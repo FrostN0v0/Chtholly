@@ -1,0 +1,14 @@
+[bot]
+driver = "~fastapi"
+adapters = [
+    "~onebot.v11",
+]
+superusers = ['1614591760']
+nickname = ['珂朵莉','Chtholly']
+
+[plugin]
+plugins = []
+plugin_dirs=['plugins']
+
+[Database]
+database = 'Chtholly'

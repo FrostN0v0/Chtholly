@@ -1,0 +1,9 @@
+[plugin]
+name = '摸鱼'
+summary = '摸鱼日历'
+version = '0.1.0'
+visable = false
+[plugin.cooldown]
+time = 3
+type = "group"
+prompt = "发过惹，仔细看聊天记录呀！baka~"

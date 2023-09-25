@@ -1,0 +1,9 @@
+[plugin]
+name = '狗屁不通文章生成器'
+summary = '根据给出的关键词和字数生成一篇狗屁不通的文章'
+version = '0.1.0'
+visable = true
+[plugin.cooldown]
+time = 10
+type = "group"
+prompt = "冷却惹，不要刷屏呀！baka~"

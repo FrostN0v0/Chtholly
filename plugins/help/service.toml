@@ -1,0 +1,9 @@
+[plugin]
+name = '菜单'
+summary = '介绍功能'
+version = '0.1.0'
+visable = false
+[plugin.cooldown]
+time = 10
+type = "group"
+prompt = "发过惹，仔细看聊天记录呀！baka~"
