@@ -68,3 +68,9 @@ See [Docs](https://kiramibot.dev/)
 ## 声明
 
 此项目仅用于学习交流，请勿用于非法用途。
+
+## 许可证
+
+本项目使用 [GNU AGPLv3](https://choosealicense.com/licenses/agpl-3.0/) 作为开源许可证。
+
+这意味着你可以运行本项目，并向你的用户提供服务，如后续有对本项目源码的修改，你需要向用户公开修改后的此项目的源码。
