@@ -1,0 +1,9 @@
+[plugin]
+name = '每日60s'
+summary = '每日60s了解世界，每日新闻推送'
+version = '0.1.0'
+visable = true
+[plugin.cooldown]
+time = 3
+type = "user"
+prompt = "冷却惹，不要刷屏呀！baka~"
