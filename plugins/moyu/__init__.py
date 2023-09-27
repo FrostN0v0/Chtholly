@@ -10,7 +10,7 @@ from datetime import date
 
 json_dict = JsonDict(path=DATA_DIR / "moyu.json", auto_load=True)
 
-moyu = on_fullmatch("moyu", "摸鱼", "摸鱼日历")
+moyu = on_fullmatch("moyu", "摸鱼", "摸鱼日历", to_me=True)
 moyu_sub = on_fullmatch("摸鱼订阅")
 moyu_download = on_fullmatch("摸鱼更新")
 moyu_delsub = on_fullmatch("摸鱼订阅取消")
@@ -61,7 +61,7 @@ async def push():
         await bot.call_api("send_group_msg", group_id=gid, message=msg)
 
 
-@on_time("cron", hour=14, minute=37)
+@on_time("cron", hour=7, minute=55)
 async def auto_download():
     response = await get_api_data("https://api.j4u.ink/v1/store/other/proxy/remote/moyu.json")
     await Downloader.download_file(response['data']['moyu_url'], IMAGE_DIR/"moyu_img", file_name=str(date.today()))

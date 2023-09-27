@@ -2,7 +2,7 @@
 name = '摸鱼'
 summary = '摸鱼日历'
 version = '0.1.0'
-visable = false
+visable = true
 [plugin.cooldown]
 time = 3
 type = "user"
