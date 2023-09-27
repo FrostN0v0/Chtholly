@@ -1,0 +1,9 @@
+[plugin]
+name = '随机可爱'
+summary = '随机猫猫图、二哈图、狐狸图'
+version = '0.1.0'
+visable = true
+[plugin.cooldown]
+time = 3
+type = "user"
+prompt = "冷却惹，不要刷屏呀！baka~"
