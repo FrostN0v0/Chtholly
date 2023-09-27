@@ -4,6 +4,16 @@
 </p>
   <p>✨ 基于<a href="https://kiramibot.dev/">Kirami</a>的QQ机器人 ✨</p>
 </div>
+<p align="center">
+  <a href="https://raw.githubusercontent.com/FrostN0v0/Chtholly/main/LICENSE">
+    <img src="https://img.shields.io/github/license/FrostN0v0/Chtholly" alt="license">
+  </a>
+    <img src="https://img.shields.io/badge/python-3.10+-blue?logo=python&logoColor=edb641" alt="python">
+  <a href="https://github.com/A-kirami/KiramiBot">
+    <img src="https://img.shields.io/badge/KiramiBot-0.3.2-green" alt="KiramiBot">
+  </a>
+    
+</p>
 
 # Chtholly
 
@@ -20,9 +30,53 @@ Welcome To [斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO
 
 先开坑，慢慢迁
 
-- 占位
-- 占位
+<details ><summary>摸鱼日历</summary>
 
+| 命令  |  @  | 功能说明 |  示例  |
+|:---:|:---:|:----:|:----:|
+| 命令1 |  是  |  无   | 配置说明 |
+| 命令2 |  否  |  无   | 配置说明 |
+</details>
+
+<details ><summary>每日60s推送</summary>
+
+| 命令  |  @  | 功能说明 |  示例  |
+|:---:|:---:|:----:|:----:|
+| 命令1 |  是  |  无   | 配置说明 |
+| 命令2 |  否  |  无   | 配置说明 |
+</details>
+
+<details ><summary>狗屁不通文章生成器</summary>
+
+| 命令  |  @  | 功能说明 |  示例  |
+|:---:|:---:|:----:|:----:|
+| 命令1 |  是  |  无   | 配置说明 |
+| 命令2 |  否  |  无   | 配置说明 |
+</details>
+
+<details ><summary>狐娘图片</summary>
+
+| 命令  |  @  | 功能说明 |  示例  |
+|:---:|:---:|:----:|:----:|
+| 命令1 |  是  |  无   | 配置说明 |
+| 命令2 |  否  |  无   | 配置说明 |
+</details>
+
+<details ><summary>随机可爱</summary>
+
+| 命令  |  @  | 功能说明 |  示例  |
+|:---:|:---:|:----:|:----:|
+| 命令1 |  是  |  无   | 配置说明 |
+| 命令2 |  否  |  无   | 配置说明 |
+</details>
+
+<details ><summary>钉宫语音</summary>
+
+| 命令  |  @  | 功能说明 |  示例  |
+|:---:|:---:|:----:|:----:|
+| 命令1 |  是  |  无   | 配置说明 |
+| 命令2 |  否  |  无   | 配置说明 |
+</details>
 
 ## 部署
 
@@ -64,6 +118,7 @@ See [Docs](https://kiramibot.dev/)
 - [Kirami](https://kiramibot.dev/)：基于 Nonebot2 二次开发的机器人框架
 - [go-cqhttp](https://github.com/Mrs4s/go-cqhttp)：提供稳定接口
 - [Nonebot2商店](https://v2.nonebot.dev/store)：插件灵感来源以及参考
+- [绪山真寻Bot](https://github.com/HibiKier/zhenxun_bot): 插件灵感来源以及参考
 
 ## 声明
 
