@@ -7,6 +7,8 @@ from kirami.config.path import IMAGE_DIR, DATA_DIR
 from kirami.utils.downloader import Downloader
 from kirami.utils.jsondata import JsonDict
 from kirami.utils.resource import Resource
+from kirami.hook import on_startup
+from kirami.utils.utils import new_dir
 from datetime import date
 
 json_dict = JsonDict(path=DATA_DIR / "daily60s.json", auto_load=True)
@@ -18,6 +20,11 @@ daily_delsub = on_fullmatch("日报取消订阅")
 daily_download = on_fullmatch("日报更新")
 key_name = "group_list"
 
+
+@on_startup
+async def check_dir():
+    if not (IMAGE_DIR / "daily60s_img").exists():
+        new_dir(IMAGE_DIR / "daily60s_img")
 
 @daily_sub.handle()
 async def add_group(event: GroupMessageEvent, matcher: Matcher):

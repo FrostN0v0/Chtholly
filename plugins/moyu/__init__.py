@@ -6,6 +6,8 @@ from kirami.event import GroupMessageEvent
 from kirami.config.path import IMAGE_DIR, DATA_DIR
 from kirami.utils.downloader import Downloader
 from kirami.utils.jsondata import JsonDict
+from kirami.hook import on_startup
+from kirami.utils.utils import new_dir
 from datetime import date
 
 json_dict = JsonDict(path=DATA_DIR / "moyu.json", auto_load=True)
@@ -16,6 +18,11 @@ moyu_download = on_fullmatch("摸鱼更新")
 moyu_delsub = on_fullmatch("摸鱼订阅取消")
 key_name = "group_list"
 
+
+@on_startup
+async def check_dir():
+    if not (IMAGE_DIR / "moyu_img").exists():
+        new_dir(IMAGE_DIR / "moyu_img")
 
 @moyu_sub.handle()
 async def add_group(event: GroupMessageEvent, matcher: Matcher):
