@@ -9,6 +9,7 @@ from kirami.log import logger
 from utils.mockingbirdforuse import MockingBird
 from .config import Config
 from .data_source import get_ai_voice
+from .res_download import download_resource, check_resource, check_dir
 
 import asyncio
 import langid
@@ -24,14 +25,25 @@ voice = on_command("说", to_me=True)
 
 @on_startup
 async def init_mockingbird():
-    logger.info("开始加载 MockingBird 模型...")
-    mockingbird.load_model(
-        mockingbird_path / "encoder.pt",
-        mockingbird_path / "g_hifigan.pt",
-        # Path(os.path.join(mockingbird_path, "wavernn.pt"))
-    )
-    mockingbird.set_synthesizer(mockingbird_path / config.model / f"{config.model}.pt")
-    logger.success(f"已加载模型 {config.model} ")
+    try:
+        await check_dir(mockingbird_path, config.model)
+        if not await check_resource(mockingbird_path, config.model):
+            if await download_resource(mockingbird_path, config.model):
+                logger.success("模型下载成功...")
+            else:
+                logger.error("模型下载失败，请检查网络...")
+                return False
+        logger.info("开始加载 MockingBird 模型...")
+        mockingbird.load_model(
+            mockingbird_path / "encoder.pt",
+            mockingbird_path / "g_hifigan.pt",
+            # Path(os.path.join(mockingbird_path, "wavernn.pt"))
+        )
+        mockingbird.set_synthesizer(mockingbird_path / config.model / f"{config.model}.pt")
+        logger.success(f"已加载模型 {config.model} ")
+        return True
+    except Exception as e:
+        return f"{type(e)}：{e}"
 
 
 @voice.handle()
