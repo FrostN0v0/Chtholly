@@ -6,7 +6,7 @@ groups = ["default"]
 cross_platform = true
 static_urls = false
 lock_version = "4.3"
-content_hash = "sha256:a95df7db08a2dd2711bf258d84035d7a15a3ef8878f535d9a0791eaf33847bae"
+content_hash = "sha256:91d27fe514101cc338898571b7d6cfe6f8d4648969029d7682fc48729d6ab3e1"
 
 [[package]]
 name = "anyio"
@@ -494,6 +494,17 @@ dependencies = [
 files = [
     {file = "kiramibot-0.3.2-py3-none-any.whl", hash = "sha256:e05d85cd2c52fc25b9bf67c9206314682fc171b7404b5d10d8b82b3c2d067814"},
     {file = "kiramibot-0.3.2.tar.gz", hash = "sha256:78901c28d96dda09985dc36d69d7b507026d25e21e52f1e659a79747845f6a56"},
+]
+
+[[package]]
+name = "langid"
+version = "1.1.6"
+summary = "langid.py is a standalone Language Identification (LangID) tool."
+dependencies = [
+    "numpy",
+]
+files = [
+    {file = "langid-1.1.6.tar.gz", hash = "sha256:044bcae1912dab85c33d8e98f2811b8f4ff1213e5e9a9e9510137b84da2cb293"},
 ]
 
 [[package]]
@@ -1080,6 +1091,15 @@ files = [
     {file = "pydantic-1.10.12-cp311-cp311-win_amd64.whl", hash = "sha256:87afda5539d5140cb8ba9e8b8c8865cb5b1463924d38490d73d3ccfd80896b3f"},
     {file = "pydantic-1.10.12-py3-none-any.whl", hash = "sha256:b749a43aa51e32839c9d71dc67eb1e4221bb04af1033a32e3923d46f9effa942"},
     {file = "pydantic-1.10.12.tar.gz", hash = "sha256:0fe8a415cea8f340e7a9af9c54fc71a649b43e8ca3cc732986116b3cb135d303"},
+]
+
+[[package]]
+name = "pydub"
+version = "0.25.1"
+summary = "Manipulate audio with an simple and easy high level interface"
+files = [
+    {file = "pydub-0.25.1-py2.py3-none-any.whl", hash = "sha256:65617e33033874b59d87db603aa1ed450633288aefead953b30bded59cb599a6"},
+    {file = "pydub-0.25.1.tar.gz", hash = "sha256:980a33ce9949cab2a569606b65674d748ecbca4f0796887fd6f46173a7b0d30f"},
 ]
 
 [[package]]

@@ -3,6 +3,8 @@ name = "Chtholly"
 version = "0.1.0"
 description = "Chtholly"
 readme = "README.md"
+authors = [{ name = "FrostN_0v0", email = "suny25802@gmail.com" }]
+license = { text = "AGPL-3.0" }
 requires-python = ">=3.10, <4.0"
 dependencies = [
     "anyio==3.7.1",
@@ -83,6 +85,8 @@ dependencies = [
     "webrtcvad>=2.0.10",
     "Unidecode>=1.3.7",
     "inflect>=7.0.0",
+    "pydub>=0.25.1",
+    "langid>=1.1.6",
 ]
 
 [tool.nonebot]
@@ -90,7 +94,7 @@ adapters = [
     { name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11" }
 ]
 plugins = []
-plugin_dirs = []
+plugin_dirs = ["plugins"]
 builtin_plugins = ["echo"]
 
 [build-system]
