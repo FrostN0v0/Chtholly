@@ -9,7 +9,7 @@ class Config(BaseConfig):
     """图片保留时间，请设置在两分钟以内"""
 
     @validator("last_time")
-    def check_last_time(self, v):
+    def check_last_time(cls, v):
         if isinstance(v, int) and 120 > v > 0:
             return v
         raise ValueError("消息撤回时间不合法")
