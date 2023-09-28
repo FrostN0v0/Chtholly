@@ -28,7 +28,7 @@ Welcome To [斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO
 
 前身使用[NoneBot2](https://v2.nonebot.dev/)开发，现使用[Kirami](https://kiramibot.dev/)，计划迁移原有多数功能。
 
-先开坑，慢慢迁
+先开坑，慢慢迁,先列功能，命令及配置参数之后再补
 
 <details ><summary>摸鱼日历</summary>
 
@@ -70,12 +70,36 @@ Welcome To [斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO
 | 命令2 |  否  |  无   | 配置说明 |
 </details>
 
+<details ><summary>公共图库</summary>
+
+| 命令  |  @  | 功能说明 |  示例  |
+|:---:|:---:|:----:|:----:|
+| 命令1 |  是  |  无   | 配置说明 |
+| 命令2 |  否  |  无   | 配置说明 |
+</details>
+
 <details ><summary>钉宫语音</summary>
 
 | 命令  |  @  | 功能说明 |  示例  |
 |:---:|:---:|:----:|:----:|
 | 命令1 |  是  |  无   | 配置说明 |
 | 命令2 |  否  |  无   | 配置说明 |
+</details>
+
+<details ><summary>mockingbird合成语音</summary>
+
+| 命令  |  @  | 功能说明 |  示例  |
+|:---:|:---:|:----:|:----:|
+| 命令1 |  是  |  无   | 配置说明 |
+| 命令2 |  否  |  无   | 配置说明 |
+</details>
+
+<details ><summary>被动技能</summary>
+
+- 戳一戳回复语
+- 戳回去
+- 骂回去
+- 发送图片
 </details>
 
 ## 部署
@@ -103,6 +127,14 @@ pdm install
 ```shell
 pip install -r requirements.txt
 ```
+
+#### 安装ffmpeg
+
+[FFmpeg官网](https://ffmpeg.org/)，找到对应的系统版本下载。
+
+将压缩包解压到指定的目录。
+
+将安装安装目录下的bin文件夹添加到系统的Path环境变量中。
 
 ### 运行
 
