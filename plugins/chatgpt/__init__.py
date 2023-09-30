@@ -18,7 +18,6 @@ from plugins.mockingbird import config as mb_config
 
 import asyncio
 
-# mockingbird = MockingBird()
 mockingbird_path = RES_DIR / "mockingbird"
 config = Config.load_config()
 
@@ -28,22 +27,6 @@ talk_voice_cmd = config.talk_with_chatgpt_talk_to_voice_cmd
 reset_cmd = config.talk_with_chatgpt_reset_cmd
 prompt_cmd = config.talk_with_chatgpt_prompt_cmd
 enable_cmd = config.talk_with_chatgpt_group_enable_cmd
-
-
-# @on_startup
-# async def init_mockingbird():
-#     try:
-#         logger.info("开始加载 MockingBird 模型...")
-#         mockingbird.load_model(
-#             mockingbird_path / "encoder.pt",
-#             mockingbird_path / "g_hifigan.pt",
-#             # Path(os.path.join(mockingbird_path, "wavernn.pt"))
-#         )
-#         mockingbird.set_synthesizer(mockingbird_path / config.model / f"{config.model}.pt")
-#         logger.success(f"已加载模型 {config.model} ")
-#         return True
-#     except Exception as e:
-#         return f"{type(e)}：{e}"
 
 
 def get_id(event: MessageEvent) -> str:
@@ -339,6 +322,7 @@ async def _(event: MessageEvent):
     # 根据配置是否发出提示
     if config.talk_with_chatgpt_reply_notice:
         await talk.send("响应中...")
+    print(text)
     result = await req_chatgpt(uid, text)
     await talk_voice.send(result)
     if config.talk_with_chatgpt_ban_word:

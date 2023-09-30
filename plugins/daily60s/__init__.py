@@ -26,6 +26,7 @@ async def check_dir():
     if not (IMAGE_DIR / "daily60s_img").exists():
         new_dir(IMAGE_DIR / "daily60s_img")
 
+
 @daily_sub.handle()
 async def add_group(event: GroupMessageEvent, matcher: Matcher):
     if key_name not in json_dict:
@@ -83,7 +84,7 @@ async def auto_download():
     img_name = str(date.today()) + ".png"
     img_today = Resource.image(IMAGE_DIR / "daily60s_img").search(img_name)
     try:
-        img = next(img_today)
+        next(img_today)
     except StopIteration:
         response = await get_api_data("https://api.03c3.cn/zb/api.php")
         if response["datatime"] == str(date.today()):
