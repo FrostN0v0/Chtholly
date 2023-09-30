@@ -87,6 +87,7 @@ dependencies = [
     "inflect>=7.0.0",
     "pydub>=0.25.1",
     "langid>=1.1.6",
+    "rtoml>=0.9.0",
 ]
 
 [tool.nonebot]

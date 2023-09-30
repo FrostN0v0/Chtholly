@@ -6,7 +6,7 @@ groups = ["default"]
 cross_platform = true
 static_urls = false
 lock_version = "4.3"
-content_hash = "sha256:91d27fe514101cc338898571b7d6cfe6f8d4648969029d7682fc48729d6ab3e1"
+content_hash = "sha256:818cfe4c849254fb72cb64ed93a67396aa9326156f0abedc2bf37d66a50f8bc1"
 
 [[package]]
 name = "anyio"
@@ -1301,6 +1301,35 @@ dependencies = [
 files = [
     {file = "rich-13.5.3-py3-none-any.whl", hash = "sha256:9257b468badc3d347e146a4faa268ff229039d4c2d176ab0cffb4c4fbc73d5d9"},
     {file = "rich-13.5.3.tar.gz", hash = "sha256:87b43e0543149efa1253f485cd845bb7ee54df16c9617b8a893650ab84b4acb6"},
+]
+
+[[package]]
+name = "rtoml"
+version = "0.9.0"
+requires_python = ">=3.7"
+summary = ""
+files = [
+    {file = "rtoml-0.9.0-cp310-cp310-macosx_10_7_x86_64.whl", hash = "sha256:b440445df3a5bdd30f70196305c964699fb8c6a23dfe08b9b0a822a8c3a1da00"},
+    {file = "rtoml-0.9.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:4e00c085841c215868b5c3d607ae7076bad4faf6cc00bf9da334c0683b2001a9"},
+    {file = "rtoml-0.9.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:d66f145fca240150d54334b1779edbc713a2b2b0547c703a9b441b94f05cec14"},
+    {file = "rtoml-0.9.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:38ed7487251aed9f118949d49e0edff2ace2f979ef7d23adf174bcb30983627a"},
+    {file = "rtoml-0.9.0-cp310-cp310-manylinux_2_24_armv7l.whl", hash = "sha256:a500481c61b0babb438b1d4c0a295ba60a0c890688431db980e3209d7c093045"},
+    {file = "rtoml-0.9.0-cp310-cp310-manylinux_2_5_i686.manylinux1_i686.whl", hash = "sha256:9826a25e7c274fbcfa1518f1e1c99104f10ba553b34be38dcd31b6c9d5207e47"},
+    {file = "rtoml-0.9.0-cp310-cp310-musllinux_1_1_aarch64.whl", hash = "sha256:2dff4812186dff9381459d6a962e8dfd909ea8cb03f98ba28aa486b9bf8d72f8"},
+    {file = "rtoml-0.9.0-cp310-cp310-musllinux_1_1_x86_64.whl", hash = "sha256:7a6088f6e77817389720ed8852ec2493b4524c96bd25f3aafe217e2a6cb29f7d"},
+    {file = "rtoml-0.9.0-cp310-none-win32.whl", hash = "sha256:38362ab6123a28e2f1f88995f286b999fc6f7c27896f402ee293de2a090b305c"},
+    {file = "rtoml-0.9.0-cp310-none-win_amd64.whl", hash = "sha256:f920b97df9b33c18d3857dbd4af234e2a7f3372de3cfb4c0d8514e66ffd4dfdb"},
+    {file = "rtoml-0.9.0-cp311-cp311-macosx_10_7_x86_64.whl", hash = "sha256:91a25c5ab2a518b5126a52300d1a6ced0e363510e9b6e64cb36b19275083b441"},
+    {file = "rtoml-0.9.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:85d8abf6eb1da262a26f15d97de6ec83960172095e627dadf1ee7a32b70a367b"},
+    {file = "rtoml-0.9.0-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:363d41f1f69d415ced4c6be8c5feb6680c2330406ca2f0ba8ea04318857b8ca3"},
+    {file = "rtoml-0.9.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e31bec5a3d7b56966130ba2a68be7bef608822063ff8b9a6362c5001a2a4c82b"},
+    {file = "rtoml-0.9.0-cp311-cp311-manylinux_2_24_armv7l.whl", hash = "sha256:9eb42c8af0300c0e3c11057a7ace894247f3f9d265b10bedde72e1008bf09634"},
+    {file = "rtoml-0.9.0-cp311-cp311-manylinux_2_5_i686.manylinux1_i686.whl", hash = "sha256:604782f36701d8b7df9b7f928e054e2a62dde828860e828377b2c8db550afb28"},
+    {file = "rtoml-0.9.0-cp311-cp311-musllinux_1_1_aarch64.whl", hash = "sha256:13dc836d84fe987ddc00b6ec8683002eb53ffa59dc13d5a9ef51a1409539bea7"},
+    {file = "rtoml-0.9.0-cp311-cp311-musllinux_1_1_x86_64.whl", hash = "sha256:2f4e7841ab7cbdfaa15cbc5f0b049b154a68644fa39fc27a1f72a0dc23012e40"},
+    {file = "rtoml-0.9.0-cp311-none-win32.whl", hash = "sha256:9ca09643e9ffdebcbb27a095ffca86e32c3fb0a63c8788c5d40890065962eb65"},
+    {file = "rtoml-0.9.0-cp311-none-win_amd64.whl", hash = "sha256:5c91c99f5646e81c677133b3740a8e6b25cbe6fbf33fefd749c85e031f7716b9"},
+    {file = "rtoml-0.9.0.tar.gz", hash = "sha256:113f2e133d152d9424269c475b4a7d0679987078b543e88fcb16c870dc2c460d"},
 ]
 
 [[package]]
