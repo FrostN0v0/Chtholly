@@ -51,6 +51,8 @@ async def _(event: MessageEvent, bot: Bot):
         logger.warning(f'图库 {gallery} 为空，调用取消！')
         await send_img.finish("该图库中没有图片噢")
     result = Resource.image(path).choice()
+    if msg[1]:
+        result = path / f"{msg[1]}.png"
     pic = Resource.image(result).name
     if result:
         msg_id = await send_img.send(f"id：{pic.split('.')[0]}" + MessageSegment.image(result))
