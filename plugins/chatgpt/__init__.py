@@ -2,7 +2,8 @@ from kirami import on_message, on_fullmatch, on_command
 from kirami.depends import (
     Bot,
     MessageEvent,
-    GroupMessageEvent
+    GroupMessageEvent,
+    CommandArg
 )
 from kirami.event import PrivateMessageEvent
 from kirami.message import MessageSegment
@@ -11,17 +12,20 @@ from .data_handle import req_chatgpt, text_to_img
 from kirami.typing import State
 from html import unescape
 from kirami.permission import SUPERUSER
-from kirami.config.path import RES_DIR
+from kirami.config.path import RES_DIR, DATA_DIR
 from plugins.mockingbird import mockingbird
 from plugins.mockingbird import config as mb_config
-from plugins.vits import cn_func
-
+from plugins.vits import cn_func, profileDict
+from kirami.utils.jsondata import JsonDict
 
 import asyncio
+
+json_dict = JsonDict(path=DATA_DIR / "vits_gpt.json", auto_load=True)
 
 mockingbird_path = RES_DIR / "mockingbird"
 config = Config.load_config()
 
+ttv_character = config.talk_with_chatgpt_ttv_character
 talk_cmd = config.talk_with_chatgpt_talk_cmd
 talk_p_cmd = config.talk_with_chatgpt_talk_p_cmd
 talk_voice_cmd = config.talk_with_chatgpt_talk_to_voice_cmd
@@ -311,7 +315,7 @@ async def _(event: GroupMessageEvent):
 
 
 @talk_voice.handle()
-async def _(event: MessageEvent):
+async def _(event: MessageEvent, gevent: GroupMessageEvent):
     # 获取信息
     text = unescape(event.get_plaintext().strip())
     # 把命令前缀截掉
@@ -343,5 +347,23 @@ async def _(event: MessageEvent):
         )
         await talk.finish(MessageSegment.record(record))
     if config.talk_with_chatgpt_talk_to_voice_model == 'vits':
-        record = await cn_func(result, name=config.talk_with_chatgpt_ttv_character, para_dict={})
+        gid = str(gevent.group_id)
+        if gid in json_dict:
+            record = await cn_func(result, name=json_dict[gid], para_dict={})
+        else:
+            json_dict[gid] = ttv_character
+            json_dict.save()
+            record = await cn_func(result, name=ttv_character, para_dict={})
         await talk.finish(record)
+
+tts = on_command("修改角色")
+
+
+@tts.handle()
+async def _(arg: CommandArg, event: GroupMessageEvent):
+    gid = str(event.group_id)
+    args = arg.extract_plain_text().split()
+    if args[0] in profileDict["cnapi"]["char"]:
+        json_dict[gid] = args[0]
+        json_dict.save()
+    await tts.finish(f"GPT转语音角色已经更换为{json_dict[gid]}")
