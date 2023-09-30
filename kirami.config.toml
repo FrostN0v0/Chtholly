@@ -16,3 +16,31 @@ database = 'Chtholly'
 [image]
 withdraw = true
 last_time = 90
+
+[chatgpt]
+# ChatGPT的accesstoken，从（https://chat.openai.com/api/auth/session）获取
+talk_with_chatgpt_accesstoken = ""
+# 群聊是否共享会话
+talk_with_chatgpt_group_share = false
+# 只允许超级管理员修改预设
+talk_with_chatgpt_prompt_admin_only = true
+# 群聊艾特是否响应
+talk_with_chatgpt_talk_at = false
+# 机器人的回复是否使用图片发送
+talk_with_chatgpt_send_with_img = false
+# 触发对话的命令前缀，群聊直接艾特也可以触发
+talk_with_chatgpt_talk_cmd = "/talk"
+# 私聊沉浸式对话触发命令
+talk_with_chatgpt_talk_p_cmd = "/hi"
+# 重置对话，就是清空聊天记录
+talk_with_chatgpt_reset_cmd = "/reset"
+# 设置预设的指令
+talk_with_chatgpt_prompt_cmd = "/prompt"
+# 对话转换语音触发命令
+talk_with_chatgpt_talk_to_voice_cmd = "/speak"
+#更多设置请前往插件config.py查看
+
+[mockingbird]
+model = "nanmei"
+accuracy = 9
+steps = 1000
