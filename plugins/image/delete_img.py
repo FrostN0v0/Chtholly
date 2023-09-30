@@ -8,11 +8,19 @@ from kirami.config.path import DATA_DIR, IMAGE_DIR
 from kirami.event import MessageEvent, GroupMessageEvent
 from kirami.state import State
 from kirami.depends import ArgStr, EventPlainText
+from kirami.hook import on_startup
+from kirami.utils.utils import new_dir
 import os
 
 delete_img = on_prefix("删除图片", to_me=True, permission=SUPERUSER)
 
 json_dict = JsonDict(path=DATA_DIR / "image.json", auto_load=True)
+
+
+@on_startup
+async def check_dir():
+    if not (DATA_DIR / "trash_bin").exists():
+        new_dir(DATA_DIR / "trash_bin")
 
 
 @delete_img.handle()
