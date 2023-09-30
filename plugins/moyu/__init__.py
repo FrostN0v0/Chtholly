@@ -24,6 +24,7 @@ async def check_dir():
     if not (IMAGE_DIR / "moyu_img").exists():
         new_dir(IMAGE_DIR / "moyu_img")
 
+
 @moyu_sub.handle()
 async def add_group(event: GroupMessageEvent, matcher: Matcher):
     if key_name not in json_dict:
