@@ -14,6 +14,7 @@ from kirami.permission import SUPERUSER
 from kirami.config.path import RES_DIR
 from plugins.mockingbird import mockingbird
 from plugins.mockingbird import config as mb_config
+from plugins.vits import cn_func
 
 
 import asyncio
@@ -322,7 +323,6 @@ async def _(event: MessageEvent):
     # 根据配置是否发出提示
     if config.talk_with_chatgpt_reply_notice:
         await talk.send("响应中...")
-    print(text)
     result = await req_chatgpt(uid, text)
     await talk_voice.send(result)
     if config.talk_with_chatgpt_ban_word:
@@ -330,15 +330,18 @@ async def _(event: MessageEvent):
             if w in result:
                 result = "本次回答中包含屏蔽词！"
                 break
-
-    record = await asyncio.get_event_loop().run_in_executor(
-        None,
-        mockingbird.synthesize,
-        result,
-        mockingbird_path / mb_config.model / "record.wav",
-        "HifiGan",
-        0,
-        mb_config.accuracy,
-        mb_config.steps,
-    )
-    await talk.finish(MessageSegment.record(record))
+    if config.talk_with_chatgpt_talk_to_voice_model == 'mockingbird':
+        record = await asyncio.get_event_loop().run_in_executor(
+            None,
+            mockingbird.synthesize,
+            result,
+            mockingbird_path / mb_config.model / "record.wav",
+            "HifiGan",
+            0,
+            mb_config.accuracy,
+            mb_config.steps,
+        )
+        await talk.finish(MessageSegment.record(record))
+    if config.talk_with_chatgpt_talk_to_voice_model == 'vits':
+        record = await cn_func(result, name=config.talk_with_chatgpt_ttv_character, para_dict={})
+        await talk.finish(record)

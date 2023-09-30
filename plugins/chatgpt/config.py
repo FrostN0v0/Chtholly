@@ -45,6 +45,12 @@ class Config(BaseConfig):
     talk_with_chatgpt_group_enable_cmd: str = "/chatgpt"
     # 对话转换语音触发命令
     talk_with_chatgpt_talk_to_voice_cmd: str = "/speak"
+    # 对话转换语音使用模型
+    talk_with_chatgpt_talk_to_voice_model: str = "vits"
+    # 对话转换语音vits模型的默认角色
+    talk_with_chatgpt_ttv_character: str = "宵宫"
+    # 对话转换语音vits模型的默认角色
+    talk_with_chatgpt_ttv_character: str = "宵宫"
 
     # 敏感词屏蔽，默认不屏蔽任何词
     talk_with_chatgpt_ban_word: List[str] = []
