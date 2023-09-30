@@ -40,6 +40,28 @@ async def check_dir():
         new_dir(DATA_DIR / 'moegoe')
 
 
+@driver.on_startup
+async def update():
+    global profileDict
+    profileData = await download_url(profileDict['download']['proxy_url'] + profileDict['download']['profile_url'])
+    if profileData is None:
+        profileData = await download_url(profileDict['download']['profile_url'])
+    if profileData is None:
+        logger.warning(f"Error updating profile for moegoe.")
+        return
+
+    newProfileDict = tomllib.loads(profileData.decode('utf-8'))
+    if versionGreater(newProfileDict['version'], profileDict['version']):
+        if profilePath.exists():
+            profilePath.rename(bakProfilePath)
+        write_file(profilePath, profileData)
+        profileDict = newProfileDict
+        profilePreprocess()
+        logger.info(f"moegoe profile updated to version {profileDict['version']}.")
+    else:
+        logger.info("moegoe profile checked.")
+
+
 def profilePreprocess():
     global jpapi, jp2api, krapi, cnapi, jp_dict, jp2_dict, kr_dict, cn_dict, paramap_dict
     jpapi = Template(profileDict['jpapi']['url'])
@@ -59,6 +81,19 @@ def profilePreprocess():
 
 
 profilePreprocess()
+
+# plugin commands
+plugin_cmd = on_command(profileDict['plugin']['cmd'], block=True, priority=profileDict['priority'])
+
+
+@plugin_cmd.handle()
+async def _(matcher: Matcher, args: CommandArg):
+    args = args.extract_plain_text().split()
+    if 'load' in args:
+        await update()
+        await matcher.finish(f"moegoe reloaded, ver {profileDict['version']}.")
+    else:
+        await matcher.finish(f'moegoe命令：load->更新profile.')
 
 # api for other plugins
 
