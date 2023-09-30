@@ -33,10 +33,12 @@ if profilePath.exists():
 if saved_profileDict and versionGreater(saved_profileDict['version'], profileDict['version']):
     profileDict = saved_profileDict
 
+
 @on_startup
 async def check_dir():
     if not (DATA_DIR / 'moegoe').exists():
         new_dir(DATA_DIR / 'moegoe')
+
 
 @driver.on_startup
 async def update():
@@ -85,7 +87,7 @@ plugin_cmd = on_command(profileDict['plugin']['cmd'], block=True, priority=profi
 
 
 @plugin_cmd.handle()
-async def _(matcher: Matcher, args: Tuple[Any, ...] = CommandArg()):
+async def _(matcher: Matcher, args: CommandArg):
     args = args.extract_plain_text().split()
     if 'load' in args:
         await update()
