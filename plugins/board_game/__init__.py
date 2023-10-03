@@ -170,7 +170,6 @@ async def handle_boardgame(matcher: Matcher, bot: Bot, event: GroupMessageEvent,
 
     try:
         args = parser.parse_args(argv)
-        print(args)
     except ParserExit as e:
         if e.status == 0:
             await send("@我 + “五子棋”、“黑白棋”、“围棋”开始一局游戏;\n"
