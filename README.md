@@ -30,6 +30,18 @@ Welcome To [斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO
 
 先开坑，慢慢迁,先列功能，命令及配置参数之后再补
 
+- [天气功能](https://github.com/FrostN0v0/kirami-plugin-qweather)
+- [赛马小游戏](https://github.com/FrostN0v0/kirami-plugin-horserace)
+- [棋类游戏](https://github.com/FrostN0v0/kirami-plugin-boardgame)
+
+<details ><summary>签到功能</summary>
+
+|  命令   |  @  |  功能说明  | 示例  |
+|:-----:|:---:|:------:|:---:|
+| 签到/盖章 |  否  |   签到   |  无  |
+|  收集册  |  否  | 查看印章收集 |  无  |
+</details>
+
 <details ><summary>每日60s推送</summary>
 
 |    命令    |  @  |    功能说明     | 示例  |
@@ -111,6 +123,11 @@ Welcome To [斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO
 | /prompt  |                 设置预设（人格），设置后会重置对话                  |                  |
 | /chatgpt | 如果talk_with_chatgpt_all_group_enable为false，则用该命令启用 |                  |
 |   修改角色   |                   设置预设vits转语音角色                    |    修改角色 <派蒙>     |
+</details>
+
+<details ><summary>面包店小游戏</summary>
+
+**发送 “面包帮助” 查看详细指令**
 </details>
 
 <details ><summary>被动技能</summary>
