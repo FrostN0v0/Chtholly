@@ -7,7 +7,7 @@ from kirami.depends import CommandArg
 
 from .data_source import *
 
-check_qq = on_command("点歌", "qq点歌", "QQ点歌")
+check_qq = on_command("点歌", "qq点歌", "QQ点歌", priority=20)
 check_163 = on_command("163点歌", "网易点歌", "网易云点歌")
 check_kuwo = on_command("kuwo点歌", "酷我点歌")
 check_kugou = on_command("kugou点歌", "酷狗点歌")

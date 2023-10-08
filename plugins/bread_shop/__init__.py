@@ -61,7 +61,7 @@ for things in chain(bread_config.special_thing_group.values(), (bread_config.bre
 
         cmd_top.add(f"{thing_}排行")
         cmd_top.add(f"{thing_}排名")
-        cmd_help.add(f"{thing_}帮助")
+        cmd_help.add(f"{thing_}店帮助")
 
 bread_buy = on_command("bread_buy", aliases=cmd_buy, priority=5)
 bread_eat = on_command("bread_eat", aliases=cmd_eat, priority=5)
@@ -72,7 +72,7 @@ bread_bet = on_command("bread_bet", aliases=cmd_bet, priority=5)
 bread_log = on_command("bread_log", aliases=cmd_log, priority=5)
 bread_check = on_command("bread_check", aliases=cmd_check, priority=5)
 bread_top = on_command("bread_top", aliases=cmd_top, priority=5)
-bread_help = on_command("bread_help", aliases=cmd_help, priority=5)
+bread_help = on_command("bread_help", aliases=cmd_help, priority=5, block=True)
 
 # 初始化事件
 EatEvent.add_events(eat_events)

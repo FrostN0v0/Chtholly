@@ -21,7 +21,7 @@ gsub_data = JsonDict(path=DATA_DIR / "weather" / "gsub_weather.json", auto_load=
 if DEBUG:
     logger.debug("将会保存图片到 weather.png")
 
-weather = on_keyword("天气", priority=10)
+weather = on_keyword("天气", priority=20)
 sub_weather = on_command("天气订阅", priority=5)
 gsub_weather = on_command("群天气订阅", priority=5, permission=GROUP)
 lookup_p_sub = on_command("查询天气订阅", priority=5)
