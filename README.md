@@ -21,7 +21,7 @@
 
 珂朵莉是世界上最幸福的女孩，一款QQ娱乐机器人。基于[Kirami](https://kiramibot.dev/)开发。
 
-Welcome To [斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO2zj9f5ziuS2ijcDzbjkAfcMHVA&authKey=ilcGvEnqWjHOJKa3f1cpOMQPVAeA0RZyv%2BD9lE9aV1WfwFZ8ig%2BUynUCSM4AXZOB&noverify=0&group_code=326466216)
+Welcome To 交流群 [斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO2zj9f5ziuS2ijcDzbjkAfcMHVA&authKey=ilcGvEnqWjHOJKa3f1cpOMQPVAeA0RZyv%2BD9lE9aV1WfwFZ8ig%2BUynUCSM4AXZOB&noverify=0&group_code=326466216)
 
 ## 功能列表
 
@@ -94,14 +94,14 @@ Welcome To [斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO
 
 |  命令   |  @  | 功能说明 |   示例   |
 |:-----:|:---:|:----:|:------:|
-| 骂+任何话 |  是  |  返回语音   | @珂朵莉骂我 |
+| 骂+任何话 |  是  | 返回语音 | @珂朵莉骂我 |
 </details>
 
 <details ><summary>点歌</summary>
 
-| 命令  |  @  | 功能说明 |  示例  |
-|:---:|:---:|:----:|:----:|
-| 点歌/qq点歌/网易点歌/酷我点歌/酷狗点歌/咪咕点歌/b站点歌 + 关键词  |  否  | 返回音乐 | 配置说明 |
+|                   命令                   |  @  | 功能说明 |  示例  |
+|:--------------------------------------:|:---:|:----:|:----:|
+| 点歌/qq点歌/网易点歌/酷我点歌/酷狗点歌/咪咕点歌/b站点歌 + 关键词 |  否  | 返回音乐 | 配置说明 |
 
 </details>
 
@@ -139,6 +139,8 @@ Welcome To [斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO
 </details>
 
 ## 部署
+
+**须知：项目与框架均处于开发阶段，不稳定，部署中如遇到问题请通过交流群 [斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO2zj9f5ziuS2ijcDzbjkAfcMHVA&authKey=ilcGvEnqWjHOJKa3f1cpOMQPVAeA0RZyv%2BD9lE9aV1WfwFZ8ig%2BUynUCSM4AXZOB&noverify=0&group_code=326466216) 联系我**
 
 ### 安装脚手架
 
