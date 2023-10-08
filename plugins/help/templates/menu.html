@@ -25,10 +25,12 @@
                     </span>
                 </div>
                 {% for item in plugin_data %}
+                {% if item['visable'] %}
                         <span>
                             {{item['name']}}
                             <div class="splic"></div>
                         </span>
+                {% endif %}
                 {% endfor %}
             </div>
              {% endfor %}
