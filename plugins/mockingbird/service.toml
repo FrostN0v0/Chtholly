@@ -3,3 +3,4 @@ name = 'mockingbird语音合成'
 summary = 'mockingbird本地语音合成'
 version = '0.1.0'
 visable = true
+tags = ['语言类']

@@ -3,6 +3,7 @@ name = '菜单'
 summary = '介绍功能'
 version = '0.1.0'
 visable = false
+tags = ['功能']
 [plugin.cooldown]
 time = 10
 type = "group"

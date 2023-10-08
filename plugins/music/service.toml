@@ -1,0 +1,6 @@
+[plugin]
+name = '点歌'
+summary = '介绍功能'
+version = '0.1.0'
+visable = true
+tags = ['工具']

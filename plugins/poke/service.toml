@@ -3,3 +3,4 @@ name = '戳一戳'
 summary = '你再戳？'
 version = '0.1.0'
 visable = true
+tags = ['被动']

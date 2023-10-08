@@ -3,6 +3,7 @@ name = '随机可爱'
 summary = '随机猫猫图、二哈图、狐狸图'
 version = '0.1.0'
 visable = true
+tags = ['好康的']
 [plugin.cooldown]
 time = 3
 type = "user"

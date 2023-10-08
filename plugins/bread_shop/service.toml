@@ -1,7 +1,6 @@
 [plugin]
-name = '赛马'
-summary = '赛马小游戏'
+name = '面包店'
+summary = '介绍功能'
 version = '0.1.0'
 visable = true
-scope = "group"
 tags = ['小游戏']

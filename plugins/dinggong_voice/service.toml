@@ -3,6 +3,7 @@ name = '钉宫语音'
 summary = '让钉宫来骂你'
 version = '0.1.0'
 visable = true
+tags = ['语言类']
 [plugin.cooldown]
 time = 3
 type = "user"
