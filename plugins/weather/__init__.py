@@ -146,8 +146,8 @@ async def gsub(event: GroupMessageEvent, arg: CommandArg, matcher: Matcher):
             data_dict = {"city": city_name, "hour": args[1]}
     if gid not in gsub_data:
         gsub_data[gid] = {}
-        if uid not in gsub_data[gid]:
-            gsub_data[gid][uid] = []
+    if uid not in gsub_data[gid]:
+        gsub_data[gid][uid] = []
     if data_dict not in gsub_data[gid][uid]:
         gsub_data[gid][uid].append(data_dict)
     else:
