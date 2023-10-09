@@ -71,11 +71,11 @@ async def push():
 
 @on_time("cron", hour=7, minute=55)
 async def auto_download():
-    response = await get_api_data("https://api.j4u.ink/v1/store/other/proxy/remote/moyu.json")
-    await Downloader.download_file(response['data']['moyu_url'], IMAGE_DIR/"moyu_img", file_name=str(date.today()))
+    response = await get_api_data("https://moyu.qqsuu.cn/?type=json")
+    await Downloader.download_file(response['data'], IMAGE_DIR/"moyu_img", file_name=str(date.today()))
 
 
 @moyu_download.handle()
 async def download():
-    response = await get_api_data("https://api.j4u.ink/v1/store/other/proxy/remote/moyu.json")
-    await Downloader.download_file(response['data']['moyu_url'], IMAGE_DIR/"moyu_img", file_name=str(date.today()))
+    response = await get_api_data("https://moyu.qqsuu.cn/?type=json")
+    await Downloader.download_file(response['data'], IMAGE_DIR/"moyu_img", file_name=str(date.today()))
