@@ -1,11 +1,11 @@
 from kirami import on_message
 from kirami.typing import Bot
 from kirami.utils.jsondata import JsonDict
-from kirami.message import MessageSegment
 from kirami.utils.resource import Resource
 from kirami.log import logger
 from kirami.config.path import DATA_DIR, IMAGE_DIR
-from kirami.event import MessageEvent, GroupMessageEvent
+from nonebot.adapters.red.event import MessageEvent, GroupMessageEvent
+from nonebot.adapters.red.message import MessageSegment
 from kirami.utils.helpers import extract_plain_text
 import asyncio
 import os
@@ -61,8 +61,8 @@ async def _(event: MessageEvent, bot: Bot):
             await bot.delete_msg(message_id=msg_id["message_id"])
     else:
         logger.info(
-            f"(USER {event.user_id}, GROUP "
-            f"{event.group_id if isinstance(event, GroupMessageEvent) else 'private'}) "
+            f"(USER {event.senderUin}, GROUP "
+            f"{event.peerUin if isinstance(event, GroupMessageEvent) else 'private'}) "
             f"发送 {gallery} 失败"
         )
         await send_img.finish(f"不想给你看Ov|")

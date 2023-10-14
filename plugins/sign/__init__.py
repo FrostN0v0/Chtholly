@@ -13,10 +13,11 @@ from .utils import *
 
 from kirami.log import logger
 from kirami.depends import CommandArg
-from kirami import on_command, Bot
+from kirami import on_command
 from kirami.config import bot_config
-from kirami.message import MessageSegment
-from kirami.event import GroupMessageEvent, PrivateMessageEvent
+from nonebot.adapters.red import Bot
+from nonebot.adapters.red.event import GroupMessageEvent, PrivateMessageEvent
+from nonebot.adapters.red.message import MessageSegment
 
 try:
     import ujson as json
@@ -34,9 +35,9 @@ give_okodokai = on_command("盖章", "签到", "妈!", priority=30, block=True)
 @give_okodokai.handle()
 async def _(event: Union[GroupMessageEvent, PrivateMessageEvent]):
     # 获取 QQ 号和群号
-    uid = event.user_id
+    uid = event.senderUin
     if isinstance(event, GroupMessageEvent):
-        gid = event.group_id
+        gid = event.peerUin
     elif isinstance(event, PrivateMessageEvent):
         gid = uid
     else:
@@ -106,7 +107,7 @@ async def _(bot: Bot, event: Union[GroupMessageEvent, PrivateMessageEvent], msg:
     uid = await get_at(event)
     if uid == -1:
         if variable_list == []:
-            uid = event.user_id
+            uid = event.senderUin
         elif len(variable_list) == 1:
             uid = int(variable_list[0])
         else:
@@ -114,7 +115,7 @@ async def _(bot: Bot, event: Union[GroupMessageEvent, PrivateMessageEvent], msg:
 
     # 获取群号
     if isinstance(event, GroupMessageEvent):
-        gid = event.group_id
+        gid = event.peerUin
     elif isinstance(event, PrivateMessageEvent):
         gid = uid
     else:
@@ -136,17 +137,17 @@ async def _(bot: Bot, event: Union[GroupMessageEvent, PrivateMessageEvent], msg:
         base.paste(f, (
             30 + col_index * 80 + (col_index - 1) * 10, row_offset + 40 + row_index * 80 + (row_index - 1) * 10))
     row_offset += 30
+    print(gid, uid)
     ranking = db.get_group_ranking(gid, uid)
     ranking_desc = f'第{ranking}位' if ranking != -1 else '未上榜'
     buf = BytesIO()
     base = base.convert('RGB')
     base.save(buf, format='JPEG')
-    base64_str = f'base64://{base64.b64encode(buf.getvalue()).decode()}'
-    img = MessageSegment.image(base64_str)
+    img = MessageSegment.image(buf.getvalue())
 
     # 整合信息并发送
     if isinstance(event, GroupMessageEvent):
-        lucky_user_card = await get_user_card(bot, gid, uid)
+        lucky_user_card = event.sendNickName
         try:
             await storage.finish(
                 f'『{lucky_user_card}』的收集册:\n' + img + f'图鉴完成度: {normalize_digit_format(len(cards_num))}/{normalize_digit_format(len(card_file_names_all))}\n当前群排名: {ranking_desc}')

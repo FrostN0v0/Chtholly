@@ -1,8 +1,9 @@
-from kirami import on_prefix, on_endswith
+from kirami import on_command, on_endswith
 from kirami.typing import Matcher
-from kirami.message import MessageSegment, Message
-from kirami.event import MessageEvent
 from kirami.service.manager import _from_file as from_file
+
+from nonebot.adapters.red.event import MessageEvent
+from nonebot.adapters.red.message import MessageSegment
 
 from operator import itemgetter
 from itertools import groupby
@@ -10,11 +11,11 @@ from nonebot.plugin import get_loaded_plugins, Plugin
 from kirami.utils.utils import tpl2img, md2img
 from pathlib import Path
 
-menu = on_prefix("功能", "菜单", "help")
+menu = on_command("功能", "菜单", "help")
 
 
 @menu.handle()
-async def menu(matcher: Matcher):
+async def menu(matcher: Matcher, event: MessageEvent):
     pcls = []
     for p in list(get_loaded_plugins()):
         plug = from_file(p)

@@ -8,12 +8,14 @@ from kirami.log import logger
 from kirami.matcher import Matcher
 from kirami.depends import RegexGroup, CommandArg
 from kirami import on_regex, on_command
-from kirami.message import MessageSegment
 from kirami.config.path import DATA_DIR
 from kirami.exception import ActionFailed
 from kirami.hook import on_startup
 from kirami import get_driver
 from kirami.utils.utils import new_dir
+from nonebot.adapters.red import Bot
+from nonebot.adapters.red.event import MessageEvent
+from nonebot.adapters.red.message import MessageSegment
 from .utils import download_url, write_file, versionGreater
 
 driver = get_driver()
@@ -103,14 +105,15 @@ async def get_record(url):
         resp = await client.get(url, timeout=120)
     resp.raise_for_status()
     voice = resp.content
-    return MessageSegment.record(voice)
+    return MessageSegment.voice(voice)
 
 
 async def get_MessageSegment(url, name, msg, output_format):
     if output_format == "link":
         return MessageSegment.text(url)
     elif output_format == "share":  # Windows TIM端的url会缺失&，原因不明
-        return MessageSegment.share(url=url, title=name+'说...', content=msg, image='')
+        print()
+        # return MessageSegment.share(url=url, title=name+'说...', content=msg, image='')
     else:
         return await get_record(url)
 

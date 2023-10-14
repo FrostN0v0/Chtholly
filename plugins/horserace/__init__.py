@@ -2,10 +2,12 @@
 import time
 import asyncio
 from kirami import on_command
-from kirami.message import Message, MessageSegment
-from kirami.event import GroupMessageEvent, MessageEvent
 from kirami.permission import SUPERUSER
-from kirami.depends import CommandArg, Bot
+from kirami.depends import CommandArg
+from nonebot.adapters.red import Bot
+from nonebot.adapters.red.event import GroupMessageEvent, MessageEvent
+from nonebot.adapters.red.message import Message, MessageSegment, ForwardNode, BaseMessage
+from nonebot_plugin_saa import MessageFactory, Image
 from kirami.config.path import FONT_DIR
 from kirami.config import bot_config
 from kirami.log import logger
@@ -16,6 +18,7 @@ from .config import Config
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 from kirami.utils.downloader import Downloader
+import datetime
 
 botname = list(bot_config.nickname)[0]
 config = Config.load_config()
@@ -43,13 +46,14 @@ RaceStop = on_command("赛马暂停", priority=5, permission=SUPERUSER, block=Tr
 RaceClear = on_command("赛马清空", priority=5, permission=SUPERUSER, block=True)
 RaceReload = on_command("赛马事件重载", priority=5, permission=SUPERUSER, block=True)
 race = {}
-forward_msg = []
+nodes = []
+msg_list = []
 
 
 @RaceNew.handle()
-async def _(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
+async def new(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
     global race
-    group = event.group_id
+    group = event.peerUid
     try:
         if race[group].start == 0 and time.time() - race[group].time < 300:
             out_msg = f'> 创建赛马比赛失败!\n> 原因:{botname}正在打扫赛马场...\n> 解决方案:等{botname}打扫完...\n> 可以在{str(config.setting_over_time - time.time() + race[group].time)}秒后输入 赛马重置'
@@ -64,12 +68,12 @@ async def _(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
 
 
 @RaceJoin.handle()
-async def _(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
+async def join(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
     global race
     msg = arg.extract_plain_text().strip()
-    uid = event.user_id
-    group = event.group_id
-    player_name = event.sender.card if event.sender.card else event.sender.nickname
+    uid = event.senderUin
+    group = event.peerUid
+    player_name = event.sendMemberName if event.sendMemberName else event.sendNickName
     try:
         race[group]
     except KeyError:
@@ -93,11 +97,12 @@ async def _(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
 
 
 @RaceStart.handle()
-async def _(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
+async def startrace(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
     global race
     global events_list
-    global forward_msg
-    group = event.group_id
+    global nodes
+    global msg_list
+    group = event.peerUid
     try:
         if race[group].query_of_player() == 0:
             await RaceStart.finish()
@@ -132,7 +137,19 @@ async def _(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
         logger.info(f'事件输出:\n {display}')
         ima = text_to_img(display)
         if config.send_forward_msg:
-            forward_msg.append(Message.image(ima))
+            msg = MessageSegment.image(ima)
+            msgs = BaseMessage(msg)
+            msg_list.append(msgs)
+            nodes = [
+                ForwardNode(
+                    uin=bot.self_id,
+                    name=botname,
+                    group=group,
+                    message=msg,
+                    time=datetime.datetime.now(),
+                )
+                for msg in msg_list
+                ]
         else:
             await RaceStart.send(MessageSegment.image(ima))
             await asyncio.sleep(3)
@@ -140,18 +157,18 @@ async def _(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
         if race[group].is_die_all():
             del race[group]
             if config.send_forward_msg:
-                msg = [MessageSegment.node(event.user_id, event.sender.nickname, m) for m in forward_msg]
-                await bot.call_api("send_group_forward_msg", group_id=event.group_id, messages=msg)
-                forward_msg = []
+                await bot.send_fake_forward(nodes=nodes, chat_type=event.chatType.GROUP, target=group)
+                nodes = []
+                msg_list = []
             await asyncio.sleep(2)
             await RaceStart.finish("比赛已结束，鉴定为无马生还")
         # 全员胜利计算
         winer = race[group].is_win_all()
         if winer != f"":
             if config.send_forward_msg:
-                msg = [MessageSegment.node(event.user_id, event.sender.nickname, m) for m in forward_msg]
-                await bot.call_api("send_group_forward_msg", group_id=event.group_id, messages=msg)
-                forward_msg = []
+                await bot.send_fake_forward(nodes=nodes, chat_type=event.chatType.GROUP, target=group)
+                nodes = []
+                msg_list = []
             await asyncio.sleep(1)
             await RaceStart.send(f'> 比赛结束\n> {botname}正在为您生成战报...')
             await asyncio.sleep(2)
@@ -161,9 +178,9 @@ async def _(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
 
 
 @RaceReStart.handle()
-async def _(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
+async def restart(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
     global race
-    group = event.group_id
+    group = event.peerUid
     time_key = math.ceil(time.time() - race[group].time)
     if time_key >= config.setting_over_time:
         del race[group]
@@ -172,21 +189,21 @@ async def _(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
 
 
 @RaceStop.handle()
-async def _(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
+async def stoprace(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
     global race
-    group = event.group_id
+    group = event.peerUid
     race[group].start_change(2)
 
 
 @RaceClear.handle()
-async def _(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
+async def clearrace(bot: Bot, event: GroupMessageEvent, arg: CommandArg):
     global race
-    group = event.group_id
+    group = event.peerUid
     del race[group]
 
 
 @RaceReload.handle()
-async def _(bot: Bot, event: MessageEvent, arg: CommandArg):
+async def reloadrace(bot: Bot, event: MessageEvent, arg: CommandArg):
     global events_list
     logs = f""
     files = os.listdir(os.path.dirname(__file__) + '/events')

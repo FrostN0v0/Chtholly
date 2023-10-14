@@ -50,6 +50,5 @@ def generator(xx='1',word=int):
             else:
                 tmp += next(下一句废话)
         tmp = tmp.replace("x",xx)
-        print(tmp)
         return tmp
 

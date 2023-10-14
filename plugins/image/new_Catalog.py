@@ -1,14 +1,15 @@
 from kirami.utils.utils import new_dir
 from kirami.utils.jsondata import JsonDict
-from kirami import on_prefix
+from kirami import on_command
 from kirami.log import logger
 from kirami.typing import Matcher
-from kirami.depends import ArgStr, EventPlainText
+from kirami.depends import ArgStr, CommandArg
+from nonebot.adapters.red.event import MessageEvent
 from kirami.permission import SUPERUSER
 from kirami.config.path import DATA_DIR, IMAGE_DIR
 from kirami.utils.utils import new_dir
 
-create_dir = on_prefix("新建图库", permission=SUPERUSER)
+create_dir = on_command("新建图库", permission=SUPERUSER)
 
 json_dict = JsonDict(path=DATA_DIR / "image.json", auto_load=True)
 catelog_name = ["美图", "表情包"]
@@ -25,7 +26,7 @@ for img_dir in json_dict["catelog"]:
 
 
 @create_dir.handle()
-async def add_dir(get_msg: EventPlainText, matcher: Matcher):
+async def add_dir(get_msg: CommandArg, matcher: Matcher, event: MessageEvent):
     if get_msg:
         for key_name in json_dict[catelog_key]:
             if key_name == get_msg:
@@ -40,7 +41,7 @@ async def add_dir(get_msg: EventPlainText, matcher: Matcher):
 
 
 @create_dir.got("cate", prompt="请输入要新建的目录")
-async def got_dir(cate: ArgStr, matcher: Matcher):
+async def got_dir(cate: ArgStr, matcher: Matcher, event: MessageEvent):
     if catelog_key not in json_dict:
         json_dict[catelog_key] = catelog_name  # 如果列表不存在，创建一个默认列表
     for key_name in json_dict[catelog_key]:

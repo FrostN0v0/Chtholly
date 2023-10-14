@@ -2,7 +2,7 @@ from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional
 
 import httpx
-from kirami.message import MessageSegment
+from nonebot.adapters.red.message import MessageSegment
 
 
 async def search_qq(keyword: str) -> Optional[MessageSegment]:
@@ -28,7 +28,7 @@ async def search_qq(keyword: str) -> Optional[MessageSegment]:
             key=lambda x: SequenceMatcher(None, keyword, x["name"]).ratio(),
             reverse=True,
         )
-        return MessageSegment.music("qq", int(songs[0]["id"]))
+        return MessageSegment.voice("qq", int(songs[0]["id"]))
 
 
 async def search_163(keyword: str) -> Optional[MessageSegment]:
@@ -43,7 +43,7 @@ async def search_163(keyword: str) -> Optional[MessageSegment]:
             key=lambda x: SequenceMatcher(None, keyword, x["name"]).ratio(),
             reverse=True,
         )
-        return MessageSegment.music("163", songs[0]["id"])
+        return MessageSegment.voice("163", songs[0]["id"])
 
 
 async def search_kuwo(keyword: str) -> Optional[MessageSegment]:
@@ -203,6 +203,3 @@ async def search_bili(keyword: str) -> Optional[MessageSegment]:
         #         "image": info["cover"],
         #     },
         # )
-
-
-

@@ -1,5 +1,5 @@
 from kirami.log import logger
-from kirami.message import MessageSegment
+from nonebot.adapters.red.message import MessageSegment
 from calendar import MONDAY
 from typing import Union, List, Dict, Optional, Tuple
 from pathlib import Path

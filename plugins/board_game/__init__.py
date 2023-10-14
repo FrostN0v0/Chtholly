@@ -8,12 +8,11 @@ from kirami.matcher import Matcher
 from kirami.rule import ArgumentParser
 from kirami.exception import ParserExit
 from kirami import on_command
-from kirami.depends import CommandArg, Bot
-from kirami.event import MessageEvent, GroupMessageEvent
-from kirami.message import (
-    Message,
-    MessageSegment,
-)
+from kirami.depends import CommandArg
+
+from nonebot.adapters.red import Bot
+from nonebot.adapters.red.event import MessageEvent, GroupMessageEvent
+from nonebot.adapters.red.message import MessageSegment, Message
 
 from .go import Go
 from .gomoku import Gomoku
@@ -34,10 +33,10 @@ parser.add_argument("position", nargs="?", help="落子位置")
 
 def get_cid(bot: Bot, event: MessageEvent):
     if isinstance(event, MessageEvent):
-        cid = f"{bot.self_id}_{event.sub_type}_"
+        cid = f"{bot.self_id}_{event.subMsgType}_"
 
     if isinstance(event, GroupMessageEvent):
-        cid += str(event.group_id)
+        cid += str(event.subMsgType)
 
     return cid
 
@@ -129,7 +128,7 @@ async def wuzi(matcher: Matcher, bot: Bot, event: GroupMessageEvent, msg: Comman
 
 
 def new_player(event: GroupMessageEvent) -> Player:
-    return Player(str(event.user_id), event.sender.card or event.sender.nickname or "")
+    return Player(str(event.senderUin), event.sendMemberName or event.sendNickName or "")
 
 
 @dataclass

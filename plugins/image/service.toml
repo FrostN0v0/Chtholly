@@ -2,5 +2,5 @@
 name = '公共图库'
 summary = '可以由用户上传、管理者管理的公共图库'
 version = '0.1.0'
-visable = true
+visable = false
 tags = ['好康的']

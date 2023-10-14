@@ -19,7 +19,6 @@ func_list = ["QQ音乐", "网易云", "酷我", "酷狗", "咪咕", "B站"]
 
 async def search(func: str, keyword: str):
     if func in func_list:
-        print(func)
         match func:
             case "QQ音乐":
                 return await search_qq(keyword)

@@ -3,7 +3,7 @@ from os import makedirs, path
 from kirami import get_bot, get_bots, get_driver
 from kirami.log import logger
 from kirami.config.path import FONT_DIR
-from kirami.depends import Bot
+from nonebot.adapters.red import Bot
 from typing import Optional, List, Dict
 from asyncio import Queue
 from httpx import AsyncClient

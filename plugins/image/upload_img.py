@@ -1,17 +1,18 @@
 from kirami.utils.jsondata import JsonDict
-from kirami import on_prefix
+from kirami import on_command
 from kirami.log import logger
 from kirami.typing import Matcher
-from kirami.event import MessageEvent, GroupMessageEvent
+from nonebot.adapters.red.event import MessageEvent, GroupMessageEvent
+from nonebot.adapters.red.message import MessageSegment
 from kirami.state import State
-from kirami.depends import Arg, ArgStr
+from kirami.depends import CommandArg, ArgStr, Arg
 from kirami.utils.downloader import Downloader
 from kirami.config.path import DATA_DIR, IMAGE_DIR
 from kirami.utils.helpers import extract_image_urls, extract_plain_text
 import os
 
-upload_img = on_prefix("上传图片", to_me=True)
-show_gallery = on_prefix("查看公开图库", to_me=True)
+upload_img = on_command("上传图片", to_me=True)
+show_gallery = on_command("查看公开图库", to_me=True)
 
 json_dict = JsonDict(path=DATA_DIR / "image.json", auto_load=True)
 
@@ -30,24 +31,29 @@ async def upload(event: MessageEvent, state: State):
 @upload_img.got(
     "path",
     prompt=f"请选择要上传的图库\n- "
-    + "\n- ".join(json_dict["catelog"]),
+           + "\n- ".join(json_dict["catelog"]),
 )
 @upload_img.got("img_list", prompt="图呢图呢图呢图呢！GKD！")
 async def _(path: ArgStr, img_list: Arg, matcher: Matcher, event: MessageEvent):
+    print(img_list)
     if path not in json_dict["catelog"]:
         await matcher.reject_arg("path", "此目录不正确，请重新输入目录！")
-    if not extract_image_urls(img_list):
+    if not img_list[0].get('data')['path']:
+        print(img_list[0].get('data')['path'])
         await matcher.reject_arg("img_list", "图呢图呢图呢图呢！GKD！")
-    img_list = extract_image_urls(img_list)
+    img_list = [
+        i.get('data')['path']
+        for i in img_list
+    ]
     group_id = 0
-    user_id = event.user_id
+    user_id = event.senderUin
     if isinstance(event, GroupMessageEvent):
-        group_id = event.group_id
+        group_id = event.peerUin
     img_id = len(os.listdir(IMAGE_DIR / 'gallery' / path)) + 1
     failed_list = []
     success_id = ""
     for img in img_list:
-        if await Downloader.download_file(img, IMAGE_DIR/'gallery'/path, file_name=str(img_id), file_type="png"):
+        if await Downloader.download_file(img, IMAGE_DIR / 'gallery' / path, file_name=str(img_id), file_type="png"):
             success_id += str(img_id) + "，"
             img_id += 1
         else:
@@ -72,7 +78,7 @@ async def _(path: ArgStr, img_list: Arg, matcher: Matcher, event: MessageEvent):
 
 
 @show_gallery.handle()
-async def show(matcher: Matcher):
+async def show(matcher: Matcher, event: MessageEvent):
     x = "公开图库列表：\n"
     for i, gallery in enumerate(json_dict["catelog"], 1):
         x += f"\t{i}.{gallery}\n"

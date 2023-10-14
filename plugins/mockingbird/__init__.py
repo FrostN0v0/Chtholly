@@ -1,6 +1,6 @@
 from kirami import on_command
 from kirami.config.path import RES_DIR
-from kirami.message import MessageSegment
+from nonebot.adapters.red.message import MessageSegment
 from kirami.state import State
 from kirami.depends import CommandArg, ArgStr
 from kirami.utils.helpers import extract_plain_text
@@ -69,4 +69,4 @@ async def _(words: ArgStr):
             config.accuracy,
             config.steps,
         )
-    await voice.finish(MessageSegment.record(record))
+    await voice.finish(MessageSegment.voice(record))

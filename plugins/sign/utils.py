@@ -1,9 +1,9 @@
 import os
 from PIL import Image, ImageFont
-from kirami.event import GroupMessageEvent
+from nonebot.adapters.red.event import GroupMessageEvent
 from kirami.config import DATA_DIR, IMAGE_DIR, FONT_DIR
 from kirami.log import logger
-from kirami import Bot
+from nonebot.adapters.red import Bot
 
 try:
     import ujson as json
@@ -64,10 +64,3 @@ async def get_at(event: GroupMessageEvent) -> int:
     return -1
 
 
-async def get_user_card(bot: Bot, group_id, qid):
-    # 返还用户nickname
-    user_info: dict = await bot.get_group_member_info(group_id=group_id, user_id=qid)
-    user_card = user_info["card"]
-    if not user_card:
-        user_card = user_info["nickname"]
-    return user_card

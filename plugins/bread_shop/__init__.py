@@ -5,9 +5,11 @@ from itertools import chain
 
 from kirami import get_driver
 from nonebot import on_command
-from kirami.depends import CommandArg, RawCommand, Bot
-from kirami.event import Event
+from kirami.depends import CommandArg, RawCommand
 from kirami.message import Message
+from nonebot.adapters.red import Bot
+from nonebot.adapters.red.event import Event, GroupMessageEvent
+from nonebot.adapters.red.message import Message
 from kirami.exception import ActionFailed
 
 from .bread_handle import BreadDataManage, Action
@@ -87,7 +89,7 @@ random_config()
 
 
 @bread_buy.handle()
-async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
+async def _(event: GroupMessageEvent, bot: Bot, args: CommandArg, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_buy_ori)
         buy_num = get_num_arg(args.extract_plain_text(), BuyEvent, group_id)
@@ -114,7 +116,7 @@ async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
 
 
 @bread_eat.handle()
-async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
+async def _(event: GroupMessageEvent, bot: Bot, args: CommandArg, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_eat_ori)
         eat_num = get_num_arg(args.extract_plain_text(), EatEvent, group_id)
@@ -140,7 +142,7 @@ async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
 
 
 @bread_rob.handle()
-async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
+async def _(bot: Bot, event: GroupMessageEvent, args: CommandArg, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_rob_ori)
     except CommandError:
@@ -168,14 +170,14 @@ async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
                 return
             robbed_qq = random.choice(all_qq)
             try:
-                robbed_name = await get_nickname(bot, robbed_qq, group_id)
+                robbed_name = event.sendNickName
             except ActionFailed:  # 群员不存在
-                robbed_name = await get_nickname(bot, robbed_qq)
+                robbed_name = event.sendNickName
         else:
             await bot.send(event=event, message="不支持随机抢！请指定用户进行抢")
             return
     else:
-        robbed_name = await get_nickname(bot, robbed_qq, group_id)
+        robbed_name = event.sendNickName
 
     wait_time = cd_wait_time(group_id, user_qq, Action.ROB)
     if wait_time > 0:
@@ -193,7 +195,7 @@ async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
 
 
 @bread_give.handle()
-async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
+async def _(bot: Bot, event: GroupMessageEvent, args: CommandArg, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_give_ori)
     except CommandError:
@@ -221,14 +223,14 @@ async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
                 return
             given_qq = random.choice(all_qq)
             try:
-                given_name = await get_nickname(bot, given_qq, group_id)
+                given_name = event.sendNickName
             except ActionFailed:  # 群员不存在
-                given_name = await get_nickname(bot, given_qq)
+                given_name = event.sendNickName
         else:
             await bot.send(event=event, message="不支持随机赠送！请指定用户进行赠送")
             return
     else:
-        given_name = await get_nickname(bot, given_qq, group_id)
+        given_name = event.sendNickName
 
     wait_time = cd_wait_time(group_id, user_qq, Action.GIVE)
     if wait_time > 0:
@@ -246,7 +248,7 @@ async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
 
 
 @bread_bet.handle()
-async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
+async def _(bot: Bot, event: GroupMessageEvent, args: CommandArg, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_bet_ori)
     except CommandError:
@@ -293,7 +295,7 @@ async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
 
 
 @bread_check.handle()
-async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
+async def _(event: GroupMessageEvent, bot: Bot, args: CommandArg, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_check_ori)
     except CommandError:
@@ -307,7 +309,7 @@ async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
         user_data = BreadDataManage(group_id).get_bread_data(user_qq)
         msg = f"你现在拥有{user_data.bread_num}个{thing}，等级为Lv.{user_data.level}，排名为{user_data.no}！"
     else:
-        checked_name = await get_nickname(bot, checked_qq, group_id)
+        checked_name = event.sendNickName
         checked_data = BreadDataManage(group_id).get_bread_data(checked_qq)
         msg = f"{checked_name} 现在拥有{checked_data.bread_num}个{thing}，等级为Lv.{checked_data.level}，排名为{checked_data.no}！"
 
@@ -315,7 +317,7 @@ async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
 
 
 @bread_log.handle()
-async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
+async def _(event: GroupMessageEvent, bot: Bot, args: CommandArg, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_log_ori)
     except CommandError:
@@ -328,7 +330,7 @@ async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
             val_index = action_args.index(add_arg)
             action = Action(val_index)
             data = BreadDataManage(group_id).get_action_log(action)
-            name = await get_nickname(bot, data.user_id, group_id)
+            name = event.sendNickName
             attr_val = BreadDataManage.LOG_COLUMN[val_index].lower()
             app_msg = ["哇好有钱！", "好能吃，大胃王！", "大坏比！", "我超，带好人！", "哇塞，赌狗！"]
             msg = f"{add_arg}次数最多是{name}！共{getattr(data, attr_val)}次！" + app_msg[val_index]
@@ -342,13 +344,13 @@ async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
     checked_qq = user_qq
     for arg in args:
         if arg.type == "at":
-            checked_qq = arg.data.get("qq", "")
+            checked_qq = arg.data.get("user_id", "")
     if checked_qq == user_qq:
         user_log = BreadDataManage(group_id).get_log_data(user_qq)
         msg = f"你共购买{user_log.buy_times}次，吃{user_log.eat_times}次，抢{user_log.rob_times}次，" \
               f"赠送{user_log.give_times}次，猜拳{user_log.bet_times}次！"
     else:
-        checked_name = await get_nickname(bot, checked_qq, group_id)
+        checked_name = event.sendNickName
         checked_log = BreadDataManage(group_id).get_log_data(checked_qq)
         msg = f"{checked_name}共购买{checked_log.buy_times}次，吃{checked_log.eat_times}次，抢{checked_log.rob_times}次，" \
               f"赠送{checked_log.give_times}次，猜拳{checked_log.bet_times}次！"
@@ -356,7 +358,7 @@ async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
 
 
 @bread_help.handle()
-async def _(event: Event, bot: Bot, cmd: RawCommand):
+async def _(event: GroupMessageEvent, bot: Bot, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_help_ori)
     except CommandError:
@@ -379,7 +381,7 @@ https://github.com/Mai-icy/nonebot-plugin-bread-shop"""
 
 
 @bread_top.handle()
-async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
+async def _(bot: Bot, event: GroupMessageEvent, args: CommandArg, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_top_ori)
     except CommandError:
@@ -394,7 +396,7 @@ async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
         if int(args_list[0]) > 10 or int(args_list[0]) < 1:
             await bot.send(event=event, message="超出范围了！")
             return
-        msg = await get_group_top(bot, group_id, thing, end=int(args_list[0]))
+        msg = await get_group_top(bot, event, group_id, thing, end=int(args_list[0]))
     elif len(args_list) == 2:
         # 指定查看排行榜区间 start - end
         end = int(args_list[1])
@@ -402,40 +404,22 @@ async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
         if end - start >= 10 or start > end or start < 1:
             await bot.send(event=event, message="超出范围了！")
             return
-        msg = await get_group_top(bot, group_id, thing, start=start, end=end)
+        msg = await get_group_top(bot, event, group_id, thing, start=start, end=end)
     elif len(args_list) == 0:
-        msg = await get_group_top(bot, group_id, thing)
+        msg = await get_group_top(bot, event, group_id, thing)
     else:
         await bot.send(event=event, message="参数非法！")
         return
-
     await bot.send(event=event, message=msg)
 
 
-async def get_group_id(session_id):
-    """获取群号"""
-    res = re.findall("_(.*)_", session_id)
-    group_id = res[0]
-
-    # 调整是否全局分群
-    for zone_pair in bread_config.group_database.items():
-        if group_id in zone_pair[1]:
-            return zone_pair[0]
-
-    if bread_config.global_database:
-        return "global"
-    else:
-        return group_id
-
-
-async def get_group_top(bot: Bot, group_id, thing, start=1, end=5) -> Message:
+async def get_group_top(bot: Bot, event: GroupMessageEvent, group_id, thing, start=1, end=5) -> Message:
     """获取群内（或全局）排行榜"""
     if group_id == "global":
         group_member_list = []
     else:
-        group_member_list = await bot.get_group_member_list(group_id=int(group_id))
-
-    user_id_list = {info['user_id'] for info in group_member_list}
+        group_member_list = await bot.get_members(group=group_id)
+    user_id_list = {info.uid for info in group_member_list}
     all_data = BreadDataManage(group_id).get_all_data()
     num = 0
     append_text = f"🍞本群{thing}排行top！🍞\n"
@@ -443,27 +427,13 @@ async def get_group_top(bot: Bot, group_id, thing, start=1, end=5) -> Message:
         if int(data.user_id) in user_id_list or group_id == "global":
             num += 1
             if start <= num <= end:
-                name = await get_nickname(bot, data.user_id, group_id)
+                name = event.sendNickName
                 append_text += f"top{num} : {name} Lv.{data.bread_eaten // LEVEL}，拥有{thing}{data.bread_num}个\n"
             if num > end:
                 break
 
     append_text += "大家继续加油w！"
     return Message(append_text)
-
-
-async def get_nickname(bot: Bot, user_id, group_id=None):
-    """获取用户的昵称，若在群中则为群名片，不在群中为qq昵称"""
-    if group_id and group_id != "global" and group_id not in bread_config.group_database.keys():
-        info = await bot.get_group_member_info(group_id=int(group_id), user_id=int(user_id))
-        other_name = info.get("card", "") or info.get("nickname", "")
-        if not other_name:
-            info = await bot.get_stranger_info(user_id=int(user_id))
-            other_name = info.get("nickname", "")
-    else:
-        info = await bot.get_stranger_info(user_id=int(user_id))
-        other_name = info.get("nickname", "")
-    return other_name
 
 
 def get_num_arg(text, event_type, group_id):
@@ -484,9 +454,9 @@ def get_num_arg(text, event_type, group_id):
 
 
 async def pre_get_data(event, bot, cmd, cmd_ori):
-    user_qq = event.get_user_id()
-    group_id = await get_group_id(event.get_session_id())
-    name = await get_nickname(bot, user_qq, group_id)
+    user_qq = event.senderUin
+    group_id = event.peerUid
+    name = event.sendNickName
 
     if bread_config.is_at_valid:
         msg_at = Message(f"[CQ:at,qq={user_qq}]")  # at生效

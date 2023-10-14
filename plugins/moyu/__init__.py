@@ -1,8 +1,8 @@
 from kirami import on_fullmatch, on_time, get_bot, logger
 from kirami.typing import Matcher
-from kirami.message import Message
 from kirami.utils.utils import get_api_data
-from kirami.event import GroupMessageEvent
+from nonebot.adapters.red.event import GroupMessageEvent
+from nonebot.adapters.red.message import MessageSegment
 from kirami.config.path import IMAGE_DIR, DATA_DIR
 from kirami.utils.downloader import Downloader
 from kirami.utils.jsondata import JsonDict
@@ -29,7 +29,7 @@ async def check_dir():
 async def add_group(event: GroupMessageEvent, matcher: Matcher):
     if key_name not in json_dict:
         json_dict[key_name] = []  # 如果列表不存在，创建一个空列表
-    new_group = event.group_id
+    new_group = event.peerUid
     for gid in json_dict[key_name]:
         if new_group == gid:
             await matcher.finish("该群已经订阅了摸鱼日历推送")
@@ -43,7 +43,7 @@ async def add_group(event: GroupMessageEvent, matcher: Matcher):
 
 @moyu_delsub.handle()
 async def del_group(event: GroupMessageEvent, matcher: Matcher):
-    unsub_group = event.group_id
+    unsub_group = event.peerUid
     for gid in json_dict[key_name]:
         if unsub_group == gid:
             json_dict[key_name].remove(unsub_group)
@@ -57,7 +57,7 @@ async def del_group(event: GroupMessageEvent, matcher: Matcher):
 
 @moyu.handle()
 async def moyu(matcher: Matcher):
-    msg = Message.image(IMAGE_DIR/"moyu_img"/f'{date.today()}.png')
+    msg = MessageSegment.image(IMAGE_DIR/"moyu_img"/f'{date.today()}.png')
     await matcher.finish(msg)
 
 
@@ -65,7 +65,7 @@ async def moyu(matcher: Matcher):
 async def push():
     bot = get_bot()
     for gid in json_dict['group_list']:
-        msg = Message.image(IMAGE_DIR / "moyu_img" / f'{date.today()}.png')
+        msg = MessageSegment.image(IMAGE_DIR / "moyu_img" / f'{date.today()}.png')
         await bot.call_api("send_group_msg", group_id=gid, message=msg)
 
 

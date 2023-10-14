@@ -1,12 +1,8 @@
 from kirami import on_message, on_fullmatch, on_command
-from kirami.depends import (
-    Bot,
-    MessageEvent,
-    GroupMessageEvent,
-    CommandArg
-)
-from kirami.event import PrivateMessageEvent
-from kirami.message import MessageSegment
+from kirami.depends import CommandArg
+from nonebot.adapters.red import Bot
+from nonebot.adapters.red.event import MessageEvent, GroupMessageEvent, PrivateMessageEvent
+from nonebot.adapters.red.message import MessageSegment
 from .config import Config, var
 from .data_handle import req_chatgpt, text_to_img
 from kirami.typing import State
@@ -38,11 +34,11 @@ def get_id(event: MessageEvent) -> str:
     """获取会话id"""
     if isinstance(event, GroupMessageEvent):
         if config.talk_with_chatgpt_group_share:
-            gid = f"{event.group_id}-share"
+            gid = f"{event.guildId}-share"
         else:
-            gid = f"{event.group_id}-{event.user_id}"
+            gid = f"{event.guildId}-{event.senderUin}"
     elif isinstance(event, PrivateMessageEvent):
-        gid = str(event.user_id)
+        gid = str(event.guildId)
     else:
         gid = ""
     # 记录id
@@ -61,7 +57,7 @@ async def rule_check(event: MessageEvent, bot: Bot) -> bool:
         # 判断是否启用
         if (
             config.talk_with_chatgpt_all_group_enable is False
-            and event.group_id not in var.enable_group_list
+            and event.guildId not in var.enable_group_list
         ):
             return False
 
@@ -115,7 +111,7 @@ async def rule_check3(event: MessageEvent, bot: Bot) -> bool:
         if (
             isinstance(event, GroupMessageEvent)
             and config.talk_with_chatgpt_all_group_enable is False
-            and event.group_id not in var.enable_group_list
+            and event.guildId not in var.enable_group_list
         ):
             return False
 
@@ -306,11 +302,11 @@ async def _(event: GroupMessageEvent):
     if config.talk_with_chatgpt_all_group_enable is True:
         await enable_group.finish("当前配置是所有群都启用，此命令无效")
 
-    if event.group_id in var.enable_group_list:
-        var.enable_group_list.remove(event.group_id)
+    if event.guildId in var.enable_group_list:
+        var.enable_group_list.remove(event.guildId)
         await enable_group.finish("chatgpt已禁用")
     else:
-        var.enable_group_list.append(event.group_id)
+        var.enable_group_list.append(event.guildId)
         await enable_group.finish("chatgpt已启用")
 
 
@@ -345,9 +341,9 @@ async def _(event: MessageEvent, gevent: GroupMessageEvent):
             mb_config.accuracy,
             mb_config.steps,
         )
-        await talk.finish(MessageSegment.record(record))
+        await talk.finish(MessageSegment.voice(record))
     if config.talk_with_chatgpt_talk_to_voice_model == 'vits':
-        gid = str(gevent.group_id)
+        gid = str(gevent.guildId)
         if gid in json_dict:
             record = await cn_func(result, name=json_dict[gid], para_dict={})
         else:
@@ -361,7 +357,7 @@ tts = on_command("修改角色")
 
 @tts.handle()
 async def _(arg: CommandArg, event: GroupMessageEvent):
-    gid = str(event.group_id)
+    gid = str(event.guildId)
     args = arg.extract_plain_text().split()
     if args[0] in profileDict["cnapi"]["char"]:
         json_dict[gid] = args[0]

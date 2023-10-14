@@ -3,8 +3,10 @@ from kirami.log import logger
 from kirami import on_command, on_regex
 from kirami.matcher import Matcher
 from kirami.permission import SUPERUSER
-from kirami.depends import Bot, GroupMessageEvent, CommandArg, RegexMatched, ArgStr
-from kirami.message import MessageSegment, Message
+from kirami.depends import CommandArg, RegexMatched, ArgStr
+from nonebot.adapters.red import Bot
+from nonebot.adapters.red.event import GroupMessageEvent
+from nonebot.adapters.red.message import MessageSegment, Message
 from kirami.permission import GROUP, GROUP_OWNER, GROUP_ADMIN
 from kirami.utils.helpers import extract_plain_text
 from kirami.depends import DependsInner
@@ -26,37 +28,37 @@ __morning_usages__ = f'''
 
 
 # Good morning/night
-morning = on_command("早安", "哦哈哟", "おはよう", permission=GROUP, priority=12)
-night = on_command("晚安", "哦呀斯密", "おやすみ", permission=GROUP, priority=12)
+morning = on_command("早安", "哦哈哟", "おはよう", priority=12)
+night = on_command("晚安", "哦呀斯密", "おやすみ", priority=12)
 
 # Routine
-my_routine = on_command("我的作息", permission=GROUP, priority=12)
-group_routine = on_command("群友作息", permission=GROUP, priority=12)
+my_routine = on_command("我的作息", priority=12)
+group_routine = on_command("群友作息", priority=12)
 
 # Settings
-configure = on_command("早安设置", "晚安设置", "早晚安设置", permission=GROUP, priority=11, block=True)
+configure = on_command("早安设置", "晚安设置", "早晚安设置", priority=11, block=True)
 
 
 @morning.handle()
-async def good_morning(bot: Bot, matcher: Matcher, event: GroupMessageEvent, args: CommandArg):
+async def good_morning(bot: Bot, event: GroupMessageEvent, args: CommandArg):
     arg: str = args.extract_plain_text()
     if arg == "帮助":
-        await matcher.finish(__morning_usages__)
+        await morning.finish(MessageSegment.text(__morning_usages__))
 
-    uid = event.user_id
-    gid = event.group_id
-    mem_info = await bot.call_api("get_group_member_info", group_id=gid, user_id=uid)
-
-    sex = mem_info["sex"]
-    if sex == "male":
-        sex_str = "少年"
-    elif sex == "female":
-        sex_str = "少女"
-    else:
-        sex_str = "群友"
-
-    msg = morning_manager.get_morning_msg(str(gid), str(uid), sex_str)
-    await matcher.finish(message=msg, at_sender=True)
+    uid = event.senderUid
+    gid = event.peerUid
+    # mem_info = await bot.call_api("get_group_member_info", group_id=gid, user_id=uid)
+    #
+    # sex = mem_info["sex"]
+    # if sex == "male":
+    #     sex_str = "少年"
+    # elif sex == "female":
+    #     sex_str = "少女"
+    # else:
+    sex_str = "小可爱"
+    msg = MessageSegment.at(event.senderUid)
+    msg += morning_manager.get_morning_msg(str(gid), str(uid), sex_str)
+    await morning.finish(msg)
 
 
 @night.handle()
@@ -65,34 +67,35 @@ async def good_night(bot: Bot, matcher: Matcher, event: GroupMessageEvent, args:
     if arg == "帮助":
         await matcher.finish(__morning_usages__)
 
-    uid: int = event.user_id
-    gid: int = event.group_id
-    mem_info = await bot.call_api("get_group_member_info", group_id=gid, user_id=uid)
-
-    sex = mem_info["sex"]
-    if sex == "male":
-        sex_str = "少年"
-    elif sex == "female":
-        sex_str = "少女"
-    else:
-        sex_str = "群友"
-
-    msg = morning_manager.get_night_msg(str(gid), str(uid), sex_str)
-    await matcher.finish(message=msg, at_sender=True)
+    uid: str = event.senderUid
+    gid: str = event.peerUid
+    # mem_info = await bot.call_api("get_group_member_info", group_id=gid, user_id=uid)
+    #
+    # sex = mem_info["sex"]
+    # if sex == "male":
+    #     sex_str = "少年"
+    # elif sex == "female":
+    #     sex_str = "少女"
+    # else:
+    sex_str = "小可爱"
+    msg = MessageSegment.at(event.senderUid)
+    msg += morning_manager.get_night_msg(str(gid), str(uid), sex_str)
+    await matcher.finish(message=msg)
 
 
 @my_routine.handle()
 async def _(matcher: Matcher, event: GroupMessageEvent):
-    gid = str(event.group_id)
-    uid = str(event.user_id)
+    gid = str(event.peerUid)
+    uid = str(event.senderUid)
 
-    msg = morning_manager.get_my_routine(gid, uid)
-    await matcher.finish(message=msg, at_sender=True)
+    msg = MessageSegment.at(event.senderUid)
+    msg += morning_manager.get_my_routine(gid, uid)
+    await matcher.finish(message=msg)
 
 
 @group_routine.handle()
 async def _(bot: Bot, matcher: Matcher, event: GroupMessageEvent):
-    gid = event.group_id
+    gid = event.peerUid
     morning_count, night_count, uid = morning_manager.get_group_routine(str(gid))
     msg: str = f"今天已经有{morning_count}位群友早安了，{night_count}位群友晚安了~"
 
@@ -106,10 +109,9 @@ async def _(bot: Bot, matcher: Matcher, event: GroupMessageEvent):
 
 @configure.handle()
 async def _(matcher: Matcher, event: GroupMessageEvent):
-    gid = str(event.group_id)
+    gid = str(event.peerUid)
     msg = morning_manager.get_group_config()
     await matcher.finish(msg)
-
 
 
 # 每日最早晚安时间，重置昨日早晚安计数
