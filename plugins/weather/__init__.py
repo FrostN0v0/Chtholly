@@ -56,7 +56,7 @@ async def push_privite_msg(uid: str, city: str):
     img = await render(w_data)
     msg = MessageSegment.text(f"您订阅的{city}实时天气送达啦~\n")
     msg += MessageSegment.image(img)
-    await bot.call_api('send_private_msg', user_id=uid, message=msg)
+    await bot.call_api('send_friend_message', target=uid, message=msg)
 
 
 async def push_group_msg(uid: str, gid: str, city: str):
@@ -67,7 +67,7 @@ async def push_group_msg(uid: str, gid: str, city: str):
     msg = MessageSegment.at(uid)
     msg += MessageSegment.text(f"您订阅的{city}实时天气送达啦~\n")
     msg += MessageSegment.image(img)
-    await bot.call_api('send_group_msg', group_id=gid, message=msg)
+    await bot.call_api('send_group_message', target=gid, message=msg)
 
 
 @weather.handle()
