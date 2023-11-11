@@ -10,7 +10,7 @@
   </a>
     <img src="https://img.shields.io/badge/python-3.10+-blue?logo=python&logoColor=edb641" alt="python">
   <a href="https://github.com/A-kirami/KiramiBot">
-    <img src="https://img.shields.io/badge/KiramiBot-0.3.2-green" alt="KiramiBot">
+    <img src="https://img.shields.io/badge/KiramiBot-0.3.3-green" alt="KiramiBot">
   </a>
     
 </p>
@@ -141,6 +141,8 @@ Welcome To 交流群 [斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=102
 ## 部署
 
 **须知：项目与框架均处于开发阶段，不稳定，部署中如遇到问题请通过交流群 [斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO2zj9f5ziuS2ijcDzbjkAfcMHVA&authKey=ilcGvEnqWjHOJKa3f1cpOMQPVAeA0RZyv%2BD9lE9aV1WfwFZ8ig%2BUynUCSM4AXZOB&noverify=0&group_code=326466216) 联系我**
+
+**gocq已寄，请各位自行寻找替代方案，由于tx打压，这里不做推荐**
 
 ### 安装脚手架
 
