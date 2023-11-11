@@ -3,7 +3,7 @@
 
 class Config(BaseConfig):
 
-    send_forward_msg: bool = True
+    send_forward_msg: bool = False
     """是否将赛马过程图片以合并消息发送"""
     pic_font_size: int = 16
     """图片字体大小"""

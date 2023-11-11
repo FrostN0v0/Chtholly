@@ -2,7 +2,7 @@
 name = '每日60s'
 summary = '每日60s了解世界，每日新闻推送'
 version = '0.1.0'
-visable = true
+visable = false
 tags = ['工具']
 [plugin.cooldown]
 time = 3

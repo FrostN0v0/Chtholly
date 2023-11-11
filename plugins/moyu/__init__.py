@@ -9,6 +9,7 @@ from kirami.utils.jsondata import JsonDict
 from kirami.hook import on_startup
 from kirami.utils.utils import new_dir
 from datetime import date
+from utils.utils import path2base64
 
 json_dict = JsonDict(path=DATA_DIR / "moyu.json", auto_load=True)
 
@@ -57,7 +58,7 @@ async def del_group(event: GroupMessageEvent, matcher: Matcher):
 
 @moyu.handle()
 async def moyu(matcher: Matcher):
-    msg = Message.image(IMAGE_DIR/"moyu_img"/f'{date.today()}.png')
+    msg = Message.image(await path2base64(IMAGE_DIR/"moyu_img"/f'{date.today()}.png'))
     await matcher.finish(msg)
 
 
@@ -65,7 +66,7 @@ async def moyu(matcher: Matcher):
 async def push():
     bot = get_bot()
     for gid in json_dict['group_list']:
-        msg = Message.image(IMAGE_DIR / "moyu_img" / f'{date.today()}.png')
+        msg = Message.image(await path2base64(IMAGE_DIR / "moyu_img" / f'{date.today()}.png'))
         await bot.call_api("send_group_msg", group_id=gid, message=msg)
 
 

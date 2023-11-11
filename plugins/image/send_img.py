@@ -10,6 +10,7 @@ from kirami.utils.helpers import extract_plain_text
 import asyncio
 import os
 from .config import Config
+from utils.utils import path2base64
 
 config = Config.load_config()
 
@@ -55,7 +56,7 @@ async def _(event: MessageEvent, bot: Bot):
         result = path / f"{msg[1]}.png"
     pic = Resource.image(result).name
     if result:
-        msg_id = await send_img.send(f"id：{pic.split('.')[0]}" + MessageSegment.image(result))
+        msg_id = await send_img.send(f"id：{pic.split('.')[0]}" + MessageSegment.image(await path2base64(result)))
         if config.withdraw:
             await asyncio.sleep(config.last_time)
             await bot.delete_msg(message_id=msg_id["message_id"])

@@ -17,6 +17,7 @@ from kirami import on_command, Bot
 from kirami.config import bot_config
 from kirami.message import MessageSegment
 from kirami.event import GroupMessageEvent, PrivateMessageEvent
+from utils.utils import path2base64
 
 try:
     import ujson as json
@@ -32,7 +33,7 @@ give_okodokai = on_command("盖章", "签到", "妈!", priority=30, block=True)
 
 
 @give_okodokai.handle()
-async def _(event: Union[GroupMessageEvent, PrivateMessageEvent]):
+async def _(event: Union[GroupMessageEvent, PrivateMessageEvent], bot: Bot):
     # 获取 QQ 号和群号
     uid = event.user_id
     if isinstance(event, GroupMessageEvent):
@@ -59,21 +60,22 @@ async def _(event: Union[GroupMessageEvent, PrivateMessageEvent]):
     goodwill = random.randint(1, 10)
     stamp = random.choice(card_file_names_all)
     path = STAMP_PATH / stamp
-    image = MessageSegment.image(path)
+    base64_str = await path2base64(path)
+    image = MessageSegment.image(base64_str)
     card_id = stamp[:-4]
     db.add_card_num(gid, uid, card_id)
 
     # 一言
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get("https://api.vvhan.com/api/ian")
+            response = await client.get("https://v1.hitokoto.cn/?encode=text")
             status_code = response.status_code
             if status_code == 200:
                 response_text = response.text
             else:
-                response_text = f"今日一言: 请求错误: {status_code}"
+                response_text = f"今日一言: 请求错误"
     except Exception as error:
-        logger.warning(error)
+        print(error)
 
     # 读写数据
     with open(GOODWILL_PATH / "goodwill.json", "r", encoding="utf-8") as f:
@@ -88,10 +90,10 @@ async def _(event: Union[GroupMessageEvent, PrivateMessageEvent]):
         else:
             data[str(gid)] = {str(uid): [user_goodwill + goodwill, last_time]}
         json.dump(data, f, indent=4, ensure_ascii=False)
-
-    await give_okodokai.send(
-        f'\n欢迎回来, 主人 ~ !' + image + f'\n好感 + {goodwill} ! 当前好感: {data[str(gid)][str(uid)][0]}\n' + f'主人今天要{todo}吗? \n\n今日一言: {response_text}',
-        at_sender=True)
+    msg = MessageSegment.text('\n欢迎回来, 主人 ~ !')
+    msg += image
+    msg += MessageSegment.text(f'\n好感 + {goodwill} ! 当前好感: {data[str(gid)][str(uid)][0]}\n 主人今天要{todo}吗? \n\n今日一言: {response_text}')
+    await bot.call_api('send_group_msg', group_id=gid, message=msg)
 
 
 storage = on_command('收集册', priority=30, block=True)
@@ -146,7 +148,7 @@ async def _(bot: Bot, event: Union[GroupMessageEvent, PrivateMessageEvent], msg:
 
     # 整合信息并发送
     if isinstance(event, GroupMessageEvent):
-        lucky_user_card = await get_user_card(bot, gid, uid)
+        lucky_user_card = event.sender.nickname
         try:
             await storage.finish(
                 f'『{lucky_user_card}』的收集册:\n' + img + f'图鉴完成度: {normalize_digit_format(len(cards_num))}/{normalize_digit_format(len(card_file_names_all))}\n当前群排名: {ranking_desc}')

@@ -6,7 +6,7 @@ from itertools import chain
 from kirami import get_driver
 from nonebot import on_command
 from kirami.depends import CommandArg, RawCommand, Bot
-from kirami.event import Event
+from kirami.event import GroupMessageEvent
 from kirami.message import Message
 from kirami.exception import ActionFailed
 
@@ -87,7 +87,7 @@ random_config()
 
 
 @bread_buy.handle()
-async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
+async def _(event: GroupMessageEvent, bot: Bot, args: CommandArg, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_buy_ori)
         buy_num = get_num_arg(args.extract_plain_text(), BuyEvent, group_id)
@@ -114,7 +114,7 @@ async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
 
 
 @bread_eat.handle()
-async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
+async def _(event: GroupMessageEvent, bot: Bot, args: CommandArg, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_eat_ori)
         eat_num = get_num_arg(args.extract_plain_text(), EatEvent, group_id)
@@ -140,7 +140,7 @@ async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
 
 
 @bread_rob.handle()
-async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
+async def _(bot: Bot, event: GroupMessageEvent, args: CommandArg, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_rob_ori)
     except CommandError:
@@ -193,7 +193,7 @@ async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
 
 
 @bread_give.handle()
-async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
+async def _(bot: Bot, event: GroupMessageEvent, args: CommandArg, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_give_ori)
     except CommandError:
@@ -246,7 +246,7 @@ async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
 
 
 @bread_bet.handle()
-async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
+async def _(bot: Bot, event: GroupMessageEvent, args: CommandArg, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_bet_ori)
     except CommandError:
@@ -293,7 +293,7 @@ async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
 
 
 @bread_check.handle()
-async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
+async def _(event: GroupMessageEvent, bot: Bot, args: CommandArg, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_check_ori)
     except CommandError:
@@ -315,7 +315,7 @@ async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
 
 
 @bread_log.handle()
-async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
+async def _(event: GroupMessageEvent, bot: Bot, args: CommandArg, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_log_ori)
     except CommandError:
@@ -356,7 +356,7 @@ async def _(event: Event, bot: Bot, args: CommandArg, cmd: RawCommand):
 
 
 @bread_help.handle()
-async def _(event: Event, bot: Bot, cmd: RawCommand):
+async def _(event: GroupMessageEvent, bot: Bot, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_help_ori)
     except CommandError:
@@ -379,7 +379,7 @@ https://github.com/Mai-icy/nonebot-plugin-bread-shop"""
 
 
 @bread_top.handle()
-async def _(bot: Bot, event: Event, args: CommandArg, cmd: RawCommand):
+async def _(bot: Bot, event: GroupMessageEvent, args: CommandArg, cmd: RawCommand):
     try:
         user_qq, group_id, name, msg_at, thing = await pre_get_data(event, bot, cmd, cmd_top_ori)
     except CommandError:
@@ -484,9 +484,9 @@ def get_num_arg(text, event_type, group_id):
 
 
 async def pre_get_data(event, bot, cmd, cmd_ori):
-    user_qq = event.get_user_id()
+    user_qq = str(event.user_id)
     group_id = await get_group_id(event.get_session_id())
-    name = await get_nickname(bot, user_qq, group_id)
+    name = event.sender.nickname
 
     if bread_config.is_at_valid:
         msg_at = Message(f"[CQ:at,qq={user_qq}]")  # at生效

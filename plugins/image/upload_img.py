@@ -37,6 +37,7 @@ async def _(path: ArgStr, img_list: Arg, matcher: Matcher, event: MessageEvent):
     if path not in json_dict["catelog"]:
         await matcher.reject_arg("path", "此目录不正确，请重新输入目录！")
     if not extract_image_urls(img_list):
+        print(img_list)
         await matcher.reject_arg("img_list", "图呢图呢图呢图呢！GKD！")
     img_list = extract_image_urls(img_list)
     group_id = 0
