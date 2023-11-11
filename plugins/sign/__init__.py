@@ -90,8 +90,7 @@ async def _(event: Union[GroupMessageEvent, PrivateMessageEvent], bot: Bot):
         else:
             data[str(gid)] = {str(uid): [user_goodwill + goodwill, last_time]}
         json.dump(data, f, indent=4, ensure_ascii=False)
-    msg = MessageSegment.at(user_id=uid)
-    msg += MessageSegment.text('\n欢迎回来, 主人 ~ !')
+    msg = MessageSegment.text('\n欢迎回来, 主人 ~ !')
     msg += image
     msg += MessageSegment.text(f'\n好感 + {goodwill} ! 当前好感: {data[str(gid)][str(uid)][0]}\n 主人今天要{todo}吗? \n\n今日一言: {response_text}')
     await bot.call_api('send_group_msg', group_id=gid, message=msg)
