@@ -164,16 +164,16 @@ async def _(event: MessageEvent):
     # 根据配置是否发出提示
     if config.talk_with_chatgpt_reply_notice:
         await talk.send("响应中...")
-
-    result = await req_chatgpt(uid, text)
+    result = MessageSegment.at(user_id=uid)
+    result += await req_chatgpt(uid, text)
     if config.talk_with_chatgpt_ban_word:
         for w in config.talk_with_chatgpt_ban_word:
             if w in result:
-                result = "本次回答中包含屏蔽词！"
+                result += "本次回答中包含屏蔽词！"
                 break
 
     if config.talk_with_chatgpt_send_with_img:
-        result = MessageSegment.image(text_to_img(result))
+        result += MessageSegment.image(text_to_img(result))
     await talk.finish(result, at_sender=True)
 
 
