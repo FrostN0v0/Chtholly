@@ -147,7 +147,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
         new_waifu_id = -1
         old_times = limit_times
     else:
-        all_member: list = await bot.get_group_member_list(group_id=gid)
+        all_member: list = await bot.get_group_member_list(group_id=event.group_id)
         id_set: Set[int] = set(i['user_id'] for i in all_member) - set(
             i['waifu_id'] for i in group_today_record.values()) - ban_id
         id_set.discard(int(uid))
@@ -162,7 +162,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
     }
     save_group_record(gid, group_record)
     try:
-        member_info = await bot.get_group_member_info(group_id=gid, user_id=new_waifu_id)
+        member_info = await bot.get_group_member_info(group_id=event.group_id, user_id=new_waifu_id)
     except ActionFailed:
         # 群员已经退群情况
         member_info = {}
@@ -196,7 +196,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
         is_first = False
     else:
         # 如果用户在今天无老婆记录，随机从群友中抓取一位作为老婆，同时保证别人的老婆不会被抓（NTR禁止）
-        all_member: list = await bot.get_group_member_list(group_id=gid)
+        all_member: list = await bot.get_group_member_list(group_id=event.group_id)
         id_set: Set[int] = set(i['user_id'] for i in all_member) - set(
             i['waifu_id'] for i in group_today_record.values()) - ban_id
         id_set.discard(int(uid))
@@ -214,7 +214,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
     if save:
         save_group_record(gid, group_record)
     try:
-        member_info = await bot.get_group_member_info(group_id=gid, user_id=waifu_id)
+        member_info = await bot.get_group_member_info(group_id=event.group_id, user_id=waifu_id)
     except ActionFailed:
         # 群员已经退群情况
         member_info = {}
