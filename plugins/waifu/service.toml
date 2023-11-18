@@ -1,0 +1,6 @@
+[plugin]
+name = '抽老婆'
+summary = '抽群友做老婆'
+version = '0.1.0'
+visable = true
+tags = ['功能']
