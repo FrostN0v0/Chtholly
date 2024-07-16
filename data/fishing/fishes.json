@@ -42,7 +42,8 @@
         "display-name": "虾",
         "weight-min": 3,
         "weight-max": 8,
-        "icon": "minecraft:cod"
+        "icon": "minecraft:cod",
+        "msg": "虾头楠，蒸鹅心！"
       },
       "Anchovy": {
         "display-name": "鳀鱼",
@@ -72,7 +73,8 @@
         "display-name": "鲱鱼",
         "weight-min": 20,
         "weight-max": 30,
-        "icon": "minecraft:cod"
+        "icon": "minecraft:cod",
+        "msg": "做成罐头吃掉了，你感觉身体有些轻"
       }
     },
     "junk": {
@@ -80,7 +82,8 @@
         "display-name": "馅饼",
         "weight-min": 3.14,
         "weight-max": 3.14,
-        "icon": "minecraft:pump"
+        "icon": "minecraft:pump",
+        "msg": "pie!你尝了尝，韭菜馅儿的。"
       },
       "Magikarp": {
         "display-name": "鲤鱼王",
@@ -113,7 +116,8 @@
         "display-name": "海绵宝宝",
         "weight-min": 16,
         "weight-max": 16,
-        "icon": "minecraft:sponge"
+        "icon": "minecraft:sponge",
+        "msg": "我准备好了！我准备好了！"
       }
     },
     "rare": {
@@ -127,13 +131,15 @@
         "display-name": "乌贼",
         "weight-min": 30,
         "weight-max": 50,
-        "icon": "minecraft:ink"
+        "icon": "minecraft:ink",
+        "msg": "吃了一嘴墨"
       },
       "Flatfish": {
         "display-name": "比目鱼",
         "weight-min": 40,
         "weight-max": 75,
-        "icon": "minecraft:cod"
+        "icon": "minecraft:cod",
+        "msg": "眼睛瞪得像铜铃~"
       },
       "SeaBream": {
         "display-name": "海鲷",
@@ -153,7 +159,15 @@
         "display-name": "小丑鱼",
         "weight-min": 10,
         "weight-max": 18,
-        "icon": "minecraft:trop"
+        "icon": "minecraft:trop",
+        "msg": "小丑鱼，于是你照了照镜子！"
+      },
+      "ZeKu": {
+        "display-name": "杂鱼♥",
+        "weight-min": 5,
+        "weight-max": 20,
+        "icon": "ZeKu",
+        "msg": "大哥哥真是杂鱼♥呢~ZeKuZeKu~"
       },
       "Pufferfish": {
         "display-name": "河豚",
@@ -183,7 +197,8 @@
         "display-name": "金枪鱼",
         "weight-min": 130,
         "weight-max": 180,
-        "icon": "minecraft:cod"
+        "icon": "minecraft:cod",
+        "msg": "直到胸口中了一枪"
       }
     },
     "legendary": {
@@ -192,20 +207,14 @@
         "weight-min": 160,
         "weight-max": 240,
         "icon": "minecraft:cod",
-        "msg": [
-          "&7&o最棘手的鱼",
-          "&7当你吃了这条鱼,你会获得 &9力量 I (2:00)&7."
-        ]
+        "msg": "鱼！好大的鱼！"
       },
       "PygmyWhale": {
         "display-name": "抹香鲸",
         "weight-min": 600,
         "weight-max": 650,
         "icon": "minecraft:cod",
-        "msg": [
-          "&7&o最大的鱼",
-          "&7吃了这条鱼你会补充 &9全部血量跟饥饿度&7"
-        ]
+        "msg": "传说中的鲸鱼，上钩的时候溅了你一脸水，你称之为🐋液"
       }
     }
   }

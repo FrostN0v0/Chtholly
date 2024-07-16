@@ -71,7 +71,7 @@ async def fishing_handler(event: GroupMessageEvent):
               )
     try:
         if fish_detail['msg']:
-            result += fish_detail['msg']
+            result += f"{fish_detail['msg']}\n"
     except KeyError:
         print("no msg keys")
     result += "收获满满~"
