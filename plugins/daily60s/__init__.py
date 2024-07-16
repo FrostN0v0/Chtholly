@@ -1,14 +1,12 @@
 from kirami import on_fullmatch, on_time, get_bot, logger
 from kirami.typing import Matcher
 from kirami.message import Message
-from kirami.utils.utils import get_api_data
 from kirami.event import GroupMessageEvent
 from kirami.config.path import IMAGE_DIR, DATA_DIR
-from kirami.utils.downloader import Downloader
 from kirami.utils.jsondata import JsonDict
-from kirami.utils.resource import Resource
 from kirami.hook import on_startup
 from kirami.utils.utils import new_dir
+from kirami.utils.request import Request
 from datetime import date
 
 json_dict = JsonDict(path=DATA_DIR / "daily60s.json", auto_load=True)
@@ -65,35 +63,19 @@ async def daily(matcher: Matcher):
 
 @daily_download.handle()
 async def rb_download(matcher: Matcher):
-    img_name = str(date.today()) + ".png"
-    img_today = Resource.image(IMAGE_DIR / "daily60s_img").search(img_name)
-    try:
-        img = next(img_today)
-        if img.name == img_name:
-            await matcher.finish("今天的每日60s已是最新")
-    except StopIteration:
-        response = await get_api_data("https://api.03c3.cn/zb/api.php")
-        if response["datatime"] == str(date.today()):
-            await Downloader.download_file(response['imageUrl'], IMAGE_DIR / "daily60s_img", file_name=str(date.today()))
-        else:
-            pass
+    response =  await Request.get("https://api.03c3.cn/api/zb")
+    with open(IMAGE_DIR/"daily60s_img" / f'{str(date.today())}.png', 'wb') as file:
+        file.write(response.content)
 
 
-@on_time("interval", minutes=5)
+@on_time("cron", hour=8, minute=45)
 async def auto_download():
-    img_name = str(date.today()) + ".png"
-    img_today = Resource.image(IMAGE_DIR / "daily60s_img").search(img_name)
-    try:
-        next(img_today)
-    except StopIteration:
-        response = await get_api_data("https://api.03c3.cn/zb/api.php")
-        if response["datatime"] == str(date.today()):
-            await Downloader.download_file(response['imageUrl'], IMAGE_DIR / "daily60s_img", file_name=str(date.today()))
-        else:
-            pass
+    response =  await Request.get("https://api.03c3.cn/api/zb")
+    with open(IMAGE_DIR/"daily60s_img" / f'{str(date.today())}.png', 'wb') as file:
+        file.write(response.content)
 
 
-@on_time("cron", hour=8, minute=30)
+@on_time("cron", hour=8, minute=55)
 async def push():
     bot = get_bot()
     for gid in json_dict['group_list']:
