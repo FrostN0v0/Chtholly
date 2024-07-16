@@ -1,0 +1,210 @@
+{
+  "rarity-list": {
+    "common": {
+      "display-name": "一般",
+      "display-star": "★★☆☆☆",
+      "chance": 15,
+      "color": "reset",
+      "additional-price": 0.0
+    },
+    "junk": {
+      "display-name": "垃圾",
+      "display-star": "☆☆☆☆☆",
+      "chance": 1,
+      "color": "gray",
+      "additional-price": 0.0
+    },
+    "rare": {
+      "display-name": "稀有",
+      "display-star": "★★★☆☆",
+      "chance": 22,
+      "color": "aqua",
+      "additional-price": 22.22
+    },
+    "epic": {
+      "display-name": "史诗",
+      "display-star": "★★★★☆",
+      "chance": 6.5,
+      "color": "light_purple",
+      "additional-price": 111.11
+    },
+    "legendary": {
+      "display-name": "传说",
+      "display-star": "★★★★★",
+      "chance": 0.5,
+      "color": "green",
+      "additional-price": 555.55
+    }
+  },
+  "fish-list": {
+    "common": {
+      "Shrimp": {
+        "display-name": "虾",
+        "weight-min": 3,
+        "weight-max": 8,
+        "icon": "minecraft:cod"
+      },
+      "Anchovy": {
+        "display-name": "鳀鱼",
+        "weight-min": 7,
+        "weight-max": 13,
+        "icon": "minecraft:cod"
+      },
+      "Croaker": {
+        "display-name": "黄花鱼",
+        "weight-min": 12,
+        "weight-max": 15,
+        "icon": "minecraft:cod"
+      },
+      "Crab": {
+        "display-name": "螃蟹",
+        "weight-min": 10,
+        "weight-max": 15,
+        "icon": "minecraft:cod"
+      },
+      "Mackerel": {
+        "display-name": "青花鱼",
+        "weight-min": 15,
+        "weight-max": 30,
+        "icon": "minecraft:cod"
+      },
+      "Herring": {
+        "display-name": "鲱鱼",
+        "weight-min": 20,
+        "weight-max": 30,
+        "icon": "minecraft:cod"
+      }
+    },
+    "junk": {
+      "Pie": {
+        "display-name": "馅饼",
+        "weight-min": 3.14,
+        "weight-max": 3.14,
+        "icon": "minecraft:pump"
+      },
+      "Magikarp": {
+        "display-name": "鲤鱼王",
+        "weight-min": 25,
+        "weight-max": 35,
+        "icon": "cod",
+        "msg": "鲤鱼王使用了弹跳!"
+      },
+      "Breadfish": {
+        "display-name": "面包鱼",
+        "weight-min": 10,
+        "weight-max": 30,
+        "icon": "bread",
+        "msg": "请问你看过, 这么奇怪的一条面包鱼吗?"
+      },
+      "WoodenAxe": {
+        "display-name": "管理员的木斧头",
+        "weight-min": 16,
+        "weight-max": 16,
+        "icon": "minecraft:wood",
+        "msg": "//set 0!"
+      },
+      "FishingRod": {
+        "display-name": "别人手滑Q出去的钓鱼竿",
+        "weight-min": 16,
+        "weight-max": 16,
+        "icon": "minecraft:fish"
+      },
+      "SpongeBob": {
+        "display-name": "海绵宝宝",
+        "weight-min": 16,
+        "weight-max": 16,
+        "icon": "minecraft:sponge"
+      }
+    },
+    "rare": {
+      "Jellyfish": {
+        "display-name": "水母",
+        "weight-min": 20,
+        "weight-max": 40,
+        "icon": "minecraft:cod"
+      },
+      "Squid": {
+        "display-name": "乌贼",
+        "weight-min": 30,
+        "weight-max": 50,
+        "icon": "minecraft:ink"
+      },
+      "Flatfish": {
+        "display-name": "比目鱼",
+        "weight-min": 40,
+        "weight-max": 75,
+        "icon": "minecraft:cod"
+      },
+      "SeaBream": {
+        "display-name": "海鲷",
+        "weight-min": 50,
+        "weight-max": 70,
+        "icon": "minecraft:cod"
+      },
+      "SeaBass": {
+        "display-name": "黑鲈",
+        "weight-min": 60,
+        "weight-max": 100,
+        "icon": "minecraft:cod"
+      }
+    },
+    "epic": {
+      "Clownfish": {
+        "display-name": "小丑鱼",
+        "weight-min": 10,
+        "weight-max": 18,
+        "icon": "minecraft:trop"
+      },
+      "Pufferfish": {
+        "display-name": "河豚",
+        "weight-min": 20,
+        "weight-max": 30,
+        "icon": "minecraft:puff"
+      },
+      "SeaTurtle": {
+        "display-name": "海龟",
+        "weight-min": 90,
+        "weight-max": 130,
+        "icon": "minecraft:cod"
+      },
+      "Salmon": {
+        "display-name": "鲑鱼",
+        "weight-min": 100,
+        "weight-max": 130,
+        "icon": "minecraft:salmon"
+      },
+      "BlackDrum": {
+        "display-name": "多须石首鱼",
+        "weight-min": 100,
+        "weight-max": 180,
+        "icon": "minecraft:cod"
+      },
+      "Tuna": {
+        "display-name": "金枪鱼",
+        "weight-min": 130,
+        "weight-max": 180,
+        "icon": "minecraft:cod"
+      }
+    },
+    "legendary": {
+      "BlueShark": {
+        "display-name": "蓝鲨",
+        "weight-min": 160,
+        "weight-max": 240,
+        "icon": "minecraft:cod",
+        "msg": [
+          "最棘手的鱼,当你吃了这条鱼,你会获得"
+        ]
+      },
+      "PygmyWhale": {
+        "display-name": "抹香鲸",
+        "weight-min": 600,
+        "weight-max": 700,
+        "icon": "minecraft:cod",
+        "msg": [
+          "最大的鱼,吃了这条鱼你会补充,全部血量跟饥饿度"
+        ]
+      }
+    }
+  }
+}
