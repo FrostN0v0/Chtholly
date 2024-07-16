@@ -86,14 +86,14 @@
         "display-name": "鲤鱼王",
         "weight-min": 25,
         "weight-max": 35,
-        "icon": "cod",
+        "icon": "minecraft:cod",
         "msg": "鲤鱼王使用了弹跳!"
       },
       "Breadfish": {
         "display-name": "面包鱼",
         "weight-min": 10,
         "weight-max": 30,
-        "icon": "bread",
+        "icon": "minecraft:bread",
         "msg": "请问你看过, 这么奇怪的一条面包鱼吗?"
       },
       "WoodenAxe": {
@@ -193,16 +193,18 @@
         "weight-max": 240,
         "icon": "minecraft:cod",
         "msg": [
-          "最棘手的鱼,当你吃了这条鱼,你会获得"
+          "&7&o最棘手的鱼",
+          "&7当你吃了这条鱼,你会获得 &9力量 I (2:00)&7."
         ]
       },
       "PygmyWhale": {
         "display-name": "抹香鲸",
         "weight-min": 600,
-        "weight-max": 700,
+        "weight-max": 650,
         "icon": "minecraft:cod",
         "msg": [
-          "最大的鱼,吃了这条鱼你会补充,全部血量跟饥饿度"
+          "&7&o最大的鱼",
+          "&7吃了这条鱼你会补充 &9全部血量跟饥饿度&7"
         ]
       }
     }
