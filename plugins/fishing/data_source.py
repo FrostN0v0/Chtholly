@@ -1,5 +1,7 @@
 import random
 import time
+from typing import List
+
 import numpy as np
 
 from datetime import datetime
@@ -44,6 +46,7 @@ async def choice(gid: str, uid: str):
     # 在该鱼的重量范围内随机生成重量（保留两位小数）
     fish_weight = round(random.uniform(fish_detail["weight-min"], fish_detail["weight-max"]), 2)
     fish_vault = fish_weight * config.fish_multiplier + rarity_list[selected_rarity]["additional-price"]
+    fish_vault = round(fish_vault, 2)
     # 存入背包数据和钓鱼记录
     fish_record = FishHistory(
         gid=gid,
@@ -89,7 +92,7 @@ async def get_stats(gid: str, uid: str) -> str:
     if fish_user_data := await FishUserData.find(FishUserData.gid == gid, FishUserData.user_id == uid).get():
         reg_time = fish_user_data.register_time.strftime("%Y年%m月%d日 %H:%M:%S")
         result += f"钓鱼注册时间:{reg_time}\n"
-        result += f"余额:{fish_user_data.coin}{config.fishing_coin_name}\n"
+        result += f"余额:{fish_user_data.coin:.2f}{config.fishing_coin_name}\n"
     return result
 
 
@@ -157,25 +160,35 @@ async def get_balance_rank(bot: Bot, gid: str, uid: str):
             for all_rank in range(5):
                 nickname = await get_nickname(bot, balance_list[all_rank].get("user_id"), gid)
                 result += (
-                    f"第{all_rank + 1}名:{nickname},{balance_list[all_rank].get('coin')}{config.fishing_coin_name}\n"
+                    f"第{all_rank + 1}名:{nickname},{balance_list[all_rank].get('coin'):.2f}{config.fishing_coin_name}\n"
                 )
             for u_rank in range(len(balance_list)):
                 if balance_list[u_rank].get("user_id") == uid:
-                    result += (f"您的余额排名为{u_rank + 1}:【{balance_list[u_rank].get('coin')}】{config.fishing_coin_name}\n"
+                    result += (f"您的余额排名为{u_rank + 1}:【{balance_list[u_rank].get('coin'):.2f}】{config.fishing_coin_name}\n"
                                )
         elif 5 > len(balance_list) > 0:
             for all_rank in range(len(balance_list)):
                 nickname = await get_nickname(bot, balance_list[all_rank].get("user_id"), gid)
                 result += (
-                    f"第{all_rank + 1}名:{nickname},{balance_list[all_rank].get('coin')}{config.fishing_coin_name}\n"
+                    f"第{all_rank + 1}名:{nickname},{balance_list[all_rank].get('coin'):.2f}{config.fishing_coin_name}\n"
                 )
             for u_rank in range(len(balance_list)):
                 if balance_list[u_rank].get("user_id") == uid:
-                    result += (f"您的余额排名为{u_rank + 1}:【{balance_list[u_rank].get('coin')}】{config.fishing_coin_name}\n"
+                    result += (f"您的余额排名为{u_rank + 1}:【{balance_list[u_rank].get('coin'):.2f}】{config.fishing_coin_name}\n"
                                )
         else:
             result = "暂无余额记录"
         return result
+
+
+async def get_fish_caught_list(gid: str, uid: str) -> List[str]:
+    result = []
+    if fish_record := FishHistory.find(FishHistory.gid == gid, FishHistory.user_id == uid):
+        async for fi in fish_record:
+            last_fish_name = dict(fi).get("fish_name")
+            result.append(last_fish_name)
+    return list(set(result))
+
 
 async def get_nickname(bot: Bot, user_id, group_id=None):
     """获取用户的昵称，若在群中则为群名片，不在群中为qq昵称"""

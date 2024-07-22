@@ -1,8 +1,12 @@
+import base64
 import random
+from io import BytesIO
 
 from kirami import on_command, Bot
 
 from kirami.event import GroupMessageEvent
+from kirami.message import MessageSegment
+from kirami.log import logger
 
 import asyncio
 
@@ -14,14 +18,16 @@ from .data_source import (
     get_stats,
     parse_empty_data,
     get_fish_weight_rank,
-    get_balance_rank
+    get_balance_rank,
 )
+from .image_handle import handbook_card_image, get_pic
 
 
 fishing = on_command("fishing", "钓鱼", priority=15)
 stats = on_command("stats", "钓鱼统计", "钓鱼统计信息", priority=15)
 rank = on_command("rank", "钓鱼排行", "钓鱼排名", priority=15)
 balance = on_command("balance", "鱼干", "钓鱼余额", priority=15)
+handbook = on_command("handbook", "鱼鉴", "钓鱼手册", priority=15)
 
 
 @fishing.handle()
@@ -60,20 +66,27 @@ async def _(event: GroupMessageEvent):
 
 async def fishing_handler(event: GroupMessageEvent):
     fish_detail, fish_weight, selected_rarity, fish_vault = await choice(str(event.group_id), str(event.user_id))
-    print(fish_detail['display-name'], fish_weight, selected_rarity)
+    logger.info(fish_detail['display-name'], fish_weight, selected_rarity)
     await fishing.send(f"正在钓鱼…请耐心等待上钩")
     fish_time = get_fish_time()
     await asyncio.sleep(fish_time)
-    result = (f"你钓到了一条【{fish_detail['display-name']}】\n"
-              f"品质【{selected_rarity['display-star']}】\n"
-              f"重 【{fish_weight}】Kg\n"
-              f"价值 【{fish_vault}】{config.fishing_coin_name}\n"
-              )
+    result = f"你钓到了一条【{fish_detail['display-name']}】\n"
+    fish_pic_name = f"{fish_detail['display-name']}.png"
+    if fish_pic := get_pic(fish_pic_name, False):
+        buf = BytesIO()
+        fish_pic = fish_pic.convert('RGBA')
+        fish_pic.save(buf, format='PNG')
+        base64_str = f'base64://{base64.b64encode(buf.getvalue()).decode()}'
+        result += MessageSegment.image(base64_str)
+    result += (f"品质【{selected_rarity['display-star']}】\n"
+               f"重 【{fish_weight}】Kg\n"
+               f"价值 【{fish_vault}】{config.fishing_coin_name}\n"
+               )
     try:
         if fish_detail['msg']:
             result += f"{fish_detail['msg']}\n"
     except KeyError:
-        print("no msg keys")
+        logger.warning("no msg keys")
     result += "收获满满~"
     return result
 
@@ -93,3 +106,9 @@ async def _(event: GroupMessageEvent, bot: Bot):
 async def _(event: GroupMessageEvent, bot: Bot):
     msg = await get_balance_rank(bot, str(event.group_id), str(event.user_id))
     await balance.finish(msg)
+
+
+@handbook.handle()
+async def _(event: GroupMessageEvent):
+    msg = MessageSegment.image(await handbook_card_image(str(event.group_id), str(event.user_id)))
+    await handbook.finish(msg)

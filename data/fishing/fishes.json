@@ -5,7 +5,7 @@
       "display-star": "★★☆☆☆",
       "chance": 15,
       "color": "reset",
-      "additional-price": 0.0
+      "additional-price": 1.1
     },
     "junk": {
       "display-name": "垃圾",
@@ -42,39 +42,197 @@
         "display-name": "虾",
         "weight-min": 3,
         "weight-max": 8,
-        "icon": "minecraft:cod",
         "msg": "虾头楠，蒸鹅心！"
       },
       "Anchovy": {
         "display-name": "鳀鱼",
         "weight-min": 7,
-        "weight-max": 13,
-        "icon": "minecraft:cod"
+        "weight-max": 13
       },
       "Croaker": {
         "display-name": "黄花鱼",
         "weight-min": 12,
-        "weight-max": 15,
-        "icon": "minecraft:cod"
+        "weight-max": 15
       },
       "Crab": {
         "display-name": "螃蟹",
         "weight-min": 10,
         "weight-max": 15,
-        "icon": "minecraft:cod"
+        "msg": "菜就多练！"
+      },
+      "Cxk": {
+        "display-name": "鸡拟态鱼",
+        "weight-min": 5,
+        "weight-max": 20,
+        "msg": "中分头，背带裤，我是ikun你记住"
       },
       "Mackerel": {
         "display-name": "青花鱼",
         "weight-min": 15,
         "weight-max": 30,
-        "icon": "minecraft:cod"
+        "msg": "天青色等腌鱼"
       },
       "Herring": {
         "display-name": "鲱鱼",
         "weight-min": 20,
         "weight-max": 30,
-        "icon": "minecraft:cod",
         "msg": "做成罐头吃掉了，你感觉身体有些轻"
+      },
+      "BuGU": {
+        "display-name": "布谷鱼",
+        "weight-min": 3,
+        "weight-max": 33,
+        "msg": "啊对对对"
+      },
+      "大海参": {
+        "display-name": "大海参",
+        "weight-min": 15,
+        "weight-max": 25,
+        "msg": "国足特供！"
+      },
+      "大眼鱼": {
+        "display-name": "大眼鱼",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "大眼瞪小眼。"
+      },
+      "小嘴鲈鱼": {
+        "display-name": "小嘴鲈鱼",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "尺寸合适，但也请收起你大胆的想法。"
+      },
+      "岩浆鳗鱼": {
+        "display-name": "岩浆鳗鱼",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "多喝岩浆。"
+      },
+      "木跃鱼": {
+        "display-name": "木跃鱼",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "在森林深处的水池中生存。"
+      },
+      "沙丁鱼": {
+        "display-name": "沙丁鱼",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "赶了趟上班的地铁，被挤成了沙丁鱼罐头"
+      },
+      "沙鱼": {
+        "display-name": "沙鱼",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "它用保护色隐藏自己。"
+      },
+      "河鲈": {
+        "display-name": "河鲈",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "一种冬季淡水鱼"
+      },
+      "海参": {
+        "display-name": "海参",
+        "weight-min": 5,
+        "weight-max": 15,
+        "msg": "你抓起来，被喷射了一脸破碎的海参内脏"
+      },
+      "淡水螯虾": {
+        "display-name": "淡水螯虾",
+        "weight-min": 8,
+        "weight-max": 16,
+        "msg": "被夹中了鼻子"
+      },
+      "牡蛎": {
+        "display-name": "牡蛎",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "仙贝~牡蛎莫牡蛎，牡蛎desu~"
+      },
+      "狗鱼": {
+        "display-name": "狗鱼",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "你怎么跟狗一样？"
+      },
+      "狮子鱼": {
+        "display-name": "狮子鱼",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "好斗的食肉性鱼，有毒刺."
+      },
+      "罗非鱼": {
+        "display-name": "罗非鱼",
+        "weight-min": 20,
+        "weight-max": 30,
+        "msg": "案发现场找到了这条冰冻罗非鱼"
+      },
+      "虾虎鱼": {
+        "display-name": "虾虎鱼",
+        "weight-min": 12,
+        "weight-max": 24,
+        "msg": "有些虾虎鱼能攀上瀑布。"
+      },
+      "蝎鲤鱼": {
+        "display-name": "蝎鲤鱼",
+        "weight-min": 24,
+        "weight-max": 36,
+        "msg": "毒性仅次于女人心"
+      },
+      "西鲱": {
+        "display-name": "西鲱",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "她说她叫苏菲，但她的同伴说并不是的"
+      },
+      "鱿鱼": {
+        "display-name": "鱿鱼",
+        "weight-min": 30,
+        "weight-max": 36,
+        "msg": "鱿鱼丝很美味，铁板鱿鱼也是"
+      },
+      "鲢鱼": {
+        "display-name": "鲢鱼",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "一种常见的淡水鱼，因贪吃的食性而广为人知。"
+      },
+      "鲤鱼": {
+        "display-name": "鲤鱼",
+        "weight-min": 10,
+        "weight-max": 15,
+        "msg": "一种常见的池鱼。"
+      },
+      "鲷鱼": {
+        "display-name": "鲷鱼",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "一种夜间活跃的常见河鱼。"
+      },
+      "鳀鱼": {
+        "display-name": "鳀鱼",
+        "weight-min": 3,
+        "weight-max": 6,
+        "msg": "一种海里的小银鱼。"
+      },
+      "鳗鱼": {
+        "display-name": "鳗鱼",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "爽滑鳗舔"
+      },
+      "黄貂鱼": {
+        "display-name": "黄貂鱼",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "不要问它出门为什么要披件貂"
+      },
+      "龙虾": {
+        "display-name": "龙虾",
+        "weight-min": 8,
+        "weight-max": 16,
+        "msg": "你的推举做的还不如龙虾"
       }
     },
     "junk": {
@@ -82,41 +240,83 @@
         "display-name": "馅饼",
         "weight-min": 3.14,
         "weight-max": 3.14,
-        "icon": "minecraft:pump",
         "msg": "pie!你尝了尝，韭菜馅儿的。"
       },
       "Magikarp": {
         "display-name": "鲤鱼王",
         "weight-min": 25,
         "weight-max": 35,
-        "icon": "minecraft:cod",
         "msg": "鲤鱼王使用了弹跳!"
+      },
+      "海草": {
+        "display-name": "海草",
+        "weight-min": 3,
+        "weight-max": 6,
+        "msg": "像一颗海草海草"
+      },
+      "鸟蛤": {
+        "display-name": "鸟蛤",
+        "weight-min": 2,
+        "weight-max": 6,
+        "msg": "一种常见的咸水蛤。"
+      },
+      "蚌": {
+        "display-name": "蚌",
+        "weight-min": 6.6,
+        "weight-max": 6.6,
+        "msg": "蚌不住了"
+      },
+      "蛤": {
+        "display-name": "蛤",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "蛤？"
+      },
+      "蜗牛": {
+        "display-name": "蜗牛",
+        "weight-min": 10,
+        "weight-max": 20,
+        "msg": "小蜗是你吗小蜗"
       },
       "Breadfish": {
         "display-name": "面包鱼",
         "weight-min": 10,
         "weight-max": 30,
-        "icon": "minecraft:bread",
         "msg": "请问你看过, 这么奇怪的一条面包鱼吗?"
+      },
+      "玉黍螺": {
+        "display-name": "玉黍螺",
+        "weight-min": 5,
+        "weight-max": 10,
+        "msg": "一种居住在蓝色贝壳里的小型淡水蜗牛。"
       },
       "WoodenAxe": {
         "display-name": "管理员的木斧头",
         "weight-min": 16,
         "weight-max": 16,
-        "icon": "minecraft:wood",
         "msg": "//set 0!"
       },
       "FishingRod": {
         "display-name": "别人手滑Q出去的钓鱼竿",
         "weight-min": 16,
-        "weight-max": 16,
-        "icon": "minecraft:fish"
+        "weight-max": 16
+      },
+      "XiaoGe": {
+        "display-name": "小哥",
+        "weight-min": 0,
+        "weight-max": 1,
+        "msg": "可以没用，但不能没有"
+      },
+      "Radiated": {
+        "display-name": "辐射鱼",
+        "weight-min": 1,
+        "weight-max": 5,
+        "msg": "鱼走了上来，给了你一巴掌，脸火辣辣的疼"
       },
       "SpongeBob": {
         "display-name": "海绵宝宝",
         "weight-min": 16,
         "weight-max": 16,
-        "icon": "minecraft:sponge",
         "msg": "我准备好了！我准备好了！"
       }
     },
@@ -124,34 +324,136 @@
       "Jellyfish": {
         "display-name": "水母",
         "weight-min": 20,
+        "weight-max": 40
+      },
+      "午夜鲤鱼": {
+        "display-name": "午夜鲤鱼",
+        "weight-min": 20,
+        "weight-max": 35,
+        "msg": "这种害羞的鱼只在晚上感到舒适。"
+      },
+      "鲶鱼": {
+        "display-name": "鲶鱼",
+        "weight-min": 30,
         "weight-max": 40,
-        "icon": "minecraft:cod"
+        "msg": "谨防网络诈骗"
+      },
+      "变种鲤鱼": {
+        "display-name": "变种鲤鱼",
+        "weight-min": 5,
+        "weight-max": 120,
+        "msg": "小日子排的核废水让这条鲤鱼变得畸形了"
+      },
+      "蓝铁饼鱼": {
+        "display-name": "蓝铁饼鱼",
+        "weight-min": 66,
+        "weight-max": 77,
+        "msg": "像一片迪斯科彩碟"
+      },
+      "虎纹鳟鱼": {
+        "display-name": "虎纹鳟鱼",
+        "weight-min": 70,
+        "weight-max": 80,
+        "msg": "一种不能繁殖后代的稀有杂交鳟鱼。"
+      },
+      "水滴鱼": {
+        "display-name": "水滴鱼",
+        "weight-min": 35,
+        "weight-max": 45,
+        "msg": "这些古怪的生物漂浮在海底上，吃掉所经之地的任何可食材料。"
+      },
+      "雌𩽾𩾌鱼": {
+        "display-name": "雌𩽾𩾌鱼",
+        "weight-min": 60,
+        "weight-max": 70,
+        "msg": "曾经是名虚拟主播，直到某次暴露中之人身份"
       },
       "Squid": {
         "display-name": "乌贼",
         "weight-min": 30,
         "weight-max": 50,
-        "icon": "minecraft:ink",
         "msg": "吃了一嘴墨"
+      },
+       "史莱姆鱼": {
+        "display-name": "史莱姆鱼",
+        "weight-min": 25,
+        "weight-max": 30,
+        "msg": "它身上裹了厚厚一层粘液，拿在手里总是要滑脱，但你另有它用。"
+      },
+      "石鱼": {
+        "display-name": "石鱼",
+        "weight-min": 40,
+        "weight-max": 50,
+        "msg": "坚如磐石~你们会输的"
+      },
+      "章鱼": {
+        "display-name": "章鱼",
+        "weight-min": 30,
+        "weight-max": 40,
+        "msg": "我的竖笛去哪儿了？"
+      },
+      "红鲷鱼": {
+        "display-name": "红鲷鱼",
+        "weight-min": 30,
+        "weight-max": 36,
+        "msg": "一种身上是漂亮红色的受欢迎鱼类。"
+      },
+      "红鲻鱼": {
+        "display-name": "红鲻鱼",
+        "weight-min": 40,
+        "weight-max": 50,
+        "msg": "从前它们被当做宠物饲养。"
+      },
+      "大嘴鲈鱼": {
+        "display-name": "大嘴鲈鱼",
+        "weight-min": 12,
+        "weight-max": 25,
+        "msg": "嘴巴里长了牙齿，收起你大胆的想法。"
+      },
+      "太阳鱼": {
+        "display-name": "太阳鱼",
+        "weight-min": 30,
+        "weight-max": 50,
+        "msg": "赞美太阳！"
+      },
+      "大头鱼": {
+        "display-name": "大头鱼",
+        "weight-min": 16,
+        "weight-max": 28,
+        "msg": "大头大头，下雨不愁。"
       },
       "Flatfish": {
         "display-name": "比目鱼",
         "weight-min": 40,
         "weight-max": 75,
-        "icon": "minecraft:cod",
         "msg": "眼睛瞪得像铜铃~"
       },
       "SeaBream": {
         "display-name": "海鲷",
         "weight-min": 50,
-        "weight-max": 70,
-        "icon": "minecraft:cod"
+        "weight-max": 70
       },
       "SeaBass": {
         "display-name": "黑鲈",
         "weight-min": 60,
-        "weight-max": 100,
-        "icon": "minecraft:cod"
+        "weight-max": 100
+      },
+      "WuQian": {
+        "display-name": "加拿大电鳗",
+        "weight-min": 0,
+        "weight-max": 1,
+        "msg": "你看这个面，它又长又宽"
+      },
+      "冰柱鱼": {
+        "display-name": "冰柱鱼",
+        "weight-min": 30,
+        "weight-max": 48,
+        "msg": "冻住不许走！冰柱鱼冰住了。"
+      },
+      "蛇齿单线鱼": {
+        "display-name": "蛇齿单线鱼",
+        "weight-min": 70,
+        "weight-max": 80
       }
     },
     "epic": {
@@ -159,46 +461,112 @@
         "display-name": "小丑鱼",
         "weight-min": 10,
         "weight-max": 18,
-        "icon": "minecraft:trop",
         "msg": "小丑鱼，于是你照了照镜子！"
       },
       "ZeKu": {
         "display-name": "杂鱼♥",
         "weight-min": 5,
         "weight-max": 20,
-        "icon": "ZeKu",
         "msg": "大哥哥真是杂鱼♥呢~ZeKuZeKu~"
+      },
+      "午夜鱿鱼": {
+        "display-name": "午夜鱿鱼",
+        "weight-min": 80,
+        "weight-max": 95,
+        "msg": "海洋暮色深处陌生且神秘的居民。"
+      },
+      "小冰川鱼": {
+        "display-name": "小冰川鱼",
+        "weight-min": 89,
+        "weight-max": 99,
+        "msg": "冰川鱼的子嗣。"
+      },
+      "绯红鱼之子": {
+        "display-name": "绯红鱼之子",
+        "weight-min": 60,
+        "weight-max": 80,
+        "msg": "它在温暖的夏水中孵化而出，追随父亲的足迹。"
+      },
+      "幽灵鱼": {
+        "display-name": "幽灵鱼",
+        "weight-min": 0,
+        "weight-max": 1,
+        "msg": "巨大的眼睛可以检测到猎物微弱的侧影。"
       },
       "Pufferfish": {
         "display-name": "河豚",
         "weight-min": 20,
-        "weight-max": 30,
-        "icon": "minecraft:puff"
+        "weight-max": 30
+      },
+      "大比目鱼": {
+        "display-name": "大比目鱼",
+        "weight-min": 45,
+        "weight-max": 80,
+        "msg": "射出闪电般的机灵"
       },
       "SeaTurtle": {
         "display-name": "海龟",
         "weight-min": 90,
         "weight-max": 130,
-        "icon": "minecraft:cod"
+        "msg": "据说曾去往海鲜大学留学"
+      },
+      "绯红鱼": {
+        "display-name": "绯红鱼",
+        "weight-min": 200,
+        "weight-max": 240,
+        "msg": "它住在深海里但是喜欢在温暖的夏天产卵。"
       },
       "Salmon": {
         "display-name": "鲑鱼",
         "weight-min": 100,
-        "weight-max": 130,
-        "icon": "minecraft:salmon"
+        "weight-max": 130
       },
       "BlackDrum": {
         "display-name": "多须石首鱼",
         "weight-min": 100,
-        "weight-max": 180,
-        "icon": "minecraft:cod"
+        "weight-max": 180
+      },
+      "FlyingFish": {
+        "display-name": "飞鱼",
+        "weight-min": 60,
+        "weight-max": 80,
+        "msg": "海阔凭鱼跃，但是你为什么在飞？"
+      },
+      "鬼鱼": {
+        "display-name": "鬼鱼",
+        "weight-min": 36,
+        "weight-max": 42,
+        "msg": "鬼!"
+      },
+      "麻哈脂鲤": {
+        "display-name": "麻哈脂鲤",
+        "weight-min": 80,
+        "weight-max": 95,
+        "msg": "凶猛的肉食鱼，有着绚烂的橙色鳞片。"
       },
       "Tuna": {
         "display-name": "金枪鱼",
         "weight-min": 130,
         "weight-max": 180,
-        "icon": "minecraft:cod",
         "msg": "直到胸口中了一枪"
+      },
+      "Legends II": {
+        "display-name": "传说之鱼二代",
+        "weight-min": 160,
+        "weight-max": 220,
+        "msg": "传说之鱼的继任者。"
+      },
+      "鲟鱼": {
+        "display-name": "鲟鱼",
+        "weight-min": 100,
+        "weight-max": 120,
+        "msg": "古老的生物链底层生物，数量一直在减少。雌性的寿命长达150年。"
+      },
+      "𩽾𩾌鱼": {
+        "display-name": "𩽾𩾌鱼",
+        "weight-min": 120,
+        "weight-max": 180,
+        "msg": "曾经的榜一大哥，连夜扛着火车来到了这片海"
       }
     },
     "legendary": {
@@ -206,15 +574,49 @@
         "display-name": "蓝鲨",
         "weight-min": 160,
         "weight-max": 240,
-        "icon": "minecraft:cod",
         "msg": "鱼！好大的鱼！"
       },
       "PygmyWhale": {
         "display-name": "抹香鲸",
         "weight-min": 600,
         "weight-max": 650,
-        "icon": "minecraft:cod",
         "msg": "传说中的鲸鱼，上钩的时候溅了你一脸水，你称之为🐋液"
+      },
+      "FlyFish": {
+        "display-name": "六眼飞鱼",
+        "weight-min": 233,
+        "weight-max": 366,
+        "msg": "爱真的需要勇气来面对六眼飞鱼！"
+      },
+      "LEGENDS": {
+        "display-name": "传说之鱼",
+        "weight-min": 700,
+        "weight-max": 750,
+        "msg": "万鱼之王！传说它永远不会被抓到。"
+      },
+      "glacier": {
+        "display-name": "冰川鱼",
+        "weight-min": 350,
+        "weight-max": 400,
+        "msg": "冰不住了。"
+      },
+      "放射性鲤鱼": {
+        "display-name": "放射性鲤鱼",
+        "weight-min": 320,
+        "weight-max": 380,
+        "msg": "核废水筛选出的变种鲤鱼，充满放射性，请问你认识加坦杰厄吗?"
+      },
+      "虚空鲑鱼": {
+        "display-name": "虚空鲑鱼",
+        "weight-min": 260,
+        "weight-max": 300,
+        "msg": "虚空是我的家，但我永远不会忘记艾欧尼亚"
+      },
+      "虹鳟鱼": {
+        "display-name": "虹鳟鱼",
+        "weight-min": 250,
+        "weight-max": 280,
+        "msg": "遇上彩虹，吃定彩虹。"
       }
     }
   }
