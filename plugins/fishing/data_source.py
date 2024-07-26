@@ -9,11 +9,10 @@ from collections import Counter
 from .config import config
 from kirami.utils.jsondata import JsonDict
 from kirami import Bot
+from kirami.config import DATA_DIR
 from .model import FishHistory, FishUserData
 
 fishing_coin_name = config.fishing_coin_name
-
-fish_data = JsonDict(path=config.fish_dir / "fishes.json", auto_load=True)
 
 
 async def get_cd(gid: str, uid: str) -> int:
@@ -33,6 +32,7 @@ async def can_fishing(cd_now: int) -> bool:
 
 async def choice(gid: str, uid: str):
     """从json文件中随机获取鱼及其信息"""
+    fish_data = JsonDict(path=DATA_DIR / "fishing" / "fishes.json", auto_load=True)
     rarity_list = fish_data.get("rarity-list")
     rarity_names = list(rarity_list.keys())
     chances = np.array([rarity_list[name]['chance'] for name in rarity_names])

@@ -10,7 +10,6 @@ from kirami.hook import on_startup
 from kirami.utils.downloader import Downloader
 from kirami.utils.request import Request
 
-from .data_source import get_fish_caught_list
 
 import zipfile
 from io import BytesIO
@@ -34,6 +33,10 @@ async def init_fishing():
         DATA_Path.mkdir(parents=True)
     if not Fish_Path.exists():
         Fish_Path.mkdir()
+        await Downloader.download_file(
+            url='https://raw.githubusercontent.com/FrostN0v0/kirami-plugin-fishing/master/resources/fish.zip',
+            path=DATA_Path
+        )
         with zipfile.ZipFile(DATA_Path / 'fish.zip') as zip_ref:
             for member in zip_ref.infolist():
                 try:
@@ -87,6 +90,7 @@ def get_pic(pic_path, grey):
 
 
 async def handbook_card_image(gid: str, uid: str):
+    from .data_source import get_fish_caught_list
     row_num = len_card // 11 if len_card % 11 != 0 else len_card // 11 - 1
     base = Image.open(IMAGE_DIR / 'frame.png')
     base = base.resize((40 + 11 * 80 + (11 - 1) * 10, 150 + row_num * 80 + (row_num - 1) * 10),

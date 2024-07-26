@@ -10,7 +10,7 @@ from kirami.log import logger
 
 import asyncio
 
-from .config import Config, config
+from .config import config
 from .data_source import (
     choice,
     get_cd,
