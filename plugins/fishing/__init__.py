@@ -14,7 +14,6 @@ from .config import Config, config
 from .data_source import (
     choice,
     get_cd,
-    can_fishing,
     get_stats,
     parse_empty_data,
     get_fish_weight_rank,
@@ -23,7 +22,7 @@ from .data_source import (
 from .image_handle import handbook_card_image, get_pic
 
 
-fishing = on_command("fishing", "钓鱼", priority=15)
+fishing = on_command("fishing", "钓鱼", "🎣", priority=15)
 stats = on_command("stats", "钓鱼统计", "钓鱼统计信息", priority=15)
 rank = on_command("rank", "钓鱼排行", "钓鱼排名", priority=15)
 balance = on_command("balance", "鱼干", "钓鱼余额", priority=15)
@@ -72,7 +71,8 @@ async def fishing_handler(event: GroupMessageEvent):
     await asyncio.sleep(fish_time)
     result = f"你钓到了一条【{fish_detail['display-name']}】\n"
     fish_pic_name = f"{fish_detail['display-name']}.png"
-    if fish_pic := get_pic(fish_pic_name, False):
+    fish_pic = get_pic(fish_pic_name, False)
+    if fish_pic:
         buf = BytesIO()
         fish_pic = fish_pic.convert('RGBA')
         fish_pic.save(buf, format='PNG')

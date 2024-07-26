@@ -73,17 +73,24 @@ async def choice(gid: str, uid: str):
 
 
 async def get_stats(gid: str, uid: str) -> str:
-    """查询钓鱼信息-历史最重的鱼-钓到最多的鱼-钓鱼次数-钓鱼注册时间-货币余额"""
+    """查询钓鱼信息-历史最重的鱼-钓到最多的鱼-钓鱼次数-空军次数-钓鱼注册时间-货币余额"""
     result = '🐟钓鱼生涯🐟\n'
     if fish_record := FishHistory.find(FishHistory.gid == gid, FishHistory.user_id == uid):
         fish_catch_list = []
         fish_times = await fish_record.count()
-        result += f"钓鱼次数:{fish_times}\n"
+        result += f"钓鱼次数:{fish_times}|"
+        if loss_record := FishHistory.find(FishHistory.gid == gid, FishHistory.user_id == uid,
+                                           FishHistory.fish_name == "空军了"):
+            loss_times = await loss_record.count()
+            result += f"空军次数:{loss_times}\n"
         async for fi in fish_record:
             last_fish_name = dict(fi).get("fish_name")
             fish_catch_list.append(last_fish_name)
-        fish_counts = Counter(fish_catch_list).most_common(1)
-        result += f"钓到最多的鱼:{fish_counts[0][0]}|钓到次数:{fish_counts[0][1]}\n"
+        fish_counts = Counter(fish_catch_list).most_common(2)
+        most_fish = fish_counts[0][0]
+        if fish_counts[0][0] == "空军了":
+            most_fish = fish_counts[1][0]
+        result += f"钓到最多的鱼:{most_fish}|钓到次数:{fish_counts[0][1]}\n"
         fish_weight = fish_record.desc("weight")
         async for wei in fish_weight:
             heaviest_fish = dict(wei)
@@ -164,8 +171,9 @@ async def get_balance_rank(bot: Bot, gid: str, uid: str):
                 )
             for u_rank in range(len(balance_list)):
                 if balance_list[u_rank].get("user_id") == uid:
-                    result += (f"您的余额排名为{u_rank + 1}:【{balance_list[u_rank].get('coin'):.2f}】{config.fishing_coin_name}\n"
-                               )
+                    result += (
+                        f"您的余额排名为{u_rank + 1}:【{balance_list[u_rank].get('coin'):.2f}】{config.fishing_coin_name}\n"
+                        )
         elif 5 > len(balance_list) > 0:
             for all_rank in range(len(balance_list)):
                 nickname = await get_nickname(bot, balance_list[all_rank].get("user_id"), gid)
@@ -174,8 +182,9 @@ async def get_balance_rank(bot: Bot, gid: str, uid: str):
                 )
             for u_rank in range(len(balance_list)):
                 if balance_list[u_rank].get("user_id") == uid:
-                    result += (f"您的余额排名为{u_rank + 1}:【{balance_list[u_rank].get('coin'):.2f}】{config.fishing_coin_name}\n"
-                               )
+                    result += (
+                        f"您的余额排名为{u_rank + 1}:【{balance_list[u_rank].get('coin'):.2f}】{config.fishing_coin_name}\n"
+                        )
         else:
             result = "暂无余额记录"
         return result
