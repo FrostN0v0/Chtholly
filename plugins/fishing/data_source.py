@@ -88,9 +88,11 @@ async def get_stats(gid: str, uid: str) -> str:
             fish_catch_list.append(last_fish_name)
         fish_counts = Counter(fish_catch_list).most_common(2)
         most_fish = fish_counts[0][0]
+        most_count = fish_counts[0][1]
         if fish_counts[0][0] == "空军了":
             most_fish = fish_counts[1][0]
-        result += f"钓到最多的鱼:{most_fish}|钓到次数:{fish_counts[0][1]}\n"
+            most_count = fish_counts[1][1]
+        result += f"钓到最多的鱼:{most_fish}|钓到次数:{most_count}\n"
         fish_weight = fish_record.desc("weight")
         async for wei in fish_weight:
             heaviest_fish = dict(wei)
