@@ -7,6 +7,7 @@ from kirami.log import logger
 from kirami.config.path import DATA_DIR, IMAGE_DIR
 from kirami.event import MessageEvent, GroupMessageEvent
 from kirami.utils.helpers import extract_plain_text
+from pathlib import Path
 import asyncio
 import os
 from .config import Config
@@ -34,15 +35,16 @@ send_img = on_message(rule=rule)
 
 @send_img.handle()
 async def _(event: MessageEvent, bot: Bot):
+    result = Path()
     msg = extract_plain_text(event.message).split()
     gallery = msg[0]
-    if gallery not in json_dict["catelog"]:
+    if gallery not in json_dict["catalog"]:
         return
     img_id = None
     if len(msg) > 1:
         img_id = msg[1]
     path = IMAGE_DIR / 'gallery' / gallery
-    if gallery in json_dict["catelog"]:
+    if gallery in json_dict["catalog"]:
         if not path.exists() and (path.parent.parent / gallery).exists():
             path = IMAGE_DIR / gallery
         else:
@@ -51,12 +53,14 @@ async def _(event: MessageEvent, bot: Bot):
     if length == 0:
         logger.warning(f'图库 {gallery} 为空，调用取消！')
         await send_img.finish("该图库中没有图片噢")
-    result = Resource.image(path).choice()
-    if msg[1]:
-        result = path / f"{msg[1]}.png"
+    try:
+        if msg[1]:
+            result = path / f"{msg[1]}.png"
+    except IndexError:
+        result = Resource.image(path).choice()
     pic = Resource.image(result).name
     if result:
-        msg_id = await send_img.send(f"id：{pic.split('.')[0]}" + MessageSegment.image(await path2base64(result)))
+        msg_id = await send_img.send(f"id：{pic.split('.')[0]}" + MessageSegment.image(await path2base64(result.path)))
         if config.withdraw:
             await asyncio.sleep(config.last_time)
             await bot.delete_msg(message_id=msg_id["message_id"])
