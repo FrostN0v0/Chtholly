@@ -57,10 +57,10 @@ async def _(event: MessageEvent, bot: Bot):
         if msg[1]:
             result = path / f"{msg[1]}.png"
     except IndexError:
-        result = Resource.image(path).choice()
+        result = Resource.image(path).choice().path
     pic = Resource.image(result).name
     if result:
-        msg_id = await send_img.send(f"id：{pic.split('.')[0]}" + MessageSegment.image(await path2base64(result.path)))
+        msg_id = await send_img.send(f"id：{pic.split('.')[0]}" + MessageSegment.image(await path2base64(result)))
         if config.withdraw:
             await asyncio.sleep(config.last_time)
             await bot.delete_msg(message_id=msg_id["message_id"])
