@@ -38,13 +38,13 @@ async def _(event: MessageEvent, bot: Bot):
     result = Path()
     msg = extract_plain_text(event.message).split()
     gallery = msg[0]
-    if gallery not in json_dict["catalog"]:
+    if gallery not in json_dict["catelog"]:
         return
     img_id = None
     if len(msg) > 1:
         img_id = msg[1]
     path = IMAGE_DIR / 'gallery' / gallery
-    if gallery in json_dict["catalog"]:
+    if gallery in json_dict["catelog"]:
         if not path.exists() and (path.parent.parent / gallery).exists():
             path = IMAGE_DIR / gallery
         else:
