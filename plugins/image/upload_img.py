@@ -1,4 +1,3 @@
-from kirami.utils.jsondata import JsonDict
 from kirami import on_prefix
 from kirami.log import logger
 from kirami.typing import Matcher
@@ -10,10 +9,10 @@ from kirami.config.path import DATA_DIR, IMAGE_DIR
 from kirami.utils.helpers import extract_image_urls, extract_plain_text
 import os
 
+from .new_Catalog import get_gallery_list
+
 upload_img = on_prefix("上传图片", to_me=True)
 show_gallery = on_prefix("查看公开图库", to_me=True)
-
-json_dict = JsonDict(path=DATA_DIR / "image.json", auto_load=True)
 
 
 @upload_img.handle()
@@ -21,20 +20,22 @@ async def upload(event: MessageEvent, state: State):
     args = extract_plain_text(event.message).strip()
     img_list = extract_image_urls(event.message)
     if args:
-        if args in json_dict["catelog"]:
+        if args in get_gallery_list():
             state.path = args
     if img_list:
         state.img_list = event.message.get("image")
 
+    if not args:
+        x = "请选择要上传的图库：\n"
+        for i, gallery in enumerate(get_gallery_list(), 1):
+            x += f"\t{i}.{gallery}\n"
+        await upload_img.send(x)
 
-@upload_img.got(
-    "path",
-    prompt=f"请选择要上传的图库\n- "
-    + "\n- ".join(json_dict["catelog"]),
-)
+
+@upload_img.got("path")
 @upload_img.got("img_list", prompt="图呢图呢图呢图呢！GKD！")
 async def _(path: ArgStr, img_list: Arg, matcher: Matcher, event: MessageEvent):
-    if path not in json_dict["catelog"]:
+    if path not in get_gallery_list():
         await matcher.reject_arg("path", "此目录不正确，请重新输入目录！")
     if not extract_image_urls(img_list):
         print(img_list)
@@ -74,7 +75,7 @@ async def _(path: ArgStr, img_list: Arg, matcher: Matcher, event: MessageEvent):
 
 @show_gallery.handle()
 async def show(matcher: Matcher):
-    x = "公开图库列表：\n"
-    for i, gallery in enumerate(json_dict["catelog"], 1):
-        x += f"\t{i}.{gallery}\n"
-    await matcher.send(x)
+    msg = "公开图库列表：\n"
+    for i, gallery in enumerate(get_gallery_list(), 1):
+        msg += f"\t{i}.{gallery}\n"
+    await matcher.send(msg)

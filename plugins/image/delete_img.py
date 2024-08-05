@@ -12,9 +12,9 @@ from kirami.hook import on_startup
 from kirami.utils.utils import new_dir
 import os
 
-delete_img = on_prefix("删除图片", to_me=True, permission=SUPERUSER)
+from .new_Catalog import get_gallery_list
 
-json_dict = JsonDict(path=DATA_DIR / "image.json", auto_load=True)
+delete_img = on_prefix("删除图片", to_me=True, permission=SUPERUSER)
 
 
 @on_startup
@@ -27,7 +27,7 @@ async def check_dir():
 async def _(state: State, arg: EventPlainText):
     args = arg.strip().split()
     if args:
-        if args[0] in json_dict["catelog"]:
+        if args[0] in get_gallery_list():
             state["path"] = args[0]
         if len(args) > 0:
             state["img_id"] = args[1]
@@ -38,7 +38,7 @@ async def _(state: State, arg: EventPlainText):
 async def delete(path: ArgStr, img_id: ArgStr, event: MessageEvent, state: State, matcher: Matcher):
     if path in ["取消", "算了"] or img_id in ["取消", "算了"]:
         await delete_img.finish("已取消操作...")
-    if path not in json_dict["catelog"]:
+    if path not in get_gallery_list():
         await delete_img.reject_arg("path", "此目录不正确，请重新输入目录！")
     if not img_id.isdigit():
         await delete_img.reject_arg("id", "id不正确！请重新输入数字...")
