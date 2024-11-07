@@ -1,7 +1,0 @@
-[plugin]
-name = '钓鱼'
-summary = '钓鱼'
-version = '0.1.0'
-visable = true
-tags = ['小游戏']
-enabled = true

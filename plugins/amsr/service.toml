@@ -1,6 +1,0 @@
-[plugin]
-name = '搜音声'
-summary = '调用asmr.one站api 搜音声'
-version = '0.1.0'
-visable = false
-tags = ['工具']

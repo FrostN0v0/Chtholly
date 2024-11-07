@@ -1,7 +1,0 @@
-[plugin]
-name = '面包店'
-summary = '介绍功能'
-version = '0.1.0'
-visable = false
-tags = ['小游戏']
-enabled = false

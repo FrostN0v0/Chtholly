@@ -1,6 +1,0 @@
-[plugin]
-name = '摸鱼'
-summary = '摸鱼日历'
-version = '0.1.0'
-visable = true
-tags = ['工具']

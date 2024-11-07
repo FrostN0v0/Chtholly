@@ -1,6 +1,0 @@
-[plugin]
-name = '好友申请处理'
-summary = '介绍功能'
-version = '0.1.0'
-visable = false
-tags = ['被动']

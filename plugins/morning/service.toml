@@ -1,6 +1,0 @@
-[plugin]
-name = '早安'
-summary = '介绍功能'
-version = '0.1.0'
-visable = true
-tags = ['功能']
