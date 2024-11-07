@@ -1,0 +1,15 @@
+<div id="image-gallery" class="flex flex-wrap justify-center gap-4">
+    {% set base_path = request.path.split('/')[:2]|join('/') %}
+    {% for image_id in image_ids %}
+        <div class="relative backdrop-blur rounded-xl overflow-hidden shadow-md box-border border-2 border-white group object-cover h-40 w-96">
+            <a href="{{ base_path }}/byid?path={{ path }}&pic_id={{ image_id }}" target="_blank">
+                <img src="{{ base_path }}/byid?path={{ path }}&pic_id={{ image_id }}"
+                     alt="Image {{ image_id }}"
+                     class="object-contain w-full h-full">
+            </a>
+            <div class="absolute bottom-0 left-0 w-full h-1/4 bg-gray-800 bg-opacity-50 flex items-center justify-center text-white opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                <span>Image ID: {{ image_id }}</span>
+            </div>
+        </div>
+    {% endfor %}
+</div>

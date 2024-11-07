@@ -47,8 +47,10 @@ async def _(event: MessageEvent, bot: Bot):
         logger.warning(f'图库 {gallery_name} 为空，调用取消！')
         await send_img.finish("该图库中没有图片噢")
     try:
-        if msg[1]:
+        if int(msg[1]) <= length:
             result = img_path / f"{msg[1]}.png"
+        else:
+            await send_img.finish(f"图库[{gallery_name}]中只有{length}张图片，请输入正确的序号")
     except IndexError:
         result = Resource.image(img_path).choice().path
     pic = Resource.image(result).name

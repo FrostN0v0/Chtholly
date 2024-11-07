@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>图片画廊</title>
+    <link rel="icon" href="./static/favicon.png" type="image/x-icon">
+    <link rel="stylesheet" href="./static/tailwind.css">
+    <style>
+        body::before {
+          content: "";
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          background-color: rgba(0, 0, 0, 0.2);
+          z-index: -1;
+        }
+    </style>
+
+</head>
+<body class="background" style="background-image: url({{background_image}});">
+    {% set base_path = request.path.split('/')[:2]|join('/') %}
+    <div class="container mx-auto">
+    <section class="backdrop-blur my-3 max-w-64 mx-auto flex justify-center items-center box-border border-2 border-white rounded-md p-5">
+        <h1 class="text-center text-gray-600 text-3xl font-normal">{{path}}</h1>
+    </section>
+        <div id="image-gallery" class="flex flex-wrap justify-center gap-4"></div>
+                <div class="pagination mt-4 flex justify-center items-center space-x-2">
+                    <a id="prev-page" onclick="changePage('prev')" class="px-4 py-2 border-t-2 border-transparent text-gray-500 rounded hover:border-gray-400 hover:text-blue-700">上一页</a>
+                    {% if total_pages <= 6 %}
+                        {% for i in range(1, total_pages + 1) %}
+                            <a id="page-{{ i }}" onclick="jumpToPage({{ i }})" class="px-4 py-2 border-t-2 rounded text-gray-500 border-transparent hover:border-blue-400 hover:text-blue-700">{{ i }}</a>
+                        {% endfor %}
+                    {% else %}
+                        {% for i in range(1, 3) %}
+                            <a id="page-{{ i }}" onclick="jumpToPage({{ i }})" class="px-4 py-2 border-t-2 rounded text-gray-500 border-transparent hover:border-blue-400 hover:text-blue-700">{{ i }}</a>
+                        {% endfor %}
+                        <span class="px-4 py-2 border-t-2 border-transparent text-gray-500">...</span>
+                        {% for i in range(page - 1, page + 2) %}
+                            <a id="page-{{ i }}" onclick="jumpToPage({{ i }})" class="px-4 py-2 border-t-2 rounded text-gray-500 border-transparent hover:border-blue-400 hover:text-blue-700">{{ i }}</a>
+                        {% endfor %}
+                        <span class="px-4 py-2 border-t-2 border-transparent text-gray-500">...</span>
+                        {% for i in range(total_pages - 1, total_pages + 1) %}
+                            <a id="page-{{ i }}" onclick="jumpToPage({{ i }})" class="px-4 py-2 border-t-2 rounded text-gray-500 border-transparent hover:border-blue-400 hover:text-blue-700">{{ i }}</a>
+                        {% endfor %}
+                    {% endif %}
+
+
+                    <a id="next-page" onclick="changePage('next')" class="px-4 py-2 border-t-2 border-transparent text-gray-500 rounded hover:border-gray-400 hover:text-blue-700">下一页</a>
+                </div>
+    </div>
+    <footer class="mt-2 space-y-4 text-sm text-white text-center font-normal">
+        <p>Powered by <a href="https://github.com/FrostN0v0/kirami-plugin-gallery" target="_blank" class="text-blue-500 hover:underline">kirami-plugin-gallery</a></p>
+        <p> <a href="https://beian.miit.gov.cn/" target="_blank" class="text-blue-500 hover:underline">{{icp_id}}</a></p>
+    </footer>
+
+    <script>
+        let currentPage = 1;
+        function loadImages(page) {
+            const url = `{{ base_path }}/images?path={{ path }}&page=${page}`;
+            fetch(url)
+                .then(response => response.text())
+                .then(html => {
+                    document.getElementById('image-gallery').innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('请求失败:', error);
+                });
+        }
+
+        function changePage(direction) {
+            if (direction === 'next' && currentPage < {{ total_pages }}) {
+                currentPage++;
+            } else if (direction === 'prev' && currentPage > 1) {
+                currentPage--;
+            }
+            loadImages(currentPage);
+            updatePaginationStyles();
+        }
+
+        function jumpToPage(page) {
+            currentPage = page;
+            console.info(currentPage)
+            loadImages(currentPage);
+            updatePaginationStyles();
+        }
+
+        function updatePaginationStyles() {
+            document.querySelectorAll('a[id^="page-"]').forEach(function(link) {
+                const pageIndex = parseInt(link.id.replace('page-', ''));
+                if (pageIndex === currentPage) {
+                    link.classList.add('border-blue-500', 'text-blue-700');
+                    link.classList.remove('text-gray-500', 'border-transparent');
+                } else {
+                    link.classList.remove('border-blue-500', 'text-blue-700');
+                    link.classList.add('text-gray-500', 'border-transparent');
+                }
+            });
+
+            const prevPageLink = document.getElementById('prev-page');
+            if (currentPage > 1) {
+                prevPageLink.classList.remove('text-gray-500');
+                prevPageLink.classList.add('hover:border-blue-400', 'hover:text-blue-700', 'text-blue-700');
+                prevPageLink.setAttribute('onclick', "changePage('prev')");
+            } else {
+                prevPageLink.classList.add('text-gray-500');
+                prevPageLink.classList.remove('hover:border-gray-400', 'hover:text-blue-700');
+                prevPageLink.removeAttribute('onclick');
+            }
+
+            const nextPageLink = document.getElementById('next-page');
+            if (currentPage < {{ total_pages }}) {
+                nextPageLink.classList.remove('text-gray-500');
+                nextPageLink.classList.add('hover:border-blue-400', 'hover:text-blue-700', 'text-blue-500');
+                nextPageLink.setAttribute('onclick', "changePage('next')");
+            } else {
+                nextPageLink.classList.add('text-gray-500');
+                nextPageLink.classList.remove('hover:border-gray-400', 'hover:text-blue-700');
+                nextPageLink.removeAttribute('onclick');
+            }
+        }
+
+        window.onload = function() {
+            loadImages(currentPage);
+            updatePaginationStyles();
+        };
+    </script>
+
+</body>
+</html>

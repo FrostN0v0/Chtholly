@@ -5,7 +5,7 @@ from kirami.event import MessageEvent, GroupMessageEvent
 from kirami.state import State
 from kirami.depends import Arg, ArgStr
 from kirami.utils.downloader import Downloader
-from kirami.config.path import DATA_DIR, IMAGE_DIR
+from kirami.config.path import IMAGE_DIR
 from kirami.utils.helpers import extract_image_urls, extract_plain_text
 import os
 

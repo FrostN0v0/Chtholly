@@ -2,7 +2,6 @@ from kirami.message import MessageSegment
 from kirami.typing import Matcher
 from kirami.config.path import IMAGE_DIR, AUDIO_DIR
 from kirami.utils.resource import Resource
-from kirami.log import logger
 from kirami import on_notice
 from kirami.event import PokeNotifyEvent
 import random
@@ -42,7 +41,6 @@ async def poke_event(event: PokeNotifyEvent, matcher: Matcher):
         if rand <= 0.3:
             msg = MessageSegment.image(Resource.image(IMAGE_DIR/"fox_img").choice())
             await matcher.finish(msg)
-            logger.info(f"USER {event.user_id} 戳了戳我 回复: {msg} \n {msg}")
         elif 0.3 < rand < 0.6:
             msg = Resource.audio(AUDIO_DIR / "dinggong").choice()
             await matcher.finish(MessageSegment.record(msg))

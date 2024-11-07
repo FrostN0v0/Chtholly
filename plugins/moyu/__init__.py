@@ -8,6 +8,7 @@ from kirami.utils.downloader import Downloader
 from kirami.utils.jsondata import JsonDict
 from kirami.hook import on_startup
 from kirami.utils.utils import new_dir
+from kirami.utils.request import Request
 from datetime import date
 from utils.utils import path2base64
 
@@ -62,7 +63,7 @@ async def moyu(matcher: Matcher):
     await matcher.finish(msg)
 
 
-@on_time("cron", hour=8, minute=0)
+@on_time("cron", hour=9, minute=0)
 async def push():
     bot = get_bot()
     for gid in json_dict['group_list']:
@@ -70,13 +71,14 @@ async def push():
         await bot.call_api("send_group_msg", group_id=gid, message=msg)
 
 
-@on_time("cron", hour=7, minute=55)
+@on_time("cron", hour=8, minute=55)
 async def auto_download():
-    response = await get_api_data("https://moyu.qqsuu.cn/?type=json")
-    await Downloader.download_file(response['data'], IMAGE_DIR/"moyu_img", file_name=str(date.today()))
+    await Downloader.download_file("https://api.j4u.ink/v1/store/redirect/moyu/calendar/today.png",
+                                   IMAGE_DIR / "moyu_img", file_name=str(date.today()))
 
 
 @moyu_download.handle()
 async def download():
-    response = await get_api_data("https://moyu.qqsuu.cn/?type=json")
-    await Downloader.download_file(response['data'], IMAGE_DIR/"moyu_img", file_name=str(date.today()))
+    await Downloader.download_file("https://api.j4u.ink/v1/store/redirect/moyu/calendar/today.png",
+                                   IMAGE_DIR / "moyu_img", file_name=str(date.today()))
+
