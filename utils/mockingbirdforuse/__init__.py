@@ -1,16 +1,17 @@
 import re
-import librosa
-import numpy as np
 from io import BytesIO
 from pathlib import Path
-from scipy.io import wavfile
 from typing import List, Literal, Optional
 
-from .encoder.inference import Encoder, preprocess_wav
+import librosa
+import numpy as np
+from scipy.io import wavfile
+from nonebot.log import logger
+
 from .synthesizer.inference import Synthesizer
 from .vocoder.hifigan.inference import HifiGanVocoder
 from .vocoder.wavernn.inference import WaveRNNVocoder
-from kirami.log import logger
+from .encoder.inference import Encoder, preprocess_wav
 
 
 def process_text(text: str) -> List[str]:

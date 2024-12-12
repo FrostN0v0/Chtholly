@@ -1,12 +1,13 @@
+from pathlib import Path
+
 import torch
 import numpy as np
-from pathlib import Path
+from nonebot.log import logger
 
 from . import audio
 from .model import SpeakerEncoder
-from .audio import preprocess_wav  # We want to expose this function from here
 from .hparams import hparams as hp
-from kirami.log import logger
+from .audio import preprocess_wav  # We want to expose this function from here
 
 
 class Encoder:
@@ -75,15 +76,12 @@ class Encoder:
         else:
             samples_per_frame = int((hp.sampling_rate * hp.mel_window_step / 1000))
             n_frames = int(np.ceil((n_samples + 1) / samples_per_frame))
-            frame_step = max(
-                int(np.round(partial_utterance_n_frames * (1 - overlap))), 1
-            )
+            frame_step = max(int(np.round(partial_utterance_n_frames * (1 - overlap))), 1)
 
         assert 0 < frame_step, "The rate is too high"
-        assert (
-            frame_step <= hp.partials_n_frames
-        ), "The rate is too low, it should be %f at least" % (
-            hp.sampling_rate / (samples_per_frame * hp.partials_n_frames)
+        assert frame_step <= hp.partials_n_frames, (
+            "The rate is too low, it should be %f at least"
+            % (hp.sampling_rate / (samples_per_frame * hp.partials_n_frames))
         )
 
         # Compute the slices

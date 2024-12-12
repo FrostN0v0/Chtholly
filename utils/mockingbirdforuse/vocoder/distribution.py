@@ -68,13 +68,11 @@ def discretized_mix_logistic_loss(
     # for num_classes=65536 case? 1e-7? not sure..
     inner_inner_cond = (cdf_delta > 1e-5).float()
 
-    inner_inner_out = inner_inner_cond * torch.log(
-        torch.clamp(cdf_delta, min=1e-12)
-    ) + (1.0 - inner_inner_cond) * (log_pdf_mid - np.log((num_classes - 1) / 2))
+    inner_inner_out = inner_inner_cond * torch.log(torch.clamp(cdf_delta, min=1e-12)) + (
+        1.0 - inner_inner_cond
+    ) * (log_pdf_mid - np.log((num_classes - 1) / 2))
     inner_cond = (y > 0.999).float()
-    inner_out = (
-        inner_cond * log_one_minus_cdf_min + (1.0 - inner_cond) * inner_inner_out
-    )
+    inner_out = inner_cond * log_one_minus_cdf_min + (1.0 - inner_cond) * inner_inner_out
     cond = (y < -0.999).float()
     log_probs = cond * log_cdf_plus + (1.0 - cond) * inner_out
 

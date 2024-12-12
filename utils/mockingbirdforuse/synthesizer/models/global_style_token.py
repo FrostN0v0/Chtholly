@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.init as init
-from torch.nn.parameter import Parameter
 import torch.nn.functional as tFunctional
+from torch.nn.parameter import Parameter
 
 from ..hparams import hparams as hp
 from ..gst_hyperparameters import hparams as gst_hp
@@ -16,7 +16,6 @@ class GlobalStyleToken(nn.Module):
     """
 
     def __init__(self, speaker_embedding_dim=None):
-
         super().__init__()
         self.encoder = ReferenceEncoder()
         self.stl = STL(speaker_embedding_dim)
@@ -38,7 +37,6 @@ class ReferenceEncoder(nn.Module):
     """
 
     def __init__(self):
-
         super().__init__()
         K = len(gst_hp.ref_enc_filters)
         filters = [1] + gst_hp.ref_enc_filters
@@ -94,7 +92,6 @@ class STL(nn.Module):
     """
 
     def __init__(self, speaker_embedding_dim=None):
-
         super().__init__()
         self.embed = Parameter(
             torch.FloatTensor(gst_hp.token_num, gst_hp.E // gst_hp.num_heads)
@@ -131,7 +128,6 @@ class MultiHeadAttention(nn.Module):
     """
 
     def __init__(self, query_dim, key_dim, num_units, num_heads):
-
         super().__init__()
         self.num_units = num_units
         self.num_heads = num_heads
@@ -141,9 +137,7 @@ class MultiHeadAttention(nn.Module):
             in_features=query_dim, out_features=num_units, bias=False
         )
         self.W_key = nn.Linear(in_features=key_dim, out_features=num_units, bias=False)
-        self.W_value = nn.Linear(
-            in_features=key_dim, out_features=num_units, bias=False
-        )
+        self.W_value = nn.Linear(in_features=key_dim, out_features=num_units, bias=False)
 
     def forward(self, query, key):
         querys = self.W_query(query)  # [N, T_q, num_units]

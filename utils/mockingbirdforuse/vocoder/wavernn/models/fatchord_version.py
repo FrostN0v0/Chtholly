@@ -1,14 +1,15 @@
 import time
+
 import torch
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
+from nonebot.log import logger
 from torch.nn.parameter import Parameter
 
-from ..audio import de_emphasis, decode_mu_law
 from ..hparams import hparams as hp
+from ..audio import de_emphasis, decode_mu_law
 from ...distribution import sample_from_discretized_mix_logistic
-from kirami.log import logger
 
 
 class ResBlock(nn.Module):
@@ -209,7 +210,6 @@ class WaveRNN(nn.Module):
             aux_split = [aux[:, :, d * i : d * (i + 1)] for i in range(4)]
 
             for i in range(seq_len):
-
                 m_t = mels[:, i, :]
 
                 a1_t, a2_t, a3_t, a4_t = (a[:, i, :] for a in aux_split)
@@ -299,7 +299,6 @@ class WaveRNN(nn.Module):
         return padded
 
     def fold_with_overlap(self, x, target, overlap):
-
         """Fold the tensor with overlap for quick batched inference.
             Overlap will be used for crossfading in xfade_and_unfold()
 
@@ -351,7 +350,6 @@ class WaveRNN(nn.Module):
         return folded
 
     def xfade_and_unfold(self, y, target, overlap):
-
         """Applies a crossfade and unfolds into a 1d array.
 
         Args:

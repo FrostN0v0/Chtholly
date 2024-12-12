@@ -1,9 +1,10 @@
-import torch
 from pathlib import Path
+
+import torch
+from nonebot.log import logger
 
 from .hparams import hparams as hp
 from .models.fatchord_version import WaveRNN
-from kirami.log import logger
 
 
 class WaveRNNVocoder:
@@ -35,9 +36,7 @@ class WaveRNNVocoder:
         self._model.load_state_dict(checkpoint["model_state"])
         self._model.eval()
 
-    def infer_waveform(
-        self, mel, normalize=True, batched=True, target=8000, overlap=800
-    ):
+    def infer_waveform(self, mel, normalize=True, batched=True, target=8000, overlap=800):
         """
         Infers the waveform of a mel spectrogram output by the synthesizer (the format must match
         that of the synthesizer!)

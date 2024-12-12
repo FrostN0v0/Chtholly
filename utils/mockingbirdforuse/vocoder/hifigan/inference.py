@@ -1,9 +1,10 @@
-import torch
 from pathlib import Path
 
-from .hparams import hparams as hp
+import torch
+from nonebot.log import logger
+
 from .models import Generator
-from kirami.log import logger
+from .hparams import hparams as hp
 
 
 class HifiGanVocoder:

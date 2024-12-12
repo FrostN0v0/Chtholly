@@ -1,12 +1,13 @@
 import time
+
 import torch
 import numpy as np
 import torch.nn as nn
+from nonebot.log import logger
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 from ..audio import combine_signal
-from kirami.log import logger
 
 
 class WaveRNN(nn.Module):
@@ -38,7 +39,6 @@ class WaveRNN(nn.Module):
         self.num_params()
 
     def forward(self, prev_y, prev_hidden, current_coarse):
-
         # Main matmul - the projection is split 3 ways
         R_hidden = self.R(prev_hidden)
         (
@@ -102,7 +102,6 @@ class WaveRNN(nn.Module):
 
             # Loop for generation
             for i in range(seq_len):
-
                 # Split into two hidden states
                 hidden_coarse, hidden_fine = torch.split(hidden, self.split_size, dim=1)
 

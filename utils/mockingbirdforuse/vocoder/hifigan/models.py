@@ -1,10 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from nonebot.log import logger
 from torch.nn.utils.spectral_norm import spectral_norm
-from torch.nn import Conv1d, ConvTranspose1d, AvgPool1d, Conv2d
+from torch.nn import Conv1d, Conv2d, AvgPool1d, ConvTranspose1d
 from torch.nn.utils.weight_norm import weight_norm, remove_weight_norm
-from kirami.log import logger
 
 LRELU_SLOPE = 0.1
 
@@ -166,9 +166,11 @@ class InterpolationBlock(torch.nn.Module):
     def forward(self, x):
         outputs = F.interpolate(
             x,
-            size=x.shape[-1] * self.scale_factor
-            if not self.downsample
-            else x.shape[-1] // self.scale_factor,
+            size=(
+                x.shape[-1] * self.scale_factor
+                if not self.downsample
+                else x.shape[-1] // self.scale_factor
+            ),
             mode=self.mode,
             align_corners=self.align_corners,
             recompute_scale_factor=False,

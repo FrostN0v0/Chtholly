@@ -1,9 +1,10 @@
 import struct
+from pathlib import Path
+from typing import Union, Optional
+
 import librosa
 import webrtcvad
 import numpy as np
-from pathlib import Path
-from typing import Optional, Union
 from scipy.ndimage import binary_dilation
 
 from .hparams import hparams as hp
@@ -103,7 +104,7 @@ def trim_long_silences(wav):
         return ret[width - 1 :] / width
 
     audio_mask = moving_average(voice_flags, hp.vad_moving_average_width)
-    audio_mask = np.round(audio_mask).astype(np.bool8)
+    audio_mask = np.round(audio_mask).astype(np.bool)
 
     # Dilate the voiced regions
     audio_mask = binary_dilation(audio_mask, np.ones(hp.vad_max_silence_length + 1))

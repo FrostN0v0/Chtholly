@@ -1,12 +1,12 @@
 import torch
 import numpy as np
 import torch.nn as nn
+from nonebot.log import logger
 import torch.nn.functional as F
 
 from ..hparams import hparams as hp
 from .global_style_token import GlobalStyleToken
 from ..gst_hyperparameters import hparams as gst_hp
-from kirami.log import logger
 
 
 class HighwayNetwork(nn.Module):
@@ -243,7 +243,6 @@ class LSA(nn.Module):
         self.attention = torch.zeros(b, t, device=device)
 
     def forward(self, encoder_seq_proj, query, t, chars):
-
         if t == 0:
             self.init_attention(encoder_seq_proj)
 
@@ -317,7 +316,6 @@ class Decoder(nn.Module):
         t,
         chars,
     ):
-
         # Need this for reshaping mels
         batch_size = encoder_seq.size(0)
         device = encoder_seq.device

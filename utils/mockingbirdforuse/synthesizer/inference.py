@@ -1,16 +1,17 @@
+from pathlib import Path
+from typing import List, Union
+
 import torch
 import librosa
 import numpy as np
-from pathlib import Path
-from typing import Union, List
-from pypinyin import lazy_pinyin, Style
+from nonebot.log import logger
+from pypinyin import Style, lazy_pinyin
 
 from .hparams import hparams as hp
 from .utils.symbols import symbols
 from .models.tacotron import Tacotron
 from .utils.text import text_to_sequence
 from .utils.logmmse import denoise, profile_noise
-from kirami.log import logger
 
 
 class Synthesizer:

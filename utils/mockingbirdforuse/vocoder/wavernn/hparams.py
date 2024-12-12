@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+
 from ...synthesizer.hparams import hparams as _syn_hp
 
 

@@ -1,4 +1,5 @@
 import re
+
 import inflect
 
 _inflect = inflect.engine()
@@ -53,9 +54,9 @@ def _expand_number(m):
         elif num % 100 == 0:
             return _inflect.number_to_words(num // 100) + " hundred"
         else:
-            return _inflect.number_to_words(
-                num, andword="", zero="oh", group=2
-            ).replace(", ", " ")
+            return _inflect.number_to_words(num, andword="", zero="oh", group=2).replace(
+                ", ", " "
+            )
     else:
         return _inflect.number_to_words(num, andword="")
 
