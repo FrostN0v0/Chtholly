@@ -3,7 +3,7 @@
 <p>
   <a href="" alt="珂朵莉是世界上最幸福的女孩"><img src="./docs/ChthollyBot.png" width="420"  alt="NoneBotPluginLogo"></a>
 </p>
-  <p>✨ 基于<a href="https://kiramibot.dev/">Kirami</a>的QQ机器人 ✨</p>
+  <p>✨ 基于<a href="https://nonebot.dev/">NoneBot2</a>的QQ机器人 ✨</p>
 </div>
 <p align="center">
   <a href="https://raw.githubusercontent.com/FrostN0v0/Chtholly/main/LICENSE">
