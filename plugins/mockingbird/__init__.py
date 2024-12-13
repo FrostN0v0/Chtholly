@@ -1,6 +1,8 @@
 import asyncio
 
 import langid
+from pydub import AudioSegment
+from io import BytesIO
 from nonebot.log import logger
 from nonebot.rule import to_me
 from nonebot import get_driver, on_command
@@ -8,7 +10,7 @@ from nonebot.typing import T_State as State
 from nonebot.params import ArgStr, CommandArg
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
 
-from utils.path import RES_DIR
+from utils.path import RES_DIR, AUDIO_DIR
 from utils.mockingbirdforuse import MockingBird
 
 from .config import config
@@ -61,6 +63,11 @@ async def _(words: str = ArgStr()):
     words = words.strip().replace("\n", "").replace("\r", "")
     if langid.classify(words)[0] == "ja":
         record = await get_ai_voice(words)
+        if record is None:
+            await voice.finish("语音合成失败，请稍后再试。")
+        else:
+            with open(AUDIO_DIR / 'mocking.wav', 'wb') as file:
+                file.write(record.getvalue())
     else:
         record = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -72,7 +79,12 @@ async def _(words: str = ArgStr()):
             config.accuracy,
             config.steps,
         )
+        with open(AUDIO_DIR / 'mocking.mp3', 'wb') as file:
+            file.write(record.getvalue())
+        record_bytes = record.getvalue()
+        audio = AudioSegment.from_file(BytesIO(record_bytes))
+        audio.export(AUDIO_DIR/"mocking.mp3", format="mp3")
     if record is None:
         await voice.finish("语音合成失败，请稍后再试。")
     else:
-        await voice.finish(MessageSegment.record(record))
+        await voice.finish(MessageSegment.record(AUDIO_DIR/"mocking.mp3"))
