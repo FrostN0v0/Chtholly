@@ -3,8 +3,8 @@ import time
 import torch
 import numpy as np
 import torch.nn as nn
-from nonebot.log import logger
 import torch.nn.functional as F
+from nonebot.log import logger
 from torch.nn.parameter import Parameter
 
 from ..audio import combine_signal

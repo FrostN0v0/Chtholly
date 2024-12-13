@@ -1,8 +1,8 @@
 import torch
 import numpy as np
 import torch.nn as nn
-from nonebot.log import logger
 import torch.nn.functional as F
+from nonebot.log import logger
 
 from ..hparams import hparams as hp
 from .global_style_token import GlobalStyleToken
