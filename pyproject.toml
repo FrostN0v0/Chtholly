@@ -5,7 +5,7 @@ description = "Chtholly"
 readme = "README.md"
 authors = [{ name = "FrostN_0v0", email = "suny25802@gmail.com" }]
 license = { text = "AGPL-3.0" }
-requires-python = ">=3.12, <4.0"
+requires-python = ">=3.10, <4.0"
 dependencies = [
     "langid>=1.1.6",
     "nonebot2>=2.4.0",
@@ -17,7 +17,6 @@ dependencies = [
 [tool.nonebot]
 adapters = [
     { name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11" },
-    { name = "QQ", module_name = "nonebot.adapters.qq" }
 ]
 plugins = [
     "nonebot_plugin_memes_api",
@@ -100,6 +99,6 @@ select = ["E", "W", "F", "UP", "C", "T", "PYI", "PT", "Q"]
 ignore = ["E402", "C901"]
 
 [tool.pyright]
-pythonVersion = "3.12"
+pythonVersion = "3.10"
 pythonPlatform = "All"
 typeCheckingMode = "basic"
