@@ -1,6 +1,7 @@
+<!-- markdownlint-disable MD033 MD036 MD041 -->
 <div align="center">
 <p>
-  <a href="https://kiramibot.dev/"><img src="https://raw.githubusercontent.com/FrostN0v0/Chtholly/main/logo.png" width="200" height="200" alt="珂朵莉是世界上最幸福的女孩"></a>
+  <a href="" alt="珂朵莉是世界上最幸福的女孩"><img src="./docs/ChthollyBot.png" width="420"  alt="NoneBotPluginLogo"></a>
 </p>
   <p>✨ 基于<a href="https://kiramibot.dev/">Kirami</a>的QQ机器人 ✨</p>
 </div>
@@ -9,194 +10,111 @@
     <img src="https://img.shields.io/github/license/FrostN0v0/Chtholly" alt="license">
   </a>
     <img src="https://img.shields.io/badge/python-3.10+-blue?logo=python&logoColor=edb641" alt="python">
-  <a href="https://github.com/A-kirami/KiramiBot">
-    <img src="https://img.shields.io/badge/KiramiBot-0.3.3-green" alt="KiramiBot">
+  <a href="https://nonebot.dev/">
+    <img src="https://img.shields.io/badge/nonebot-v2.4.0-EA5252" alt="Nonebot2">
   </a>
-    
+
 </p>
 
 # Chtholly
 
-## 简介
+>_我曾经发誓要永远和他在一起，能够如此发誓，让我无比幸福。_  
+>_——我曾经发誓要永远和她在一起，能够如此发誓，让我心获安详。_  
+>_我曾经认为自己喜欢这个人。_  
+>_我曾经觉得自己非常珍视她。_  
+>_能有如此感受，让我无比幸福_  
+>_——能有如此感受，让我无比喜悦。_  
+>_他曾经对我说，我一定会让你幸福。_  
+>_——我曾经对她说，我一定会让你幸福。_  
+>_能够听到他那样说，让我无比幸福。_  
+>_——能够对她那么说，让我心获满足。_  
+>_那个人，分了这么多的幸福给我。_  
+>_——我从她那，得到了这么多的东西，可是我却……_  
+>_所以，我敢肯定，现在的我，不管别人怎么说，都一定是世界上最幸福的女孩。_
 
-珂朵莉是世界上最幸福的女孩，一款QQ娱乐机器人。基于[Kirami](https://kiramibot.dev/)开发。
+## 📖 简介
 
-Welcome To 交流群 [斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO2zj9f5ziuS2ijcDzbjkAfcMHVA&authKey=ilcGvEnqWjHOJKa3f1cpOMQPVAeA0RZyv%2BD9lE9aV1WfwFZ8ig%2BUynUCSM4AXZOB&noverify=0&group_code=326466216)
+珂朵莉是世界上最幸福的女孩，一款QQ娱乐机器人。基于[Nonebot2](https://kiramibot.dev/)开发。
 
-## 功能列表
+~~现在跟原生NoneBot2没什么区别喵~~
 
+Welcome To [💬 斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO2zj9f5ziuS2ijcDzbjkAfcMHVA&authKey=ilcGvEnqWjHOJKa3f1cpOMQPVAeA0RZyv%2BD9lE9aV1WfwFZ8ig%2BUynUCSM4AXZOB&noverify=0&group_code=326466216)
 
-前身使用[NoneBot2](https://v2.nonebot.dev/)开发，现使用[Kirami](https://kiramibot.dev/)，计划迁移原有多数功能。
+## 🪧 功能列表
 
-先开坑，慢慢迁,先列功能，命令及配置参数之后再补
+前身使用[Kirami](https://kiramibot.dev/)开发，现使用[NoneBot2](https://v2.nonebot.dev/)，计划迁移原有多数功能。
 
-- [天气功能](https://github.com/FrostN0v0/kirami-plugin-qweather)
-- [赛马小游戏](https://github.com/FrostN0v0/kirami-plugin-horserace)
-- [棋类游戏](https://github.com/FrostN0v0/kirami-plugin-boardgame)
+~~功能列表呢？没有的喵，兼容[nonebot2插件](https://nonebot.dev/store/plugins)，想用什么自己装喵，还要写功能列表？没有这样的道理的喵。~~
 
-<details ><summary>签到功能</summary>
-
-|  命令   |  @  |  功能说明  | 示例  |
-|:-----:|:---:|:------:|:---:|
-| 签到/盖章 |  否  |   签到   |  无  |
-|  收集册  |  否  | 查看印章收集 |  无  |
-</details>
-
-<details ><summary>每日60s推送</summary>
-
-|    命令    |  @  |    功能说明     | 示例  |
-|:--------:|:---:|:-----------:|:---:|
-| 每日60s/日报 |  是  | 发送今日每日60s图片 |  无  |
-| 日报(取消)订阅 |  否  | 为本群（取消）订阅推送 |  无  |
-</details>
-
-<details ><summary>摸鱼日历推送</summary>
-
-|    命令    |  @  |    功能说明     | 示例  |
-|:--------:|:---:|:-----------:|:---:|
-| 摸鱼/摸鱼日历  |  是  | 发送今日摸鱼日历图片  |  无  |
-| 摸鱼订阅（取消） |  否  | 为本群（取消）订阅推送 |  无  |
-</details>
-
-<details ><summary>狗屁不通文章生成器</summary>
-
-|    命令     |  @  | 功能说明 |       示例        |
-|:---------:|:---:|:----:|:---------------:|
-| 狗屁不通/gpbt |  否  |  无   | 狗屁不通 <关键字> <字数> |
-</details>
-
-<details ><summary>狐娘图片</summary>
-
-|   命令    |  @  | 功能说明 | 示例  |
-|:-------:|:---:|:----:|:---:|
-| 嘤/狐娘表情包 |  否  | 返回图片 |  无  |
-</details>
-
-<details ><summary>随机可爱</summary>
-
-|  命令  |  @  | 功能说明 | 示例  |
-|:----:|:---:|:----:|:---:|
-| 来个猫猫 |  否  | 返回图片 |  无  |
-| 来个狐狸 |  否  | 返回图片 |  无  |
-| 来个二哈 |  否  | 返回图片 |  无  |
-</details>
-
-<details ><summary>公共图库</summary>
-
-|       命令       |  @  | 功能说明 |  示例  |
-|:--------------:|:---:|:----:|:----:|
-|      上传图片      |  是  |  无   | 配置说明 |
-|     查看公开图库     |  是  |  无   | 配置说明 |
-| <图库名> <id(可选)> |  否  | 返回图片 | 美图 1 |
-</details>
-
-<details ><summary>钉宫语音</summary>
-
-|  命令   |  @  | 功能说明 |   示例   |
-|:-----:|:---:|:----:|:------:|
-| 骂+任何话 |  是  | 返回语音 | @珂朵莉骂我 |
-</details>
-
-<details ><summary>点歌</summary>
-
-|                   命令                   |  @  | 功能说明 |  示例  |
-|:--------------------------------------:|:---:|:----:|:----:|
-| 点歌/qq点歌/网易点歌/酷我点歌/酷狗点歌/咪咕点歌/b站点歌 + 关键词 |  否  | 返回音乐 | 配置说明 |
-
-</details>
-
-<details ><summary>mockingbird合成语音</summary>
-
-|  命令   |  @  | 功能说明 |  示例  |
-|:-----:|:---:|:----:|:----:|
-| 说+任何话 |  是  | 返回语音 | 说我爱你 |
-</details>
-
-<details ><summary>ChatGPT对话</summary>
-
-|    命令    |                         说明                         |        示例        |
-|:--------:|:--------------------------------------------------:|:----------------:|
-|  /talk   |                  开始对话，默认群里@机器人也可以                  | /talk 先有鸡还是先有蛋？  |
-|   /hi    |                    沉浸式对话（仅限私聊）                     |                  |
-|  /speak  |                      gpt转语音对话                      | /speak 先有鸡还是先有蛋？ |
-|  /reset  |                    重置对话（不会重置预设）                    |                  |
-| /prompt  |                 设置预设（人格），设置后会重置对话                  |                  |
-| /chatgpt | 如果talk_with_chatgpt_all_group_enable为false，则用该命令启用 |                  |
-|   修改角色   |                   设置预设vits转语音角色                    |    修改角色 <派蒙>     |
-</details>
-
-<details ><summary>面包店小游戏</summary>
-
-**发送 “面包帮助” 查看详细指令**
-</details>
-
-<details ><summary>被动技能</summary>
-
-- 戳一戳回复语
-- 戳回去
-- 骂回去
-- 发送图片
-</details>
-
-## 部署
+## 🛠️ 部署
 
 **须知：项目与框架均处于开发阶段，不稳定，部署中如遇到问题请通过交流群 [斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO2zj9f5ziuS2ijcDzbjkAfcMHVA&authKey=ilcGvEnqWjHOJKa3f1cpOMQPVAeA0RZyv%2BD9lE9aV1WfwFZ8ig%2BUynUCSM4AXZOB&noverify=0&group_code=326466216) 联系我**
 
-**gocq已寄，请各位自行寻找替代方案，由于tx打压，这里不做推荐**
+**协议端的使用具有时效性，~~比如寄了的gocq~~，所以这里不做推荐**
 
-### 安装脚手架
+如果有疑问推荐访问[社区文档](https://x.none.bot/before/QA)
 
-可参考[Kirami用户手册](https://kiramibot.dev/docs/guide/start/installation)进行部署,安装好脚手架[Kirami-CLI](https://github.com/A-kirami/KiramiCLI)，以及[MongoDB](https://www.mongodb.com/try/download/community)
+### 🦯 安装脚手架
 
-###  克隆源码
+可参考[nonebot用户手册](https://nonebot.dev/docs/quick-start#安装脚手架)进行部署,安装好脚手架。
+
+### 🔗 克隆源码
 
 ```shell
 git clone https://github.com/FrostN0v0/Chtholly.git
 ```
 
-### 安装依赖
+### ➕ 安装依赖
+
+> [!TIP]
+> 推荐使用uv管理喵
+>
+> 安装脚手架时默认你已经安装过pipx了，那么现在你只需要使用 `pipx install uv` 安装uv就好啦~
+
+#### 使用uv
+
+```shell
+uv sync --all-extras
+```
 
 #### 使用pdm
 
 ```shell
-pdm install
+pdm install -G:all
 ```
 
-#### 或使用pip
+### 🚀 运行
 
-```shell
-pip install -r requirements.txt
+修改 `pyproject.toml` 配置文件中的`[tool.nonebot]`，自定义[`适配器`](https://x.none.bot/before/terms#nonebot-组件)和加载[`插件`](https://x.none.bot/before/terms#nonebot-组件)运行配置。
+
+并在根目录创建一个 `.env` 文件，填入你的配置，例如：
+
+```env
+LOG_LEVEL=INFO
+DRIVER=~fastapi+~httpx+~websockets+~aiohttp
+PORT=8820
+COMMAND_START=["/", ""]
+SUPERUSERS=["123123123"] # 超级用户,填你的QQ号
+
+# 你的插件配置也写在这里，例如（mockingbird）：
+model = "azusa"
+accuracy = 9
+steps = 1000
 ```
 
-#### 安装ffmpeg
+使用 `nb run` 命令运行机器人
 
-[FFmpeg官网](https://ffmpeg.org/)，找到对应的系统版本下载。
-
-将压缩包解压到指定的目录。
-
-将安装安装目录下的bin文件夹添加到系统的Path环境变量中。
-
-### 运行
-
-修改 `kirami.config.toml` 配置文件，自定义运行配置，详见[Kirami配置](https://kiramibot.dev/docs/guide/tutorial/config)
-
-使用 `kirami run` 命令运行机器人
-
-See [Docs](https://kiramibot.dev/)
-
-## 感谢
+## 💖 感谢
 
 - [Nonebot2](https://github.com/nonebot/nonebot2)：跨平台 PYTHON 异步机器人框架
-- [Kirami](https://kiramibot.dev/)：基于 Nonebot2 二次开发的机器人框架
-- [go-cqhttp](https://github.com/Mrs4s/go-cqhttp)：提供稳定接口
-- [Nonebot2商店](https://v2.nonebot.dev/store)：插件灵感来源以及参考
-- [绪山真寻Bot](https://github.com/HibiKier/zhenxun_bot): 插件灵感来源以及参考
+- [Kirami](https://kiramibot.dev/)：简明轻快的聊天机器人应用
+- [Nonebot2商店](https://v2.nonebot.dev/store)：开发者们贡献的优秀插件生态
 
-## 声明
+## 📢 声明
 
 此项目仅用于学习交流，请勿用于非法用途。
 
-## 许可证
+## 📄 许可证
 
 本项目使用 [GNU AGPLv3](https://choosealicense.com/licenses/agpl-3.0/) 作为开源许可证。
 

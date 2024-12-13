@@ -79,10 +79,9 @@ class Encoder:
             frame_step = max(int(np.round(partial_utterance_n_frames * (1 - overlap))), 1)
 
         assert 0 < frame_step, "The rate is too high"
-        assert (
-            frame_step <= hp.partials_n_frames
-        ), "The rate is too low, it should be %f at least" % (
-            hp.sampling_rate / (samples_per_frame * hp.partials_n_frames)
+        assert frame_step <= hp.partials_n_frames, (
+            "The rate is too low, it should be %f at least"
+            % (hp.sampling_rate / (samples_per_frame * hp.partials_n_frames))
         )
 
         # Compute the slices
