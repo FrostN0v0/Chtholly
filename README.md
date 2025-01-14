@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD033 MD041 -->
 <div align="center">
 <p>
   <a href="" alt="珂朵莉是世界上最幸福的女孩"><img src="./ChthollyBot.png" width="420"  alt="Chatholly UwU Logo"></a>
@@ -32,3 +33,16 @@
 >_那个人，分了这么多的幸福给我。_  
 >_——我从她那，得到了这么多的东西，可是我却……_  
 >_所以，我敢肯定，现在的我，不管别人怎么说，都一定是世界上最幸福的女孩。_
+
+## 📄 许可证
+
+本项目使用 [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) 作为开源许可证。
+
+[Chatholly UwU](https://github.com/FrostN0v0/Chtholly/tree/resources) © 2025 by [FrostN0v0](https://github.com/FrostN0v0) is licensed under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+<img style="height:22px!important;margin-left:3px;vertical-align:text-bottom;" src="https://mirrors.creativecommons.org/presskit/icons/cc.svg?ref=chooser-v1" alt=""><img style="height:22px!important;margin-left:3px;vertical-align:text-bottom;" src="https://mirrors.creativecommons.org/presskit/icons/by.svg?ref=chooser-v1" alt=""><img style="height:22px!important;margin-left:3px;vertical-align:text-bottom;" src="https://mirrors.creativecommons.org/presskit/icons/nc.svg?ref=chooser-v1" alt=""><img style="height:22px!important;margin-left:3px;vertical-align:text-bottom;" src="https://mirrors.creativecommons.org/presskit/icons/sa.svg?ref=chooser-v1" alt=""></a></p>
+> [!NOTE]
+>
+> - **The font required additional licensing. Please go to the [LETS Website](https://lets.fontworks.co.jp/) for more information.**
+> - The creator of these logos is FrostN0v0. Copyright is not fully relinquished.
+> - You CAN'T use this logo for commercial purposes.
+> - The creator have the right to use this logo for any purpose.(Except for the font.)
