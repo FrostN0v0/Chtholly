@@ -8,7 +8,7 @@ basic:
     - type: ws
       host: "127.0.0.1"
       port: 5140
-      path: "satori"
+      path: ""
       ignore_self_message: true
   log:
     level: INFO
@@ -17,7 +17,7 @@ basic:
     compression: "zip"
     rich_error: true
   prefix: ["/", "."]
-  nickname: ["珂朵莉", "佩佩"]
+  nickname: "珂朵莉"
   superusers:
     qq: []
   str_as_message: true
@@ -30,12 +30,12 @@ plugins:
     - key: ""
       plugins: ["poke"]
 
-  .record_message: { record_send: true }
-  .commands: { use_config_prefix: true }
+  .record_message: {record_send: true}
+  .commands: {use_config_prefix: true}
   .scheduler: {}
-  .localdata: { use_global: false, app_name: "chtholly" }
+  .localdata: {use_global: false, app_name: "chtholly"}
   ::echo: {}
-  ::help: { page_size: null }
+  ::help: {page_size: null}
   ::auto_reload:
     watch_dirs: ["./plugins", "./utils"]
     watch_config: true

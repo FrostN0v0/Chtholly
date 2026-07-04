@@ -65,8 +65,8 @@ basic:
   log:
     level: INFO
     save: true             # 启用日志落盘
-  prefix: ["/", "."]       # 指令前缀
-  nickname: ["珂朵莉", "佩佩"]
+  prefix: ["/", "."]       # 指令前缀（list[str]，空字符串表示无前缀也可触发）
+  nickname: "珂朵莉"        # Bot 昵称（str，单值），配合指令前缀使用
   superusers:
     qq: []                 # 填入超管 QQ
   external_dirs: ["./plugins"]   # 本地插件目录加入 sys.path
