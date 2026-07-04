@@ -5,33 +5,46 @@ description = "Chtholly"
 readme = "README.md"
 authors = [{ name = "FrostN_0v0", email = "suny25802@gmail.com" }]
 license = { text = "AGPL-3.0" }
-requires-python = ">=3.10, <4.0"
+requires-python = ">=3.14, <4.0"
 dependencies = [
     "langid>=1.1.6",
+    "nonebot-plugin-alconna>=0.62.0",
+    "nonebot-plugin-uninfo>=0.11.0",
     "nonebot2>=2.4.0",
     "pydub>=0.25.1",
     "rich>=13.9.4",
+    "ruamel-yaml>=0.18.17",
     "ujson>=5.10.0",
 ]
+
+[tool.uv]
+override-dependencies = [
+    "httpx[http2]==0.27.2",
+    "pillow>=11.0.0",
+    "pypinyin>=0.54.0",
+    "nonebot-plugin-htmlrender>=0.7.0a3"
+]
+
+[tool.uv.sources]
+nonebot-plugin-wakatime = { git = "https://github.com/FrostN0v0/nonebot-plugin-wakatime", branch = "feat/ai-coding-render"}
 
 [tool.nonebot]
 adapters = [
     { name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11" },
+    { name = "Telegram", module_name = "nonebot.adapters.telegram" },
+    # {name = "nonebot-adapter-milky", module_name = "nonebot.adapters.milky"}
 ]
 plugins = [
     "nonebot_plugin_memes_api",
     "nonebot_plugin_color_see_see",
-    "nonebot_plugin_wakatime",
     "nonebot_plugin_kawaii_status",
     "nonebot_plugin_pcr_sign",
-    "nonebot_plugin_zxpm",
-    "nonebot_plugin_today_waifu",
-    "nonebot_plugin_beauty_rater",
-    "nonebot_plugin_tarot",
-    "nonebot_plugin_shindan",
     "nonebot_plugin_miao",
     "nonebot_bison",
-    "nonebot_plugin_bilichat",
+    "nonebot_plugin_deepseek",
+    "nonebot_plugin_skland",
+    "nonebot_plugin_rollpig",
+    "nonebot_plugin_doroending"
 ]
 plugin_dirs = ["./plugins"]
 builtin_plugins = []
@@ -39,6 +52,7 @@ builtin_plugins = []
 
 [project.optional-dependencies]
 adapters = [
+    "nonebot-adapter-milky>=1.1.0",
     "nonebot-adapter-onebot>=2.4.6",
     "nonebot-adapter-qq>=1.5.3",
     "nonebot-adapter-telegram>=0.1.0b20",
@@ -48,19 +62,20 @@ test = [
     "nonebot-plugin-orm[default]>=0.7.6",
 ]
 plugins = [
-    "nonebot-bison>=0.9.5",
+    "nonebot-bison>=0.9.14",
+    "nonebot-plugin-rollpig>=0.2.5",
+    "nonebot-plugin-memes-api>=0.5.1",
     "nonebot-plugin-beauty-rater>=0.1.3",
-    "nonebot-plugin-bilichat>=5.13.4",
     "nonebot-plugin-color-see-see>=0.2.0",
     "nonebot-plugin-kawaii-status>=0.1.9",
-    "nonebot-plugin-memes-api>=0.4.12",
     "nonebot-plugin-miao>=1.1.0",
-    "nonebot-plugin-pcr-sign>=0.1.7",
-    "nonebot-plugin-shindan>=0.6.5",
-    "nonebot-plugin-tarot>=0.2.5",
-    "nonebot-plugin-today-waifu>=0.1.5",
-    "nonebot-plugin-wakatime>=0.2.6",
-    "nonebot-plugin-zxpm>=0.2.2",
+    "nonebot-plugin-pcr-sign>=0.3.1",
+    "nonebot-plugin-wakatime>=0.3.0",
+    "nonebot-plugin-skland>=0.6.9",
+    "nonebot-plugin-deepseek[full]>=0.2.0",
+    "nonebot-plugin-picmenu-next>=0.1.6",
+    "nonebot-plugin-deltaforce-simulator>=1.0.0",
+    "nonebot-plugin-doroending>=0.2.0",
 ]
 mockingbird = [
     "torch>=1.10.0",
@@ -75,30 +90,30 @@ mockingbird = [
     "loguru>=0.6.0"
 ]
 
-[tool.black]
-line-length = 90
-target-version = ["py310", "py311", "py312"]
-include = '\.pyi?$'
-extend-exclude = '''
-'''
-
-[tool.isort]
-profile = "black"
-line_length = 90
-length_sort = true
-skip_gitignore = true
-force_sort_within_sections = true
-extra_standard_library = ["typing_extensions"]
-
-[tool.ruff]
-line-length = 90
-target-version = "py310"
-
 [tool.ruff.lint]
-select = ["E", "W", "F", "UP", "C", "T", "PYI", "PT", "Q"]
-ignore = ["E402", "C901"]
+select = [
+  "W",   # pycodestyle warnings
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "UP",  # pyupgrade
+  "C4",  # flake8-comprehensions
+  "T10", # flake8-debugger
+  "T20", # flake8-print
+  "PYI", # flake8-pyi
+  "PT",  # flake8-pytest-style
+  "Q",   # flake8-quotes
+  "TC",  # flake8-type-checking
+  "RUF", # Ruff-specific rules
+  "I",   # isort
+]
+ignore = [
+  "E402",   # module-import-not-at-top-of-file
+  "RUF001", # ambiguous-unicode-character-string
+  "RUF002", # ambiguous-unicode-character-docstring
+  "RUF003", # ambiguous-unicode-character-comment
+]
 
 [tool.pyright]
-pythonVersion = "3.10"
+pythonVersion = "3.14"
 pythonPlatform = "All"
 typeCheckingMode = "basic"
