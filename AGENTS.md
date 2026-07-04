@@ -20,11 +20,9 @@
 - **事件总线**: arclet-letoderea（Entari 内建依赖）
 - **命令系统**: arclet-alconna（Entari 内建 `command` 模块）
 - **服务管理**: launart（`Service` 基类用于跨插件依赖注入）
-- **协议适配器**: `entari-plugin-server` + `satori-python-adapter-*`（按需安装）
+- **协议适配器**: `satori-python-adapter-onebot11`（默认）；`entari-plugin-server` 在 Python 3.14 下有 dataclass 兼容问题，暂用外部 Satori server + `basic.network` 连接，或降级到 Python 3.13
 - **配置模型**: `BasicConfModel`（默认，dataclass 风格）/ Pydantic `BaseModel`（`arclet.entari.config.models.pyd`）/ msgspec `Struct`
 - **HTTP 客户端**: httpx
-- **音频/语音**: pydub、`utils/mockingbirdforuse/`（mockingbird 推理运行时本地拷贝）
-- **序列化**: ruamel.yaml、ujson
 - **日志与终端**: rich（Entari 内建 log 使用 loguru，可启用 `rich_error`）
 - **包管理**: uv（`uv sync` / `uv add` / `uv remove`）
 - **代码质量**: Ruff、Pyright（`typeCheckingMode = "basic"`）
@@ -36,21 +34,14 @@ Chtholly/
 ├── entari.yml             # 主配置：basic.network / log / prefix / plugins
 ├── .env                   # 环境变量（需 arclet-entari[dotenv]）；存放敏感值，不入库
 ├── main.py                # 可选：entari gen_main 生成，直接 python main.py 运行
-├── plugins/               # 本地插件目录（external_dirs 或 $files 加载）
-│   ├── plugin_manager/    # 插件启停 / 会话级开关
-│   ├── poke/              # 戳一戳交互
-│   ├── mockingbird/       # 基于 mockingbirdforuse 的语音合成
-│   ├── fox/               # 娱乐指令
-│   └── dinggong_voice/    # 语音相关小功能
+├── plugins/               # 本地插件目录（basic.external_dirs 加入 sys.path）
+│   └── poke/              # 戳一戳交互（OneBot V11 poke notice → 自定义事件）
 ├── utils/                 # 跨插件共享工具（纯函数库，不写 Entari 副作用）
-│   ├── path.py            # 资源/缓存路径常量（与 local_data 对接）
-│   ├── downloader.py      # 通用下载器
-│   ├── utils.py           # 杂项工具
-│   └── mockingbirdforuse/ # mockingbird 推理运行时本地拷贝
-├── resources/             # 静态资源（字体、图片、音频、页面模板等）
-├── config/                # 运行期配置文件目录
-├── data/                  # 运行期数据文件目录（与 .localdata 的 get_data_dir 协同）
-├── logs/                  # 运行日志（Entari log.save 启用时写入）
+│   └── path.py            # 静态资源目录常量
+├── resources/             # 静态资源（字体、图片、音频）
+├── config/                # 运行期配置文件目录（gitignored）
+├── data/                  # 运行期数据文件目录（gitignored，与 .localdata 协同）
+├── logs/                  # 运行日志（gitignored，Entari log.save 启用时写入）
 ├── docs/                  # 文档 / 图片
 ├── pyproject.toml         # 依赖、Ruff/Pyright 配置
 ├── uv.lock                # uv 锁文件
@@ -65,7 +56,7 @@ Chtholly/
 
 ```yaml
 basic:
-  network:                 # Satori 服务器连接；启用 entari-plugin-server 后可改用 direct_adapter
+  network:                 # Satori 服务器连接（外部 Satori server，如 Lagrange.OneBot + satori-python-server）
     - type: ws
       host: "127.0.0.1"
       port: 5140
@@ -74,32 +65,40 @@ basic:
   log:
     level: INFO
     save: true             # 启用日志落盘
-  prefix: ["/"]            # 指令前缀
-  nickname: "珂朵莉"        # 配合指令前缀使用
+  prefix: ["/", "."]       # 指令前缀
+  nickname: ["珂朵莉", "佩佩"]
   superusers:
-    qq: ["123123123"]      # 平台名 -> 超管 ID 列表
-  external_dirs: ["./plugins"]   # 本地插件加载目录
+    qq: []                 # 填入超管 QQ
+  external_dirs: ["./plugins"]   # 本地插件目录加入 sys.path
 
 plugins:
-  $prelude: ["::auto_reload"]    # 预加载插件
-  .record_message: {}
+  $prelude: ["::auto_reload"]
+  $prefix:                  # 本地插件名不加 entari_plugin_ 前缀
+    - key: ""
+      plugins: ["poke"]
+  .record_message: { record_send: true }
   .commands: { use_config_prefix: true }
   .scheduler: {}
-  .localdata: { use_global: false }
+  .localdata: { use_global: false, app_name: "chtholly" }
   ::echo: {}
   ::help: { page_size: null }
-  ::control: {}             # 运行时插件管理（/plugin、/function）
-  server:                   # entari-plugin-server，按需配置适配器
-    adapters:
-      - $path: "@onebot11.forward"
-        endpoint: "http://localhost:8081"
-  plugin_manager: {}        # 本地插件：包名省略 entari_plugin_ 前缀
-  poke: {}
+  ::inspect: {}
+  ::control: {}
+  ::auto_reload:
+    watch_dirs: ["./plugins", "./utils"]
+    watch_config: true
+  poke: {}                  # 本地插件，由 $prefix 映射到包名 poke
+
+  # entari-plugin-server（Python 3.14 暂不可用，见技术栈说明）：
+  # server:
+  #   direct_adapter: true
+  #   adapters:
+  #     - $path: "@onebot11.forward"
+  #       endpoint: "${{ env.ONEBOT11_ENDPOINT }}"
+  #       access_token: "${{ env.ONEBOT11_ACCESS_TOKEN }}"
 ```
 
-插件配置的四种写法：`foo: {}`（启用）、`~foo:`（加载但禁用）、`foo: {key: val}`（启用并配置）、`?foo:`（仅存配置不加载）。特殊前缀：`::` 内建插件、`.` Rootless 插件、`~` 禁用、`?` 不加载。
-
-**环境变量**：需安装 `arclet-entari[dotenv]`。在 `entari.yml` 中以 `${{ env.KEY }}` 插值；`.env` / `.env.local` / `.env.<ENVIRONMENT>` 提供敏感值。
+> 第三方插件实现位于 `.venv` 或 uv 缓存中，请勿直接修改；如需定制先向上游反馈或 fork。本地插件位于 `plugins/`，按本文规范用 Entari API 编写。
 
 ## 运行与常用命令
 

@@ -1,10 +1,9 @@
 # Chtholly — Entari configuration
 # Docs: https://arclet.top/tutorial/entari/
-# Sensitive values go in .env and are interpolated via ${{ env.KEY }}.
+# Sensitive values go in .env and are interpolated via env.* expressions
+# (env values must be non-empty when used inside YAML flow sequences).
 
 basic:
-  # Satori server connection. With entari-plugin-server + direct_adapter,
-  # the server plugin runs the ASGI server in-process and adapters dial out.
   network:
     - type: ws
       host: "127.0.0.1"
@@ -20,38 +19,39 @@ basic:
   prefix: ["/", "."]
   nickname: ["珂朵莉", "佩佩"]
   superusers:
-    qq: ["${{ env.SUPERUSER_QQ_1 }}", "${{ env.SUPERUSER_QQ_2 }}"]
+    qq: []
   str_as_message: true
   external_dirs: ["./plugins"]
 
 plugins:
   $prelude:
     - "::auto_reload"
+  $prefix:
+    - key: ""
+      plugins: ["poke"]
 
-  # Built-in helpers
   .record_message: { record_send: true }
   .commands: { use_config_prefix: true }
   .scheduler: {}
   .localdata: { use_global: false, app_name: "chtholly" }
   ::echo: {}
   ::help: { page_size: null }
-  ::inspect: {}
-  ::control: {}
   ::auto_reload:
     watch_dirs: ["./plugins", "./utils"]
     watch_config: true
 
-  # Satori server + adapters (OneBot V11 forward by default)
-  server:
-    direct_adapter: true
-    adapters:
-      - $path: "@onebot11.forward"
-        endpoint: "${{ env.ONEBOT11_ENDPOINT }}"
-        access_token: "${{ env.ONEBOT11_ACCESS_TOKEN }}"
-
-  # Local plugins (loaded from ./plugins via external_dirs)
-  plugin_manager: {}
+  # Local plugins (auto-discovered via basic.external_dirs + plugins list).
   poke: {}
-  mockingbird: {}
-  fox: {}
-  dinggong_voice: {}
+  # Satori server + adapters (OneBot V11 forward by default).
+  # entari-plugin-server 0.7.1 has a Python 3.14 dataclass incompatibility;
+  # until upstream fixes it, connect Entari to an external Satori server
+  # via basic.network, or run on Python 3.13.
+  # server:
+  #   direct_adapter: true
+  #   adapters:
+  #     - $path: "@onebot11.forward"
+  #       endpoint: "${{ env.ONEBOT11_ENDPOINT }}"
+  #       access_token: "${{ env.ONEBOT11_ACCESS_TOKEN }}"
+
+  # Local plugins are auto-loaded from ./plugins via basic.external_dirs.
+  # Do not list them here unless they need per-plugin config.
