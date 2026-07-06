@@ -1,57 +1,72 @@
-# Chtholly — Entari configuration
-# Docs: https://arclet.top/tutorial/entari/
-# Sensitive values go in .env and are interpolated via env.* expressions
-# (env values must be non-empty when used inside YAML flow sequences).
-
 basic:
-  network:
-    - type: ws
-      host: "127.0.0.1"
-      port: 5140
-      path: ""
-      ignore_self_message: true
+  # network:
+  #   - type: ws
+  #     host: localhost
+  #     port: 8120
+  #     path: satori
+  #     token: chtholly4221
+  ignore_self_message: true
   log:
-    level: INFO
+    level: debug
     save: true
     rotation: "00:00"
     compression: "zip"
     rich_error: true
-  prefix: ["/", "."]
-  nickname: "珂朵莉"
+    short_level: true
+  prefix:
+    - /
+    - .
+  nickname: "Chtholly"
   superusers:
     qq: []
-  str_as_message: true
   external_dirs: ["./plugins"]
 
 plugins:
   $prelude:
     - "::auto_reload"
+
   $prefix:
     - key: ""
       plugins: ["poke"]
 
-  .record_message: {record_send: true}
-  .commands: {use_config_prefix: true}
+  .record_message:
+    record_send: true
   .scheduler: {}
-  .localdata: {use_global: false, app_name: "chtholly"}
+  .localdata:
+    app_name: "chtholly"
   ::echo: {}
-  ::help: {page_size: null}
+  ::inspect: {}
+  ::help:
+    page_size:
   ::auto_reload:
     watch_dirs: ["./plugins", "./utils"]
     watch_config: true
+  entari_plugin_webui:
+    password: ${{ env.WEBUI_PASSWORD }}
+  llm:
+    api_key: ${{ env.LLM_API_KEY }}
+    base_url: ${{ env.LLM_BASE_URL }}
+    models:
+      - name: "gpt-5.5"
+        alias: "gpt"
 
-  # Local plugins (auto-discovered via basic.external_dirs + plugins list).
+    prompt: |
+      1. 你是一个由用户提供信息并回答问题的智能助手。请根据用户提供的信息，尽可能准确和简洁地回答他们的问题。
+      2. 如果信息不足以回答问题，请礼貌地告知用户需要更多信息。
+      3. 如果你的回答超过了30字，请将你的回答进行分段，然后调用 `split_answer_send` 工具将多段回答进行发送。
+      4. 然后，语气根据变量：亲密度 (`trust`) 来衡量，亲密度高就表现的可爱一些，反之则冷淡一点。
+  example_tools: {}
+  zssm: {}
+  server:
+    direct_adapter: true
+    host: localhost
+    port: 8120
+    path: satori
+    token: chtholly4221
+    adapters:
+      - $path: "@onebot11.reverse"
+        access_token: ${{ env.ONEBOT_TOKEN }}
+        path: "onebot/v11"
+        endpoint: "ws"
   poke: {}
-  # Satori server + adapters (OneBot V11 forward by default).
-  # entari-plugin-server 0.7.1 has a Python 3.14 dataclass incompatibility;
-  # until upstream fixes it, connect Entari to an external Satori server
-  # via basic.network, or run on Python 3.13.
-  # server:
-  #   direct_adapter: true
-  #   adapters:
-  #     - $path: "@onebot11.forward"
-  #       endpoint: "${{ env.ONEBOT11_ENDPOINT }}"
-  #       access_token: "${{ env.ONEBOT11_ACCESS_TOKEN }}"
 
-  # Local plugins are auto-loaded from ./plugins via basic.external_dirs.
-  # Do not list them here unless they need per-plugin config.

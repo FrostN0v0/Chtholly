@@ -5,54 +5,41 @@ description = "Chtholly"
 readme = "README.md"
 authors = [{ name = "FrostN_0v0", email = "suny25802@gmail.com" }]
 license = { text = "AGPL-3.0" }
-requires-python = ">=3.14, <4.0"
+requires-python = ">=3.10, <4.0"
 dependencies = [
-    "arclet-entari[full]>=0.18.0",
-    "entari-cli>=0.4.1",
-    "entari-plugin-server>=0.1.0",
-    "satori-python-adapter-onebot11>=0.1.0",
+    "arclet-entari[full]>=0.18.1",
+    "entari-plugin-browser>=0.6.1",
+    "entari-plugin-database>=0.3.3",
+    "entari-plugin-llm>=0.2.1",
+    "entari-plugin-permission>=0.1.1",
+    "entari-plugin-server>=0.7.1",
+    "entari-plugin-webui>=1.0.1",
     "httpx[http2]>=0.27.2",
     "rich>=13.9.4",
 ]
 
-[tool.uv]
-override-dependencies = [
-    "httpx[http2]==0.27.2",
-]
 
 [project.optional-dependencies]
 adapters = [
-    "satori-python-adapter-milky>=0.1.0",
-    "satori-python-adapter-qq>=0.1.0",
+  "satori-python-adapter-onebot11>=0.4.4",
 ]
 
 [tool.ruff]
 line-length = 120
+target-version = "py310"
 
 [tool.ruff.lint]
-select = [
-  "W",   # pycodestyle warnings
-  "E",   # pycodestyle errors
-  "F",   # pyflakes
-  "UP",  # pyupgrade
-  "C4",  # flake8-comprehensions
-  "T10", # flake8-debugger
-  "T20", # flake8-print
-  "PYI", # flake8-pyi
-  "PT",  # flake8-pytest-style
-  "Q",   # flake8-quotes
-  "TC",  # flake8-type-checking
-  "RUF", # Ruff-specific rules
-  "I",   # isort
-]
-ignore = [
-  "E402",   # module-import-not-at-top-of-file
-  "RUF001", # ambiguous-unicode-character-string
-  "RUF002", # ambiguous-unicode-character-docstring
-  "RUF003", # ambiguous-unicode-character-comment
-]
+select = ["E", "W", "F", "UP", "C", "T", "PYI", "PT", "Q", "I"]
+ignore = ["E402", "C901"]
+
+[tool.ruff.lint.isort]
+length-sort = true
+force-sort-within-sections = true
+combine-as-imports = true
+extra-standard-library = ["typing_extensions"]
+
 
 [tool.pyright]
-pythonVersion = "3.14"
+pythonVersion = "3.10"
 pythonPlatform = "All"
-typeCheckingMode = "basic"
+typeCheckingMode = "standard"

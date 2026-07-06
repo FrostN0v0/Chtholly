@@ -2,11 +2,11 @@
 
 本文档为 AI 编程代理（如 Codex、Claude Code 等）提供本仓库的项目上下文与开发指南。内容应以当前源码为准；修改实现后请同步更新本文档。
 
-> 本仓库正在 `etr` 分支上将 Bot 宿主从 NoneBot2 迁移到 **Entari**（Arclet Project，基于 Satori 协议）。本文件已按目标架构编写；尚未迁移完成的旧 NoneBot2 代码以 `plugins/` 下的现存文件为准，迁移时遵循本文规范重写。
+> 本仓库正在 `etr` 分支上将 Bot 从 NoneBot2 迁移到 **Entari**（Arclet Project，基于 Satori 协议）。本文件已按目标架构编写；尚未迁移完成的旧 NoneBot2 代码以 `plugins/` 下的现存文件为准，迁移时遵循本文规范重写。
 
 ## 项目概述
 
-**Chtholly** 是一款 QQ 娱乐机器人宿主工程，基于 [Entari](https://github.com/ArcletProject/Entari)（Satori 协议）运行。它本身不实现单一业务，而是通过 `entari.yml` 声明加载的社区插件与 `plugins/` 目录下的本地插件组合出功能。
+**Chtholly** 是一款 QQ 娱乐机器人工程，基于 [Entari](https://github.com/ArcletProject/Entari)（Satori 协议）运行。它本身不实现单一业务，而是通过 `entari.yml` 声明加载的社区插件与 `plugins/` 目录下的本地插件组合出功能。
 
 - 协议层：Satori 协议；通过 `entari-plugin-server` + 适配器对接 OneBot V11 / Milky / QQ / Lagrange / Console / 纯 Satori 等协议端。
 - 主要职责：提供运行时环境（`entari.yml`）、共享工具（`utils/`）、静态资源（`resources/`）、本地扩展插件（`plugins/`）。
@@ -20,12 +20,12 @@
 - **事件总线**: arclet-letoderea（Entari 内建依赖）
 - **命令系统**: arclet-alconna（Entari 内建 `command` 模块）
 - **服务管理**: launart（`Service` 基类用于跨插件依赖注入）
-- **协议适配器**: `satori-python-adapter-onebot11`（默认）；`entari-plugin-server` 在 Python 3.14 下有 dataclass 兼容问题，暂用外部 Satori server + `basic.network` 连接，或降级到 Python 3.13
+- **协议适配器**: `satori-python-adapter-onebot11`（默认）；`entari-plugin-server` 在 Python 3.14 下有 dataclass 兼容问题，暂用外部 Satori server + `basic.network` 连接，已降级到 Python 3.10，待修复后升回 3.14
 - **配置模型**: `BasicConfModel`（默认，dataclass 风格）/ Pydantic `BaseModel`（`arclet.entari.config.models.pyd`）/ msgspec `Struct`
 - **HTTP 客户端**: httpx
 - **日志与终端**: rich（Entari 内建 log 使用 loguru，可启用 `rich_error`）
 - **包管理**: uv（`uv sync` / `uv add` / `uv remove`）
-- **代码质量**: Ruff、Pyright（`typeCheckingMode = "basic"`）
+- **代码质量**: Ruff、Pyright（`typeCheckingMode = "standard"`）
 
 ## 目录结构（目标形态）
 
@@ -34,8 +34,8 @@ Chtholly/
 ├── entari.yml             # 主配置：basic.network / log / prefix / plugins
 ├── .env                   # 环境变量（需 arclet-entari[dotenv]）；存放敏感值，不入库
 ├── main.py                # 可选：entari gen_main 生成，直接 python main.py 运行
-├── plugins/               # 本地插件目录（basic.external_dirs 加入 sys.path）
-│   └── poke/              # 戳一戳交互（OneBot V11 poke notice → 自定义事件）
+├── plugins/               # 本地插件目录
+│   └──...                 # 各插件
 ├── utils/                 # 跨插件共享工具（纯函数库，不写 Entari 副作用）
 │   └── path.py            # 静态资源目录常量
 ├── resources/             # 静态资源（字体、图片、音频）
@@ -50,103 +50,31 @@ Chtholly/
 
 > 第三方插件实现位于 `.venv` 或 uv 缓存中，请勿直接修改；如需定制先向上游反馈或 fork。迁移期仍残留的 NoneBot2 风格插件需要按本文规范重写为 Entari 插件。
 
-## 配置文件
-
-主配置为 `entari.yml`（YAML，也支持 JSON 等格式）。关键段：
-
-```yaml
-basic:
-  network:                 # Satori 服务器连接（外部 Satori server，如 Lagrange.OneBot + satori-python-server）
-    - type: ws
-      host: "127.0.0.1"
-      port: 5140
-      path: "satori"
-      ignore_self_message: true
-  log:
-    level: INFO
-    save: true             # 启用日志落盘
-  prefix: ["/", "."]       # 指令前缀（list[str]，空字符串表示无前缀也可触发）
-  nickname: "珂朵莉"        # Bot 昵称（str，单值），配合指令前缀使用
-  superusers:
-    qq: []                 # 填入超管 QQ
-  external_dirs: ["./plugins"]   # 本地插件目录加入 sys.path
-
-plugins:
-  $prelude: ["::auto_reload"]
-  $prefix:                  # 本地插件名不加 entari_plugin_ 前缀
-    - key: ""
-      plugins: ["poke"]
-  .record_message: { record_send: true }
-  .commands: { use_config_prefix: true }
-  .scheduler: {}
-  .localdata: { use_global: false, app_name: "chtholly" }
-  ::echo: {}
-  ::help: { page_size: null }
-  ::inspect: {}
-  ::control: {}
-  ::auto_reload:
-    watch_dirs: ["./plugins", "./utils"]
-    watch_config: true
-  poke: {}                  # 本地插件，由 $prefix 映射到包名 poke
-
-  # entari-plugin-server（Python 3.14 暂不可用，见技术栈说明）：
-  # server:
-  #   direct_adapter: true
-  #   adapters:
-  #     - $path: "@onebot11.forward"
-  #       endpoint: "${{ env.ONEBOT11_ENDPOINT }}"
-  #       access_token: "${{ env.ONEBOT11_ACCESS_TOKEN }}"
-```
-
-> 第三方插件实现位于 `.venv` 或 uv 缓存中，请勿直接修改；如需定制先向上游反馈或 fork。本地插件位于 `plugins/`，按本文规范用 Entari API 编写。
-
 ## 运行与常用命令
 
 ```bash
-# 初始化新 Entari 环境（创建虚拟环境 + 安装 entari + 生成 entari.yml）
-entari init
 
 # 运行机器人
 entari run
 # 或生成入口脚本后运行
 entari gen_main
-python main.py
+uv run main.py
 
 # 安装插件并写入 entari.yml
 entari add <plugin-name> [-D] [-O] [-p NUM] [--key KEY]
+# 目前add指令会因为未读取到env而报错，所以请使用 uv 安装插件并手动配置 entari.yml
 
-# 卸载插件并从配置移除
-entari remove <plugin-name>
-
-# 生成/编辑配置（含 JSON Schema 校验）
-entari config
-
-# 创建新本地插件脚手架
-entari new <name> [-A] [-f] [-S] [-D] [-O] [-p NUM]
-#   -A, --application  本地插件（位于 plugins/ 下）必加
-#   -f, --file         单文件插件
-#   -S, --static       静态插件
-#   -D, --disabled     初始禁用
-#   -O, --optional     仅存配置不加载
-#   -p, --priority NUM 加载优先级（越小越先，默认 16）
-
-# 依赖管理（pyproject.toml 依赖表禁止手改，必须走 uv 命令）
-uv sync --extra full        # 或 uv sync --all-extras
-uv add "arclet-entari[full]"
-uv add entari-plugin-server
-uv add satori-python-adapter-onebot11
-uv remove <pkg>
+# 同步依赖
+uv sync --all-extras 
 
 # 格式化与静态检查
-uvx isort .
 uvx ruff format
-uvx ruff check
+uvx ruff check 
+uvx ruff check --fix
 
 # 构建发布包
 uv build
 ```
-
-`entari run` 前需确保已运行 Satori 服务器，或启用 `entari-plugin-server` 并配置好适配器。
 
 ## 插件开发规范
 
@@ -267,8 +195,15 @@ config = plugin_config(MyConfig)
 - 行长度与格式遵循 `ruff` 与项目已有设置。
 - Python 目标版本：3.14。
 - Ruff lint 规则见 `pyproject.toml` 的 `[tool.ruff.lint]`。
-- Pyright 使用 `typeCheckingMode = "basic"`。
+- Pyright 使用 `typeCheckingMode = "standard"`。
 - 保持现有代码风格：异步函数、配置模型（`BasicConfModel` 优先，跨框架兼容场景用 Pydantic）、短中文注释风格。
+
+### 基础建设
+
+- 项目引进了 `entari-plugin-browser`、`entari-plugin-llm`、`entari-plugin-database`、`entari-plugin-permission` 作为项目的基础建设工具，当你需要使用 playwright、jinja2 模板渲染，AI会话调用、数据库及ORM、权限管理等方面时，优先考虑现有基建。
+- 当前项目拟构造一个供其它插件或服务调用的 TTS 服务，目前拟兼容 gpt-sovits 的接入，参考 `nonebot-plugin-deepseek` 中的 TTS 服务对接，并优化实现，使其符合当前项目的基建要求。
+- 帮助菜单，当前项目拟参考 [`nonebot-plugin-picmenu-next`](https://github.com/lgc-NB2Dev/nonebot-plugin-picmenu-next) 的菜单功能，结合 entari 基建，实现一个自动生成、界面美观、自定义程度高，开发简单的图片帮助基建插件。
+- 会话互动系统，当前项目拟构造一个基于 llm 插件支持群聊场景需求，在复杂的多人对话中保有人物认知和交互能力的聊天交互系统，支持对本地图片通过 llm 视觉识别打上标签，并在合适不突兀的语境下发送图片和语音（语音文件以内容命名，根据文件名判断语境发送），并支持调用插件功能。
 
 ### 测试
 
@@ -280,8 +215,7 @@ config = plugin_config(MyConfig)
 
 ### 包管理
 
-- 使用 uv（Python）。**禁止直接手改** `pyproject.toml` 的依赖表，应通过 `uv add` / `uv remove` / `uv sync` 操作；插件安装优先用 `entari add`（会同步写入 `entari.yml`）。
-- 初始化子项目或工具时使用对应命令（`uv init`、`entari new` 等），而不是手动拼装目录。
+- 使用 uv（Python）。**禁止直接手改** `pyproject.toml` 的依赖表，应通过 `uv add` / `uv remove` / `uv sync` 操作；或用 `entari add`（会同步写入 `entari.yml`）。
 - 添加新依赖前确认必要性：优先复用 Entari 内建能力（`.localdata` / `.scheduler` / `::control` / `command` / `filter_`），再考虑社区插件，最后才自造。
 
 ## 添加新功能的一般流程
@@ -289,7 +223,7 @@ config = plugin_config(MyConfig)
 1. **确定归属**：新增本地插件（`plugins/<name>/` 或 `plugins/<name>.py`）还是修改现有插件 / 共享工具（`utils/`）？跨插件通用逻辑放 `utils/`，业务逻辑放各自插件。
 2. **建立入口**：用 `entari new <name> -A [-f]` 生成脚手架；在 `__init__.py` / 单文件中调用 `metadata(...)` 声明元数据与 `PluginRole`。
 3. **配置项**：定义 `BasicConfModel`（或 Pydantic `BaseModel`）+ `plugin_config(...)` 读取 `entari.yml` 中的插件段；避免全局可变默认。
-4. **数据存储**：持久化路径走 `local_data.get_data_dir()` / `get_cache_dir()`；结构化数据需要 ORM 时，优先寻找 Entari 生态插件，否则在 `utils/` 中封装 SQLAlchemy 会话并作为 Service 暴露。
+4. **数据存储**：持久化路径走 `local_data.get_data_dir()` / `get_cache_dir()`；结构化数据需要 ORM 时，优先使用 Entari 生态插件 `entari-plugin-database`，尽量避免手搓。
 5. **事件/指令/过滤器**：`@plugin.listen` / `@plug.dispatch` / `@plug.use` / `command.on` / `command.mount` / `filter_`；账号/群号等敏感值通过配置 `$filter` 表达式或环境变量传入，不硬编码。
 6. **副作用清理**：所有运行期可卸载的插件用 `collect_disposes` 清理；需要跨卸载保留的状态用 `keeping`。
 7. **补充测试**：对纯逻辑函数（数据处理、分组、状态机、过滤器表达式等）优先写单元测试。
@@ -299,15 +233,19 @@ config = plugin_config(MyConfig)
 
 1. **凭证安全**：任何 access_token、cred、cookie、role_token、Satori token、适配器 token 等敏感数据禁止写入日志、文档、测试输出或提交到仓库；一律走 `.env` + `${{ env.KEY }}` 插值。
 2. **API 限流**：外部服务（GitHub、各游戏 Web API、AI 服务、Satori 协议端等）均可能限流或不可用；批量请求应控制并发与错误处理。
-3. **资源缓存**：优先使用本地资源，缺失时再从网络获取；下载失败要有回退或明确报错，不要静默失败。本地缓存路径统一走 `local_data.get_cache_dir()`。
+3. **资源缓存**：如有资源调用需求，优先使用本地资源，缺失时再从网络获取；下载失败要有回退或明确报错，不要静默失败。本地缓存路径统一走 `local_data.get_cache_dir()`。
 4. **命令权限**：涉及全局广播、批量下发、资源同步、插件启停等高影响命令，应仅超管可用；`::control` 已按 `PluginRole` 与 `$filter` 提供分层控制，复用之。
 5. **异常类型**：接口层应抛出语义清晰的异常，handler 层再决定用户可见的消息反馈；避免用宽泛 `Exception` 吞错。Entari 事件监听器抛出的异常会按 `skip_req_missing` 等配置处理，不要在 handler 里静默 `except Exception: pass`。
-6. **文档同步**：新增命令、配置、插件、适配器或测试约定时，同步更新 `README.md`、`entari.yml` 注释与本文件。
+6. **文档同步**：新增命令、配置、插件、适配器或测试约定时，同步更新 `README.md`、`entari.yml` 或新建 markdown 文档并在主 `README.md` 中引用。
 7. **保持代码干净**：新增代码按项目分层放置，专事专干，不要在专注渲染的模块里做数据处理，也不要在数据层做 IO / 渲染。
    > 涉及渲染部分时，前置数据处理特化的可以在接收数据时于 `schemas`/数据模型部分完成；通用格式化在过滤器/模板 helper 内完成；渲染模块只做渲染。
 8. **pydantic 兼容**：Entari 默认使用 `BasicConfModel`（dataclass）；如需 Pydantic，从 `arclet.entari.config.models.pyd` 导入并注意 v1/v2 差异，优先使用框架提供的兼容封装。
 9. **用户体验**：命令与交互应贴近直觉，避免繁琐难记的指令、反人类的输入约束与需要多轮猜谜的对话流；指令前缀与 nickname 在 `entari.yml` 中统一配置，不要在插件内重复实现前缀解析。
 10. **热重载安全**：所有本地插件必须可被 `::auto_reload` 安全重载——避免模块级副作用、全局可变状态、未清理的文件句柄/连接；用 `keeping` + `collect_disposes` 兜底。
+11. **注重文档时效性**： Entari 项目是一个正在频繁迭代开发的项目，当做开发参考时，请检查当前依赖是否为最新，官方文档是否有更新，如果依赖过时，请结合官方文档和相关 commit 更新的内容同步开发文档，以避免过时特性和使用新特性。
+12. **内建插件和可发布插件的区分**：当前项目鼓励将于本bot基建无耦合的插件，作为可发布插件进行开发，你构建插件时需要分辨当前插件是否无耦合可能，然后将可发布并支持其它 Entari 项目安装的插件按独立插件标准开发，为其配备完备独立的 git repo 和 docs 等架构。
+  > 比如 [`mirata`](https://github.com/entanex/miraita) 项目的 argot 功能，完全可以拆除作为独立插件发布，供 entari 生态使用。
+13. **分支纯净性**：所有变更请基于当前 `etr` 分支新建分支，命名结构参考 `etr/feat-xxx`，并在该分支按原子性提交规范落成 `commit` , `commit message` 使用中文，遵循 `gitmoji` 规范，主 `etr` 分支不要随便 commit。
 
 ## 工作流：Plan 模式与 Code 模式
 
@@ -458,7 +396,6 @@ config = plugin_config(MyConfig)
   - 性能与并发；
   - 正确性与鲁棒性；
   - 可维护性与演进策略。
-- 在没有必要澄清的重要信息缺失时，尽量减少无谓往返和问题式对话，直接给出高质量思考后的结论与实现建议。
 - 如果一段话删掉后不影响我做决策，那就不要写。
   - 直接给出结论或方案，不要铺垫；
   - 省略显而易见的上下文和已知信息；

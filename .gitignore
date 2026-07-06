@@ -190,3 +190,6 @@ logs/
 data/
 entari.yml.local
 .env.local
+.entari
+.entari_cli.toml
+data.db

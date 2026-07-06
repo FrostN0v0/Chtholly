@@ -8,18 +8,25 @@ image, audio, or a poke back depending on configured probabilities.
 from __future__ import annotations
 
 import random
-from typing import TYPE_CHECKING, Any
+from typing import Any
+from pathlib import Path
 
-from arclet.entari import Account, Plugin, Session, metadata, register_internal_event
-from arclet.entari.event.base import Attr, NoticeEvent
 from satori import EventType
-from satori.element import Audio, Custom, Image
-from satori.model import Channel, ChannelType, Event, Guild, User
+from satori.model import User, Event, Guild, Channel, ChannelType
+from arclet.entari import (
+    Plugin,
+    Account,
+    Session,
+    MessageChain,
+    attr,
+    metadata,
+    collect_disposes,
+    register_internal_event,
+)
+from satori.element import Audio, Image
+from arclet.entari.event.base import NoticeEvent
 
 from utils.path import AUDIO_DIR, IMAGE_DIR
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 metadata(
     name="poke",
@@ -58,35 +65,34 @@ class PokeEvent(NoticeEvent):
     """Custom event wrapping an OneBot V11 ``notice.notify.poke`` notice.
 
     The satori onebot11 adapter forwards unregistered notices as
-    ``EventType.INTERNAL`` with the raw event data attached. This class
-    materializes that into a proper notice event with channel/user context so
-    handlers can reply through a normal ``Session``.
+    ``EventType.INTERNAL`` with the raw event data attached to ``_data``.
+    This class materializes that into a proper notice event with channel/user
+    context so handlers can reply through a normal ``Session``.
+
+    Field attributes are read from ``origin._data`` via ``attr(internal=True)``
+    to avoid ``Attr.__set__`` raising (the bug in the previous etr version that
+    declared them with ``Attr()`` and then tried to assign in ``__init__``).
+    Channel/user/guild are not redeclared: their inherited ``Attr`` descriptors
+    read from ``origin`` via ``getattr``, so we mutate ``origin`` directly.
     """
 
     type = EventType.INTERNAL
 
-    user_id: str = Attr()
-    target_id: str = Attr()
-    self_id: str = Attr()
-    group_id: str | None = Attr()
+    user_id: str = attr(str, internal=True)
+    target_id: str = attr(str, internal=True)
+    self_id: str = attr(str, internal=True)
+    group_id: str | None = attr(str, internal=True)
 
     def __init__(self, account: Account, origin: Event):
         super().__init__(account, origin)
-        data: dict[str, Any] = origin._data or {}
-        self.user_id = str(data.get("user_id", ""))
-        self.target_id = str(data.get("target_id", ""))
-        self.self_id = str(data.get("self_id", ""))
-        group_id = data.get("group_id")
-        self.group_id = str(group_id) if group_id is not None else None
-
-        # Rebuild channel/user context so Session.send has a target.
-        if self.group_id:
-            self.channel = Channel(str(self.group_id), ChannelType.TEXT)
-            self.guild = Guild(str(self.group_id))
+        group_id = self.group_id
+        if group_id:
+            origin.channel = Channel(group_id, ChannelType.TEXT)
+            origin.guild = Guild(group_id)
         else:
-            self.channel = Channel(f"private:{self.self_id}", ChannelType.DIRECT)
-            self.guild = None
-        self.user = User(self.user_id)
+            origin.channel = Channel(f"private:{self.self_id}", ChannelType.DIRECT)
+            origin.guild = None
+        origin.user = User(self.user_id)
 
 
 @register_internal_event
@@ -96,13 +102,35 @@ def _parse_poke(event_type: str, raw_type: str, data: dict[str, Any]) -> type[No
     return None
 
 
-_img_list: list[Path] = [p for p in FOX_DIR.iterdir() if p.is_file()]
-_audio_list: list[Path] = [p for p in DINGGONG_DIR.iterdir() if p.is_file()]
+def _remove_parser():
+    from arclet.entari.event.base import INTERNAL_ADDITIONAL_HANDLERS
+
+    INTERNAL_ADDITIONAL_HANDLERS[:] = [h for h in INTERNAL_ADDITIONAL_HANDLERS if h is not _parse_poke]
+
+
+collect_disposes(_remove_parser)
+
+
+_img_list: list[Path] | None = None
+_audio_list: list[Path] | None = None
+
+
+def _images() -> list[Path]:
+    global _img_list
+    if _img_list is None:
+        _img_list = [p for p in FOX_DIR.iterdir() if p.is_file()]
+    return _img_list
+
+
+def _audios() -> list[Path]:
+    global _audio_list
+    if _audio_list is None:
+        _audio_list = [p for p in DINGGONG_DIR.iterdir() if p.is_file()]
+    return _audio_list
 
 
 @plug.dispatch(PokeEvent)
-async def on_poke(session: Session[PokeEvent]):
-    event = session.event
+async def on_poke(session: Session, event: PokeEvent):
     if event.target_id != event.self_id:
         return
 
@@ -113,8 +141,15 @@ async def on_poke(session: Session[PokeEvent]):
 
     roll = random.random()
     if roll <= 0.3:
-        await session.send(Image.of(path=random.choice(_img_list)))
+        imgs = _images()
+        if imgs:
+            await session.send(MessageChain([Image.of(path=random.choice(imgs))]))
     elif roll < 0.6:
-        await session.send(Audio.of(path=random.choice(_audio_list)))
+        auds = _audios()
+        if auds:
+            await session.send(MessageChain([Audio.of(path=random.choice(auds))]))
+    group_id = event.group_id
+    if group_id:
+        await session.account.internal("group_poke", group_id=int(group_id), user_id=int(event.user_id))
     else:
-        await session.send(Custom("onebot:poke", {"qq": event.user_id}))
+        await session.account.internal("friend_poke", user_id=int(event.user_id))
