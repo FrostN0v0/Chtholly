@@ -23,11 +23,15 @@ class TestParse:
         assert result.deltas["affection"] == 3
         assert result.deltas["resentment"] == -2
         assert result.impression == "很友善"
+        assert result.profile_patches == []
+        assert result.memory_items == []
 
     def test_fenced_json_accepted(self):
         result = parse_eval_response(f"```json\n{VALID}\n```")
         assert result is not None
         assert result.deltas["affection"] == 3
+        assert result.profile_patches == []
+        assert result.memory_items == []
 
     def test_malformed_json_returns_none(self):
         assert parse_eval_response("not json at all") is None
@@ -46,6 +50,8 @@ class TestParse:
         assert result is not None
         assert result.deltas == {"affection": 0.0, "trust": 0.0, "dependence": 0.0, "resentment": 0.0}
         assert result.mood_delta == 0.0
+        assert result.profile_patches == []
+        assert result.memory_items == []
 
     def test_out_of_range_deltas_clamped(self):
         payload = '{"mood_delta": 5, "affection": 100, "trust": -100, "dependence": 0, "resentment": 0}'
@@ -65,6 +71,54 @@ class TestParse:
         result = parse_eval_response('{"impression": 42}', current_impression="旧画像")
         assert result is not None
         assert result.impression == "旧画像"
+
+    def test_profile_patches_and_memory_items_are_parsed(self):
+        payload = (
+            '{"profile_patches": ['
+            '{"category": "preference", "key": "drink", "value": "tea", '
+            '"confidence": 0.8, "evidence": "用户说喜欢茶"}'
+            '], "memory_items": ['
+            '{"text": "用户喜欢安静的早晨", "importance": 0.7}'
+            "]}"
+        )
+        result = parse_eval_response(payload)
+
+        assert result is not None
+        assert len(result.profile_patches) == 1
+        patch = result.profile_patches[0]
+        assert patch.category == "preference"
+        assert patch.key == "drink"
+        assert patch.value == "tea"
+        assert patch.confidence == 0.8
+        assert patch.evidence == "用户说喜欢茶"
+        assert len(result.memory_items) == 1
+        memory = result.memory_items[0]
+        assert memory.text == "用户喜欢安静的早晨"
+        assert memory.importance == 0.7
+
+    def test_low_confidence_profile_patch_is_skipped(self):
+        payload = (
+            '{"profile_patches": ['
+            '{"category": "interest", "key": "music", "value": "jazz", '
+            '"confidence": 0.7, "evidence": "提到一次爵士"}'
+            "]}"
+        )
+        result = parse_eval_response(payload, min_profile_confidence=0.8)
+
+        assert result is not None
+        assert result.profile_patches == []
+
+    def test_invalid_profile_category_is_skipped(self):
+        payload = (
+            '{"profile_patches": ['
+            '{"category": "temporary_mood", "key": "mood", "value": "sleepy", '
+            '"confidence": 0.9, "evidence": "临时说困"}'
+            "]}"
+        )
+        result = parse_eval_response(payload)
+
+        assert result is not None
+        assert result.profile_patches == []
 
 
 class TestApplyDeltas:

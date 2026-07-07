@@ -17,6 +17,7 @@ async def run_evaluation(
     persona: str,
     axes: dict[str, float],
     impression: str,
+    profile_facts: list[str],
     transcript: list[str],
 ) -> EvalResult | None:
     """Run the relationship evaluator; returns None when parsing fails."""
@@ -25,7 +26,7 @@ async def run_evaluation(
         model=conf.name,
         messages=[
             {"role": "system", "content": EVAL_SYSTEM},
-            {"role": "user", "content": build_eval_prompt(persona, axes, impression, transcript)},
+            {"role": "user", "content": build_eval_prompt(persona, axes, impression, profile_facts, transcript)},
         ],
         base_url=conf.base_url,
         api_key=conf.api_key,
@@ -36,4 +37,8 @@ async def run_evaluation(
     content = response.choices[0].message.content  # type: ignore[union-attr]
     if not content:
         return None
-    return parse_eval_response(content, current_impression=impression)
+    return parse_eval_response(
+        content,
+        current_impression=impression,
+        min_profile_confidence=config.profile_fact_min_confidence,
+    )

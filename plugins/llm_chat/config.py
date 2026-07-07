@@ -8,8 +8,9 @@ DEFAULT_PERSONA = "你是一个友善的群聊助手。"
 
 SYSTEM_SCAFFOLD = (
     "你在群聊中与多个用户交流，历史消息以 [名字]: 开头标注说话人，记住每个人。\n"
-    "下方 [当前状态]、[对话对象]、[你对TA的印象] 描述了你此刻的状态与说话人的关系，"
-    "据此调整语气和态度，但绝不复述、提及这些数值或描述本身。\n"
+    "下方 [当前状态]、[对话对象]、[长期画像]、[相关记忆]、[你对TA的最近印象] 描述了你此刻的状态与说话人的关系，"
+    "据此调整语气和态度，但绝不复述、提及这些数值或描述本身。"
+    "长期画像是多轮互动积累的稳定事实；最近印象只描述短期互动。不要因为一次新话题、玩笑或临时情绪推翻长期画像。\n"
     "提供了本地媒体工具时，只在合适且不突兀的时机调用，不要滥用。"
     "send_image 用于图片、表情包、贴纸请求，或轻量情绪反应比文字更合适时；"
     "send_audio 用于语音、台词请求，或短本地语音片段贴合当前情绪/场景时。"
@@ -36,6 +37,24 @@ class LLMChatConfig(BasicConfModel):
     """Model alias for relationship evaluation; None uses the main model."""
     eval_every_n: int = 1
     """Run the relationship evaluator every N bot replies (per user)."""
+    memory_enabled: bool = True
+    """Enable long-term profile and semantic memory retrieval."""
+    memory_embedding_model: str = "volcengine/doubao-embedding-text-240715"
+    """LiteLLM embedding model for profile and memory retrieval."""
+    memory_embedding_api_key: str | None = None
+    """Embedding API key; set from env in entari.yml."""
+    memory_embedding_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
+    """Embedding API base URL."""
+    memory_top_profile_facts: int = 8
+    """Max stable profile facts injected into the prompt."""
+    memory_top_memories: int = 5
+    """Max semantically relevant memories injected into the prompt."""
+    memory_min_similarity: float = 0.25
+    """Minimum cosine similarity for relevant episodic memories."""
+    profile_fact_min_confidence: float = 0.55
+    """Minimum confidence for storing and injecting stable profile facts."""
+    memory_max_records_per_user: int = 200
+    """Max episodic memory rows kept per user/channel."""
     tts_enabled: bool = True
     """Effective only when the tts_service plugin is installed."""
     tts_max_chars: int = 80

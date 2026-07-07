@@ -2,6 +2,7 @@
 
 from datetime import datetime
 
+from sqlalchemy import Text
 from entari_plugin_database import Base, Mapped, mapped_column
 
 
@@ -29,6 +30,34 @@ class UserRelation(Base):
     impression: Mapped[str] = mapped_column(default="")
     eval_counter: Mapped[int] = mapped_column(default=0)
     last_interaction: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+
+class UserProfileFact(Base):
+    __tablename__ = "chat_user_profile_facts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[str] = mapped_column(index=True)
+    channel_id: Mapped[str] = mapped_column(index=True)
+    category: Mapped[str] = mapped_column(index=True)
+    key: Mapped[str] = mapped_column(index=True)
+    value: Mapped[str] = mapped_column(Text)
+    confidence: Mapped[float] = mapped_column(default=0.0)
+    evidence_count: Mapped[int] = mapped_column(default=0)
+    last_evidence: Mapped[str] = mapped_column(Text, default="")
+    embedding_json: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+
+class UserMemory(Base):
+    __tablename__ = "chat_user_memories"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[str] = mapped_column(index=True)
+    channel_id: Mapped[str] = mapped_column(index=True)
+    text: Mapped[str] = mapped_column(Text)
+    importance: Mapped[float] = mapped_column(default=0.5)
+    embedding_json: Mapped[str] = mapped_column(Text, default="")
+    source: Mapped[str] = mapped_column(default="conversation")
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
 
 class BotState(Base):

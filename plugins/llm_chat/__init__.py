@@ -9,9 +9,8 @@ import base64
 import asyncio
 from datetime import datetime
 
-import litellm
-
 from launart import Launart
+import litellm
 from arclet.entari import (
     Audio,
     Image,
@@ -27,12 +26,12 @@ from arclet.entari import (
 )
 from arclet.letoderea import BLOCK
 from entari_plugin_llm import LLMToolEvent, llm  # entari: plugin
-from entari_plugin_llm.config import get_model_config
-from arclet.entari.logger import log
 from arclet.entari.filter import superusers
+from arclet.entari.logger import log
 from arclet.entari.plugin import PluginRole
 from entari_plugin_database import select, get_session  # entari: plugin
 from arclet.letoderea.context import Contexts
+from entari_plugin_llm.config import get_model_config
 
 from utils.path import AUDIO_DIR, IMAGE_DIR
 
@@ -51,6 +50,7 @@ from .persona.store import (
 )
 from .persona.runner import run_evaluation
 from .persona.compose import energy_at, compose_persona_prompt
+from .persona.memory_store import load_memory_context, apply_memory_updates
 
 metadata(
     name="llm_chat",
@@ -239,7 +239,9 @@ async def _tag_images(limit: int | None = None, *, retag: bool = False) -> tuple
                     failed += 1
                     continue
                 async with get_session() as db:
-                    existing = (await db.execute(select(ImageTag).where(ImageTag.file_path == rel_path))).scalar_one_or_none()
+                    existing = (
+                        await db.execute(select(ImageTag).where(ImageTag.file_path == rel_path))
+                    ).scalar_one_or_none()
                     if existing is None:
                         db.add(ImageTag(file_path=rel_path, tags=tags))
                     else:
@@ -255,6 +257,7 @@ async def _tag_images(limit: int | None = None, *, retag: bool = False) -> tuple
     except asyncio.CancelledError:
         pass
     return tagged, failed, remaining
+
 
 @command.on("llmchat retag-images")
 @superusers()
@@ -293,6 +296,8 @@ async def on_chat(session: Session, ctx: Contexts):
     mood = await get_mood(channel_id)
     energy = energy_at(datetime.now().hour)
 
+    memory_context = await load_memory_context(config, user_id, channel_id, content)
+
     history = await load_history(channel_id, config.context_window)
     messages = [
         {
@@ -313,6 +318,8 @@ async def on_chat(session: Session, ctx: Contexts):
         resentment=rel.resentment,
         familiarity=rel.familiarity,
         impression=rel.impression,
+        profile_facts=memory_context.profile_facts,
+        relevant_memories=memory_context.relevant_memories,
         user_name=user_name,
     )
 
@@ -347,7 +354,9 @@ async def on_chat(session: Session, ctx: Contexts):
         if reply and reply != "[END_OF_RESPONSE]":
             transcript.append(f"[你]: {reply}")
         try:
-            result = await run_evaluation(config, config.persona, axes, impression, transcript)
+            result = await run_evaluation(
+                config, config.persona, axes, impression, memory_context.profile_facts, transcript
+            )
         except Exception as e:
             _LOGGER.warning(f"relationship evaluation failed: {e!r}")
             result = None
@@ -356,6 +365,7 @@ async def on_chat(session: Session, ctx: Contexts):
 
             axes = apply_deltas(axes, result)
             impression = result.impression
+            await apply_memory_updates(config, user_id, channel_id, result)
             await set_mood(channel_id, mood + result.mood_delta)
 
     await save_relation(

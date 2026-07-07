@@ -110,7 +110,7 @@ class TestComposePrompt:
         assert "[当前状态]" in prompt
         assert "[对话对象:测试员]" in prompt
         assert "傲娇" in prompt
-        assert "还不了解这个人" in prompt
+        assert "[你对TA的最近印象] 还不了解这个人" in prompt
 
     def test_impression_included(self):
         prompt = compose_persona_prompt(
@@ -126,4 +126,27 @@ class TestComposePrompt:
             user_name="A",
         )
         assert "爱开玩笑的老朋友" in prompt
+        assert "[你对TA的最近印象] 爱开玩笑的老朋友" in prompt
         assert "老朋友" in prompt  # familiarity hint present at >= 60
+
+    def test_memory_sections_are_separate_from_recent_impression(self):
+        prompt = compose_persona_prompt(
+            "persona",
+            0.0,
+            1.0,
+            affection=50,
+            trust=50,
+            dependence=0,
+            resentment=0,
+            familiarity=30,
+            impression="最近很放松",
+            profile_facts=["- preference:drink=tea（置信0.90，证据3次）"],
+            relevant_memories=["- 上次聊到喜欢安静的早晨"],
+            user_name="A",
+        )
+
+        assert "[长期画像]\n- preference:drink=tea（置信0.90，证据3次）" in prompt
+        assert "[相关记忆]\n- 上次聊到喜欢安静的早晨" in prompt
+        assert "[你对TA的最近印象] 最近很放松" in prompt
+        assert prompt.index("[长期画像]") < prompt.index("[相关记忆]")
+        assert prompt.index("[相关记忆]") < prompt.index("[你对TA的最近印象]")

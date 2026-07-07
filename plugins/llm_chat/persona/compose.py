@@ -100,15 +100,24 @@ def compose_persona_prompt(
     resentment: float,
     familiarity: float,
     impression: str,
+    profile_facts: list[str] | None = None,
+    relevant_memories: list[str] | None = None,
     user_name: str,
 ) -> str:
     """persona + built-in scaffold + state block -> full system prompt."""
     stance = derive_stance(affection, trust, dependence, resentment)
-    state_block = (
-        f"[当前状态] 心情:{mood_desc(mood)}，精力:{energy_desc(energy)}\n"
-        f"[对话对象:{user_name}] 关系:{stance}"
-        f"（好感{affection:.0f} 信任{trust:.0f} 依赖{dependence:.0f}"
-        f" 芥蒂{resentment:.0f} 熟悉{familiarity:.0f}{familiarity_hint(familiarity)}）\n"
-        f"[你对TA的印象] {impression or '还不了解这个人'}"
-    )
+    state_lines = [
+        f"[当前状态] 心情:{mood_desc(mood)}，精力:{energy_desc(energy)}",
+        (
+            f"[对话对象:{user_name}] 关系:{stance}"
+            f"（好感{affection:.0f} 信任{trust:.0f} 依赖{dependence:.0f}"
+            f" 芥蒂{resentment:.0f} 熟悉{familiarity:.0f}{familiarity_hint(familiarity)}）"
+        ),
+    ]
+    if profile_facts:
+        state_lines.append("[长期画像]\n" + "\n".join(profile_facts))
+    if relevant_memories:
+        state_lines.append("[相关记忆]\n" + "\n".join(relevant_memories))
+    state_lines.append(f"[你对TA的最近印象] {impression or '还不了解这个人'}")
+    state_block = "\n".join(state_lines)
     return f"{persona}\n\n{SYSTEM_SCAFFOLD}\n\n{state_block}"
