@@ -264,8 +264,17 @@ async def _generate_image_tags(data_url: str) -> str:
     return normalize_image_tags((response.choices[0].message.content or "").strip())  # type: ignore[union-attr]
 
 
-async def _tag_images(limit: int | None = None, *, retag: bool = False) -> tuple[int, int, int]:
-    """Tag local images with vision keywords and return tagged, failed, remaining."""
+async def _tag_images(
+    limit: int | None = None,
+    *,
+    retag: bool = False,
+    on_progress=None,
+) -> tuple[int, int, int]:
+    """Tag local images with vision keywords and return tagged, failed, remaining.
+
+    ``on_progress``: optional async callable(tagged, failed, total) called at
+    start, every 50 images, and at end so commands can report feedback.
+    """
     tagged = 0
     failed = 0
     remaining = 0
@@ -280,10 +289,13 @@ async def _tag_images(limit: int | None = None, *, retag: bool = False) -> tuple
         ]
         batch = candidates if limit is None else candidates[: max(0, limit)]
         remaining = max(0, len(candidates) - len(batch))
+        total = len(batch)
         if not batch:
             return tagged, failed, remaining
         scope = "retagging" if retag else "tagging"
-        _LOGGER.info(f"{scope} {len(batch)} images ({remaining} remain)")
+        _LOGGER.info(f"{scope} {total} images ({remaining} remain)")
+        if on_progress is not None:
+            await on_progress(tagged, failed, total)
         for path in batch:
             rel_path = str(path.relative_to(IMAGE_DIR))
             try:
@@ -313,7 +325,11 @@ async def _tag_images(limit: int | None = None, *, retag: bool = False) -> tuple
             except Exception as e:
                 failed += 1
                 _LOGGER.warning(f"tagging failed for {path.name}: {e!r}")
+            if on_progress is not None and (tagged + failed) % 50 == 0:
+                await on_progress(tagged, failed, total)
             await asyncio.sleep(1)
+        if on_progress is not None:
+            await on_progress(tagged, failed, total)
     except asyncio.CancelledError:
         pass
     except Exception as e:
@@ -322,28 +338,48 @@ async def _tag_images(limit: int | None = None, *, retag: bool = False) -> tuple
     return tagged, failed, remaining
 
 
+async def _progress_reporter(session: Session, scope: str):
+    """Return an async callback that sends tagging progress to the session."""
+
+    async def report(tagged: int, failed: int, total: int) -> None:
+        if total == 0:
+            return
+        if tagged == 0:
+            await session.send(f"开始{scope}，共 {total} 张图片，预计需要约 {total} 秒……")
+        elif tagged + failed >= total:
+            await session.send(f"{scope}完成：已标注 {tagged}，失败 {failed}，剩余 {total - tagged - failed}")
+        else:
+            await session.send(f"{scope}进度：{tagged + failed}/{total}（失败 {failed}）")
+
+    return report
+
+
 @command.on("llmchat retag-images")
 @superusers()
 async def retag_images(session: Session):
     """Retag up to 50 local chat images with the configured vision model."""
-    tagged, failed, remaining = await _tag_images(50, retag=True)
-    await session.send(f"retag images done: tagged={tagged}, failed={failed}, remaining={remaining}")
+    report = await _progress_reporter(session, "重标")
+    tagged, failed, remaining = await _tag_images(50, retag=True, on_progress=report)
+    if tagged + failed < 50:
+        await session.send(f"retag images done: tagged={tagged}, failed={failed}, remaining={remaining}")
 
 
 @command.on("llmchat tag-images")
 @superusers()
 async def tag_images(session: Session):
     """Tag every remaining untagged chat image with the configured vision model."""
-    tagged, failed, remaining = await _tag_images(None, retag=False)
-    await session.send(f"tag images done: tagged={tagged}, failed={failed}, remaining={remaining}")
+    report = await _progress_reporter(session, "标注")
+    tagged, failed, remaining = await _tag_images(None, retag=False, on_progress=report)
+    if tagged + failed == 0:
+        await session.send(f"没有需要标注的图片（剩余 {remaining}）")
 
 
 @command.on("llmchat retag-images-all")
 @superusers()
 async def retag_images_all(session: Session):
     """Retag all local chat images with the configured vision model."""
-    tagged, failed, remaining = await _tag_images(None, retag=True)
-    await session.send(f"retag images done: tagged={tagged}, failed={failed}, remaining={remaining}")
+    report = await _progress_reporter(session, "全量重标")
+    await _tag_images(None, retag=True, on_progress=report)
 
 
 @scheduler.cron("0 4 * * *")
