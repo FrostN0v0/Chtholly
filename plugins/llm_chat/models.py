@@ -73,3 +73,4 @@ class ImageTag(Base):
     file_path: Mapped[str] = mapped_column(unique=True)
     tags: Mapped[str]
     """Comma-separated keywords."""
+    embedding_json: Mapped[str] = mapped_column(Text, default="")

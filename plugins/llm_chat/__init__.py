@@ -6,8 +6,10 @@ function calling. Hard deps: llm + database plugins. TTS is optional.
 """
 
 import base64
+import random
 import asyncio
 from datetime import datetime
+from collections import deque
 
 from launart import Launart
 import litellm
@@ -35,7 +37,13 @@ from entari_plugin_llm.config import get_model_config
 
 from utils.path import AUDIO_DIR, IMAGE_DIR
 
-from .media import match_audio, match_image, parse_audio_text, normalize_image_tags
+from .media import (
+    match_audio,
+    match_image,
+    parse_audio_text,
+    is_random_request,
+    normalize_image_tags,
+)
 from .tools import tts_temp_path, truncate_for_tts
 from .config import LLMChatConfig
 from .models import ImageTag
@@ -50,7 +58,8 @@ from .persona.store import (
 )
 from .persona.runner import run_evaluation
 from .persona.compose import energy_at, compose_persona_prompt
-from .persona.memory_store import load_memory_context, apply_memory_updates
+from .persona.profile import decode_embedding, encode_embedding, cosine_similarity
+from .persona.memory_store import embed_text, load_memory_context, apply_memory_updates
 
 metadata(
     name="llm_chat",
@@ -69,6 +78,39 @@ _LOGGER = log.wrapper("[llm_chat]")
 DINGGONG_DIR = AUDIO_DIR / "dinggong"
 registered_tools: list[str] = []
 
+_RECENT_IMAGE_WINDOW = 5
+_image_vectors: dict[str, list[float]] = {}
+_recent_images: dict[str, deque[str]] = {}
+
+
+async def _pick_image(rows: list[ImageTag], context: str, recent: deque[str]) -> str | None:
+    """Semantic retrieval first, IDF tag matching as fallback; recent picks excluded."""
+    paths = [row.file_path for row in rows]
+    if is_random_request(context):
+        pool = [path for path in paths if path not in recent] or paths
+        return random.choice(pool)
+    query = await embed_text(config, context)
+    if query is not None:
+        candidates: list[tuple[str, float]] = []
+        for row in rows:
+            vector = _image_vectors.get(row.file_path)
+            if vector is None:
+                vector = decode_embedding(row.embedding_json)
+                if vector is None:
+                    continue
+                _image_vectors[row.file_path] = vector
+            score = cosine_similarity(query, vector)
+            if score >= config.image_match_min_similarity:
+                candidates.append((row.file_path, score))
+        candidates.sort(key=lambda item: item[1], reverse=True)
+        top = [path for path, _ in candidates[: config.image_top_candidates]]
+        pool = [path for path in top if path not in recent] or top
+        if pool:
+            return random.choice(pool)
+    tagged = [(row.file_path, row.tags) for row in rows]
+    fallback = [(path, tags) for path, tags in tagged if path not in recent] or tagged
+    return match_image(context, fallback)
+
 
 def _sentence_truncate(text: str, limit: int) -> str:
     return truncate_for_tts(text, limit)
@@ -84,41 +126,54 @@ def _setup_tools() -> list[str]:
         Send a local reaction image or sticker matching compact keywords.
 
         Args:
-            context (str): Short emotion/scenario tags, for example "害羞 可爱 早安"; not a full sentence.
+            context (str): Short emotion/scenario tags, for example "害羞 可爱 早安"; "随便" picks randomly.
         Returns:
             str: Delivery result.
         """
         async with get_session() as db:
-            rows = (await db.execute(select(ImageTag))).scalars().all()
-        rel_path = match_image(context, [(row.file_path, row.tags) for row in rows])
+            rows = list((await db.execute(select(ImageTag))).scalars().all())
+        if not rows:
+            return "没有可用的图片"
+        recent = _recent_images.setdefault(session.channel.id, deque(maxlen=_RECENT_IMAGE_WINDOW))
+        rel_path = await _pick_image(rows, context, recent)
         if rel_path is None:
             return "没有合适的图片"
         full = IMAGE_DIR / rel_path
         if not full.exists():
             return "图片文件已丢失"
         await session.send(MessageChain([Image.of(path=full)]))
+        recent.append(rel_path)
         return f"已发送图片（{context}）"
 
     registered.append("send_image")
 
     if DINGGONG_DIR.exists():
+        clip_texts = [text for file in sorted(DINGGONG_DIR.glob("*.mp3")) if (text := parse_audio_text(file.name))]
+        inventory = "；".join(clip_texts)
 
-        @tools
         async def send_audio(session: Session, context: str) -> str:
-            """
-            Send a prerecorded local voice clip matching compact keywords.
-
-            Args:
-                context (str): Short tone/scenario/line keywords, for example "早安 问好"; not a full sentence.
-            Returns:
-                str: Spoken text in the selected clip.
-            """
-            matched = match_audio(context, sorted(DINGGONG_DIR.glob("*.mp3")))
+            files = sorted(DINGGONG_DIR.glob("*.mp3"))
+            if is_random_request(context):
+                pool = [file for file in files if parse_audio_text(file.name)]
+                matched = random.choice(pool) if pool else None
+            else:
+                matched = match_audio(context, files)
             if matched is None:
                 return "没有合适的语音片段"
             await session.send(MessageChain([Audio.of(path=matched)]))
             return f"已发送语音：{parse_audio_text(matched.name)}"
 
+        send_audio.__doc__ = f"""
+        Send a prerecorded local voice clip matching compact keywords.
+
+        Available clip lines: {inventory}
+
+        Args:
+            context (str): Tone/scenario keywords or a quote from the clip list; "随便" picks randomly.
+        Returns:
+            str: Spoken text in the selected clip.
+        """
+        tools(send_audio)
         registered.append("send_audio")
 
     if config.tts_enabled:
@@ -238,15 +293,20 @@ async def _tag_images(limit: int | None = None, *, retag: bool = False) -> tuple
                 if not tags:
                     failed += 1
                     continue
+                vector = await embed_text(config, tags)
+                embedding_json = encode_embedding(vector) if vector is not None else ""
                 async with get_session() as db:
                     existing = (
                         await db.execute(select(ImageTag).where(ImageTag.file_path == rel_path))
                     ).scalar_one_or_none()
                     if existing is None:
-                        db.add(ImageTag(file_path=rel_path, tags=tags))
+                        db.add(ImageTag(file_path=rel_path, tags=tags, embedding_json=embedding_json))
                     else:
                         existing.tags = tags
+                        if embedding_json:
+                            existing.embedding_json = embedding_json
                     await db.commit()
+                _image_vectors.pop(rel_path, None)
                 tagged += 1
             except asyncio.CancelledError:
                 raise
@@ -256,6 +316,9 @@ async def _tag_images(limit: int | None = None, *, retag: bool = False) -> tuple
             await asyncio.sleep(1)
     except asyncio.CancelledError:
         pass
+    except Exception as e:
+        # e.g. schema migration not finished yet on first startup after a model change
+        _LOGGER.warning(f"image tagging pass aborted: {e!r}")
     return tagged, failed, remaining
 
 
@@ -265,6 +328,14 @@ async def retag_images(session: Session):
     """Retag up to 50 local chat images with the configured vision model."""
     tagged, failed, remaining = await _tag_images(50, retag=True)
     await session.send(f"retag images done: tagged={tagged}, failed={failed}, remaining={remaining}")
+
+
+@command.on("llmchat tag-images")
+@superusers()
+async def tag_images(session: Session):
+    """Tag every remaining untagged chat image with the configured vision model."""
+    tagged, failed, remaining = await _tag_images(None, retag=False)
+    await session.send(f"tag images done: tagged={tagged}, failed={failed}, remaining={remaining}")
 
 
 @command.on("llmchat retag-images-all")

@@ -73,5 +73,9 @@ class LLMChatConfig(BasicConfModel):
     """Vision system prompt for image tag extraction."""
     tag_batch_size: int = 20
     """Max images tagged per startup pass."""
+    image_match_min_similarity: float = 0.30
+    """Minimum cosine similarity for semantic image retrieval."""
+    image_top_candidates: int = 8
+    """Random pick pool size among top semantic image matches."""
     allowed_commands: list[str] = field(default_factory=lambda: ["echo"])
     """Command whitelist for the call_plugin tool."""

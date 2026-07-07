@@ -1,19 +1,29 @@
 """Pure media matching: image tag search + dinggong audio filename matching."""
 
 import re
+import math
+import random
 from difflib import SequenceMatcher
 from pathlib import Path
+from collections import Counter
 
 AUDIO_MATCH_THRESHOLD = 0.4
+AUDIO_NEAR_WINDOW = 0.05
 
 _FILENAME_RE = re.compile(r"^\s*\d+\s*_(?P<text>.+?)_?\s*$")
 _TAG_SPLIT_RE = re.compile(r"[，,、;；\n\r]+")
 _TAG_PREFIX_RE = re.compile(r"^\s*(?:[-*•]+|\d+[.)、])\s*")
 _AUDIO_NORMALIZE_RE = re.compile(r"[\W_\s]+")
 _LOW_SIGNAL_CHARS = frozenset("的了呢啊吗吧呀哦嗯哈我你他她它是不在有和跟给就都也还才又很真这那一个")
-_AUDIO_SYNONYM_GROUPS = (
-    ("早上问好", "早安", "早上好", "您早上好", "问早"),
-)
+_AUDIO_SYNONYM_GROUPS = (("早上问好", "早安", "早上好", "您早上好", "问早"),)
+_RANDOM_REQUEST_RE = re.compile(r"随便|随意|任意|都行|都可以|random", re.IGNORECASE)
+
+_DEFAULT_RNG = random.Random()
+
+
+def is_random_request(text: str) -> bool:
+    """Whether the request asks for an arbitrary pick instead of a match."""
+    return bool(_RANDOM_REQUEST_RE.search(text))
 
 
 def normalize_image_tags(text: str, *, limit: int = 20) -> str:
@@ -89,37 +99,64 @@ def _audio_match_score(context: str, text: str) -> float:
     )
 
 
-def match_audio(context: str, files: list[Path]) -> Path | None:
-    """Fuzzy-match `context` against parsed clip texts; best above threshold wins."""
+def match_audio(context: str, files: list[Path], *, rng: random.Random | None = None) -> Path | None:
+    """Fuzzy-match `context` against parsed clip texts.
+
+    Candidates within AUDIO_NEAR_WINDOW of the best score are picked randomly
+    so identical requests can vary between near-equivalent clips.
+    """
     if not context.strip():
         return None
-    best: tuple[float, Path] | None = None
+    scored: list[tuple[float, Path]] = []
     for file in files:
         text = parse_audio_text(file.name)
         if text is None:
             continue
-        score = _audio_match_score(context, text)
-        if best is None or score > best[0]:
-            best = (score, file)
-    if best is None or best[0] < AUDIO_MATCH_THRESHOLD:
+        scored.append((_audio_match_score(context, text), file))
+    if not scored:
         return None
-    return best[1]
+    best = max(score for score, _ in scored)
+    if best < AUDIO_MATCH_THRESHOLD:
+        return None
+    window = [file for score, file in scored if score >= best - AUDIO_NEAR_WINDOW]
+    return (rng or _DEFAULT_RNG).choice(window)
 
 
-def match_image(context: str, tagged: list[tuple[str, str]]) -> str | None:
-    """Keyword-overlap match: `tagged` is [(file_path, "tag1,tag2,...")].
+def rank_images_by_tags(context: str, tagged: list[tuple[str, str]]) -> list[tuple[str, float]]:
+    """IDF-weighted tag-hit ranking: rare tags outweigh ubiquitous style tags.
 
-    Returns the file path with the highest tag-hit count, or None when no
-    tag appears in the context.
+    Each tag hit contributes log((N + 1) / df); a tag carried by nearly every
+    image contributes almost nothing, so one discriminative hit (e.g. 生气)
+    beats several generic hits (动漫/可爱). Zero-score entries are dropped.
     """
-    if not context.strip():
-        return None
-    best_path: str | None = None
-    best_hits = 0
+    if not context.strip() or not tagged:
+        return []
+    total = len(tagged)
+    tag_sets: list[tuple[str, set[str]]] = []
+    df: Counter[str] = Counter()
     for path, tag_str in tagged:
-        tags = [t.strip() for t in _TAG_SPLIT_RE.split(tag_str) if t.strip()]
-        hits = sum(1 for tag in tags if tag and tag in context)
-        if hits > best_hits:
-            best_hits = hits
-            best_path = path
-    return best_path
+        tags = {t.strip() for t in _TAG_SPLIT_RE.split(tag_str) if t.strip()}
+        tag_sets.append((path, tags))
+        df.update(tags)
+    scored: list[tuple[str, float]] = []
+    for path, tags in tag_sets:
+        score = sum(math.log((total + 1) / df[tag]) for tag in tags if tag in context)
+        if score > 0.0:
+            scored.append((path, score))
+    scored.sort(key=lambda item: item[1], reverse=True)
+    return scored
+
+
+def match_image(
+    context: str,
+    tagged: list[tuple[str, str]],
+    *,
+    rng: random.Random | None = None,
+) -> str | None:
+    """Best IDF-ranked image; ties at the top score are picked randomly."""
+    ranked = rank_images_by_tags(context, tagged)
+    if not ranked:
+        return None
+    best = ranked[0][1]
+    top = [path for path, score in ranked if score >= best - 1e-9]
+    return (rng or _DEFAULT_RNG).choice(top)

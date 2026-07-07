@@ -75,6 +75,7 @@ plugins:
     $filter: channel.type is public
     persona: 你是珂朵莉(Chtholly)，红发蓝瞳的少女，性格底色温柔、略带倔强。
     image_tag_model: doubao
+    tag_batch_size: 50
     memory_enabled: true
     memory_embedding_model: "volcengine/doubao-embedding-vision-251215"
     memory_embedding_api_key: ${{ env.DOUBAO_API_KEY }}
