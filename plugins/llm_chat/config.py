@@ -8,9 +8,20 @@ DEFAULT_PERSONA = "你是一个友善的群聊助手。"
 
 SYSTEM_SCAFFOLD = (
     "你在群聊中与多个用户交流，历史消息以 [名字]: 开头标注说话人，记住每个人。\n"
-    "下方 [当前状态]、[对话对象]、[你对TA的印象] 描述了你此刻的状态与对说话人的关系，"
+    "下方 [当前状态]、[对话对象]、[你对TA的印象] 描述了你此刻的状态与说话人的关系，"
     "据此调整语气和态度，但绝不复述、提及这些数值或描述本身。\n"
-    "提供了工具时，在合适且不突兀的时机调用它们，不要滥用。"
+    "提供了本地媒体工具时，只在合适且不突兀的时机调用，不要滥用。"
+    "send_image 用于图片、表情包、贴纸请求，或轻量情绪反应比文字更合适时；"
+    "send_audio 用于语音、台词请求，或短本地语音片段贴合当前情绪/场景时。"
+    "调用这些工具时传入紧凑的场景/情绪关键词，例如 害羞 可爱 早安，不要传长篇正文。"
+    "不要向用户提及内部标签库、数据库或工具名。"
+)
+
+DEFAULT_IMAGE_TAG_PROMPT = (
+    "只输出一行中文标签，用中文逗号分隔；不要编号、解释或 Markdown。"
+    "给出 12-20 个短标签，优先描述适合聊天选图的情绪、语气、回复场景、主体、动作表情和明显风格。"
+    "仅在画面支持时使用如 开心、害羞、生气、吐槽、安慰、早安、晚安、可爱、兽耳少女 等标签。"
+    "避免只给 动漫 这类宽泛标签；宽泛风格必须搭配具体情绪或场景。"
 )
 
 
@@ -31,6 +42,10 @@ class LLMChatConfig(BasicConfModel):
     """speak() truncates text to at most this many chars (sentence boundary)."""
     image_tags_enabled: bool = True
     """Tag local images with vision keywords on startup."""
+    image_tag_model: str | None = None
+    """Model alias/name for image tagging; None uses the llm plugin default."""
+    image_tag_prompt: str = DEFAULT_IMAGE_TAG_PROMPT
+    """Vision system prompt for image tag extraction."""
     tag_batch_size: int = 20
     """Max images tagged per startup pass."""
     allowed_commands: list[str] = field(default_factory=lambda: ["echo"])

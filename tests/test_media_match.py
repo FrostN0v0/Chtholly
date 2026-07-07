@@ -33,6 +33,7 @@ class TestMatchAudio:
         Path("11_你这个笨蛋！_.mp3"),
         Path("13_我才没有为你担心！_.mp3"),
         Path("50_才没有吃醋呢，你在说什么傻话啊！_.mp3"),
+        Path("05_什么“早安”，应该说“您早上好”才对！_.mp3"),
         Path("random.mp3"),
     ]
 
@@ -40,6 +41,21 @@ class TestMatchAudio:
         result = match_audio("你这个笨蛋", self.FILES)
         assert result is not None
         assert result.name == "11_你这个笨蛋！_.mp3"
+
+    def test_morning_intent_match_wins(self):
+        result = match_audio("早上问好", self.FILES)
+        assert result is not None
+        assert result.name == "05_什么“早安”，应该说“您早上好”才对！_.mp3"
+
+    def test_morning_sentence_match_wins(self):
+        result = match_audio("发一段早上问好的语音", self.FILES)
+        assert result is not None
+        assert result.name == "05_什么“早安”，应该说“您早上好”才对！_.mp3"
+
+    def test_exact_old_match_still_passes(self):
+        result = match_audio("我才没有为你担心", self.FILES)
+        assert result is not None
+        assert result.name == "13_我才没有为你担心！_.mp3"
 
     def test_below_threshold_returns_none(self):
         assert match_audio("完全不相关的天气预报内容播报", self.FILES) is None
@@ -63,6 +79,10 @@ class TestMatchImage:
 
     def test_single_hit(self):
         assert match_image("来只猫", self.TAGGED) == "cat/3.jpg"
+
+    def test_chinese_comma_tags_match(self):
+        tagged = [("morning/1.jpg", "早安，开心，可爱")]
+        assert match_image("发一张开心早安的可爱表情图", tagged) == "morning/1.jpg"
 
     def test_no_hits_returns_none(self):
         assert match_image("汽车飞机大炮", self.TAGGED) is None

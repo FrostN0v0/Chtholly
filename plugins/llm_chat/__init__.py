@@ -9,6 +9,8 @@ import base64
 import asyncio
 from datetime import datetime
 
+import litellm
+
 from launart import Launart
 from arclet.entari import (
     Audio,
@@ -25,14 +27,16 @@ from arclet.entari import (
 )
 from arclet.letoderea import BLOCK
 from entari_plugin_llm import LLMToolEvent, llm  # entari: plugin
+from entari_plugin_llm.config import get_model_config
 from arclet.entari.logger import log
+from arclet.entari.filter import superusers
 from arclet.entari.plugin import PluginRole
 from entari_plugin_database import select, get_session  # entari: plugin
 from arclet.letoderea.context import Contexts
 
 from utils.path import AUDIO_DIR, IMAGE_DIR
 
-from .media import match_audio, match_image, parse_audio_text
+from .media import match_audio, match_image, parse_audio_text, normalize_image_tags
 from .tools import tts_temp_path, truncate_for_tts
 from .config import LLMChatConfig
 from .models import ImageTag
@@ -77,10 +81,10 @@ def _setup_tools() -> list[str]:
     @tools
     async def send_image(session: Session, context: str) -> str:
         """
-        Send a local image that matches the requested context.
+        Send a local reaction image or sticker matching compact keywords.
 
         Args:
-            context (str): A few keywords describing the desired image.
+            context (str): Short emotion/scenario tags, for example "害羞 可爱 早安"; not a full sentence.
         Returns:
             str: Delivery result.
         """
@@ -102,10 +106,10 @@ def _setup_tools() -> list[str]:
         @tools
         async def send_audio(session: Session, context: str) -> str:
             """
-            Send a prerecorded local voice clip matching the context.
+            Send a prerecorded local voice clip matching compact keywords.
 
             Args:
-                context (str): The intended tone or short phrase.
+                context (str): Short tone/scenario/line keywords, for example "早安 问好"; not a full sentence.
             Returns:
                 str: Spoken text in the selected clip.
             """
@@ -176,45 +180,96 @@ _LOGGER.info(f"registered LLM tools: {', '.join(_registered) or '(none)'}")
 async def _tag_images_on_startup():
     if not config.image_tags_enabled:
         return
-    task = asyncio.create_task(_tag_images())
+    task = asyncio.create_task(_tag_images(config.tag_batch_size, retag=False))
     plugin.collect_disposes(task.cancel)
 
 
-async def _tag_images():
-    """Tag untagged local images with vision keywords, rate-limited per startup."""
+async def _generate_image_tags(data_url: str) -> str:
+    """Generate normalized image tags without LiteLLM's stale vision capability gate."""
+    model = get_model_config(config.image_tag_model)
+    response = await litellm.acompletion(
+        model=model.name,
+        messages=[
+            {
+                "role": "system",
+                "content": config.image_tag_prompt,
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Tag this image for chat reaction retrieval."},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            },
+        ],
+        base_url=model.base_url,
+        api_key=model.api_key,
+        **model.extra,
+    )
+    return normalize_image_tags((response.choices[0].message.content or "").strip())  # type: ignore[union-attr]
+
+
+async def _tag_images(limit: int | None = None, *, retag: bool = False) -> tuple[int, int, int]:
+    """Tag local images with vision keywords and return tagged, failed, remaining."""
+    tagged = 0
+    failed = 0
+    remaining = 0
     try:
         async with get_session() as db:
             known = {row.file_path for row in (await db.execute(select(ImageTag))).scalars().all()}
         candidates = [
             p
             for p in sorted(IMAGE_DIR.rglob("*"))
-            if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp") and str(p.relative_to(IMAGE_DIR)) not in known
+            if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")
+            and (retag or str(p.relative_to(IMAGE_DIR)) not in known)
         ]
-        batch = candidates[: config.tag_batch_size]
+        batch = candidates if limit is None else candidates[: max(0, limit)]
+        remaining = max(0, len(candidates) - len(batch))
         if not batch:
-            return
-        _LOGGER.info(f"tagging {len(batch)} images ({len(candidates)} untagged remain)")
+            return tagged, failed, remaining
+        scope = "retagging" if retag else "tagging"
+        _LOGGER.info(f"{scope} {len(batch)} images ({remaining} remain)")
         for path in batch:
+            rel_path = str(path.relative_to(IMAGE_DIR))
             try:
                 data = base64.b64encode(path.read_bytes()).decode()
                 mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
-                resp = await llm.vision(
-                    f"data:{mime};base64,{data}",
-                    system="用5个中文关键词描述这张图，逗号分隔，只输出关键词。",
-                )
-                tags = (resp.choices[0].message.content or "").strip()  # type: ignore[union-attr]
+                tags = await _generate_image_tags(f"data:{mime};base64,{data}")
                 if not tags:
+                    failed += 1
                     continue
                 async with get_session() as db:
-                    db.add(ImageTag(file_path=str(path.relative_to(IMAGE_DIR)), tags=tags))
+                    existing = (await db.execute(select(ImageTag).where(ImageTag.file_path == rel_path))).scalar_one_or_none()
+                    if existing is None:
+                        db.add(ImageTag(file_path=rel_path, tags=tags))
+                    else:
+                        existing.tags = tags
                     await db.commit()
+                tagged += 1
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                failed += 1
                 _LOGGER.warning(f"tagging failed for {path.name}: {e!r}")
             await asyncio.sleep(1)
     except asyncio.CancelledError:
         pass
+    return tagged, failed, remaining
+
+@command.on("llmchat retag-images")
+@superusers()
+async def retag_images(session: Session):
+    """Retag up to 50 local chat images with the configured vision model."""
+    tagged, failed, remaining = await _tag_images(50, retag=True)
+    await session.send(f"retag images done: tagged={tagged}, failed={failed}, remaining={remaining}")
+
+
+@command.on("llmchat retag-images-all")
+@superusers()
+async def retag_images_all(session: Session):
+    """Retag all local chat images with the configured vision model."""
+    tagged, failed, remaining = await _tag_images(None, retag=True)
+    await session.send(f"retag images done: tagged={tagged}, failed={failed}, remaining={remaining}")
 
 
 @scheduler.cron("0 4 * * *")

@@ -18,7 +18,8 @@ basic:
     - .
   nickname: "Chtholly"
   superusers:
-    qq: []
+    qq:
+      - 1614591760
   external_dirs: ["./plugins"]
 
 plugins:
@@ -51,6 +52,14 @@ plugins:
     models:
       - name: "gpt-5.5"
         alias: "gpt"
+      - name: "openai/doubao-seed-2-1-pro-260628"
+        alias: "doubao"
+        base_url: "https://ark.cn-beijing.volces.com/api/v3/"
+        api_key: ${{ env.DOUBAO_API_KEY }}
+      - name: "deepseek-ai/DeepSeek-V4-Flash"
+        alias: "deepseek"
+        base_url: "https://api.siliconflow.cn/v1"
+        api_key: ${{ env.DEEPSEEK_API_KEY }}
 
     prompt: |
       1. 你是一个由用户提供信息并回答问题的智能助手。请根据用户提供的信息，尽可能准确和简洁地回答他们的问题。
@@ -65,9 +74,15 @@ plugins:
   llm_chat:
     $filter: channel.type is public
     persona: 你是珂朵莉(Chtholly)，红发蓝瞳的少女，性格底色温柔、略带倔强。
+    image_tag_model: doubao
+    image_tag_prompt: |
+      只输出一行中文标签，用中文逗号分隔；不要编号、解释或 Markdown。
+      给出 12-20 个短标签，优先描述适合聊天选图的情绪、语气、回复场景、主体、动作表情和明显风格。
+      仅在画面支持时使用如 开心、害羞、生气、吐槽、安慰、早安、晚安、可爱、狐娘 等标签。
+      避免只给 动漫 这类宽泛标签；宽泛风格必须搭配具体情绪或场景。
   server:
     direct_adapter: true
-    host: localhost
+    access_token: ${{ env.ONEBOT_TOKEN }}
     port: 8120
     path: satori
     token: chtholly4221
