@@ -354,32 +354,40 @@ async def _progress_reporter(session: Session, scope: str):
     return report
 
 
+async def _run_tagging_in_background(
+    session: Session,
+    scope: str,
+    limit: int | None,
+    *,
+    retag: bool,
+) -> None:
+    """Heavy tagging task detached from the command handler so the handler returns immediately."""
+    report = await _progress_reporter(session, scope)
+    await _tag_images(limit, retag=retag, on_progress=report)
+
+
 @command.on("llmchat retag-images")
 @superusers()
 async def retag_images(session: Session):
     """Retag up to 50 local chat images with the configured vision model."""
-    report = await _progress_reporter(session, "重标")
-    tagged, failed, remaining = await _tag_images(50, retag=True, on_progress=report)
-    if tagged + failed < 50:
-        await session.send(f"retag images done: tagged={tagged}, failed={failed}, remaining={remaining}")
+    asyncio.create_task(_run_tagging_in_background(session, "重标", 50, retag=True))
+    await session.send("已开始重标，最多 50 张，进度稍后报告。")
 
 
 @command.on("llmchat tag-images")
 @superusers()
 async def tag_images(session: Session):
     """Tag every remaining untagged chat image with the configured vision model."""
-    report = await _progress_reporter(session, "标注")
-    tagged, failed, remaining = await _tag_images(None, retag=False, on_progress=report)
-    if tagged + failed == 0:
-        await session.send(f"没有需要标注的图片（剩余 {remaining}）")
+    asyncio.create_task(_run_tagging_in_background(session, "标注", None, retag=False))
+    await session.send("已开始标注剩余图片，进度稍后报告。")
 
 
 @command.on("llmchat retag-images-all")
 @superusers()
 async def retag_images_all(session: Session):
     """Retag all local chat images with the configured vision model."""
-    report = await _progress_reporter(session, "全量重标")
-    await _tag_images(None, retag=True, on_progress=report)
+    asyncio.create_task(_run_tagging_in_background(session, "全量重标", None, retag=True))
+    await session.send("已开始全量重标，预计约 20 分钟，进度稍后报告。")
 
 
 @scheduler.cron("0 4 * * *")
