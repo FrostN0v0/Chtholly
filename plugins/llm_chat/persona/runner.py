@@ -1,0 +1,39 @@
+"""Evaluator LLM call: bypasses the llm plugin's tool loop.
+
+llm.generate() hardcodes tools + tool_choice into every payload, which would
+let the evaluator trigger side-effect tools. We call litellm directly with the
+plugin's resolved model config instead (same credentials, no tools).
+"""
+
+import litellm
+from entari_plugin_llm.config import get_model_config
+
+from .eval import EVAL_SYSTEM, EvalResult, build_eval_prompt, parse_eval_response
+from ..config import LLMChatConfig
+
+
+async def run_evaluation(
+    config: LLMChatConfig,
+    persona: str,
+    axes: dict[str, float],
+    impression: str,
+    transcript: list[str],
+) -> EvalResult | None:
+    """Run the relationship evaluator; returns None when parsing fails."""
+    conf = get_model_config(config.eval_model or config.model)
+    response = await litellm.acompletion(
+        model=conf.name,
+        messages=[
+            {"role": "system", "content": EVAL_SYSTEM},
+            {"role": "user", "content": build_eval_prompt(persona, axes, impression, transcript)},
+        ],
+        base_url=conf.base_url,
+        api_key=conf.api_key,
+        temperature=0,
+        response_format={"type": "json_object"},
+        **conf.extra,
+    )
+    content = response.choices[0].message.content  # type: ignore[union-attr]
+    if not content:
+        return None
+    return parse_eval_response(content, current_impression=impression)

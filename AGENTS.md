@@ -95,6 +95,7 @@ metadata(
 
 plug = Plugin.current()
 
+
 @plug.dispatch(MessageCreatedEvent)
 async def on_message(session: Session):
     if session.content == "ping":
@@ -120,18 +121,23 @@ Entari 内建 `command` 基于 Alconna：
 ```python
 from arclet.entari import command, MessageChain, Session
 
+
 @command.on("echo {content}")
 def echo_(content: str):
     return content
+
 
 @command.command("add <a> <b>")
 def add(a: int, b: int):
     return f"{a + b = }"
 
+
 # 复杂指令用 Alconna 实例
 from arclet.alconna import Alconna, Args, AllParam
+
 alc = Alconna("echo", Args["content", AllParam])
 disp = command.mount(alc)
+
 
 @disp.handle()
 async def echo_(content: command.Match[MessageChain], session: Session):
@@ -144,6 +150,7 @@ async def echo_(content: command.Match[MessageChain], session: Session):
 
 ```python
 from arclet.entari import filter_, plugin, MessageCreatedEvent
+
 
 @plugin.listen(MessageCreatedEvent)
 @filter_.public & filter_.user("123456789")
@@ -158,9 +165,11 @@ async def on_msg(session: Session):
 ```python
 from arclet.entari import BasicConfModel, plugin_config
 
+
 class MyConfig(BasicConfModel):
     foo: str
     bar: int = 42
+
 
 config = plugin_config(MyConfig)
 ```
@@ -244,7 +253,7 @@ config = plugin_config(MyConfig)
 10. **热重载安全**：所有本地插件必须可被 `::auto_reload` 安全重载——避免模块级副作用、全局可变状态、未清理的文件句柄/连接；用 `keeping` + `collect_disposes` 兜底。
 11. **注重文档时效性**： Entari 项目是一个正在频繁迭代开发的项目，当做开发参考时，请检查当前依赖是否为最新，官方文档是否有更新，如果依赖过时，请结合官方文档和相关 commit 更新的内容同步开发文档，以避免过时特性和使用新特性。
 12. **内建插件和可发布插件的区分**：当前项目鼓励将于本bot基建无耦合的插件，作为可发布插件进行开发，你构建插件时需要分辨当前插件是否无耦合可能，然后将可发布并支持其它 Entari 项目安装的插件按独立插件标准开发，为其配备完备独立的 git repo 和 docs 等架构。
-  > 比如 [`mirata`](https://github.com/entanex/miraita) 项目的 argot 功能，完全可以拆除作为独立插件发布，供 entari 生态使用。
+   > 比如 [`mirata`](https://github.com/entanex/miraita) 项目的 argot 功能，完全可以拆除作为独立插件发布，供 entari 生态使用。
 13. **分支纯净性**：所有变更请基于当前 `etr` 分支新建分支，命名结构参考 `etr/feat-xxx`，并在该分支按原子性提交规范落成 `commit` , `commit message` 使用中文，遵循 `gitmoji` 规范，主 `etr` 分支不要随便 commit。
 
 ## 工作流：Plan 模式与 Code 模式

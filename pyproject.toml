@@ -8,7 +8,7 @@ license = { text = "AGPL-3.0" }
 requires-python = ">=3.10, <4.0"
 dependencies = [
     "arclet-entari[full]>=0.18.1",
-    "entari-plugin-browser>=0.6.1",
+    "entari-plugin-browser[jinja2]>=0.6.1",
     "entari-plugin-database>=0.3.3",
     "entari-plugin-llm>=0.2.1",
     "entari-plugin-permission>=0.1.1",
@@ -43,3 +43,13 @@ extra-standard-library = ["typing_extensions"]
 pythonVersion = "3.10"
 pythonPlatform = "All"
 typeCheckingMode = "standard"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
