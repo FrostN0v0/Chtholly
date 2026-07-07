@@ -7,7 +7,7 @@ from datetime import datetime
 from dataclasses import dataclass
 
 import litellm
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 from arclet.entari.logger import log
 from entari_plugin_database import select, get_session
 
@@ -15,7 +15,10 @@ from .eval import EvalResult
 from ..config import LLMChatConfig
 from ..models import UserMemory, UserProfileFact
 from .profile import (
+    MemoryItem,
+    ProfilePatch,
     ProfileFactSnapshot,
+    fact_rank_key,
     decode_embedding,
     encode_embedding,
     cosine_similarity,
@@ -59,16 +62,6 @@ def _format_profile_fact(fact: UserProfileFact) -> str:
     return f"- {fact.category}:{fact.key}={fact.value}（置信{fact.confidence:.2f}，证据{fact.evidence_count}次）"
 
 
-def _profile_sort_key(
-    fact: UserProfileFact,
-    query_embedding: list[float] | None,
-) -> tuple[float, float, int]:
-    embedding = decode_embedding(fact.embedding_json)
-    if query_embedding is not None and embedding is not None:
-        return (cosine_similarity(query_embedding, embedding), fact.confidence, fact.evidence_count)
-    return (fact.confidence, float(fact.evidence_count), 0)
-
-
 async def load_memory_context(config: LLMChatConfig, user_id: str, channel_id: str, query: str) -> MemoryContext:
     async with get_session() as session:
         profile_facts = (
@@ -96,10 +89,16 @@ async def load_memory_context(config: LLMChatConfig, user_id: str, channel_id: s
             .all()
         )
 
-    query_embedding = await embed_text(config, query)
+    # Skip the query-embedding call entirely when there is nothing to rank.
+    query_embedding: list[float] | None = None
+    if profile_facts or memories:
+        query_embedding = await embed_text(config, query)
 
     stable_facts = [fact for fact in profile_facts if fact.confidence >= config.profile_fact_min_confidence]
-    stable_facts.sort(key=lambda fact: _profile_sort_key(fact, query_embedding), reverse=True)
+    stable_facts.sort(
+        key=lambda fact: fact_rank_key(query_embedding, fact.embedding_json, fact.confidence, fact.evidence_count),
+        reverse=True,
+    )
     formatted_facts = [_format_profile_fact(fact) for fact in stable_facts[: config.memory_top_profile_facts]]
 
     relevant_memories: list[str] = []
@@ -150,24 +149,49 @@ async def apply_memory_updates(
     if not config.memory_enabled:
         return
 
-    async with get_session() as session:
-        for patch in result.profile_patches:
-            fact = await _find_profile_fact(session, user_id, channel_id, patch.category, patch.key)
-            existing = (
-                None
-                if fact is None
-                else ProfileFactSnapshot(
-                    value=fact.value,
-                    confidence=fact.confidence,
-                    evidence_count=fact.evidence_count,
-                )
-            )
-            merged = merge_profile_snapshot(existing, patch)
-            embedding = await embed_text(config, f"{patch.category}:{patch.key}:{merged.value}")
-            embedding_json = encode_embedding(embedding) if embedding is not None else ""
-            now = datetime.utcnow()
+    # Deduplicate patches by (category, key), keeping the first occurrence.
+    patches: dict[tuple[str, str], ProfilePatch] = {}
+    for patch in result.profile_patches:
+        patches.setdefault((patch.category, patch.key), patch)
+    if not patches and not result.memory_items:
+        return
 
-            if fact is None:
+    # Read phase: snapshot merge targets in a short-lived session.
+    fact_ids: dict[tuple[str, str], int | None] = {}
+    snapshots: dict[tuple[str, str], ProfileFactSnapshot | None] = {}
+    if patches:
+        async with get_session() as session:
+            for key, patch in patches.items():
+                fact = await _find_profile_fact(session, user_id, channel_id, patch.category, patch.key)
+                fact_ids[key] = None if fact is None else fact.id
+                snapshots[key] = (
+                    None
+                    if fact is None
+                    else ProfileFactSnapshot(
+                        value=fact.value,
+                        confidence=fact.confidence,
+                        evidence_count=fact.evidence_count,
+                    )
+                )
+
+    # Embed phase: network I/O runs with no DB session or transaction open.
+    merged_facts: list[tuple[ProfilePatch, ProfileFactSnapshot, str]] = []
+    for key, patch in patches.items():
+        merged = merge_profile_snapshot(snapshots[key], patch)
+        embedding = await embed_text(config, f"{patch.category}:{patch.key}:{merged.value}")
+        merged_facts.append((patch, merged, encode_embedding(embedding) if embedding is not None else ""))
+
+    memory_rows: list[tuple[MemoryItem, str]] = []
+    for item in result.memory_items:
+        embedding = await embed_text(config, item.text)
+        memory_rows.append((item, encode_embedding(embedding) if embedding is not None else ""))
+
+    # Write phase: one short transaction, no network awaits inside.
+    now = datetime.utcnow()
+    async with get_session() as session:
+        for patch, merged, embedding_json in merged_facts:
+            fact_id = fact_ids[(patch.category, patch.key)]
+            if fact_id is None:
                 session.add(
                     UserProfileFact(
                         user_id=user_id,
@@ -184,23 +208,25 @@ async def apply_memory_updates(
                     )
                 )
             else:
-                fact.value = merged.value
-                fact.confidence = merged.confidence
-                fact.evidence_count = merged.evidence_count
-                fact.last_evidence = patch.evidence
+                values: dict[str, Any] = {
+                    "value": merged.value,
+                    "confidence": merged.confidence,
+                    "evidence_count": merged.evidence_count,
+                    "last_evidence": patch.evidence,
+                    "updated_at": now,
+                }
                 if embedding_json:
-                    fact.embedding_json = embedding_json
-                fact.updated_at = now
+                    values["embedding_json"] = embedding_json
+                await session.execute(update(UserProfileFact).where(UserProfileFact.id == fact_id).values(**values))
 
-        for item in result.memory_items:
-            embedding = await embed_text(config, item.text)
+        for item, embedding_json in memory_rows:
             session.add(
                 UserMemory(
                     user_id=user_id,
                     channel_id=channel_id,
                     text=item.text,
                     importance=item.importance,
-                    embedding_json=encode_embedding(embedding) if embedding is not None else "",
+                    embedding_json=embedding_json,
                     source="conversation",
                 )
             )

@@ -174,3 +174,18 @@ def rank_by_similarity(
     ]
     scored.sort(key=lambda item: item[1], reverse=True)
     return scored[:limit]
+
+
+def fact_rank_key(
+    query_embedding: list[float] | None,
+    embedding_json: str,
+    confidence: float,
+    evidence_count: int,
+) -> tuple[float, float, int]:
+    """Uniform profile-fact ranking key: similarity first, 0.0 when unavailable."""
+    score = 0.0
+    if query_embedding is not None:
+        embedding = decode_embedding(embedding_json)
+        if embedding is not None:
+            score = cosine_similarity(query_embedding, embedding)
+    return (score, confidence, evidence_count)

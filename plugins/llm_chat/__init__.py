@@ -365,7 +365,10 @@ async def on_chat(session: Session, ctx: Contexts):
 
             axes = apply_deltas(axes, result)
             impression = result.impression
-            await apply_memory_updates(config, user_id, channel_id, result)
+            try:
+                await apply_memory_updates(config, user_id, channel_id, result)
+            except Exception as e:
+                _LOGGER.warning(f"memory update failed: {e!r}")
             await set_mood(channel_id, mood + result.mood_delta)
 
     await save_relation(
