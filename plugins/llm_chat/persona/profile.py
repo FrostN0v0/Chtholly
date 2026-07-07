@@ -115,12 +115,26 @@ def normalize_memory_item(raw: object) -> MemoryItem | None:
     return MemoryItem(text=text[:MEMORY_TEXT_MAX_LEN], importance=_clamp01(float(importance)))
 
 
-def merge_profile_snapshot(existing: ProfileFactSnapshot | None, patch: ProfilePatch) -> ProfileFactSnapshot:
+def merge_profile_snapshot(
+    existing: ProfileFactSnapshot | None,
+    patch: ProfilePatch,
+    *,
+    values_match: bool | None = None,
+) -> ProfileFactSnapshot:
+    """Merge a patch into an existing fact snapshot.
+
+    ``values_match`` overrides the same-value check (e.g. semantic equivalence
+    from embeddings); ``None`` falls back to exact string equality. A match
+    keeps the established value text and reinforces confidence.
+    """
     if existing is None:
         return ProfileFactSnapshot(value=patch.value, confidence=patch.confidence, evidence_count=1)
 
+    if values_match is None:
+        values_match = existing.value == patch.value
+
     evidence_count = existing.evidence_count + 1
-    if existing.value == patch.value:
+    if values_match:
         confidence = min(1.0, max(existing.confidence, patch.confidence) + REINFORCE_BONUS)
         return ProfileFactSnapshot(value=existing.value, confidence=confidence, evidence_count=evidence_count)
 

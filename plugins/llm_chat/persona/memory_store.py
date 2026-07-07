@@ -182,11 +182,13 @@ async def apply_memory_updates(
     # Read phase: snapshot merge targets and dedup candidates in a short-lived session.
     fact_ids: dict[tuple[str, str], int | None] = {}
     snapshots: dict[tuple[str, str], ProfileFactSnapshot | None] = {}
+    fact_vectors: dict[tuple[str, str], list[float] | None] = {}
     existing_memories: list[tuple[int, str, float, list[float] | None]] = []
     async with get_session() as session:
         for key, patch in patches.items():
             fact = await _find_profile_fact(session, user_id, channel_id, patch.category, patch.key)
             fact_ids[key] = None if fact is None else fact.id
+            fact_vectors[key] = None if fact is None else decode_embedding(fact.embedding_json)
             snapshots[key] = (
                 None
                 if fact is None
@@ -214,11 +216,26 @@ async def apply_memory_updates(
             ]
 
     # Embed phase: network I/O runs with no DB session or transaction open.
+    # A patch value semantically close to the stored value counts as the same
+    # fact (reinforce); LLM rewordings must not trigger conflict penalties.
     merged_facts: list[tuple[ProfilePatch, ProfileFactSnapshot, str]] = []
     for key, patch in patches.items():
-        merged = merge_profile_snapshot(snapshots[key], patch)
-        embedding = await embed_text(config, f"{patch.category}:{patch.key}:{merged.value}")
-        merged_facts.append((patch, merged, encode_embedding(embedding) if embedding is not None else ""))
+        patch_vector = await embed_text(config, f"{patch.category}:{patch.key}:{patch.value}")
+        existing_vector = fact_vectors[key]
+        values_match: bool | None = None
+        if patch_vector is not None and existing_vector is not None:
+            score = cosine_similarity(patch_vector, existing_vector)
+            values_match = score >= config.profile_value_similarity
+        merged = merge_profile_snapshot(snapshots[key], patch, values_match=values_match)
+        if merged.value == patch.value:
+            embedding_json = encode_embedding(patch_vector) if patch_vector is not None else ""
+        elif existing_vector is None:
+            # Kept the stored value but its embedding is missing: backfill it.
+            backfill = await embed_text(config, f"{patch.category}:{patch.key}:{merged.value}")
+            embedding_json = encode_embedding(backfill) if backfill is not None else ""
+        else:
+            embedding_json = ""
+        merged_facts.append((patch, merged, embedding_json))
 
     existing_candidates = [(mem_id, text, vector) for mem_id, text, _importance, vector in existing_memories]
     existing_importance = {mem_id: importance for mem_id, _text, importance, _vector in existing_memories}

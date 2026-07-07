@@ -55,6 +55,8 @@ class LLMChatConfig(BasicConfModel):
     """Minimum cosine similarity for relevant episodic memories."""
     memory_dedup_similarity: float = 0.92
     """Cosine threshold treating a new memory as duplicate of a stored one."""
+    profile_value_similarity: float = 0.90
+    """Cosine threshold treating a patch value as the same fact (reinforce)."""
     profile_fact_min_confidence: float = 0.55
     """Minimum confidence for storing and injecting stable profile facts."""
     memory_max_records_per_user: int = 200

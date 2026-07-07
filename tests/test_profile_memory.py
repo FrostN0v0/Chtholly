@@ -77,6 +77,51 @@ class TestMergeProfileSnapshot:
         assert merged.confidence == pytest.approx(0.6 + REPLACE_MARGIN)
         assert merged.evidence_count == 5
 
+    def test_values_match_true_reinforces_despite_different_value_strings(self):
+        existing = ProfileFactSnapshot(value="tea", confidence=0.7, evidence_count=2)
+
+        merged = merge_profile_snapshot(existing, _patch("green tea", 0.6), values_match=True)
+
+        assert merged.value == "tea"
+        assert merged.confidence == pytest.approx(0.7 + REINFORCE_BONUS)
+        assert merged.evidence_count == 3
+
+    def test_values_match_true_reinforcement_caps_at_one(self):
+        existing = ProfileFactSnapshot(value="tea", confidence=0.95, evidence_count=2)
+
+        merged = merge_profile_snapshot(existing, _patch("herbal tea", 0.9), values_match=True)
+
+        assert merged.value == "tea"
+        assert merged.confidence == 1.0
+        assert merged.evidence_count == 3
+
+    def test_values_match_false_penalizes_identical_value_strings(self):
+        existing = ProfileFactSnapshot(value="tea", confidence=0.8, evidence_count=4)
+
+        merged = merge_profile_snapshot(existing, _patch("tea", 0.7), values_match=False)
+
+        assert merged.value == "tea"
+        assert merged.confidence == pytest.approx(0.8 - CONFLICT_PENALTY)
+        assert merged.evidence_count == 5
+
+    def test_values_match_false_strong_patch_replaces_with_patch_confidence(self):
+        existing = ProfileFactSnapshot(value="tea", confidence=0.6, evidence_count=4)
+
+        merged = merge_profile_snapshot(existing, _patch("tea", 0.6 + REPLACE_MARGIN), values_match=False)
+
+        assert merged.value == "tea"
+        assert merged.confidence == pytest.approx(0.6 + REPLACE_MARGIN)
+        assert merged.evidence_count == 5
+
+    def test_values_match_ignored_when_existing_is_none(self):
+        patch = _patch("tea", 0.7)
+
+        merged = merge_profile_snapshot(None, patch, values_match=False)
+
+        assert merged.value == "tea"
+        assert merged.confidence == 0.7
+        assert merged.evidence_count == 1
+
 
 class TestSimilarityRanking:
     def test_cosine_similarity_identity_and_mismatched_lengths(self):
