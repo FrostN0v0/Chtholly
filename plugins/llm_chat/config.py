@@ -41,8 +41,8 @@ class LLMChatConfig(BasicConfModel):
     """Recent history lines included as evaluator context."""
     memory_enabled: bool = True
     """Enable long-term profile and semantic memory retrieval."""
-    memory_embedding_model: str = "volcengine/doubao-embedding-text-240715"
-    """LiteLLM embedding model for profile and memory retrieval."""
+    memory_embedding_model: str = "volcengine/doubao-embedding-vision-251215"
+    """Embedding model; '-vision-' models use Ark's multimodal endpoint."""
     memory_embedding_api_key: str | None = None
     """Embedding API key; set from env in entari.yml."""
     memory_embedding_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"

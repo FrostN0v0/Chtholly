@@ -76,7 +76,7 @@ plugins:
     persona: 你是珂朵莉(Chtholly)，红发蓝瞳的少女，性格底色温柔、略带倔强。
     image_tag_model: doubao
     memory_enabled: true
-    memory_embedding_model: "volcengine/doubao-embedding-text-240715"
+    memory_embedding_model: "volcengine/doubao-embedding-vision-251215"
     memory_embedding_api_key: ${{ env.DOUBAO_API_KEY }}
     memory_embedding_base_url: "https://ark.cn-beijing.volces.com/api/v3"
     image_tag_prompt: |

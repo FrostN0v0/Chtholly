@@ -6,6 +6,7 @@ from typing import Any
 from datetime import datetime
 from dataclasses import dataclass
 
+import httpx
 import litellm
 from sqlalchemy import delete, update
 from arclet.entari.logger import log
@@ -41,10 +42,32 @@ def _embedding_from_response(response: Any) -> list[float]:
     return [float(value) for value in embedding]
 
 
+_MULTIMODAL_MARKER = "-vision-"
+
+
+async def _embed_multimodal(config: LLMChatConfig, text: str) -> list[float]:
+    """Call Ark's multimodal endpoint; vision models reject plain /embeddings."""
+    model = config.memory_embedding_model.split("/", 1)[-1]
+    url = config.memory_embedding_base_url.rstrip("/") + "/embeddings/multimodal"
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.post(
+            url,
+            headers={"Authorization": f"Bearer {config.memory_embedding_api_key}"},
+            json={"model": model, "input": [{"type": "text", "text": text}]},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    data = payload["data"]
+    item = data[0] if isinstance(data, list) else data
+    return [float(value) for value in item["embedding"]]
+
+
 async def embed_text(config: LLMChatConfig, text: str) -> list[float] | None:
     if not config.memory_enabled or not text.strip():
         return None
     try:
+        if _MULTIMODAL_MARKER in config.memory_embedding_model:
+            return await _embed_multimodal(config, text)
         response = await litellm.aembedding(
             model=config.memory_embedding_model,
             input=[text],
