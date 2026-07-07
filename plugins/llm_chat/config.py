@@ -37,6 +37,8 @@ class LLMChatConfig(BasicConfModel):
     """Model alias for relationship evaluation; None uses the main model."""
     eval_every_n: int = 1
     """Run the relationship evaluator every N bot replies (per user)."""
+    eval_context_window: int = 8
+    """Recent history lines included as evaluator context."""
     memory_enabled: bool = True
     """Enable long-term profile and semantic memory retrieval."""
     memory_embedding_model: str = "volcengine/doubao-embedding-text-240715"

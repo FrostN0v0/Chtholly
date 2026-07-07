@@ -350,12 +350,28 @@ async def on_chat(session: Session, ctx: Contexts):
 
     if counter >= config.eval_every_n:
         counter = 0
-        transcript = [f"[{user_name}]: {content}"]
+        recent = history[-config.eval_context_window :] if config.eval_context_window > 0 else []
+
+        def _transcript_line(row) -> str:
+            if row.role == "assistant":
+                return f"[你]: {row.content}"
+            if row.user_id == user_id:
+                return f"[评估对象 {row.user_name}]: {row.content}"
+            return f"[{row.user_name}]: {row.content}"
+
+        transcript = [_transcript_line(row) for row in recent]
+        transcript.append(f"[评估对象 {user_name}]: {content}")
         if reply and reply != "[END_OF_RESPONSE]":
             transcript.append(f"[你]: {reply}")
         try:
             result = await run_evaluation(
-                config, config.persona, axes, impression, memory_context.profile_facts, transcript
+                config,
+                config.persona,
+                axes,
+                impression,
+                memory_context.profile_facts,
+                transcript,
+                user_name,
             )
         except Exception as e:
             _LOGGER.warning(f"relationship evaluation failed: {e!r}")
