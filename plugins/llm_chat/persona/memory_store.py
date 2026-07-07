@@ -15,13 +15,13 @@ from .eval import EvalResult
 from ..config import LLMChatConfig
 from ..models import UserMemory, UserProfileFact
 from .profile import (
-    MemoryItem,
     ProfilePatch,
     ProfileFactSnapshot,
     fact_rank_key,
     decode_embedding,
     encode_embedding,
     cosine_similarity,
+    match_duplicate_memory,
     merge_profile_snapshot,
 )
 
@@ -156,23 +156,39 @@ async def apply_memory_updates(
     if not patches and not result.memory_items:
         return
 
-    # Read phase: snapshot merge targets in a short-lived session.
+    # Read phase: snapshot merge targets and dedup candidates in a short-lived session.
     fact_ids: dict[tuple[str, str], int | None] = {}
     snapshots: dict[tuple[str, str], ProfileFactSnapshot | None] = {}
-    if patches:
-        async with get_session() as session:
-            for key, patch in patches.items():
-                fact = await _find_profile_fact(session, user_id, channel_id, patch.category, patch.key)
-                fact_ids[key] = None if fact is None else fact.id
-                snapshots[key] = (
-                    None
-                    if fact is None
-                    else ProfileFactSnapshot(
-                        value=fact.value,
-                        confidence=fact.confidence,
-                        evidence_count=fact.evidence_count,
+    existing_memories: list[tuple[int, str, float, list[float] | None]] = []
+    async with get_session() as session:
+        for key, patch in patches.items():
+            fact = await _find_profile_fact(session, user_id, channel_id, patch.category, patch.key)
+            fact_ids[key] = None if fact is None else fact.id
+            snapshots[key] = (
+                None
+                if fact is None
+                else ProfileFactSnapshot(
+                    value=fact.value,
+                    confidence=fact.confidence,
+                    evidence_count=fact.evidence_count,
+                )
+            )
+        if result.memory_items:
+            rows = (
+                (
+                    await session.execute(
+                        select(UserMemory).where(
+                            UserMemory.user_id == user_id,
+                            UserMemory.channel_id == channel_id,
+                        )
                     )
                 )
+                .scalars()
+                .all()
+            )
+            existing_memories = [
+                (row.id, row.text, row.importance, decode_embedding(row.embedding_json)) for row in rows
+            ]
 
     # Embed phase: network I/O runs with no DB session or transaction open.
     merged_facts: list[tuple[ProfilePatch, ProfileFactSnapshot, str]] = []
@@ -181,10 +197,34 @@ async def apply_memory_updates(
         embedding = await embed_text(config, f"{patch.category}:{patch.key}:{merged.value}")
         merged_facts.append((patch, merged, encode_embedding(embedding) if embedding is not None else ""))
 
-    memory_rows: list[tuple[MemoryItem, str]] = []
+    existing_candidates = [(mem_id, text, vector) for mem_id, text, _importance, vector in existing_memories]
+    existing_importance = {mem_id: importance for mem_id, _text, importance, _vector in existing_memories}
+    importance_bumps: dict[int, float] = {}
+    # Pending rows: [text, importance, embedding_json, vector].
+    pending: list[list[Any]] = []
     for item in result.memory_items:
-        embedding = await embed_text(config, item.text)
-        memory_rows.append((item, encode_embedding(embedding) if embedding is not None else ""))
+        vector = await embed_text(config, item.text)
+        duplicate_id = match_duplicate_memory(
+            vector,
+            item.text,
+            existing_candidates,
+            min_similarity=config.memory_dedup_similarity,
+        )
+        if duplicate_id is not None:
+            current = importance_bumps.get(duplicate_id, existing_importance[duplicate_id])
+            importance_bumps[duplicate_id] = max(current, item.importance)
+            continue
+        pending_candidates = [(index, row[0], row[3]) for index, row in enumerate(pending)]
+        pending_index = match_duplicate_memory(
+            vector,
+            item.text,
+            pending_candidates,
+            min_similarity=config.memory_dedup_similarity,
+        )
+        if pending_index is not None:
+            pending[pending_index][1] = max(pending[pending_index][1], item.importance)
+            continue
+        pending.append([item.text, item.importance, encode_embedding(vector) if vector is not None else "", vector])
 
     # Write phase: one short transaction, no network awaits inside.
     now = datetime.utcnow()
@@ -219,13 +259,19 @@ async def apply_memory_updates(
                     values["embedding_json"] = embedding_json
                 await session.execute(update(UserProfileFact).where(UserProfileFact.id == fact_id).values(**values))
 
-        for item, embedding_json in memory_rows:
+        # Reinforced memories refresh created_at so pruning treats them as fresh.
+        for mem_id, importance in importance_bumps.items():
+            await session.execute(
+                update(UserMemory).where(UserMemory.id == mem_id).values(importance=importance, created_at=now)
+            )
+
+        for text, importance, embedding_json, _vector in pending:
             session.add(
                 UserMemory(
                     user_id=user_id,
                     channel_id=channel_id,
-                    text=item.text,
-                    importance=item.importance,
+                    text=text,
+                    importance=importance,
                     embedding_json=embedding_json,
                     source="conversation",
                 )

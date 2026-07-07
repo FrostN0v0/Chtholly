@@ -189,3 +189,29 @@ def fact_rank_key(
         if embedding is not None:
             score = cosine_similarity(query_embedding, embedding)
     return (score, confidence, evidence_count)
+
+
+def match_duplicate_memory(
+    embedding: list[float] | None,
+    text: str,
+    candidates: list[tuple[int, str, list[float] | None]],
+    *,
+    min_similarity: float,
+) -> int | None:
+    """Return the id of a near-duplicate candidate memory, or None.
+
+    Exact text equality always matches. Semantic match requires both vectors
+    and the best cosine score >= min_similarity; first best wins on ties.
+    """
+    best_id: int | None = None
+    best_score = -1.0
+    for cand_id, cand_text, cand_embedding in candidates:
+        if text == cand_text:
+            return cand_id
+        if embedding is None or cand_embedding is None:
+            continue
+        score = cosine_similarity(embedding, cand_embedding)
+        if score >= min_similarity and score > best_score:
+            best_id = cand_id
+            best_score = score
+    return best_id

@@ -16,6 +16,7 @@ from llm_chat_src.persona.profile import (  # noqa: E402
     cosine_similarity,
     fact_rank_key,
     rank_by_similarity,
+    match_duplicate_memory,
     merge_profile_snapshot,
 )
 
@@ -97,6 +98,85 @@ class TestSimilarityRanking:
 
         assert [text for text, _score in ranked] == ["exact", "diagonal"]
         assert [score for _text, score in ranked] == pytest.approx([1.0, 2**-0.5])
+
+
+class TestMatchDuplicateMemory:
+    def test_exact_text_match_returns_candidate_id_without_embeddings(self):
+        match = match_duplicate_memory(
+            None,
+            "likes tea",
+            [(7, "likes tea", None)],
+            min_similarity=1.0,
+        )
+
+        assert match == 7
+
+    def test_semantic_match_respects_min_similarity_and_rejects_orthogonal_candidate(self):
+        match = match_duplicate_memory(
+            [1, 0],
+            "likes tea",
+            [(8, "prefers tea", [1, 0])],
+            min_similarity=0.92,
+        )
+        miss = match_duplicate_memory(
+            [1, 0],
+            "likes tea",
+            [(9, "prefers coffee", [0, 1])],
+            min_similarity=0.92,
+        )
+
+        assert match == 8
+        assert miss is None
+
+    def test_semantic_match_includes_exact_threshold_boundary(self):
+        match = match_duplicate_memory(
+            [1, 0],
+            "likes tea",
+            [(10, "prefers tea", [1, 0])],
+            min_similarity=1.0,
+        )
+
+        assert match == 10
+
+    def test_missing_embeddings_do_not_match_without_exact_text(self):
+        missing_query_embedding = match_duplicate_memory(
+            None,
+            "likes tea",
+            [(11, "prefers tea", [1, 0])],
+            min_similarity=0.5,
+        )
+        missing_candidate_embedding = match_duplicate_memory(
+            [1, 0],
+            "likes tea",
+            [(12, "prefers tea", None)],
+            min_similarity=0.5,
+        )
+
+        assert missing_query_embedding is None
+        assert missing_candidate_embedding is None
+
+    def test_best_scoring_candidate_wins_and_ties_keep_first_candidate(self):
+        best_match = match_duplicate_memory(
+            [1, 0],
+            "likes tea",
+            [
+                (13, "prefers green tea", [0.8, 0.6]),
+                (14, "prefers black tea", [1, 0]),
+            ],
+            min_similarity=0.7,
+        )
+        first_tied_match = match_duplicate_memory(
+            [1, 0],
+            "likes tea",
+            [
+                (15, "prefers green tea", [1, 0]),
+                (16, "prefers black tea", [1, 0]),
+            ],
+            min_similarity=0.7,
+        )
+
+        assert best_match == 14
+        assert first_tied_match == 15
 
 
 class TestFactRankKey:
