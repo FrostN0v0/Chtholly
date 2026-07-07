@@ -1,17 +1,20 @@
 """DB load/save helpers for relations, bot mood and decay."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from sqlalchemy import update
+from sqlalchemy import delete, update
 from entari_plugin_database import select, get_session
 
-from ..models import BotState, Conversation, UserRelation
+from ..models import BotState, Conversation, UserRelation, UserProfileFact
 
 AFFECTION_BASELINE = 30.0
 TRUST_BASELINE = 30.0
 DAILY_DRIFT = 1.0
 MINOR_DRIFT = 0.5
 FAMILIARITY_DECAY = 0.5
+FACT_IDLE_DAYS = 30
+FACT_DAILY_DECAY = 0.01
+FACT_CULL_THRESHOLD = 0.2
 
 
 async def get_relation(user_id: str, channel_id: str) -> UserRelation:
@@ -110,7 +113,7 @@ def _drift(value: float, baseline: float, step: float) -> float:
 
 
 async def nightly_decay() -> None:
-    """Time physics only: mood halves, axes drift toward baselines."""
+    """Time physics only: mood halves, axes drift, idle profile facts fade."""
     async with get_session() as session:
         states = (await session.execute(select(BotState))).scalars().all()
         for state in states:
@@ -122,4 +125,19 @@ async def nightly_decay() -> None:
             rel.dependence = _drift(rel.dependence, 0.0, MINOR_DRIFT)
             rel.resentment = _drift(rel.resentment, 0.0, MINOR_DRIFT)
             rel.familiarity = max(0.0, rel.familiarity - FAMILIARITY_DECAY)
+
+        # Idle profile facts fade nightly and are culled once too weak to
+        # matter; re-mention revives them through the merge reinforce path.
+        idle_cutoff = datetime.utcnow() - timedelta(days=FACT_IDLE_DAYS)
+        await session.execute(
+            update(UserProfileFact)
+            .where(UserProfileFact.updated_at < idle_cutoff)
+            .values(confidence=UserProfileFact.confidence - FACT_DAILY_DECAY)
+        )
+        await session.execute(
+            delete(UserProfileFact).where(
+                UserProfileFact.updated_at < idle_cutoff,
+                UserProfileFact.confidence < FACT_CULL_THRESHOLD,
+            )
+        )
         await session.commit()
