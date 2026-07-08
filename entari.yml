@@ -8,6 +8,8 @@ basic:
   ignore_self_message: true
   log:
     level: debug
+    # Silence openai SDK debug dumps (full vision payloads incl. base64 images).
+    ignores: ["openai*"]
     save: true
     rotation: "00:00"
     compression: "zip"
@@ -96,6 +98,8 @@ plugins:
     port: 8120
     path: satori
     token: chtholly4221
+    options:
+      access_log: false # kill /api/health polling and other HTTP access lines
     adapters:
       - $path: "@onebot11.reverse"
         access_token: ${{ env.ONEBOT_TOKEN }}
