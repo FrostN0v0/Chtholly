@@ -206,7 +206,7 @@ def _setup_tools() -> list[str]:
     if config.allowed_commands:
 
         @tools
-        async def call_plugin(command_line: str) -> str:
+        async def call_plugin(session: Session, command_line: str) -> str:
             """
             Execute one whitelisted bot command.
 
@@ -218,7 +218,7 @@ def _setup_tools() -> list[str]:
             head = command_line.split(maxsplit=1)[0] if command_line.strip() else ""
             if head not in config.allowed_commands:
                 return f"指令 {head or '(空)'} 不在允许列表中"
-            result = await command.execute(command_line)
+            result = await command.execute(command_line, session)
             return str(result) if result is not None else "指令已执行"
 
         registered.append("call_plugin")
