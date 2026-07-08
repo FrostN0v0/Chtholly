@@ -14,6 +14,7 @@ from collections import deque
 from launart import Launart
 import litellm
 from arclet.entari import (
+    At,
     Audio,
     Image,
     Session,
@@ -21,12 +22,11 @@ from arclet.entari import (
     MessageCreatedEvent,
     plugin,
     command,
-    filter_,
     metadata,
     scheduler,
     plugin_config,
 )
-from arclet.letoderea import BLOCK
+from arclet.letoderea import BLOCK, enter_if
 from entari_plugin_llm import LLMToolEvent, llm  # entari: plugin
 from arclet.entari.filter import superusers
 from arclet.entari.logger import log
@@ -496,8 +496,17 @@ async def _nightly_decay():
     _LOGGER.info("nightly relationship decay applied")
 
 
+async def _addressed_to_me(session: Session, is_reply_me: bool = False, is_notice_me: bool = False) -> bool:
+    """to_me plus At(bot) at ANY position: the framework only detects a leading At,
+    so "text @bot" and "quote someone + @bot" would otherwise be ignored."""
+    if is_reply_me or is_notice_me:
+        return True
+    self_id = session.account.self_id
+    return any(at.id == self_id for at in session.elements.select(At) if at.id)
+
+
 @plug.dispatch(MessageCreatedEvent).register(priority=900)
-@filter_.to_me
+@enter_if(_addressed_to_me)
 async def on_chat(session: Session, ctx: Contexts):
     content = session.elements.extract_plain_text().strip()
 
