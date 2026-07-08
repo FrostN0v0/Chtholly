@@ -94,6 +94,20 @@ async def help_menu(session: Session, category: Match[str]):
         await session.send(_plain_fallback(grouped))
         return
 
+    # graiax-playwright's page contextmanager has a `return` inside `finally`
+    # that swallows render exceptions, yielding None instead of raising.
+    if not isinstance(png, bytes) or not png:
+        from arclet.entari.logger import log
+
+        log.plugin.warning("help menu render returned no data (upstream swallowed the error)")
+        await session.send(_plain_fallback(grouped))
+        return
+
     if config.cache_ttl > 0:
-        cache.write_bytes(png)
+        try:
+            cache.write_bytes(png)
+        except OSError:
+            from arclet.entari.logger import log
+
+            log.plugin.warning("help menu cache write failed")
     await session.send(MessageChain([Image.of(raw=png, mime="image/png")]))
