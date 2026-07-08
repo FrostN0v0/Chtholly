@@ -82,6 +82,7 @@ registered_tools: list[str] = []
 
 _RECENT_IMAGE_WINDOW = 5
 _IMAGE_FETCH_TIMEOUT = 15.0
+_VISION_TIMEOUT = 120.0
 _IMAGE_FETCH_MAX_BYTES = 6 * 1024 * 1024
 _IMAGE_DESC_CACHE_MAX = 128
 _image_vectors: dict[str, list[float]] = {}
@@ -309,7 +310,7 @@ async def _vision_completion(data_url: str, system_prompt: str, user_text: str) 
         ],
         base_url=model.base_url,
         api_key=model.api_key,
-        timeout=30,
+        timeout=_VISION_TIMEOUT,
         **model.extra,
     )
     return (response.choices[0].message.content or "").strip()  # type: ignore[union-attr]
