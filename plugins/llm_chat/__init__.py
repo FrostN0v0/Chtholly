@@ -231,12 +231,52 @@ _registered = _setup_tools()
 _LOGGER.info(f"registered LLM tools: {', '.join(_registered) or '(none)'}")
 
 
+_active_tag_pass: asyncio.Task | None = None
+_active_tag_scope: str | None = None
+
+
+def _cancel_active_tag_pass() -> None:
+    if _active_tag_pass is not None and not _active_tag_pass.done():
+        _active_tag_pass.cancel()
+
+
+plugin.collect_disposes(_cancel_active_tag_pass)
+
+
+async def _launch_tag_pass(
+    scope: str,
+    limit: int | None,
+    *,
+    retag: bool,
+    session: Session | None = None,
+) -> str:
+    """Start an exclusive tagging pass, cancelling any pass already running.
+
+    Last command wins: the startup incremental pass and manual retag passes
+    never run concurrently, so vision calls and DB writes are not duplicated.
+    """
+    global _active_tag_pass, _active_tag_scope
+    cancelled = None
+    if _active_tag_pass is not None and not _active_tag_pass.done():
+        cancelled = _active_tag_scope
+        _active_tag_pass.cancel()
+        try:
+            await _active_tag_pass
+        except asyncio.CancelledError:
+            pass
+    on_progress = await _progress_reporter(session, scope) if session is not None else None
+    _active_tag_scope = scope
+    _active_tag_pass = asyncio.create_task(_tag_images(limit, retag=retag, on_progress=on_progress))
+    if cancelled:
+        return f"已终止运行中的「{cancelled}」任务，开始{scope}，"
+    return f"已开始{scope}，"
+
+
 @plug.use("::startup")
 async def _tag_images_on_startup():
     if not config.image_tags_enabled:
         return
-    task = asyncio.create_task(_tag_images(config.tag_batch_size, retag=False))
-    plugin.collect_disposes(task.cancel)
+    await _launch_tag_pass("启动增量标注", config.tag_batch_size, retag=False)
 
 
 async def _generate_image_tags(data_url: str) -> str:
@@ -354,40 +394,28 @@ async def _progress_reporter(session: Session, scope: str):
     return report
 
 
-async def _run_tagging_in_background(
-    session: Session,
-    scope: str,
-    limit: int | None,
-    *,
-    retag: bool,
-) -> None:
-    """Heavy tagging task detached from the command handler so the handler returns immediately."""
-    report = await _progress_reporter(session, scope)
-    await _tag_images(limit, retag=retag, on_progress=report)
-
-
 @command.on("llmchat retag-images")
 @superusers()
 async def retag_images(session: Session):
     """Retag up to 50 local chat images with the configured vision model."""
-    asyncio.create_task(_run_tagging_in_background(session, "重标", 50, retag=True))
-    await session.send("已开始重标，最多 50 张，进度稍后报告。")
+    status = await _launch_tag_pass("重标 50 张", 50, retag=True, session=session)
+    await session.send(status + "进度稍后报告。")
 
 
 @command.on("llmchat tag-images")
 @superusers()
 async def tag_images(session: Session):
     """Tag every remaining untagged chat image with the configured vision model."""
-    asyncio.create_task(_run_tagging_in_background(session, "标注", None, retag=False))
-    await session.send("已开始标注剩余图片，进度稍后报告。")
+    status = await _launch_tag_pass("增量标注", None, retag=False, session=session)
+    await session.send(status + "进度稍后报告。")
 
 
 @command.on("llmchat retag-images-all")
 @superusers()
 async def retag_images_all(session: Session):
     """Retag all local chat images with the configured vision model."""
-    asyncio.create_task(_run_tagging_in_background(session, "全量重标", None, retag=True))
-    await session.send("已开始全量重标，预计约 20 分钟，进度稍后报告。")
+    status = await _launch_tag_pass("全量重标", None, retag=True, session=session)
+    await session.send(status + "预计约 20 分钟，进度稍后报告。")
 
 
 @scheduler.cron("0 4 * * *")
