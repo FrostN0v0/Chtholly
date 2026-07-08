@@ -56,7 +56,7 @@ plugins:
     models:
       - name: "gpt-5.5"
         alias: "gpt"
-      - name: "openai/doubao-seed-2-1-pro-260628"
+      - name: "openai/doubao-seed-evolving"
         alias: "doubao"
         base_url: "https://ark.cn-beijing.volces.com/api/v3/"
         api_key: ${{ env.DOUBAO_API_KEY }}
