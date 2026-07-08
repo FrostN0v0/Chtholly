@@ -312,11 +312,11 @@ async def _tag_images(
 ) -> tuple[int, int, int]:
     """Tag local images with vision keywords and return tagged, failed, remaining.
 
+    Images are processed with bounded concurrency (config.tag_concurrency).
     ``on_progress``: optional async callable(tagged, failed, total) called at
-    start, every 50 images, and at end so commands can report feedback.
+    start, every 50 completions, and at end.
     """
-    tagged = 0
-    failed = 0
+    counter = {"tagged": 0, "failed": 0}
     remaining = 0
     try:
         async with get_session() as db:
@@ -331,65 +331,75 @@ async def _tag_images(
         remaining = max(0, len(candidates) - len(batch))
         total = len(batch)
         if not batch:
-            return tagged, failed, remaining
+            if on_progress is not None:
+                await on_progress(0, 0, 0)
+            return counter["tagged"], counter["failed"], remaining
         scope = "retagging" if retag else "tagging"
         _LOGGER.info(f"{scope} {total} images ({remaining} remain)")
         if on_progress is not None:
-            await on_progress(tagged, failed, total)
-        for path in batch:
+            await on_progress(0, 0, total)
+        semaphore = asyncio.Semaphore(max(1, config.tag_concurrency))
+
+        async def _tag_one(path) -> None:
             rel_path = str(path.relative_to(IMAGE_DIR))
-            try:
-                data = base64.b64encode(path.read_bytes()).decode()
-                mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
-                tags = await _generate_image_tags(f"data:{mime};base64,{data}")
-                if not tags:
-                    failed += 1
-                    continue
-                vector = await embed_text(config, tags)
-                embedding_json = encode_embedding(vector) if vector is not None else ""
-                async with get_session() as db:
-                    existing = (
-                        await db.execute(select(ImageTag).where(ImageTag.file_path == rel_path))
-                    ).scalar_one_or_none()
-                    if existing is None:
-                        db.add(ImageTag(file_path=rel_path, tags=tags, embedding_json=embedding_json))
-                    else:
-                        existing.tags = tags
-                        if embedding_json:
-                            existing.embedding_json = embedding_json
-                    await db.commit()
-                _image_vectors.pop(rel_path, None)
-                tagged += 1
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                failed += 1
-                _LOGGER.warning(f"tagging failed for {path.name}: {e!r}")
-            if on_progress is not None and (tagged + failed) % 50 == 0:
-                await on_progress(tagged, failed, total)
-            await asyncio.sleep(1)
+            async with semaphore:
+                try:
+                    data = base64.b64encode(path.read_bytes()).decode()
+                    mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+                    tags = await _generate_image_tags(f"data:{mime};base64,{data}")
+                    if not tags:
+                        counter["failed"] += 1
+                        return
+                    vector = await embed_text(config, tags)
+                    embedding_json = encode_embedding(vector) if vector is not None else ""
+                    async with get_session() as db:
+                        existing = (
+                            await db.execute(select(ImageTag).where(ImageTag.file_path == rel_path))
+                        ).scalar_one_or_none()
+                        if existing is None:
+                            db.add(ImageTag(file_path=rel_path, tags=tags, embedding_json=embedding_json))
+                        else:
+                            existing.tags = tags
+                            if embedding_json:
+                                existing.embedding_json = embedding_json
+                        await db.commit()
+                    _image_vectors.pop(rel_path, None)
+                    counter["tagged"] += 1
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    counter["failed"] += 1
+                    _LOGGER.warning(f"tagging failed for {path.name}: {e!r}")
+            done = counter["tagged"] + counter["failed"]
+            if on_progress is not None and done % 50 == 0 and done < total:
+                await on_progress(counter["tagged"], counter["failed"], total)
+
+        await asyncio.gather(*(_tag_one(path) for path in batch))
         if on_progress is not None:
-            await on_progress(tagged, failed, total)
+            await on_progress(counter["tagged"], counter["failed"], total)
     except asyncio.CancelledError:
         pass
     except Exception as e:
         # e.g. schema migration not finished yet on first startup after a model change
         _LOGGER.warning(f"image tagging pass aborted: {e!r}")
-    return tagged, failed, remaining
+    return counter["tagged"], counter["failed"], remaining
 
 
 async def _progress_reporter(session: Session, scope: str):
     """Return an async callback that sends tagging progress to the session."""
 
     async def report(tagged: int, failed: int, total: int) -> None:
+        done = tagged + failed
         if total == 0:
-            return
-        if tagged == 0:
-            await session.send(f"开始{scope}，共 {total} 张图片，预计需要约 {total} 秒……")
-        elif tagged + failed >= total:
-            await session.send(f"{scope}完成：已标注 {tagged}，失败 {failed}，剩余 {total - tagged - failed}")
+            await session.send(f"{scope}：没有需要处理的图片。")
+        elif done == 0:
+            concurrency = max(1, config.tag_concurrency)
+            est_min = max(1, round(total * 3 / concurrency / 60))
+            await session.send(f"{scope}：共 {total} 张，并发 {concurrency}，预计约 {est_min} 分钟。")
+        elif done >= total:
+            await session.send(f"{scope}完成：成功 {tagged}，失败 {failed}。")
         else:
-            await session.send(f"{scope}进度：{tagged + failed}/{total}（失败 {failed}）")
+            await session.send(f"{scope}进度：{done}/{total}（失败 {failed}）")
 
     return report
 
@@ -415,7 +425,7 @@ async def tag_images(session: Session):
 async def retag_images_all(session: Session):
     """Retag all local chat images with the configured vision model."""
     status = await _launch_tag_pass("全量重标", None, retag=True, session=session)
-    await session.send(status + "预计约 20 分钟，进度稍后报告。")
+    await session.send(status + "进度稍后报告。")
 
 
 @scheduler.cron("0 4 * * *")

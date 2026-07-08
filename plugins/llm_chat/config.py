@@ -73,6 +73,8 @@ class LLMChatConfig(BasicConfModel):
     """Vision system prompt for image tag extraction."""
     tag_batch_size: int = 20
     """Max images tagged per startup pass."""
+    tag_concurrency: int = 4
+    """Concurrent vision/embedding requests per tagging pass."""
     image_match_min_similarity: float = 0.30
     """Minimum cosine similarity for semantic image retrieval."""
     image_top_candidates: int = 8
