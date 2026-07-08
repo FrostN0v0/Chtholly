@@ -207,7 +207,7 @@ def _setup_tools() -> list[str]:
                 audio = await service.synthesize(speech)  # type: ignore[attr-defined]
             except Exception:
                 return "语音服务暂不可用"
-            out = tts_temp_path()
+            out = tts_temp_path(getattr(service, "file_extension", ".wav"))
             from pathlib import Path
 
             Path(out).write_bytes(audio)

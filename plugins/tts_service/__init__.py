@@ -12,7 +12,7 @@ from launart.status import Phase
 from arclet.entari.plugin import PluginRole
 
 from .config import TTSConfig
-from .providers import GptSovitsProvider, TTSSynthesisError
+from .providers import TTSProvider, TTSSynthesisError, build_provider
 
 metadata(
     name="tts_service",
@@ -34,7 +34,7 @@ class TTSService(Service):
     def __init__(self, config: TTSConfig) -> None:
         super().__init__()
         self.config = config
-        self._provider: GptSovitsProvider | None = None
+        self._provider: TTSProvider | None = None
 
     @property
     def required(self) -> set[str]:
@@ -48,6 +48,10 @@ class TTSService(Service):
     def available(self) -> bool:
         return self._provider is not None
 
+    @property
+    def file_extension(self) -> str:
+        return self._provider.file_extension if self._provider is not None else ".wav"
+
     async def synthesize(self, text: str, **params: Any) -> bytes:
         """Synthesize `text` into audio bytes.
 
@@ -60,13 +64,7 @@ class TTSService(Service):
 
     async def launch(self, manager: Launart):
         async with self.stage("preparing"):
-            self._provider = GptSovitsProvider(
-                self.config.api_url,
-                timeout=self.config.timeout,
-                text_lang=self.config.text_lang,
-                default_speaker=self.config.default_speaker,
-                extra_params=self.config.extra_params,
-            )
+            self._provider = build_provider(self.config)
         async with self.stage("blocking"):
             await manager.status.wait_for_sigexit()
         async with self.stage("cleanup"):

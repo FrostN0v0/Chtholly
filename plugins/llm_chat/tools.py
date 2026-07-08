@@ -25,11 +25,15 @@ def truncate_for_tts(text: str, limit: int) -> str:
     return _sentence_truncate(text, limit)
 
 
-def tts_temp_path() -> str:
+def tts_temp_path(suffix: str = ".wav") -> str:
     """Return a unique temp path for a synthesized clip under local_data."""
     from arclet.entari import local_data
 
-    return str(local_data.get_temp_file(f"tts_{uuid4().hex}.wav"))
+    if not suffix.startswith("."):
+        suffix = f".{suffix}"
+    if suffix not in {".wav", ".mp3", ".pcm", ".opus", ".ogg", ".aac"}:
+        suffix = ".wav"
+    return str(local_data.get_temp_file(f"tts_{uuid4().hex}{suffix}"))
 
 
 __all__ = ["truncate_for_tts", "tts_temp_path"]

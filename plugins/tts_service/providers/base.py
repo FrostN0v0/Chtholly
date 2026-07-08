@@ -12,6 +12,11 @@ class TTSSynthesisError(TTSError):
 
 
 class TTSProvider(Protocol):
+    @property
+    def file_extension(self) -> str:
+        """Preferred local file suffix for returned audio bytes, including the leading dot."""
+        ...
+
     async def synthesize(self, text: str, **params: Any) -> bytes:
         """Synthesize `text` into audio bytes. Raises TTSSynthesisError on failure."""
         ...

@@ -10,6 +10,9 @@
 - 长期记忆：按用户和频道维护画像、关系数值、近期印象、语义检索记忆。
 - 关系评估：每轮或按 `eval_every_n` 用 `eval_model` 评估关系变化和记忆更新。
 - 本地媒体工具：模型可调用 `send_image`、`send_audio`、`speak`、`call_plugin`；发送媒体后会写入会话历史，下一轮模型知道自己发过什么。
+
+tts_service defaults to GPT-SoVITS and can switch to Fish Audio with provider: fish-audio plus Fish API credentials.
+
 - 图片素材标注：启动或命令触发时用视觉模型给本地图片打标签，用于表情包检索。
 
 ## 模型分工

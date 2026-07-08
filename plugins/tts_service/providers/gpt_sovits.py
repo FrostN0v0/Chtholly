@@ -13,6 +13,8 @@ from .base import TTSSynthesisError
 
 
 class GptSovitsProvider:
+    file_extension = ".wav"
+
     def __init__(
         self,
         api_url: str,
