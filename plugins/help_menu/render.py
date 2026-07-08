@@ -26,5 +26,7 @@ async def render_menu(
             "columns": columns,
         },
         page_option={"viewport": {"width": 940, "height": 10}, "base_url": TEMPLATE_DIR.as_uri()},
-        screenshot_option={"type": "png", "full_page": True},
+        # quality=None overrides the renderer's jpeg default (quality=80),
+        # which playwright rejects for png screenshots.
+        screenshot_option={"type": "png", "full_page": True, "quality": None},
     )
