@@ -13,6 +13,7 @@ from dataclasses import field
 
 from arclet.entari import Image, Session, MessageChain, BasicConfModel, command, metadata, local_data, plugin_config
 from arclet.entari.plugin import PluginRole
+from arclet.entari.command import Match
 
 # entari: plugin
 import entari_plugin_browser as _browser  # noqa: F401  (hard dep: rendering backend)
@@ -66,12 +67,15 @@ def _plain_fallback(grouped) -> str:
     return "\n".join(lines)
 
 
-@command.on("help [category]")
-async def help_menu(session: Session, category: str | None = None):
+# NOTE: command.on() uses `{name}` format grammar; `[optional]` only works
+# with the AlconnaString grammar used by command.command().
+@command.command("help [category]", "生成图片帮助菜单")
+async def help_menu(session: Session, category: Match[str]):
     """生成图片帮助菜单"""
+    selected = category.result if category.available else None
     grouped = collect_entries(show_hidden=config.show_hidden, custom_icons=config.custom_icons)
-    if category:
-        grouped = {k: v for k, v in grouped.items() if k == category}
+    if selected:
+        grouped = {k: v for k, v in grouped.items() if k == selected}
     if not grouped:
         await session.send("当前没有可展示的插件")
         return
