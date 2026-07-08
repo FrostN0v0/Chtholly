@@ -1,6 +1,8 @@
+# pyright: reportMissingImports=false
 """Unit tests for the gpt-sovits TTS provider (pure HTTP layer, no Entari runtime)."""
 
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import httpx
@@ -9,6 +11,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "tts_service"))
 
 from providers.base import TTSSynthesisError  # noqa: E402
+from providers.factory import build_provider  # noqa: E402
+from providers.fish_audio import FishAudioProvider  # noqa: E402
 from providers.gpt_sovits import GptSovitsProvider  # noqa: E402
 
 pytestmark = pytest.mark.asyncio
@@ -16,6 +20,12 @@ pytestmark = pytest.mark.asyncio
 
 def make_provider(handler, **kwargs) -> GptSovitsProvider:
     provider = GptSovitsProvider("http://test/tts", **kwargs)
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
+    return provider
+
+
+def make_fish_provider(handler, **kwargs) -> FishAudioProvider:
+    provider = FishAudioProvider("https://fish.test/v1/tts", "fish-key", **kwargs)
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
     return provider
 
@@ -106,3 +116,169 @@ async def test_timeout_raises_synthesis_error():
             await provider.synthesize("你好")
     finally:
         await provider.close()
+
+
+async def test_fish_synthesize_sends_expected_headers_and_payload():
+    audio = b"fake-mp3-audio"
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        captured["path"] = request.url.path
+        captured["authorization"] = request.headers["authorization"]
+        captured["content_type"] = request.headers["content-type"]
+        captured["model"] = request.headers["model"]
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, content=audio, headers={"content-type": "audio/mpeg"})
+
+    provider = make_fish_provider(
+        handler,
+        model="s2-pro",
+        reference_id="voice-id",
+        audio_format="mp3",
+        latency="balanced",
+        sample_rate=44100,
+        prosody_speed=1.2,
+        prosody_volume=-1.0,
+        extra_params={"chunk_length": 150},
+    )
+    try:
+        result = await provider.synthesize("你好", top_p=0.6)
+    finally:
+        await provider.close()
+
+    assert result == audio
+    assert captured["path"] == "/v1/tts"
+    assert captured["authorization"] == "Bearer fish-key"
+    assert captured["content_type"].startswith("application/json")
+    assert captured["model"] == "s2-pro"
+    assert captured["payload"]["text"] == "你好"
+    assert captured["payload"]["reference_id"] == "voice-id"
+    assert captured["payload"]["format"] == "mp3"
+    assert captured["payload"]["latency"] == "balanced"
+    assert captured["payload"]["sample_rate"] == 44100
+    assert captured["payload"]["mp3_bitrate"] == 128
+    assert captured["payload"]["prosody"] == {
+        "speed": 1.2,
+        "volume": -1.0,
+        "normalize_loudness": True,
+    }
+    assert captured["payload"]["chunk_length"] == 150
+    assert captured["payload"]["top_p"] == 0.6
+
+
+async def test_fish_empty_text_short_circuits():
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("should not be called")
+
+    provider = make_fish_provider(handler)
+    try:
+        assert await provider.synthesize("   ") == b""
+    finally:
+        await provider.close()
+
+
+async def test_fish_missing_api_key_raises_before_http():
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("should not be called")
+
+    provider = FishAudioProvider("https://fish.test/v1/tts", None)
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
+    try:
+        with pytest.raises(TTSSynthesisError, match="Fish Audio API key is required"):
+            await provider.synthesize("hello")
+    finally:
+        await provider.close()
+
+
+async def test_fish_error_status_raises():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"message": "Invalid Token", "status": 401})
+
+    provider = make_fish_provider(handler)
+    try:
+        with pytest.raises(TTSSynthesisError, match="Invalid Token"):
+            await provider.synthesize("hello")
+    finally:
+        await provider.close()
+
+
+async def test_fish_json_body_instead_of_audio_raises():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"message": "not audio"})
+
+    provider = make_fish_provider(handler)
+    try:
+        with pytest.raises(TTSSynthesisError, match="JSON instead of audio"):
+            await provider.synthesize("hello")
+    finally:
+        await provider.close()
+
+
+async def test_fish_timeout_raises_synthesis_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("boom")
+
+    provider = make_fish_provider(handler)
+    try:
+        with pytest.raises(TTSSynthesisError, match="timed out"):
+            await provider.synthesize("hello")
+    finally:
+        await provider.close()
+
+
+async def test_fish_file_extension_matches_format():
+    mp3_provider = FishAudioProvider("https://fish.test/v1/tts", "fish-key", audio_format="mp3")
+    wav_provider = FishAudioProvider("https://fish.test/v1/tts", "fish-key", audio_format="wav")
+    try:
+        assert mp3_provider.file_extension == ".mp3"
+        assert wav_provider.file_extension == ".wav"
+    finally:
+        await mp3_provider.close()
+        await wav_provider.close()
+
+
+async def test_build_provider_gpt_sovits():
+    config = SimpleNamespace(
+        provider="gpt-sovits",
+        api_url="http://test/tts",
+        timeout=15.0,
+        text_lang="zh",
+        default_speaker="chtholly",
+        extra_params={},
+    )
+
+    assert isinstance(build_provider(config), GptSovitsProvider)
+
+
+async def test_build_provider_fish_audio():
+    config = SimpleNamespace(
+        provider="fish-audio",
+        api_url="http://test/tts",
+        timeout=15.0,
+        text_lang="zh",
+        default_speaker="chtholly",
+        extra_params={},
+        fish_api_url="https://fish.test/v1/tts",
+        fish_api_key="fish-key",
+        fish_model="s2-pro",
+        fish_reference_id="voice-id",
+        fish_format="mp3",
+        fish_sample_rate=None,
+        fish_mp3_bitrate=128,
+        fish_latency="normal",
+        fish_prosody_speed=1.0,
+        fish_prosody_volume=0.0,
+        fish_prosody_normalize_loudness=True,
+        fish_extra_params={},
+    )
+
+    assert isinstance(build_provider(config), FishAudioProvider)
+
+
+async def test_build_provider_unknown_raises():
+    config = SimpleNamespace(provider="bad")
+
+    with pytest.raises(TTSSynthesisError, match="Unsupported TTS provider"):
+        build_provider(config)
