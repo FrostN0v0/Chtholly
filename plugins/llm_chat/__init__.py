@@ -41,8 +41,10 @@ from .media import (
     match_audio,
     match_image,
     parse_audio_text,
+    format_image_note,
     is_random_request,
     normalize_image_tags,
+    normalize_image_description,
 )
 from .tools import tts_temp_path, truncate_for_tts
 from .config import LLMChatConfig
@@ -79,8 +81,12 @@ DINGGONG_DIR = AUDIO_DIR / "dinggong"
 registered_tools: list[str] = []
 
 _RECENT_IMAGE_WINDOW = 5
+_IMAGE_FETCH_TIMEOUT = 15.0
+_IMAGE_FETCH_MAX_BYTES = 6 * 1024 * 1024
+_IMAGE_DESC_CACHE_MAX = 128
 _image_vectors: dict[str, list[float]] = {}
 _recent_images: dict[str, deque[str]] = {}
+_image_desc_cache: dict[str, str] = {}
 
 
 async def _pick_image(rows: list[ImageTag], context: str, recent: deque[str]) -> str | None:
@@ -279,29 +285,74 @@ async def _tag_images_on_startup():
     await _launch_tag_pass("启动增量标注", config.tag_batch_size, retag=False)
 
 
-async def _generate_image_tags(data_url: str) -> str:
-    """Generate normalized image tags without LiteLLM's stale vision capability gate."""
+async def _vision_completion(data_url: str, system_prompt: str, user_text: str) -> str:
+    """Vision call bypassing LiteLLM's stale capability gate (shared by tag/describe)."""
     model = get_model_config(config.image_tag_model)
     response = await litellm.acompletion(
         model=model.name,
         messages=[
-            {
-                "role": "system",
-                "content": config.image_tag_prompt,
-            },
+            {"role": "system", "content": system_prompt},
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Tag this image for chat reaction retrieval."},
+                    {"type": "text", "text": user_text},
                     {"type": "image_url", "image_url": {"url": data_url}},
                 ],
             },
         ],
         base_url=model.base_url,
         api_key=model.api_key,
+        timeout=30,
         **model.extra,
     )
-    return normalize_image_tags((response.choices[0].message.content or "").strip())  # type: ignore[union-attr]
+    return (response.choices[0].message.content or "").strip()  # type: ignore[union-attr]
+
+
+async def _generate_image_tags(data_url: str) -> str:
+    """Generate normalized image tags without LiteLLM's stale vision capability gate."""
+    raw = await _vision_completion(data_url, config.image_tag_prompt, "Tag this image for chat reaction retrieval.")
+    return normalize_image_tags(raw)
+
+
+def _raw_to_data_url(data: bytes) -> str | None:
+    """bytes -> data URL via satori's built-in mime sniffing; None for non-images."""
+    try:
+        src = Image.of(raw=data).src
+    except ValueError:  # fleep cannot detect the mime type
+        return None
+    return src if src.startswith("data:image/") else None
+
+
+async def _fetch_image_data_url(session: Session, src: str) -> str | None:
+    """Resolve an element src to a base64 data URL; None when unusable."""
+    if src.startswith("data:"):
+        return src if src.startswith("data:image/") else None
+    if src.startswith("base64://"):  # onebot convention; not a real URL
+        return _raw_to_data_url(base64.b64decode(src[9:]))
+    data = await asyncio.wait_for(session.download(src), timeout=_IMAGE_FETCH_TIMEOUT)
+    if len(data) > _IMAGE_FETCH_MAX_BYTES:
+        return None
+    return _raw_to_data_url(data)
+
+
+async def _describe_image(session: Session, src: str) -> str:
+    """Describe one inbound image; '' means degrade to a bare placeholder."""
+    cache_key = src.split("?", 1)[0]
+    cached = _image_desc_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    data_url = await _fetch_image_data_url(session, src)
+    if data_url is None:
+        return ""
+    raw = await _vision_completion(
+        data_url, config.image_describe_prompt, "Describe this chat image for conversation context."
+    )
+    description = normalize_image_description(raw)
+    if description:
+        if len(_image_desc_cache) >= _IMAGE_DESC_CACHE_MAX:
+            _image_desc_cache.pop(next(iter(_image_desc_cache)))
+        _image_desc_cache[cache_key] = description
+    return description
 
 
 async def _tag_images(
@@ -438,8 +489,32 @@ async def _nightly_decay():
 @filter_.to_me
 async def on_chat(session: Session, ctx: Contexts):
     content = session.elements.extract_plain_text().strip()
-    if not content:
+
+    image_notes: list[str] = []
+    if config.image_understanding_enabled:
+        direct = list(session.elements.select(Image))
+        quote = session.quote
+        quoted = list(MessageChain(quote.children).select(Image)) if quote and quote.children else []
+        ordered = [(img, False) for img in direct] + [(img, True) for img in quoted]
+        cap = max(0, config.image_describe_max_per_message)
+        described = ordered[:cap]
+        overflow = ordered[cap:]
+
+        async def _note(img: Image, is_quoted: bool) -> str:
+            try:
+                description = await _describe_image(session, img.src)
+            except Exception as e:
+                _LOGGER.warning(f"image describe failed: {e!r}")
+                description = ""
+            return format_image_note(description, quoted=is_quoted)
+
+        image_notes = list(await asyncio.gather(*(_note(img, q) for img, q in described)))
+        image_notes += [format_image_note("", quoted=q) for _, q in overflow]
+
+    if not content and not image_notes:
         return None
+    if image_notes:
+        content = " ".join(part for part in [content, *image_notes] if part)
 
     channel_id = session.channel.id
     user_id = session.user.id

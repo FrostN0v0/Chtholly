@@ -16,6 +16,9 @@ SYSTEM_SCAFFOLD = (
     "send_audio 用于语音、台词请求，或短本地语音片段贴合当前情绪/场景时。"
     "调用这些工具时传入紧凑的场景/情绪关键词，例如 害羞 可爱 早安，不要传长篇正文。"
     "不要向用户提及内部标签库、数据库或工具名。"
+    "用户消息里 [图片: …]、[引用图片: …] 是系统对用户所发图片的自动描述，"
+    "[发送了表情包/语音: …] 是你此前发送媒体的记录；把这些当作你真实看到的内容自然回应，"
+    "绝不要说自己看不到图片，也不要复述标记格式本身。"
 )
 
 DEFAULT_IMAGE_TAG_PROMPT = (
@@ -23,6 +26,12 @@ DEFAULT_IMAGE_TAG_PROMPT = (
     "给出 12-20 个短标签，优先描述适合聊天选图的情绪、语气、回复场景、主体、动作表情和明显风格。"
     "仅在画面支持时使用如 开心、害羞、生气、吐槽、安慰、早安、晚安、可爱、兽耳少女 等标签。"
     "避免只给 动漫 这类宽泛标签；宽泛风格必须搭配具体情绪或场景。"
+)
+
+DEFAULT_IMAGE_DESCRIBE_PROMPT = (
+    "用一到两句简体中文客观描述这张聊天图片：先给类型（照片/截图/表情包/插画/梗图），"
+    "再说主体、动作表情和关键细节；图中清晰可读的文字要原样引用。"
+    "只输出描述本身，不要评价、不要 Markdown，总长不超过 80 字。"
 )
 
 
@@ -71,6 +80,12 @@ class LLMChatConfig(BasicConfModel):
     """Model alias/name for image tagging; None uses the llm plugin default."""
     image_tag_prompt: str = DEFAULT_IMAGE_TAG_PROMPT
     """Vision system prompt for image tag extraction."""
+    image_understanding_enabled: bool = True
+    """Describe inbound user images with the vision model and inject into context."""
+    image_describe_prompt: str = DEFAULT_IMAGE_DESCRIBE_PROMPT
+    """Vision system prompt for inbound image description."""
+    image_describe_max_per_message: int = 3
+    """Max images described per message; extras degrade to bare placeholders."""
     tag_batch_size: int = 20
     """Max images tagged per startup pass."""
     tag_concurrency: int = 4

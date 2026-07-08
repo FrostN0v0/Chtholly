@@ -41,6 +41,20 @@ def normalize_image_tags(text: str, *, limit: int = 20) -> str:
     return "，".join(tags)
 
 
+def normalize_image_description(text: str, *, limit: int = 100) -> str:
+    """Collapse whitespace/newlines and cap length for prompt injection."""
+    collapsed = " ".join(text.split())
+    if len(collapsed) > limit:
+        collapsed = collapsed[: limit - 1] + "…"
+    return collapsed
+
+
+def format_image_note(description: str, *, quoted: bool = False) -> str:
+    """Render the inline marker injected into chat content."""
+    label = "引用图片" if quoted else "图片"
+    return f"[{label}: {description}]" if description else f"[{label}]"
+
+
 def parse_audio_text(filename: str) -> str | None:
     """Extract the spoken text from a `NN_<text>_.mp3` style filename.
 
