@@ -149,6 +149,9 @@ def _setup_tools() -> list[str]:
             return "图片文件已丢失"
         await session.send(MessageChain([Image.of(path=full)]))
         recent.append(rel_path)
+        row = next((r for r in rows if r.file_path == rel_path), None)
+        tag_hint = "，".join((row.tags if row else context).split("，")[:5])
+        await append_message(session.channel.id, "", "bot", "assistant", f"[发送了表情包: {tag_hint}]")
         return f"已发送图片（{context}）"
 
     registered.append("send_image")
@@ -167,6 +170,9 @@ def _setup_tools() -> list[str]:
             if matched is None:
                 return "没有合适的语音片段"
             await session.send(MessageChain([Audio.of(path=matched)]))
+            await append_message(
+                session.channel.id, "", "bot", "assistant", f"[发送了语音: {parse_audio_text(matched.name)}]"
+            )
             return f"已发送语音：{parse_audio_text(matched.name)}"
 
         send_audio.__doc__ = f"""
@@ -205,6 +211,7 @@ def _setup_tools() -> list[str]:
 
             Path(out).write_bytes(audio)
             await session.send(MessageChain([Audio.of(path=out)]))
+            await append_message(session.channel.id, "", "bot", "assistant", f"[用语音说: {speech}]")
             return f"已用语音说出：{speech}"
 
         registered.append("speak")
@@ -551,6 +558,10 @@ async def on_chat(session: Session, ctx: Contexts):
         user_name=user_name,
     )
 
+    # Persist the user line before generate: tool calls during generation append
+    # media rows that must sort after it; a failed generate still keeps the message.
+    await append_message(channel_id, user_id, user_name, "user", content)
+
     # llm.generate resolves model=None against the "$default" scope only, so
     # resolve against this channel ourselves to follow "/llm model" switches.
     # A stale channel default (e.g. renamed model) falls back to the global default.
@@ -569,7 +580,6 @@ async def on_chat(session: Session, ctx: Contexts):
     if reply and reply != "[END_OF_RESPONSE]":
         await session.send(reply)
 
-    await append_message(channel_id, user_id, user_name, "user", content)
     if reply and reply != "[END_OF_RESPONSE]":
         await append_message(channel_id, "", "bot", "assistant", reply)
 
