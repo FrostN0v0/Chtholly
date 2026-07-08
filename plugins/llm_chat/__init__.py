@@ -476,8 +476,11 @@ async def on_chat(session: Session, ctx: Contexts):
         user_name=user_name,
     )
 
+    # llm.generate resolves model=None against the "$default" scope only, so
+    # resolve against this channel ourselves to follow "/llm model" switches.
+    model_name = get_model_config(config.model, channel_id).name
     try:
-        response = await llm.generate(messages, system=system, model=config.model, ctx=ctx)
+        response = await llm.generate(messages, system=system, model=model_name, ctx=ctx)
     except Exception as e:
         _LOGGER.warning(f"llm generate failed: {e!r}")
         return None
@@ -525,6 +528,7 @@ async def on_chat(session: Session, ctx: Contexts):
                 memory_context.profile_facts,
                 transcript,
                 user_name,
+                channel_id,
             )
         except Exception as e:
             _LOGGER.warning(f"relationship evaluation failed: {e!r}")

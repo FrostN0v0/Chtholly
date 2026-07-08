@@ -20,9 +20,10 @@ async def run_evaluation(
     profile_facts: list[str],
     transcript: list[str],
     user_name: str = "",
+    channel_id: str = "$default",
 ) -> EvalResult | None:
     """Run the relationship evaluator; returns None when parsing fails."""
-    conf = get_model_config(config.eval_model or config.model)
+    conf = get_model_config(config.eval_model or config.model, channel_id)
     response = await litellm.acompletion(
         model=conf.name,
         messages=[
