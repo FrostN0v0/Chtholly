@@ -45,21 +45,21 @@ plugins:
     name: "data/chtholly.db"
   ::auto_reload:
     watch_dirs: ["./plugins", "./utils"]
-    password: ${{ env.WEBUI_PASSWORD }}
+    watch_config: true
   entari_plugin_webui:
     password: ${{ env.WEBUI_PASSWORD }}
-    base_url: ${{ env.LLM_BASE_URL }}
+  llm:
     api_key: ${{ env.LLM_API_KEY }}
     base_url: ${{ env.LLM_BASE_URL }}
     models:
       - name: "gpt-5.5"
         alias: "gpt"
       - name: "openai/doubao-seed-2-1-pro-260628"
-        api_key: ${{ env.DOUBAO_API_KEY }}
+        alias: "doubao"
         base_url: "https://ark.cn-beijing.volces.com/api/v3/"
         api_key: ${{ env.DOUBAO_API_KEY }}
-      - name: "deepseek-ai/DeepSeek-V4-Flash"
-        api_key: ${{ env.DEEPSEEK_API_KEY }}
+      - name: "openai/deepseek-ai/DeepSeek-V4-Flash"
+        alias: "deepseek"
         base_url: "https://api.siliconflow.cn/v1"
         api_key: ${{ env.DEEPSEEK_API_KEY }}
 
@@ -78,7 +78,7 @@ plugins:
     persona: 你是珂朵莉(Chtholly)，红发蓝瞳的少女，性格底色温柔、略带倔强。
     image_tag_model: doubao
     tag_batch_size: 50
-    memory_embedding_api_key: ${{ env.DOUBAO_API_KEY }}
+    memory_enabled: true
     memory_embedding_model: "volcengine/doubao-embedding-vision-251215"
     memory_embedding_api_key: ${{ env.DOUBAO_API_KEY }}
     memory_embedding_base_url: "https://ark.cn-beijing.volces.com/api/v3"
@@ -87,13 +87,13 @@ plugins:
       给出 12-20 个短标签，优先描述适合聊天选图的情绪、语气、回复场景、主体、动作表情和明显风格。
       仅在画面支持时使用如 开心、害羞、生气、吐槽、安慰、早安、晚安、可爱、狐娘 等标签。
       避免只给 动漫 这类宽泛标签；宽泛风格必须搭配具体情绪或场景。
-    access_token: ${{ env.ONEBOT_TOKEN }}
+  server:
     direct_adapter: true
     access_token: ${{ env.ONEBOT_TOKEN }}
     port: 8120
     path: satori
     token: chtholly4221
-        access_token: ${{ env.ONEBOT_TOKEN }}
+    adapters:
       - $path: "@onebot11.reverse"
         access_token: ${{ env.ONEBOT_TOKEN }}
         path: "onebot/v11"

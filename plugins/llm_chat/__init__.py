@@ -478,7 +478,12 @@ async def on_chat(session: Session, ctx: Contexts):
 
     # llm.generate resolves model=None against the "$default" scope only, so
     # resolve against this channel ourselves to follow "/llm model" switches.
-    model_name = get_model_config(config.model, channel_id).name
+    # A stale channel default (e.g. renamed model) falls back to the global default.
+    try:
+        model_name = get_model_config(config.model, channel_id).name
+    except Exception as e:
+        _LOGGER.warning(f"channel model resolve failed, using global default: {e!r}")
+        model_name = None
     try:
         response = await llm.generate(messages, system=system, model=model_name, ctx=ctx)
     except Exception as e:

@@ -23,7 +23,11 @@ async def run_evaluation(
     channel_id: str = "$default",
 ) -> EvalResult | None:
     """Run the relationship evaluator; returns None when parsing fails."""
-    conf = get_model_config(config.eval_model or config.model, channel_id)
+    try:
+        conf = get_model_config(config.eval_model or config.model, channel_id)
+    except Exception:
+        # Stale channel default: fall back to the "$default" scope resolution.
+        conf = get_model_config(config.eval_model or config.model)
     response = await litellm.acompletion(
         model=conf.name,
         messages=[
