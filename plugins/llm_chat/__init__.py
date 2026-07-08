@@ -344,7 +344,10 @@ async def _fetch_image_data_url(session: Session, src: str) -> str | None:
 
 async def _describe_image(session: Session, src: str) -> str:
     """Describe one inbound image; '' means degrade to a bare placeholder."""
-    cache_key = src.split("?", 1)[0]
+    # Full src as key: NT multimedia URLs carry the file id in the QUERY
+    # (path is a constant /download), so stripping it collapses distinct images.
+    # Rotated rkey only costs a cache miss, never a wrong hit.
+    cache_key = src
     cached = _image_desc_cache.get(cache_key)
     if cached is not None:
         return cached
