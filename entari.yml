@@ -77,6 +77,8 @@ plugins:
     $filter: channel.type is public
     persona: 你是珂朵莉(Chtholly)，红发蓝瞳的少女，性格底色温柔、略带倔强。
     allowed_commands: ["echo", "help"]
+    # Model duties: chat follows /llm model; eval pinned below; vision tag/describe uses image_tag_model.
+    eval_model: doubao
     image_tag_model: doubao
     tag_batch_size: 50
     memory_enabled: true
