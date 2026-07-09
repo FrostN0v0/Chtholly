@@ -13,7 +13,7 @@ class Conversation(Base):
     user_id: Mapped[str]
     user_name: Mapped[str]
     role: Mapped[str]
-    """"user" | "assistant" """
+    """Stored role: "user" or "assistant"."""
     content: Mapped[str]
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 

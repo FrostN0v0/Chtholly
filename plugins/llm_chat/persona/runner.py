@@ -5,11 +5,26 @@ let the evaluator trigger side-effect tools. We call litellm directly with the
 plugin's resolved model config instead (same credentials, no tools).
 """
 
+from typing import Protocol, cast
+
 import litellm
 from entari_plugin_llm.config import get_model_config
 
-from .eval import EVAL_SYSTEM, EvalResult, build_eval_prompt, parse_eval_response
+from utils.llm_chat_core.eval import EVAL_SYSTEM, EvalResult, build_eval_prompt, parse_eval_response
+
 from ..config import LLMChatConfig
+
+
+class _MessageLike(Protocol):
+    content: str | None
+
+
+class _ChoiceLike(Protocol):
+    message: _MessageLike
+
+
+class _CompletionLike(Protocol):
+    choices: list[_ChoiceLike]
 
 
 async def run_evaluation(
@@ -43,7 +58,8 @@ async def run_evaluation(
         response_format={"type": "json_object"},
         **conf.extra,
     )
-    content = response.choices[0].message.content  # type: ignore[union-attr]
+    completion = cast(_CompletionLike, response)
+    content = completion.choices[0].message.content
     if not content:
         return None
     return parse_eval_response(

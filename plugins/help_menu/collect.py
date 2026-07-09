@@ -1,17 +1,19 @@
 """Pure data assembly for the help menu: plugins -> MenuEntry groups."""
 
 from dataclasses import field, dataclass
+from collections.abc import Mapping
 
-from arclet.entari.plugin import Plugin, PluginRole, get_plugins as _get_plugins
+from arclet.entari.plugin import get_plugins as _get_plugins
+from arclet.entari.plugin.model import Plugin, PluginRole
 
-DEFAULT_ICON = "\U0001f9e9"  # puzzle piece
+DEFAULT_ICON = "🧩"  # puzzle piece
 DEFAULT_CATEGORY = "其他"
 
 HIDDEN_ROLES = {PluginRole.LIBRARY, PluginRole.UTILITY}
 HIDDEN_ID_PREFIXES = ("entari.plugin.", ".")
 
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class MenuEntry:
     name: str
     version: str | None
@@ -24,18 +26,33 @@ class MenuEntry:
 def _plugin_commands(plug: Plugin) -> list[str]:
     """Render `(prefixes, command)` pairs from plugin extras into display strings."""
     result: list[str] = []
-    for prefixes, cmd in plug._extra.get("commands", []):
-        if prefixes and all(isinstance(p, str) for p in prefixes):
+    extra = getattr(plug, "_extra", {})
+    if not isinstance(extra, dict):
+        return result
+    commands = extra.get("commands", [])
+    if not isinstance(commands, (list, tuple)):
+        return result
+    for entry in commands:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            continue
+        prefixes, cmd = entry
+        if not isinstance(cmd, str):
+            continue
+        if isinstance(prefixes, (list, tuple)) and all(isinstance(prefix, str) for prefix in prefixes):
             result.append(f"{'|'.join(prefixes)}{cmd}")
-        else:
+        elif isinstance(prefixes, str):
+            result.append(f"{prefixes}{cmd}")
+        elif not prefixes:
             result.append(cmd)
     return result
 
 
 def _help_meta(plug: Plugin) -> dict[str, str]:
     """Read the optional module-level HELP_META dict from the plugin module."""
-    meta = getattr(plug.module, "HELP_META", None)
-    return meta if isinstance(meta, dict) else {}
+    raw = getattr(plug.module, "HELP_META", None)
+    if not isinstance(raw, Mapping):
+        return {}
+    return {key: value for key, value in raw.items() if isinstance(key, str) and isinstance(value, str)}
 
 
 def collect_entries(
@@ -73,5 +90,5 @@ def collect_entries(
         grouped.setdefault(category, []).append(entry)
 
     for entries in grouped.values():
-        entries.sort(key=lambda e: e.name)
-    return dict(sorted(grouped.items(), key=lambda kv: (kv[0] == DEFAULT_CATEGORY, kv[0])))
+        entries.sort(key=lambda entry: entry.name)
+    return dict(sorted(grouped.items(), key=lambda item: (item[0] == DEFAULT_CATEGORY, item[0])))

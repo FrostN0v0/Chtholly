@@ -1,12 +1,9 @@
 """Unit tests for dinggong filename parsing and media fuzzy matching."""
 
-import sys
 import random
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from llm_chat_src.media import (  # noqa: E402
+from utils.llm_chat_core.media import (
     match_audio,
     match_image,
     parse_audio_text,

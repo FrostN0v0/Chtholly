@@ -1,33 +1,28 @@
-# pyright: reportMissingImports=false
-"""Unit tests for the gpt-sovits TTS provider (pure HTTP layer, no Entari runtime)."""
+"""Unit tests for TTS providers (pure HTTP layer, no Entari runtime)."""
 
-import sys
 from types import SimpleNamespace
-from pathlib import Path
+from typing import cast
+from collections.abc import Callable
 
 import httpx
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "tts_service"))
-
-from providers.base import TTSSynthesisError  # noqa: E402
-from providers.factory import build_provider  # noqa: E402
-from providers.fish_audio import FishAudioProvider  # noqa: E402
-from providers.gpt_sovits import GptSovitsProvider  # noqa: E402
+from utils.tts_service_core.providers.base import TTSSynthesisError
+from utils.tts_service_core.providers.factory import TTSConfigLike, build_provider
+from utils.tts_service_core.providers.fish_audio import FishAudioProvider
+from utils.tts_service_core.providers.gpt_sovits import GptSovitsProvider
 
 pytestmark = pytest.mark.asyncio
 
 
-def make_provider(handler, **kwargs) -> GptSovitsProvider:
-    provider = GptSovitsProvider("http://test/tts", **kwargs)
-    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
-    return provider
+def make_provider(handler: Callable[[httpx.Request], httpx.Response], **kwargs) -> GptSovitsProvider:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
+    return GptSovitsProvider("http://test/tts", client=client, **kwargs)
 
 
-def make_fish_provider(handler, **kwargs) -> FishAudioProvider:
-    provider = FishAudioProvider("https://fish.test/v1/tts", "fish-key", **kwargs)
-    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
-    return provider
+def make_fish_provider(handler: Callable[[httpx.Request], httpx.Response], **kwargs) -> FishAudioProvider:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
+    return FishAudioProvider("https://fish.test/v1/tts", "fish-key", client=client, **kwargs)
 
 
 async def test_synthesize_returns_audio_bytes():
@@ -183,8 +178,8 @@ async def test_fish_missing_api_key_raises_before_http():
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
         raise AssertionError("should not be called")
 
-    provider = FishAudioProvider("https://fish.test/v1/tts", None)
-    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
+    provider = FishAudioProvider("https://fish.test/v1/tts", None, client=client)
     try:
         with pytest.raises(TTSSynthesisError, match="Fish Audio API key is required"):
             await provider.synthesize("hello")
@@ -249,7 +244,7 @@ async def test_build_provider_gpt_sovits():
         extra_params={},
     )
 
-    assert isinstance(build_provider(config), GptSovitsProvider)
+    assert isinstance(build_provider(cast(TTSConfigLike, config)), GptSovitsProvider)
 
 
 async def test_build_provider_fish_audio():
@@ -274,11 +269,11 @@ async def test_build_provider_fish_audio():
         fish_extra_params={},
     )
 
-    assert isinstance(build_provider(config), FishAudioProvider)
+    assert isinstance(build_provider(cast(TTSConfigLike, config)), FishAudioProvider)
 
 
 async def test_build_provider_unknown_raises():
     config = SimpleNamespace(provider="bad")
 
     with pytest.raises(TTSSynthesisError, match="Unsupported TTS provider"):
-        build_provider(config)
+        build_provider(cast(TTSConfigLike, config))

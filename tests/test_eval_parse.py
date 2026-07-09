@@ -1,11 +1,6 @@
 """Unit tests for evaluator JSON parsing, clamping and delta application."""
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from llm_chat_src.persona.eval import (  # noqa: E402
+from utils.llm_chat_core.eval import (
     DELTA_LIMIT,
     MOOD_DELTA_LIMIT,
     apply_deltas,

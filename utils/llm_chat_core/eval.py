@@ -2,8 +2,9 @@
 
 import json
 from dataclasses import dataclass
+from collections.abc import Mapping
 
-from .profile import (
+from utils.llm_chat_core.profile import (
     MEMORY_ITEM_LIMIT,
     PROFILE_PATCH_LIMIT,
     MemoryItem,
@@ -41,7 +42,7 @@ EVAL_SYSTEM = (
 )
 
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class EvalResult:
     mood_delta: float
     deltas: dict[str, float]
@@ -144,7 +145,7 @@ def parse_eval_response(
 
 
 def apply_deltas(
-    axes: dict[str, float],
+    axes: Mapping[str, float],
     result: EvalResult,
 ) -> dict[str, float]:
     """Apply clamped deltas to axes, keeping every axis within [0, 100]."""

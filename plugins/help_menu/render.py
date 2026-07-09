@@ -14,7 +14,7 @@ async def render_menu(
     *,
     title: str,
     columns: int,
-) -> bytes:
+) -> bytes | None:
     total = sum(len(v) for v in grouped.values())
     return await template2img(
         template_path=str(TEMPLATE_DIR),

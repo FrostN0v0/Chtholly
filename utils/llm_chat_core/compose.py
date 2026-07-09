@@ -4,10 +4,15 @@ Archetypes (tsundere / yandere / clingy / hostile ...) EMERGE from axis
 combinations via a first-match rule table; no single scalar decides tone.
 """
 
-from ..config import SYSTEM_SCAFFOLD
+from typing import TypeAlias
+from collections.abc import Callable
+
+from utils.llm_chat_core.prompts import SYSTEM_SCAFFOLD
+
+StancePredicate: TypeAlias = Callable[[float, float, float, float], bool]
 
 # (predicate, stance descriptor) — first match wins; order is load-bearing.
-_STANCE_RULES: list[tuple] = [
+_STANCE_RULES: list[tuple[StancePredicate, str]] = [
     (
         lambda a, t, d, r: r >= 60 and a >= 60,
         "病娇倾向：强烈的占有欲与嫉妒，爱恨交织，言语偏执而黏人",

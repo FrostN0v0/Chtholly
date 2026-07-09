@@ -9,7 +9,9 @@ Regenerate the stylesheet after editing templates:
 
 import time
 import hashlib
+from pathlib import Path
 from dataclasses import field
+from collections.abc import Mapping, Sequence
 
 from arclet.entari import Image, Session, MessageChain, BasicConfModel, command, metadata, local_data, plugin_config
 from arclet.entari.plugin import PluginRole
@@ -19,7 +21,7 @@ from arclet.entari.command import Match
 import entari_plugin_browser as _browser  # noqa: F401  (hard dep: rendering backend)
 
 from .render import render_menu
-from .collect import collect_entries
+from .collect import MenuEntry, collect_entries
 
 metadata(
     name="help_menu",
@@ -44,11 +46,11 @@ config = plugin_config(HelpMenuConfig)
 HELP_META = {"icon": "\U0001f4d6", "category": "基础"}
 
 
-def _cache_file(digest: str):
+def _cache_file(digest: str) -> Path:
     return local_data.get_cache_dir("help_menu") / f"{digest}.png"
 
 
-def _digest(grouped) -> str:
+def _digest(grouped: Mapping[str, Sequence[MenuEntry]]) -> str:
     parts = [f"{config.title}|{config.columns}|{config.show_hidden}"]
     for category, entries in grouped.items():
         for e in entries:
@@ -56,7 +58,7 @@ def _digest(grouped) -> str:
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
-def _plain_fallback(grouped) -> str:
+def _plain_fallback(grouped: Mapping[str, Sequence[MenuEntry]]) -> str:
     lines: list[str] = []
     for category, entries in grouped.items():
         lines.append(f"【{category}】")
@@ -70,7 +72,7 @@ def _plain_fallback(grouped) -> str:
 # NOTE: command.on() uses `{name}` format grammar; `[optional]` only works
 # with the AlconnaString grammar used by command.command().
 @command.command("help [category]", "生成图片帮助菜单")
-async def help_menu(session: Session, category: Match[str]):
+async def help_menu(session: Session, category: Match[str]) -> None:
     """生成图片帮助菜单"""
     selected = category.result if category.available else None
     grouped = collect_entries(show_hidden=config.show_hidden, custom_icons=config.custom_icons)

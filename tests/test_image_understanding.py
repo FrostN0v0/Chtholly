@@ -1,11 +1,6 @@
 """Unit tests for inbound image description normalization and note formatting."""
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from llm_chat_src.media import (  # noqa: E402
+from utils.llm_chat_core.media import (
     format_image_note,
     normalize_image_description,
 )

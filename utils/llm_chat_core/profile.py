@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any
+from typing import TypeGuard, cast
 from dataclasses import dataclass
+from collections.abc import Mapping
 
 ALLOWED_PROFILE_CATEGORIES = frozenset(
     {
@@ -51,7 +52,7 @@ class ProfileFactSnapshot:
     evidence_count: int
 
 
-def _is_number(value: object) -> bool:
+def _is_number(value: object) -> TypeGuard[int | float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
@@ -60,14 +61,15 @@ def _clamp01(value: float) -> float:
 
 
 def normalize_profile_patch(raw: object, *, min_confidence: float) -> ProfilePatch | None:
-    if not isinstance(raw, dict):
+    if not isinstance(raw, Mapping):
         return None
 
-    category = raw.get("category")
-    key = raw.get("key")
-    value = raw.get("value")
-    confidence = raw.get("confidence")
-    evidence = raw.get("evidence", "")
+    raw_map = cast(Mapping[str, object], raw)
+    category = raw_map.get("category")
+    key = raw_map.get("key")
+    value = raw_map.get("value")
+    confidence = raw_map.get("confidence")
+    evidence = raw_map.get("evidence", "")
 
     if not isinstance(category, str) or category not in ALLOWED_PROFILE_CATEGORIES:
         return None
@@ -98,17 +100,18 @@ def normalize_profile_patch(raw: object, *, min_confidence: float) -> ProfilePat
 
 
 def normalize_memory_item(raw: object) -> MemoryItem | None:
-    if not isinstance(raw, dict):
+    if not isinstance(raw, Mapping):
         return None
 
-    text = raw.get("text")
+    raw_map = cast(Mapping[str, object], raw)
+    text = raw_map.get("text")
     if not isinstance(text, str):
         return None
     text = text.strip()
     if not text:
         return None
 
-    importance = raw.get("importance", 0.5)
+    importance = raw_map.get("importance", 0.5)
     if not _is_number(importance):
         importance = 0.5
 
@@ -149,7 +152,7 @@ def decode_embedding(raw: str) -> list[float] | None:
     if not raw:
         return None
     try:
-        values: Any = json.loads(raw)
+        values: object = json.loads(raw)
     except (TypeError, json.JSONDecodeError):
         return None
     if not isinstance(values, list) or not values:

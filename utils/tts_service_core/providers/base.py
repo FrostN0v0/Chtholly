@@ -1,6 +1,8 @@
 """Provider protocol and error types for TTS backends."""
 
-from typing import Any, Protocol
+from typing import Protocol
+
+from .types import JsonValue
 
 
 class TTSError(Exception):
@@ -17,7 +19,7 @@ class TTSProvider(Protocol):
         """Preferred local file suffix for returned audio bytes, including the leading dot."""
         ...
 
-    async def synthesize(self, text: str, **params: Any) -> bytes:
+    async def synthesize(self, text: str, **params: JsonValue) -> bytes:
         """Synthesize `text` into audio bytes. Raises TTSSynthesisError on failure."""
         ...
 

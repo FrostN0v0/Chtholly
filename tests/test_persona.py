@@ -1,11 +1,6 @@
 """Unit tests for the pure persona engine: stance table, energy curve, prompt."""
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from llm_chat_src.persona.compose import (  # noqa: E402
+from utils.llm_chat_core.compose import (
     energy_at,
     mood_desc,
     energy_desc,

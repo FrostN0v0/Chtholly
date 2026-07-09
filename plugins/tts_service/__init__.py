@@ -4,15 +4,15 @@ Exposes a launart Service (`tts.service`) that any plugin can inject to
 synthesize speech. Currently backed by the gpt-sovits v2 HTTP API.
 """
 
-from typing import Any
-
 from launart import Launart, Service
 from arclet.entari import metadata, add_service, plugin_config
 from launart.status import Phase
 from arclet.entari.plugin import PluginRole
 
+from utils.tts_service_core.providers import TTSProvider, TTSSynthesisError, build_provider
+from utils.tts_service_core.providers.types import JsonValue
+
 from .config import TTSConfig
-from .providers import TTSProvider, TTSSynthesisError, build_provider
 
 metadata(
     name="tts_service",
@@ -52,7 +52,7 @@ class TTSService(Service):
     def file_extension(self) -> str:
         return self._provider.file_extension if self._provider is not None else ".wav"
 
-    async def synthesize(self, text: str, **params: Any) -> bytes:
+    async def synthesize(self, text: str, **params: JsonValue) -> bytes:
         """Synthesize `text` into audio bytes.
 
         Raises:

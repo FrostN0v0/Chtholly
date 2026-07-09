@@ -1,20 +1,15 @@
 """Unit tests for pure profile merging and semantic-memory ranking helpers."""
 
-import sys
-from pathlib import Path
-
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from llm_chat_src.persona.profile import (  # noqa: E402
+from utils.llm_chat_core.profile import (
     REPLACE_MARGIN,
     REINFORCE_BONUS,
     CONFLICT_PENALTY,
     ProfilePatch,
     ProfileFactSnapshot,
-    cosine_similarity,
     fact_rank_key,
+    cosine_similarity,
     rank_by_similarity,
     match_duplicate_memory,
     merge_profile_snapshot,
