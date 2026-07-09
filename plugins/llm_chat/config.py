@@ -4,7 +4,7 @@ from dataclasses import field
 
 from arclet.entari import BasicConfModel
 
-from utils.llm_chat_core.prompts import (
+from .core.prompts import (
     DEFAULT_PERSONA,
     DEFAULT_IMAGE_TAG_PROMPT,
     DEFAULT_IMAGE_DESCRIBE_PROMPT,
@@ -57,11 +57,11 @@ class LLMChatConfig(BasicConfModel):
     image_tag_prompt: str = DEFAULT_IMAGE_TAG_PROMPT
     """Vision system prompt for image tag extraction."""
     image_understanding_enabled: bool = True
-    """Describe inbound user images with the vision model and inject into context."""
+    """Enable inbound image understanding; vision-capable chat models receive images directly."""
     image_describe_prompt: str = DEFAULT_IMAGE_DESCRIBE_PROMPT
-    """Vision system prompt for inbound image description."""
+    """Fallback vision prompt used when the chat model cannot receive images directly."""
     image_describe_max_per_message: int = 3
-    """Max images described per message; extras degrade to bare placeholders."""
+    """Max inbound images attached or described per message; extras degrade to bare placeholders."""
     tag_batch_size: int = 20
     """Max images tagged per startup pass."""
     tag_concurrency: int = 4
@@ -70,5 +70,5 @@ class LLMChatConfig(BasicConfModel):
     """Minimum cosine similarity for semantic image retrieval."""
     image_top_candidates: int = 8
     """Random pick pool size among top semantic image matches."""
-    allowed_commands: list[str] = field(default_factory=lambda: ["echo"])
+    allowed_commands: list[str] = field(default_factory=list)
     """Command whitelist for the call_plugin tool."""

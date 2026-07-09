@@ -7,11 +7,10 @@ from dataclasses import dataclass
 
 from entari_plugin_database import select, get_session
 
-from utils.llm_chat_core.profile import MemoryItem, fact_rank_key, decode_embedding, cosine_similarity
-
 from ..models import UserMemory, UserProfileFact
 from .embedding import embed_text
 from .config_types import LLMChatConfigLike
+from ..core.profile import MemoryItem, fact_rank_key, decode_embedding, cosine_similarity
 
 
 @dataclass(slots=True, frozen=True)

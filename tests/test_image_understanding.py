@@ -1,6 +1,6 @@
 """Unit tests for inbound image description normalization and note formatting."""
 
-from utils.llm_chat_core.media import (
+from plugins.llm_chat.core.media import (
     format_image_note,
     normalize_image_description,
 )

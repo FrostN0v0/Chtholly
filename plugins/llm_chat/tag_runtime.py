@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from arclet.entari import Session, plugin, command, scheduler
+from arclet.entari import Session, plugin, command, scheduler, plugin_config
 from arclet.entari.filter import superusers
 from arclet.entari.plugin.model import Plugin
 
@@ -69,33 +69,38 @@ async def _launch_tag_pass(
     return f"已开始{scope}，"
 
 
-def register_tag_runtime(config: LLMChatConfig, plug: Plugin) -> None:
-    """Register image-tagging commands, startup pass, and nightly decay."""
+config = plugin_config(LLMChatConfig)
+plug = Plugin.current()
 
-    @plug.use("::startup")
-    async def tag_images_on_startup() -> None:
-        if not config.image_tags_enabled:
-            return
-        await _launch_tag_pass(config, "启动增量标注", config.tag_batch_size, retag=False)
 
-    @command.on("llmchat retag-images")
-    @superusers()
-    async def retag_images(session: Session) -> None:
-        status = await _launch_tag_pass(config, "重标 50 张", 50, retag=True, session=session)
-        await session.send(status + "进度稍后报告。")
+@plug.use("::startup")
+async def tag_images_on_startup() -> None:
+    if not config.image_tags_enabled:
+        return
+    await _launch_tag_pass(config, "启动增量标注", config.tag_batch_size, retag=False)
 
-    @command.on("llmchat tag-images")
-    @superusers()
-    async def tag_images_cmd(session: Session) -> None:
-        status = await _launch_tag_pass(config, "增量标注", None, retag=False, session=session)
-        await session.send(status + "进度稍后报告。")
 
-    @command.on("llmchat retag-images-all")
-    @superusers()
-    async def retag_images_all(session: Session) -> None:
-        status = await _launch_tag_pass(config, "全量重标", None, retag=True, session=session)
-        await session.send(status + "进度稍后报告。")
+@command.on("llmchat retag-images")
+@superusers()
+async def retag_images(session: Session) -> None:
+    status = await _launch_tag_pass(config, "重标 50 张", 50, retag=True, session=session)
+    await session.send(status + "进度稍后报告。")
 
-    @scheduler.cron("0 4 * * *")
-    async def nightly_decay_job() -> None:
-        await nightly_decay()
+
+@command.on("llmchat tag-images")
+@superusers()
+async def tag_images_cmd(session: Session) -> None:
+    status = await _launch_tag_pass(config, "增量标注", None, retag=False, session=session)
+    await session.send(status + "进度稍后报告。")
+
+
+@command.on("llmchat retag-images-all")
+@superusers()
+async def retag_images_all(session: Session) -> None:
+    status = await _launch_tag_pass(config, "全量重标", None, retag=True, session=session)
+    await session.send(status + "进度稍后报告。")
+
+
+@scheduler.cron("0 4 * * *")
+async def nightly_decay_job() -> None:
+    await nightly_decay()

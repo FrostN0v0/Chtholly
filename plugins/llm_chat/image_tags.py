@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import random
 from typing import TypeAlias
 import asyncio
@@ -14,12 +13,12 @@ from arclet.entari.logger import log
 from entari_plugin_database import select, get_session
 
 from utils.path import IMAGE_DIR
-from utils.llm_chat_core.media import match_image, is_random_request
-from utils.llm_chat_core.profile import decode_embedding, encode_embedding, cosine_similarity
 
 from .config import LLMChatConfig
 from .models import ImageTag
-from .vision import generate_image_tags
+from .vision import generate_image_tags, image_file_to_data_url
+from .core.media import match_image, is_random_request
+from .core.profile import decode_embedding, encode_embedding, cosine_similarity
 from .persona.embedding import embed_text
 
 ProgressReporter: TypeAlias = Callable[[int, int, int], Awaitable[None]]
@@ -93,9 +92,12 @@ async def tag_images(
             rel_path = str(path.relative_to(IMAGE_DIR))
             async with semaphore:
                 try:
-                    data = base64.b64encode(path.read_bytes()).decode()
-                    mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
-                    tags = await generate_image_tags(config, f"data:{mime};base64,{data}")
+                    data_url = image_file_to_data_url(path)
+                    if data_url is None:
+                        counter["failed"] += 1
+                        _LOGGER.warning(f"tagging skipped unreadable image {path.name}")
+                        return
+                    tags = await generate_image_tags(config, data_url)
                     if not tags:
                         counter["failed"] += 1
                         return

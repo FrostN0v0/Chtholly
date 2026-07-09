@@ -7,7 +7,7 @@ combinations via a first-match rule table; no single scalar decides tone.
 from typing import TypeAlias
 from collections.abc import Callable
 
-from utils.llm_chat_core.prompts import SYSTEM_SCAFFOLD
+from .prompts import SYSTEM_SCAFFOLD
 
 StancePredicate: TypeAlias = Callable[[float, float, float, float], bool]
 

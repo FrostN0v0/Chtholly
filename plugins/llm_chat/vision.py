@@ -5,15 +5,15 @@ from __future__ import annotations
 import base64
 from typing import Protocol, cast
 import asyncio
+from pathlib import Path
 import binascii
 
 import litellm
 from arclet.entari import Image, Session
 from entari_plugin_llm.config import get_model_config
 
-from utils.llm_chat_core.media import normalize_image_tags, normalize_image_description
-
 from .config import LLMChatConfig
+from .core.media import normalize_image_tags, normalize_image_description
 
 
 class _MessageLike(Protocol):
@@ -29,13 +29,21 @@ class _CompletionLike(Protocol):
 
 
 _IMAGE_FETCH_TIMEOUT = 15.0
-_VISION_TIMEOUT = 120.0
-_IMAGE_FETCH_MAX_BYTES = 6 * 1024 * 1024
+VISION_DESCRIBE_TIMEOUT = 30.0
+VISION_TAG_TIMEOUT = 120.0
+IMAGE_FETCH_MAX_BYTES = 6 * 1024 * 1024
 _IMAGE_DESC_CACHE_MAX = 128
 _image_desc_cache: dict[str, str] = {}
 
 
-async def vision_completion(config: LLMChatConfig, data_url: str, system_prompt: str, user_text: str) -> str:
+async def vision_completion(
+    config: LLMChatConfig,
+    data_url: str,
+    system_prompt: str,
+    user_text: str,
+    *,
+    timeout: float,
+) -> str:
     """Call the configured vision model and return stripped text content."""
     model = get_model_config(config.image_tag_model)
     response = await litellm.acompletion(
@@ -52,7 +60,7 @@ async def vision_completion(config: LLMChatConfig, data_url: str, system_prompt:
         ],
         base_url=model.base_url,
         api_key=model.api_key,
-        timeout=_VISION_TIMEOUT,
+        timeout=timeout,
         **model.extra,
     )
     completion = cast(_CompletionLike, response)
@@ -69,6 +77,20 @@ def raw_to_image_data_url(data: bytes) -> str | None:
     return src if src.startswith("data:image/") else None
 
 
+def image_file_to_data_url(path: Path, *, max_bytes: int = IMAGE_FETCH_MAX_BYTES) -> str | None:
+    """Read an image file and convert it to a sniffed data URL."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if len(data) > max_bytes:
+        return None
+    try:
+        return raw_to_image_data_url(data)
+    except ValueError:
+        return None
+
+
 async def fetch_image_data_url(session: Session, src: str) -> str | None:
     """Resolve an element src to a usable image data URL."""
     if src.startswith("data:"):
@@ -83,7 +105,7 @@ async def fetch_image_data_url(session: Session, src: str) -> str | None:
         data = await asyncio.wait_for(session.download(src), timeout=_IMAGE_FETCH_TIMEOUT)
     except Exception:
         return None
-    if len(data) > _IMAGE_FETCH_MAX_BYTES:
+    if len(data) > IMAGE_FETCH_MAX_BYTES:
         return None
     return raw_to_image_data_url(data)
 
@@ -101,6 +123,7 @@ async def describe_image(config: LLMChatConfig, session: Session, src: str) -> s
         data_url,
         config.image_describe_prompt,
         "Describe this chat image for conversation context.",
+        timeout=VISION_DESCRIBE_TIMEOUT,
     )
     description = normalize_image_description(raw)
     if description:
@@ -113,6 +136,10 @@ async def describe_image(config: LLMChatConfig, session: Session, src: str) -> s
 async def generate_image_tags(config: LLMChatConfig, data_url: str) -> str:
     """Generate normalized local-image tags."""
     raw = await vision_completion(
-        config, data_url, config.image_tag_prompt, "Tag this image for chat reaction retrieval."
+        config,
+        data_url,
+        config.image_tag_prompt,
+        "Tag this image for chat reaction retrieval.",
+        timeout=VISION_TAG_TIMEOUT,
     )
     return normalize_image_tags(raw)

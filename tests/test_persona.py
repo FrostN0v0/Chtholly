@@ -1,6 +1,6 @@
 """Unit tests for the pure persona engine: stance table, energy curve, prompt."""
 
-from utils.llm_chat_core.compose import (
+from plugins.llm_chat.core.compose import (
     energy_at,
     mood_desc,
     energy_desc,
@@ -145,3 +145,42 @@ class TestComposePrompt:
         assert "[你对TA的最近印象] 最近很放松" in prompt
         assert prompt.index("[长期画像]") < prompt.index("[相关记忆]")
         assert prompt.index("[相关记忆]") < prompt.index("[你对TA的最近印象]")
+
+    def test_media_tool_policy_requires_real_tool_call_before_delivery_claim(self):
+        prompt = compose_persona_prompt(
+            "persona",
+            0.0,
+            1.0,
+            affection=50,
+            trust=50,
+            dependence=0,
+            resentment=0,
+            familiarity=30,
+            impression="",
+            user_name="A",
+        )
+
+        assert "媒体工具是你真实发送图片、表情包、贴纸、语音的唯一方式" in prompt
+        assert "必须先调用工具" in prompt
+        assert "不要只用文字承诺、描述或假装已经发送" in prompt
+        assert "只有工具返回成功后，才可以说已经发送" in prompt
+
+    def test_media_tool_policy_encourages_occasional_reaction_images(self):
+        prompt = compose_persona_prompt(
+            "persona",
+            0.0,
+            1.0,
+            affection=50,
+            trust=50,
+            dependence=0,
+            resentment=0,
+            familiarity=30,
+            impression="",
+            user_name="A",
+        )
+
+        assert "正常闲聊中可以主动用表情包增强氛围" in prompt
+        assert "send_image 用于图片、表情包、贴纸请求" in prompt
+        assert "复杂表达可组合语音和表情包" in prompt
+        assert "避免无意义连发或刷屏" in prompt
+        assert "一轮通常最多调用一个媒体工具" not in prompt

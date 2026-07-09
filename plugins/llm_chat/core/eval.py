@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from collections.abc import Mapping
 
-from utils.llm_chat_core.profile import (
+from .profile import (
     MEMORY_ITEM_LIMIT,
     PROFILE_PATCH_LIMIT,
     MemoryItem,

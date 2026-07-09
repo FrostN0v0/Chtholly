@@ -10,9 +10,8 @@ from typing import Protocol, cast
 import litellm
 from entari_plugin_llm.config import get_model_config
 
-from utils.llm_chat_core.eval import EVAL_SYSTEM, EvalResult, build_eval_prompt, parse_eval_response
-
 from ..config import LLMChatConfig
+from ..core.eval import EVAL_SYSTEM, EvalResult, build_eval_prompt, parse_eval_response
 
 
 class _MessageLike(Protocol):

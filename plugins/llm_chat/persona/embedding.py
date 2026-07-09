@@ -13,6 +13,8 @@ from .config_types import LLMChatConfigLike
 _LOGGER = log.wrapper("[llm_chat]")
 _MULTIMODAL_MARKER = "-vision-"
 
+_missing_embedding_key_warned = False
+
 
 def _numbers(values: object) -> list[float]:
     if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
@@ -65,7 +67,14 @@ async def _embed_multimodal(config: LLMChatConfigLike, text: str) -> list[float]
 
 async def embed_text(config: LLMChatConfigLike, text: str) -> list[float] | None:
     """Return an embedding or None; embedding failures never block replies."""
+    global _missing_embedding_key_warned
+
     if not config.memory_enabled or not text.strip():
+        return None
+    if _MULTIMODAL_MARKER in config.memory_embedding_model and not (config.memory_embedding_api_key or "").strip():
+        if not _missing_embedding_key_warned:
+            _LOGGER.warning("embedding skipped: memory_embedding_api_key is required for multimodal embedding model")
+            _missing_embedding_key_warned = True
         return None
     try:
         if _MULTIMODAL_MARKER in config.memory_embedding_model:

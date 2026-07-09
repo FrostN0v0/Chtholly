@@ -2,7 +2,7 @@
 
 import pytest
 
-from utils.llm_chat_core.profile import (
+from plugins.llm_chat.core.profile import (
     REPLACE_MARGIN,
     REINFORCE_BONUS,
     CONFLICT_PENALTY,

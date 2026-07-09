@@ -2,28 +2,34 @@
 
 from __future__ import annotations
 
+from typing import Any
 import asyncio
 from collections.abc import Callable, Sequence
 
+import litellm
 from arclet.entari import Image, Session, MessageChain
-
-from utils.llm_chat_core.media import format_image_note
 
 from .config import LLMChatConfig
 from .models import Conversation
-from .vision import describe_image
+from .vision import describe_image, fetch_image_data_url
+from .core.media import format_image_note
 
 
-def build_chat_messages(history: Sequence[Conversation], user_name: str, content: str) -> list[dict[str, str]]:
+def build_chat_messages(
+    history: Sequence[Conversation],
+    user_name: str,
+    content: str,
+    current_content: str | list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Convert stored history plus the current user line into LLM messages."""
-    messages = [
+    messages: list[dict[str, Any]] = [
         {
             "role": row.role if row.role == "assistant" else "user",
             "content": f"[{row.user_name}]: {row.content}" if row.role == "user" else row.content,
         }
         for row in history
     ]
-    messages.append({"role": "user", "content": f"[{user_name}]: {content}"})
+    messages.append({"role": "user", "content": current_content or f"[{user_name}]: {content}"})
     return messages
 
 
@@ -50,20 +56,65 @@ def build_eval_transcript(
     return transcript
 
 
-def collect_message_images(session: Session, cap: int) -> list[tuple[Image, bool]]:
-    """Collect direct images first, then quoted images, capped by caller policy."""
+def collect_message_images(session: Session) -> list[tuple[Image, bool]]:
+    """Collect direct images first, then quoted images."""
     direct = list(session.elements.select(Image))
     quote = session.quote
     quoted = list(MessageChain(quote.children).select(Image)) if quote and quote.children else []
-    ordered = [(img, False) for img in direct] + [(img, True) for img in quoted]
-    return ordered[: max(0, cap)] + ordered[max(0, cap) :]
+    return [(img, False) for img in direct] + [(img, True) for img in quoted]
+
+
+def model_supports_image_input(model_name: str | None) -> bool:
+    """Return whether the chat model can receive images directly."""
+    if not model_name:
+        return False
+    try:
+        return bool(litellm.supports_vision(model=model_name))
+    except Exception:
+        return False
+
+
+async def build_multimodal_user_content(
+    config: LLMChatConfig,
+    session: Session,
+    user_name: str,
+    text: str,
+    warn: Callable[[str], None],
+) -> tuple[list[dict[str, Any]] | str, str]:
+    """Build direct image_url content for vision-capable chat models plus safe stored text."""
+    ordered = collect_message_images(session) if config.image_understanding_enabled else []
+    cap = max(0, config.image_describe_max_per_message)
+    attached = ordered[:cap]
+    overflow = ordered[cap:]
+    stored_parts = [text] if text else []
+    content_parts: list[dict[str, Any]] = [
+        {"type": "text", "text": f"[{user_name}]: {text}" if text else f"[{user_name}]:"}
+    ]
+    has_image_payload = False
+
+    for img, quoted in attached:
+        marker = format_image_note("", quoted=quoted)
+        stored_parts.append(marker)
+        content_parts.append({"type": "text", "text": marker})
+        data_url = await fetch_image_data_url(session, img.src)
+        if data_url is None:
+            warn("image passthrough skipped: image data unavailable")
+            continue
+        content_parts.append({"type": "image_url", "image_url": {"url": data_url}})
+        has_image_payload = True
+
+    stored_parts.extend(format_image_note("", quoted=quoted) for _img, quoted in overflow)
+    stored_text = " ".join(stored_parts)
+    if has_image_payload:
+        return content_parts, stored_text
+    return f"[{user_name}]: {stored_text}", stored_text
 
 
 async def build_image_notes(config: LLMChatConfig, session: Session, warn: Callable[[str], None]) -> list[str]:
     """Describe inbound images and return compact context markers."""
     if not config.image_understanding_enabled:
         return []
-    ordered = collect_message_images(session, max(0, config.image_describe_max_per_message))
+    ordered = collect_message_images(session)
     cap = max(0, config.image_describe_max_per_message)
     described = ordered[:cap]
     overflow = ordered[cap:]

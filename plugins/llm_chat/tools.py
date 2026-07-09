@@ -1,12 +1,17 @@
 """LLM tool helper functions for llm_chat.
 
-Tool *handlers* are registered in ``__init__.py`` (so they are defined in
-the same module as the plugin); this module only exposes pure helpers and
-the truncation utility they share. The dispatch target ``_tools`` is built
-in ``__init__`` and passed into ``register_tools`` there.
+Tool handlers are registered in ``tool_runtime.py``; this module only exposes
+helpers and the truncation utility they share.
 """
 
 from uuid import uuid4
+from collections.abc import Sequence
+
+
+def is_command_allowed(command_line: str, allowed_commands: Sequence[str]) -> tuple[bool, str]:
+    """Return whether a command head is explicitly whitelisted."""
+    head = command_line.split(maxsplit=1)[0] if command_line.strip() else ""
+    return bool(head and head in allowed_commands), head
 
 
 def _sentence_truncate(text: str, limit: int) -> str:
@@ -36,4 +41,4 @@ def tts_temp_path(suffix: str = ".wav") -> str:
     return str(local_data.get_temp_file(f"tts_{uuid4().hex}{suffix}"))
 
 
-__all__ = ["truncate_for_tts", "tts_temp_path"]
+__all__ = ["truncate_for_tts", "tts_temp_path", "is_command_allowed"]

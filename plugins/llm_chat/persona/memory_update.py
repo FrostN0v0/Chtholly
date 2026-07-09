@@ -11,8 +11,11 @@ from sqlalchemy import delete, update
 from entari_plugin_database import select, get_session
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from utils.llm_chat_core.eval import EvalResult
-from utils.llm_chat_core.profile import (
+from ..models import UserMemory, UserProfileFact
+from .embedding import embed_text
+from ..core.eval import EvalResult
+from .config_types import LLMChatConfigLike
+from ..core.profile import (
     ProfilePatch,
     ProfileFactSnapshot,
     decode_embedding,
@@ -21,10 +24,6 @@ from utils.llm_chat_core.profile import (
     match_duplicate_memory,
     merge_profile_snapshot,
 )
-
-from ..models import UserMemory, UserProfileFact
-from .embedding import embed_text
-from .config_types import LLMChatConfigLike
 
 
 @dataclass(slots=True, frozen=True)
@@ -48,6 +47,24 @@ class MergedFact:
     patch: ProfilePatch
     snapshot: ProfileFactSnapshot
     embedding_json: str
+    embedding_should_update: bool
+
+
+def resolve_fact_embedding_update(
+    merged_value: str,
+    patch_value: str,
+    patch_vector: list[float] | None,
+    existing_vector: list[float] | None,
+    backfill_vector: list[float] | None,
+) -> tuple[str, bool]:
+    """Decide whether a merged profile fact must rewrite its embedding."""
+    if merged_value == patch_value:
+        return (encode_embedding(patch_vector) if patch_vector is not None else "", True)
+    if existing_vector is not None:
+        return "", False
+    if backfill_vector is not None:
+        return encode_embedding(backfill_vector), True
+    return "", False
 
 
 async def _find_profile_fact(
@@ -131,14 +148,24 @@ async def apply_memory_updates(
             score = cosine_similarity(patch_vector, existing_vector)
             values_match = score >= config.profile_value_similarity
         merged = merge_profile_snapshot(snapshots[key], patch, values_match=values_match)
-        if merged.value == patch.value:
-            embedding_json = encode_embedding(patch_vector) if patch_vector is not None else ""
-        elif existing_vector is None:
-            backfill = await embed_text(config, f"{patch.category}:{patch.key}:{merged.value}")
-            embedding_json = encode_embedding(backfill) if backfill is not None else ""
-        else:
-            embedding_json = ""
-        merged_facts.append(MergedFact(patch=patch, snapshot=merged, embedding_json=embedding_json))
+        backfill_vector: list[float] | None = None
+        if merged.value != patch.value and existing_vector is None:
+            backfill_vector = await embed_text(config, f"{patch.category}:{patch.key}:{merged.value}")
+        embedding_json, embedding_should_update = resolve_fact_embedding_update(
+            merged.value,
+            patch.value,
+            patch_vector,
+            existing_vector,
+            backfill_vector,
+        )
+        merged_facts.append(
+            MergedFact(
+                patch=patch,
+                snapshot=merged,
+                embedding_json=embedding_json,
+                embedding_should_update=embedding_should_update,
+            )
+        )
 
     existing_candidates: list[tuple[int, str, list[float] | None]] = [
         (memory.id, memory.text, memory.embedding) for memory in existing_memories
@@ -205,7 +232,7 @@ async def apply_memory_updates(
                     "last_evidence": patch.evidence,
                     "updated_at": now,
                 }
-                if fact.embedding_json:
+                if fact.embedding_should_update:
                     values["embedding_json"] = fact.embedding_json
                 await session.execute(update(UserProfileFact).where(UserProfileFact.id == fact_id).values(**values))
 

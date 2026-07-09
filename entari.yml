@@ -9,7 +9,7 @@ basic:
   log:
     level: debug
     # Silence openai SDK debug dumps (full vision payloads incl. base64 images).
-    ignores: ["openai*"]
+    # ignores: ["openai*"]
     save: true
     rotation: "00:00"
     compression: "zip"
@@ -71,22 +71,22 @@ plugins:
       3. 如果你的回答超过了30字，请将你的回答进行分段，然后调用 `split_answer_send` 工具将多段回答进行发送。
       4. 然后，语气根据变量：亲密度 (`trust`) 来衡量，亲密度高就表现的可爱一些，反之则冷淡一点。
   tts_service:
-    provider: gpt-sovits
-    api_url: ${{ env.TTS_API_URL || "http://127.0.0.1:9880/tts" }}
-    default_speaker: "chtholly"
-    text_lang: "zh"
+    # provider: gpt-sovits
+    # api_url: ${{ env.TTS_API_URL || "http://127.0.0.1:9880/tts" }}
+    # default_speaker: "chtholly"
+    # text_lang: "zh"
     # Fish Audio switch example:
-    # provider: fish-audio
-    # fish_api_key: ${{ env.FISH_API_KEY }}
-    # fish_reference_id: ${{ env.FISH_REFERENCE_ID }}
-    # fish_model: s2-pro
-    # fish_format: mp3
+    provider: fish-audio
+    fish_api_key: ${{ env.FISH_API_KEY }}
+    fish_reference_id: ${{ env.FISH_REFERENCE_ID }}
+    fish_model: s2.1-pro-free
+    fish_format: mp3
   help_menu: {}
   llm_chat:
     $filter: channel.type is public
-    persona: 你是珂朵莉(Chtholly)，红发蓝瞳的少女，性格底色温柔、略带倔强。
+    persona: 你是珂朵莉(Chtholly)，蓝发蓝瞳的少女，性格底色温柔、略带倔强。
     allowed_commands: ["echo", "help"]
-    # Model duties: chat follows /llm model; eval pinned below; vision tag/describe uses image_tag_model.
+    # Model duties: chat images pass directly to vision-capable chat models; eval pinned below; fallback tag/describe uses image_tag_model.
     eval_model: doubao
     image_tag_model: doubao
     tag_batch_size: 50

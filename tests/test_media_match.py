@@ -3,7 +3,7 @@
 import random
 from pathlib import Path
 
-from utils.llm_chat_core.media import (
+from plugins.llm_chat.core.media import (
     match_audio,
     match_image,
     parse_audio_text,

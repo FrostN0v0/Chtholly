@@ -1,6 +1,6 @@
 """Unit tests for evaluator JSON parsing, clamping and delta application."""
 
-from utils.llm_chat_core.eval import (
+from plugins.llm_chat.core.eval import (
     DELTA_LIMIT,
     MOOD_DELTA_LIMIT,
     apply_deltas,
