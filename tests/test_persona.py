@@ -482,8 +482,16 @@ class TestComposePrompt:
         assert "call_plugin 只在用户明确要求执行白名单命令时使用" in prompt
         assert "只移除这一个前缀" in prompt
         assert "不自行发明、扩展、试探或连续执行命令" in prompt
-        assert "普通闲聊可主动发送明显贴合情绪的表情包或偶发语音" in prompt
+        assert "普通闲聊不是纯文字优先场景" in prompt
+        assert "每次回复前都主动判断当前情绪是否更适合用媒体表达" in prompt
+        assert "问候、调侃、害羞、撒娇、安慰、庆祝、惊讶、吃醋、无奈和轻微吐槽" in prompt
+        assert "优先选择一个合适的 send_image" in prompt
+        assert "当语气、亲昵感或情绪转折本身是表达重点时优先选择 speak" in prompt
+        assert "仅当现有台词自然吻合时选择 send_audio" in prompt
+        assert "不要因为纯文字也能回答就自动跳过媒体" in prompt
+        assert "普通闲聊可主动发送明显贴合情绪的表情包或偶发语音" not in prompt
         assert "严肃求助、事实问答、争执和多人快速对话优先文字" in prompt
+        assert "积极判断媒体机会不等于机械地每轮发送或连续刷屏" in prompt
         assert "默认一轮使用一个有发送副作用的媒体工具" in prompt
         assert "一段语音加一张表情确实构成同一自然表演节拍" in prompt
         assert "才在提示层允许最多两个" in prompt

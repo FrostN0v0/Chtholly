@@ -491,6 +491,44 @@ async def test_actual_tool_runtime_uses_configured_gate_order_and_disposal(
 
 
 @pytest.mark.asyncio
+async def test_actual_media_tool_schemas_encourage_proactive_expression(
+    local_modules: SimpleNamespace,
+) -> None:
+    baseline = _registry_snapshot()
+
+    async with _temporary_plugin(
+        config={
+            "tts_enabled": True,
+            "allowed_commands": [],
+            "web_search_enabled": False,
+        },
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        schemas = {schema["function"]["name"]: schema["function"] for schema in _schema_delta(baseline)}
+        image_schema = schemas["send_image"]
+        speak_schema = schemas["speak"]
+
+        assert "Use proactively for explicit requests and natural emotional reactions" in image_schema["description"]
+        assert "greetings, teasing, embarrassment, affection, comfort, celebration" in image_schema["description"]
+        assert "Do not wait for an explicit sticker request" in image_schema["description"]
+        assert "Use only for an explicit local reaction" not in image_schema["description"]
+        assert image_schema["parameters"]["required"] == ["context"]
+
+        assert "Use proactively when vocal delivery adds warmth" in speak_schema["description"]
+        assert "intimacy, playfulness, comfort, celebration, surprise" in speak_schema["description"]
+        assert (
+            "Prefer it over another plain-text sentence when tone itself carries the response"
+            in speak_schema["description"]
+        )
+        assert speak_schema["parameters"]["required"] == ["text"]
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+    _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
 async def test_real_llm_service_runs_search_extract_final_and_carries_tool_messages_forward(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,

@@ -45,8 +45,11 @@ async def send_image(session: Session, context: str) -> str:
     (
         """
     Send one local reaction image or sticker matching compact context keywords. """
-        """Use only for an explicit local reaction or sticker request, """
-        """or a clearly fitting lightweight emotional reaction. """
+        """Use proactively for explicit requests and natural emotional reactions in casual conversation, including """
+        """greetings, teasing, embarrassment, affection, comfort, celebration, surprise, jealousy, exasperation, """
+        """or light complaints. Prefer it when a sticker expresses the feeling more naturally """
+        """than another text sentence. """
+        """Do not wait for an explicit sticker request when the emotional fit is clear. """
         """This is not image generation, web search, or analysis of an attached image.
 
     Args:
@@ -119,6 +122,9 @@ if config.tts_enabled:
         (
             """
         Synthesize and send one short new utterance from the character. """
+            """Use proactively when vocal delivery adds warmth, intimacy, playfulness, comfort, """
+            """celebration, surprise, or a meaningful emotional turn in casual conversation. """
+            """Prefer it over another plain-text sentence when tone itself carries the response. """
             """Use this for arbitrary new speech, not for selecting a prerecorded clip. """
             """Do not repeat the full spoken sentence as final text after success.
 
