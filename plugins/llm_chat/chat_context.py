@@ -14,7 +14,7 @@ from .config import LLMChatConfig
 from .models import Conversation
 from .vision import describe_image, fetch_image_data_url
 from .core.eval import EvalMessage, EvalConversation
-from .core.media import format_image_note
+from .core.media import format_image_note, sanitize_assistant_history
 
 
 def serialize_user_turn(user_name: str, content: str) -> str:
@@ -36,7 +36,11 @@ def build_chat_messages(
     messages: list[dict[str, Any]] = [
         {
             "role": row.role if row.role == "assistant" else "user",
-            "content": row.content if row.role == "assistant" else serialize_user_turn(row.user_name, row.content),
+            "content": (
+                sanitize_assistant_history(row.content)
+                if row.role == "assistant"
+                else serialize_user_turn(row.user_name, row.content)
+            ),
         }
         for row in history
     ]
@@ -62,7 +66,7 @@ def build_eval_conversation(
             "role": "assistant",
             "speaker": "bot",
             "target": False,
-            "content": row.content,
+            "content": sanitize_assistant_history(row.content),
         }
         if row.role == "assistant"
         else {

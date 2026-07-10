@@ -2,7 +2,9 @@
 
 from plugins.llm_chat.core.media import (
     format_image_note,
+    is_internal_media_record,
     normalize_image_description,
+    strip_internal_media_records,
 )
 
 
@@ -55,3 +57,30 @@ class TestFormatImageNote:
 
     def test_quoted_empty_description(self):
         assert format_image_note("", quoted=True) == "[引用图片]"
+
+
+class TestInternalMediaRecords:
+    def test_strips_false_sticker_record_from_model_reply(self):
+        reply = "[发送了表情包: 纠结，挑选，认真看，可爱]只看立绘的话，我会选提丰。"
+
+        assert strip_internal_media_records(reply) == "只看立绘的话，我会选提丰。"
+
+    def test_strips_nested_tts_tags_through_outer_record(self):
+        reply = "[用语音说: [softly] 晚安。[happy] 明天见。]\n文字补充"
+
+        assert strip_internal_media_records(reply) == "文字补充"
+
+    def test_strips_multiple_adjacent_records(self):
+        reply = "[发送了表情包: 开心] [发送了语音: 早安]早上好。"
+
+        assert strip_internal_media_records(reply) == "早上好。"
+
+    def test_leaves_unclosed_record_unchanged(self):
+        reply = "[发送了表情包: 不完整"
+
+        assert strip_internal_media_records(reply) == reply
+
+    def test_recognizes_only_standalone_records(self):
+        assert is_internal_media_record("  [发送了语音: 晚安]  ")
+        assert is_internal_media_record("[用语音说: [softly] 晚安。]")
+        assert not is_internal_media_record("[发送了表情包: 开心]文字回复")

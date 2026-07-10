@@ -16,6 +16,7 @@ from arclet.entari.plugin.model import Plugin
 
 from .config import LLMChatConfig
 from .core.eval import apply_deltas
+from .core.media import strip_internal_media_records
 from .chat_context import (
     build_image_notes,
     build_chat_messages,
@@ -105,7 +106,10 @@ async def on_chat(session: Session, ctx: Contexts):
         _LOGGER.warning(f"llm generate failed: {exc!r}")
         return None
 
-    reply = cast(str | None, response.choices[0].message.content) or ""
+    raw_reply = cast(str | None, response.choices[0].message.content) or ""
+    reply = strip_internal_media_records(raw_reply)
+    if reply != raw_reply:
+        _LOGGER.warning("stripped reserved media history marker from model reply")
     if reply and reply != "[END_OF_RESPONSE]":
         await session.send(reply)
         await append_message(channel_id, "", "bot", "assistant", reply)
