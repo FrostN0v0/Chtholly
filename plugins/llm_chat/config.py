@@ -32,14 +32,22 @@ class LLMChatConfig(BasicConfModel):
     """Embedding API key; set from env in entari.yml."""
     memory_embedding_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     """Embedding API base URL."""
-    memory_top_profile_facts: int = 8
-    """Max stable profile facts injected into the prompt."""
-    memory_top_memories: int = 5
-    """Max semantically relevant memories injected into the prompt."""
-    memory_min_similarity: float = 0.25
+    memory_top_profile_facts: int = 6
+    """Max stable profile facts injected into the chat prompt."""
+    memory_top_memories: int = 3
+    """Max semantically relevant memories injected into the chat prompt."""
+    memory_min_importance: float = 0.60
+    """Minimum importance for persisted and prompt-visible episodic memories."""
+    memory_min_similarity: float = 0.35
     """Minimum cosine similarity for relevant episodic memories."""
-    memory_dedup_similarity: float = 0.92
+    memory_dedup_similarity: float = 0.88
     """Cosine threshold treating a new memory as duplicate of a stored one."""
+    memory_prompt_dedup_similarity: float = 0.86
+    """Cosine threshold collapsing similar memories only in prompt retrieval."""
+    profile_alias_similarity: float = 0.88
+    """Cosine threshold grouping same-category profile aliases at read time."""
+    memory_eval_profile_fact_limit: int = 50
+    """Max grouped profile facts exposed to the relationship evaluator."""
     profile_value_similarity: float = 0.90
     """Cosine threshold treating a patch value as the same fact (reinforce)."""
     profile_fact_min_confidence: float = 0.55

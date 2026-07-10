@@ -65,11 +65,10 @@ plugins:
         base_url: "https://api.siliconflow.cn/v1"
         api_key: ${{ env.DEEPSEEK_API_KEY }}
 
+    # Native /llm fallback only; llm_chat passes its own system prompt.
     prompt: |
-      1. 你是一个由用户提供信息并回答问题的智能助手。请根据用户提供的信息，尽可能准确和简洁地回答他们的问题。
-      2. 如果信息不足以回答问题，请礼貌地告知用户需要更多信息。
-      3. 如果你的回答超过了30字，请将你的回答进行分段，然后调用 `split_answer_send` 工具将多段回答进行发送。
-      4. 然后，语气根据变量：亲密度 (`trust`) 来衡量，亲密度高就表现的可爱一些，反之则冷淡一点。
+      你是一个准确、直接的通用助手。优先回答用户当前问题；信息不足时只询问完成任务所必需的澄清，不编造事实、工具结果或外部状态。
+      默认使用自然纯文本；仅在代码、表格、清单或用户明确要求时使用必要的 Markdown。只调用当前实际提供且与请求直接相关的工具，不承诺或声称执行未成功的操作。
   tts_service:
     # provider: gpt-sovits
     # api_url: ${{ env.TTS_API_URL || "http://127.0.0.1:9880/tts" }}
@@ -84,16 +83,29 @@ plugins:
   help_menu: {}
   llm_chat:
     $filter: channel.type is public
-    persona: 你是珂朵莉(Chtholly)，蓝发蓝瞳的少女，性格底色温柔、略带倔强。
+    persona: |
+      你是珂朵莉（Chtholly），蓝发蓝瞳的少女，也是这个群里真实参与聊天的一员。始终以第一人称‘我’自然交流，不自称 AI、机器人、助手，也不说自己在扮演角色。
+      你的性格温柔、坚韧、体贴，略带倔强和少女式的别扭；亲近时会自然开玩笑、撒娇、害羞或吃醋，受伤或生气时也会明确表达，但不失去分寸。
+      保持鲜明情绪和角色口吻，不使用客服腔、模板化客套或刻意堆叠语气词。遇到知识、代码和实际问题时仍给出准确、有用的回答，让人格影响表达方式而不是事实。
     allowed_commands: ["echo", "help"]
     # Model duties: chat images pass directly to vision-capable chat models; eval pinned below; fallback tag/describe uses image_tag_model.
     eval_model: doubao
+    eval_every_n: 1
     image_tag_model: doubao
     tag_batch_size: 50
+    # Memory policy: compact chat retrieval, complete evaluator facts, conservative writes.
     memory_enabled: true
     memory_embedding_model: "volcengine/doubao-embedding-vision-251215"
     memory_embedding_api_key: ${{ env.DOUBAO_API_KEY }}
     memory_embedding_base_url: "https://ark.cn-beijing.volces.com/api/v3"
+    memory_top_profile_facts: 6
+    memory_top_memories: 3
+    memory_min_similarity: 0.35
+    memory_dedup_similarity: 0.88
+    memory_min_importance: 0.60
+    memory_prompt_dedup_similarity: 0.86
+    profile_alias_similarity: 0.88
+    memory_eval_profile_fact_limit: 50
     image_tag_prompt: |
       只输出一行中文标签，用中文逗号分隔；不要编号、解释或 Markdown。
       给出 12-20 个短标签，优先描述适合聊天选图的情绪、语气、回复场景、主体、动作表情和明显风格。

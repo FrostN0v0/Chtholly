@@ -8,6 +8,7 @@ def test_domain_and_tts_core_imports_do_not_load_plugin_entrypoints():
     for name in [
         "plugins.llm_chat.core.media",
         "plugins.llm_chat.core.profile",
+        "plugins.llm_chat.core.memory_policy",
         "plugins.llm_chat.core.eval",
         "plugins.llm_chat.core.compose",
         "utils.tts_service_core.providers.gpt_sovits",

@@ -19,7 +19,7 @@ from .core.eval import apply_deltas
 from .chat_context import (
     build_image_notes,
     build_chat_messages,
-    build_eval_transcript,
+    build_eval_conversation,
     model_supports_image_input,
     build_multimodal_user_content,
 )
@@ -92,7 +92,7 @@ async def on_chat(session: Session, ctx: Contexts):
         resentment=rel.resentment,
         familiarity=rel.familiarity,
         impression=rel.impression,
-        profile_facts=memory_context.profile_facts,
+        profile=memory_context.chat_profile,
         relevant_memories=memory_context.relevant_memories,
         user_name=user_name,
     )
@@ -123,15 +123,15 @@ async def on_chat(session: Session, ctx: Contexts):
     if counter >= config.eval_every_n:
         counter = 0
         recent = history[-config.eval_context_window :] if config.eval_context_window > 0 else []
-        transcript = build_eval_transcript(recent, user_id, user_name, content, reply)
+        conversation = build_eval_conversation(recent, user_id, user_name, content, reply)
         try:
             result = await run_evaluation(
                 config,
                 config.persona,
                 axes,
                 impression,
-                memory_context.profile_facts,
-                transcript,
+                memory_context.evaluator_profile_facts,
+                conversation,
                 user_name,
                 channel_id,
             )

@@ -5,9 +5,8 @@ from __future__ import annotations
 from typing import cast
 from datetime import datetime
 from dataclasses import dataclass
-from collections.abc import Sequence
 
-from sqlalchemy import delete, update
+from sqlalchemy import update
 from entari_plugin_database import select, get_session
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +15,7 @@ from .embedding import embed_text
 from ..core.eval import EvalResult
 from .config_types import LLMChatConfigLike
 from ..core.profile import (
+    MEMORY_ITEM_LIMIT,
     ProfilePatch,
     ProfileFactSnapshot,
     decode_embedding,
@@ -24,6 +24,7 @@ from ..core.profile import (
     match_duplicate_memory,
     merge_profile_snapshot,
 )
+from ..core.memory_policy import select_admitted_memory_indexes
 
 
 @dataclass(slots=True, frozen=True)
@@ -100,7 +101,10 @@ async def apply_memory_updates(
     patches: dict[tuple[str, str], ProfilePatch] = {}
     for patch in result.profile_patches:
         patches.setdefault((patch.category, patch.key), patch)
-    if not patches and not result.memory_items:
+    eligible_memory_items = [item for item in result.memory_items if item.importance >= config.memory_min_importance][
+        :MEMORY_ITEM_LIMIT
+    ]
+    if not patches and not eligible_memory_items:
         return
 
     fact_ids: dict[tuple[str, str], int | None] = {}
@@ -122,7 +126,7 @@ async def apply_memory_updates(
                     evidence_count=fact.evidence_count,
                 )
             )
-        if result.memory_items:
+        if eligible_memory_items:
             rows = (
                 (
                     await session.execute(
@@ -173,7 +177,7 @@ async def apply_memory_updates(
     existing_importance = {memory.id: memory.importance for memory in existing_memories}
     importance_bumps: dict[int, float] = {}
     pending: list[PendingMemory] = []
-    for item in result.memory_items:
+    for item in eligible_memory_items:
         vector = await embed_text(config, item.text)
         duplicate_id = match_duplicate_memory(
             vector,
@@ -200,6 +204,13 @@ async def apply_memory_updates(
         pending.append(
             PendingMemory(item.text, item.importance, encode_embedding(vector) if vector is not None else "", vector)
         )
+
+    admitted_indexes = select_admitted_memory_indexes(
+        [item.importance for item in pending],
+        existing_count=len(existing_memories),
+        limit=config.memory_max_records_per_user,
+    )
+    admitted_pending = [pending[index] for index in admitted_indexes]
 
     now = datetime.utcnow()
     async with get_session() as raw_session:
@@ -241,7 +252,7 @@ async def apply_memory_updates(
                 update(UserMemory).where(UserMemory.id == mem_id).values(importance=importance, created_at=now)
             )
 
-        for item in pending:
+        for item in admitted_pending:
             session.add(
                 UserMemory(
                     user_id=user_id,
@@ -252,22 +263,5 @@ async def apply_memory_updates(
                     source="conversation",
                 )
             )
-
-        keep_count = max(0, config.memory_max_records_per_user)
-        old_ids = list(
-            (
-                await session.execute(
-                    select(UserMemory.id)
-                    .where(UserMemory.user_id == user_id, UserMemory.channel_id == channel_id)
-                    .order_by(UserMemory.created_at.desc(), UserMemory.id.desc())
-                    .offset(keep_count)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        if old_ids:
-            narrowed_ids: Sequence[int] = old_ids
-            await session.execute(delete(UserMemory).where(UserMemory.id.in_(narrowed_ids)))
 
         await session.commit()

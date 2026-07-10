@@ -223,7 +223,7 @@ config = plugin_config(MyConfig)
 - 项目引进了 `entari-plugin-browser`、`entari-plugin-llm`、`entari-plugin-database`、`entari-plugin-permission` 作为项目的基础建设工具，当你需要使用 playwright、jinja2 模板渲染，AI会话调用、数据库及ORM、权限管理等方面时，优先考虑现有基建。
 - 当前项目拟构造一个供其它插件或服务调用的 TTS 服务，目前拟兼容 gpt-sovits 的接入，参考 `nonebot-plugin-deepseek` 中的 TTS 服务对接，并优化实现，使其符合当前项目的基建要求。
 - 帮助菜单，当前项目拟参考 [`nonebot-plugin-picmenu-next`](https://github.com/lgc-NB2Dev/nonebot-plugin-picmenu-next) 的菜单功能，结合 entari 基建，实现一个自动生成、界面美观、自定义程度高，开发简单的图片帮助基建插件。
-- 会话互动系统，当前项目拟构造一个基于 llm 插件支持群聊场景需求，在复杂的多人对话中保有人物认知、长期用户画像和语义检索记忆能力的聊天交互系统，支持对本地图片通过 llm 视觉识别打上标签，并在合适不突兀的语境下发送图片和语音（语音文件以内容命名，根据文件名判断语境发送），并支持调用插件功能。
+- 会话互动系统：`plugins/llm_chat` 已基于 LLM 插件实现公开群聊人格对话，用户轮次使用 `speaker` / `content` JSON 区分多人发言，图片继续走独立视觉链路。主聊天只接收按类别筛选的画像值和相关记忆，关系 evaluator 接收 canonical 画像与 aliases；语义分组和去重只构造可逆读取视图，持久化继续使用 exact key 并保留原始数据。表情、预录语音、TTS 与白名单插件命令均通过实际注册工具按需调用。
 
 ### 测试
 

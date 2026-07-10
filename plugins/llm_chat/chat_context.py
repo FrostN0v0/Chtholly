@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 import asyncio
 from collections.abc import Callable, Sequence
@@ -12,7 +13,17 @@ from arclet.entari import Image, Session, MessageChain
 from .config import LLMChatConfig
 from .models import Conversation
 from .vision import describe_image, fetch_image_data_url
+from .core.eval import EvalMessage, EvalConversation
 from .core.media import format_image_note
+
+
+def serialize_user_turn(user_name: str, content: str) -> str:
+    """Serialize one user turn as unambiguous speaker/content JSON data."""
+    return json.dumps(
+        {"speaker": user_name, "content": content},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def build_chat_messages(
@@ -21,39 +32,69 @@ def build_chat_messages(
     content: str,
     current_content: str | list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Convert stored history plus the current user line into LLM messages."""
+    """Convert stored history plus the current user turn into LLM messages."""
     messages: list[dict[str, Any]] = [
         {
             "role": row.role if row.role == "assistant" else "user",
-            "content": f"[{row.user_name}]: {row.content}" if row.role == "user" else row.content,
+            "content": row.content if row.role == "assistant" else serialize_user_turn(row.user_name, row.content),
         }
         for row in history
     ]
-    messages.append({"role": "user", "content": current_content or f"[{user_name}]: {content}"})
+    messages.append(
+        {
+            "role": "user",
+            "content": current_content if current_content is not None else serialize_user_turn(user_name, content),
+        }
+    )
     return messages
 
 
-def build_eval_transcript(
+def build_eval_conversation(
     history: Sequence[Conversation],
     user_id: str,
     user_name: str,
     content: str,
     reply: str,
-) -> list[str]:
-    """Build evaluator transcript lines from recent history and this turn."""
-
-    def transcript_line(row: Conversation) -> str:
-        if row.role == "assistant":
-            return f"[你]: {row.content}"
-        if row.user_id == user_id:
-            return f"[评估对象 {row.user_name}]: {row.content}"
-        return f"[{row.user_name}]: {row.content}"
-
-    transcript = [transcript_line(row) for row in history]
-    transcript.append(f"[评估对象 {user_name}]: {content}")
-    if reply and reply != "[END_OF_RESPONSE]":
-        transcript.append(f"[你]: {reply}")
-    return transcript
+) -> EvalConversation:
+    """Separate recent history from the evaluator's current-turn evidence."""
+    recent_history: list[EvalMessage] = [
+        {
+            "role": "assistant",
+            "speaker": "bot",
+            "target": False,
+            "content": row.content,
+        }
+        if row.role == "assistant"
+        else {
+            "role": "user",
+            "speaker": row.user_name,
+            "target": row.user_id == user_id,
+            "content": row.content,
+        }
+        for row in history
+    ]
+    assistant: EvalMessage | None = (
+        {
+            "role": "assistant",
+            "speaker": "bot",
+            "target": False,
+            "content": reply,
+        }
+        if reply and reply != "[END_OF_RESPONSE]"
+        else None
+    )
+    return {
+        "recent_history": recent_history,
+        "current_turn": {
+            "user": {
+                "role": "user",
+                "speaker": user_name,
+                "target": True,
+                "content": content,
+            },
+            "assistant": assistant,
+        },
+    }
 
 
 def collect_message_images(session: Session) -> list[tuple[Image, bool]]:
@@ -87,9 +128,7 @@ async def build_multimodal_user_content(
     attached = ordered[:cap]
     overflow = ordered[cap:]
     stored_parts = [text] if text else []
-    content_parts: list[dict[str, Any]] = [
-        {"type": "text", "text": f"[{user_name}]: {text}" if text else f"[{user_name}]:"}
-    ]
+    content_parts: list[dict[str, Any]] = [{"type": "text", "text": serialize_user_turn(user_name, text)}]
     has_image_payload = False
 
     for img, quoted in attached:
@@ -103,11 +142,15 @@ async def build_multimodal_user_content(
         content_parts.append({"type": "image_url", "image_url": {"url": data_url}})
         has_image_payload = True
 
-    stored_parts.extend(format_image_note("", quoted=quoted) for _img, quoted in overflow)
+    for _img, quoted in overflow:
+        marker = format_image_note("", quoted=quoted)
+        stored_parts.append(marker)
+        content_parts.append({"type": "text", "text": marker})
+
     stored_text = " ".join(stored_parts)
     if has_image_payload:
         return content_parts, stored_text
-    return f"[{user_name}]: {stored_text}", stored_text
+    return serialize_user_turn(user_name, stored_text), stored_text
 
 
 async def build_image_notes(config: LLMChatConfig, session: Session, warn: Callable[[str], None]) -> list[str]:
