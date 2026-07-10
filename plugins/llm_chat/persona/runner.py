@@ -11,7 +11,14 @@ import litellm
 from entari_plugin_llm.config import get_model_config
 
 from ..config import LLMChatConfig
-from ..core.eval import EVAL_SYSTEM, EvalResult, build_eval_prompt, parse_eval_response
+from ..core.eval import (
+    EvalResult,
+    EvalConversation,
+    build_eval_prompt,
+    build_eval_system,
+    parse_eval_response,
+)
+from ..core.memory_policy import ProfileFactData
 
 
 class _MessageLike(Protocol):
@@ -31,8 +38,8 @@ async def run_evaluation(
     persona: str,
     axes: dict[str, float],
     impression: str,
-    profile_facts: list[str],
-    transcript: list[str],
+    evaluator_profile_facts: list[ProfileFactData],
+    conversation: EvalConversation,
     user_name: str = "",
     channel_id: str = "$default",
 ) -> EvalResult | None:
@@ -42,20 +49,34 @@ async def run_evaluation(
     except Exception:
         # Stale channel default: fall back to the "$default" scope resolution.
         conf = get_model_config(config.eval_model or config.model)
+    extra = {key: value for key, value in conf.extra.items() if key not in {"tools", "tool_choice"}}
     response = await litellm.acompletion(
         model=conf.name,
         messages=[
-            {"role": "system", "content": EVAL_SYSTEM},
+            {
+                "role": "system",
+                "content": build_eval_system(
+                    config.profile_fact_min_confidence,
+                    config.memory_min_importance,
+                ),
+            },
             {
                 "role": "user",
-                "content": build_eval_prompt(persona, axes, impression, profile_facts, transcript, user_name),
+                "content": build_eval_prompt(
+                    persona,
+                    axes,
+                    impression,
+                    evaluator_profile_facts,
+                    conversation,
+                    user_name,
+                ),
             },
         ],
         base_url=conf.base_url,
         api_key=conf.api_key,
         temperature=0,
         response_format={"type": "json_object"},
-        **conf.extra,
+        **extra,
     )
     completion = cast(_CompletionLike, response)
     content = completion.choices[0].message.content
@@ -64,5 +85,6 @@ async def run_evaluation(
     return parse_eval_response(
         content,
         current_impression=impression,
+        min_memory_importance=config.memory_min_importance,
         min_profile_confidence=config.profile_fact_min_confidence,
     )

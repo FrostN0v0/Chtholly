@@ -18,6 +18,7 @@ from utils.path import AUDIO_DIR, IMAGE_DIR
 from .tools import tts_temp_path, truncate_for_tts, is_command_allowed
 from .config import LLMChatConfig
 from .models import ImageTag
+from .web_tools import register_web_access_tools
 from .core.media import match_audio, parse_audio_text, is_random_request
 from .image_tags import pick_image
 from .persona.store import append_message
@@ -41,17 +42,22 @@ registered_tools: list[str] = []
 
 @tools
 async def send_image(session: Session, context: str) -> str:
-    """
-    Send a local reaction image or sticker matching compact keywords.
-
-    Use this whenever the user explicitly asks for an image, reaction image, sticker, meme, or emoji-style
-    response. Call it before claiming media was sent.
+    (
+        """
+    Send one local reaction image or sticker matching compact context keywords. """
+        """Use proactively for explicit requests and natural emotional reactions in casual conversation, including """
+        """greetings, teasing, embarrassment, affection, comfort, celebration, surprise, jealousy, exasperation, """
+        """or light complaints. Prefer it when a sticker expresses the feeling more naturally """
+        """than another text sentence. """
+        """Do not wait for an explicit sticker request when the emotional fit is clear. """
+        """This is not image generation, web search, or analysis of an attached image.
 
     Args:
         context (str): Short emotion/scenario tags, for example "害羞 可爱 早安"; "随便" picks randomly.
     Returns:
         str: Delivery result.
     """
+    )
     async with get_session() as db:
         rows = list((await db.execute(select(ImageTag))).scalars().all())
     if not rows:
@@ -92,8 +98,11 @@ if DINGGONG_DIR.exists():
         )
         return f"已发送语音：{parse_audio_text(matched.name)}"
 
-    send_audio.__doc__ = f"""
-    Send a prerecorded local voice clip matching compact keywords.
+    send_audio.__doc__ = (
+        """
+    Send one prerecorded local voice clip selected from the available clip lines. """
+        """Use only when an inventory line matches; use speak for arbitrary new text. """
+        f"""Do not retry with alternate wording after no match.
 
     Available clip lines: {inventory}
 
@@ -102,6 +111,7 @@ if DINGGONG_DIR.exists():
     Returns:
         str: Spoken text in the selected clip.
     """
+    )
     tools(send_audio)
     registered_tools.append("send_audio")
 
@@ -109,8 +119,14 @@ if config.tts_enabled:
 
     @tools
     async def speak(session: Session, text: str) -> str:
-        """
-        Synthesize a short sentence and send it as voice.
+        (
+            """
+        Synthesize and send one short new utterance from the character. """
+            """Use proactively when vocal delivery adds warmth, intimacy, playfulness, comfort, """
+            """celebration, surprise, or a meaningful emotional turn in casual conversation. """
+            """Prefer it over another plain-text sentence when tone itself carries the response. """
+            """Use this for arbitrary new speech, not for selecting a prerecorded clip. """
+            """Do not repeat the full spoken sentence as final text after success.
 
         For expressive Fish Audio speech, mix inline emotion or delivery tags directly into text at natural phrase
         boundaries. Use multiple tags when the sentence turns, for example:
@@ -124,6 +140,7 @@ if config.tts_enabled:
         Returns:
             str: Delivery result.
         """
+        )
         speech = truncate_for_tts(text, config.tts_max_chars)
         try:
             service = cast(TTSServiceLike, Launart.current().get_component("tts.service"))
@@ -142,14 +159,19 @@ if config.allowed_commands:
 
     @tools
     async def call_plugin(session: Session, command_line: str) -> str:
-        """
-        Execute one whitelisted bot command.
+        (
+            """
+        Execute one whitelisted bot command only when the user explicitly asks for command execution. """
+            """Remove one leading '/' or '.' from the command name before passing command_line, """
+            """preserve the remaining command and necessary arguments, """
+            """and do not discover, invent, broaden, or retry commands.
 
         Args:
             command_line (str): Full command line, for example "echo hello".
         Returns:
             str: Command result text.
         """
+        )
         allowed, head = is_command_allowed(command_line, config.allowed_commands)
         if not allowed:
             return f"指令 {head or '(空)'} 不在允许列表中"
@@ -158,3 +180,5 @@ if config.allowed_commands:
         return str(result) if result is not None else "指令已执行"
 
     registered_tools.append("call_plugin")
+
+registered_tools.extend(register_web_access_tools(tools, config))

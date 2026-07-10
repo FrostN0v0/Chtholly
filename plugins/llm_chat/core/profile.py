@@ -24,8 +24,8 @@ PROFILE_VALUE_MAX_LEN = 80
 PROFILE_EVIDENCE_MAX_LEN = 120
 MEMORY_TEXT_MAX_LEN = 160
 PROFILE_PATCH_LIMIT = 5
-MEMORY_ITEM_LIMIT = 3
-REINFORCE_BONUS = 0.12
+MEMORY_ITEM_LIMIT = 1
+REINFORCE_BONUS = 0.05
 CONFLICT_PENALTY = 0.15
 REPLACE_MARGIN = 0.25
 
@@ -99,7 +99,7 @@ def normalize_profile_patch(raw: object, *, min_confidence: float) -> ProfilePat
     )
 
 
-def normalize_memory_item(raw: object) -> MemoryItem | None:
+def normalize_memory_item(raw: object, *, min_importance: float = 0.0) -> MemoryItem | None:
     if not isinstance(raw, Mapping):
         return None
 
@@ -111,11 +111,17 @@ def normalize_memory_item(raw: object) -> MemoryItem | None:
     if not text:
         return None
 
-    importance = raw_map.get("importance", 0.5)
+    importance = raw_map.get("importance")
     if not _is_number(importance):
+        if min_importance > 0.0:
+            return None
         importance = 0.5
 
-    return MemoryItem(text=text[:MEMORY_TEXT_MAX_LEN], importance=_clamp01(float(importance)))
+    normalized_importance = _clamp01(float(importance))
+    if normalized_importance < min_importance:
+        return None
+
+    return MemoryItem(text=text[:MEMORY_TEXT_MAX_LEN], importance=normalized_importance)
 
 
 def merge_profile_snapshot(
@@ -175,37 +181,6 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
         return 0.0
     dot = math.fsum(a * b for a, b in zip(left, right, strict=True))
     return dot / (left_norm * right_norm)
-
-
-def rank_by_similarity(
-    query_embedding: list[float],
-    candidates: list[tuple[str, list[float]]],
-    *,
-    limit: int,
-    min_similarity: float,
-) -> list[tuple[str, float]]:
-    scored = [
-        (text, score)
-        for text, embedding in candidates
-        if (score := cosine_similarity(query_embedding, embedding)) >= min_similarity
-    ]
-    scored.sort(key=lambda item: item[1], reverse=True)
-    return scored[:limit]
-
-
-def fact_rank_key(
-    query_embedding: list[float] | None,
-    embedding_json: str,
-    confidence: float,
-    evidence_count: int,
-) -> tuple[float, float, int]:
-    """Uniform profile-fact ranking key: similarity first, 0.0 when unavailable."""
-    score = 0.0
-    if query_embedding is not None:
-        embedding = decode_embedding(embedding_json)
-        if embedding is not None:
-            score = cosine_similarity(query_embedding, embedding)
-    return (score, confidence, evidence_count)
 
 
 def match_duplicate_memory(

@@ -17,8 +17,69 @@ _AUDIO_NORMALIZE_RE = re.compile(r"[\W_\s]+")
 _LOW_SIGNAL_CHARS = frozenset("的了呢啊吗吧呀哦嗯哈我你他她它是不在有和跟给就都也还才又很真这那一个")
 _AUDIO_SYNONYM_GROUPS = (("早上问好", "早安", "早上好", "您早上好", "问早"),)
 _RANDOM_REQUEST_RE = re.compile(r"随便|随意|任意|都行|都可以|random", re.IGNORECASE)
+_INTERNAL_MEDIA_RECORD_PREFIXES = (
+    "[发送了表情包:",
+    "[发送了语音:",
+    "[用语音说:",
+)
+
 
 _DEFAULT_RNG = random.Random()
+
+
+def _find_record_end(text: str, start: int) -> int | None:
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == "[":
+            depth += 1
+        elif text[index] == "]":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return None
+
+
+def _find_internal_media_records(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    while cursor < len(text):
+        starts = [start for prefix in _INTERNAL_MEDIA_RECORD_PREFIXES if (start := text.find(prefix, cursor)) >= 0]
+        if not starts:
+            break
+        start = min(starts)
+        end = _find_record_end(text, start)
+        if end is None:
+            cursor = start + 1
+            continue
+        spans.append((start, end))
+        cursor = end
+    return spans
+
+
+def is_internal_media_record(text: str) -> bool:
+    """Return whether text is exactly one reserved media history record."""
+    stripped = text.strip()
+    spans = _find_internal_media_records(stripped)
+    return len(spans) == 1 and spans[0] == (0, len(stripped))
+
+
+def strip_internal_media_records(text: str) -> str:
+    """Remove reserved media history records from model-authored output."""
+    spans = _find_internal_media_records(text)
+    if not spans:
+        return text
+    parts: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        parts.append(text[cursor:start])
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts).strip()
+
+
+def sanitize_assistant_history(text: str) -> str:
+    """Keep real standalone media records while cleaning leaked mixed replies."""
+    return text if is_internal_media_record(text) else strip_internal_media_records(text)
 
 
 def is_random_request(text: str) -> bool:

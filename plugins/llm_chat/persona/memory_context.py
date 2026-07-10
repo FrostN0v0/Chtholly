@@ -10,36 +10,41 @@ from entari_plugin_database import select, get_session
 from ..models import UserMemory, UserProfileFact
 from .embedding import embed_text
 from .config_types import LLMChatConfigLike
-from ..core.profile import MemoryItem, fact_rank_key, decode_embedding, cosine_similarity
-
-
-@dataclass(slots=True, frozen=True)
-class ExistingMemory:
-    id: int
-    text: str
-    importance: float
-    embedding: list[float] | None
-    created_at: datetime | None
+from ..core.profile import decode_embedding
+from ..core.memory_policy import (
+    MemoryCandidate,
+    ProfileFactData,
+    ProfileFactCandidate,
+    group_profile_facts,
+    normalize_prompt_text,
+    select_relevant_memories,
+    select_chat_profile_facts,
+)
 
 
 @dataclass(slots=True, frozen=True)
 class MemoryContext:
-    profile_facts: list[str]
+    chat_profile: dict[str, list[str]]
+    evaluator_profile_facts: list[ProfileFactData]
     relevant_memories: list[str]
 
 
-def _format_profile_fact(fact: UserProfileFact) -> str:
-    return f"- {fact.category}:{fact.key}={fact.value}（置信{fact.confidence:.2f}，证据{fact.evidence_count}次）"
+async def load_memory_context(
+    config: LLMChatConfigLike,
+    user_id: str,
+    channel_id: str,
+    query: str,
+) -> MemoryContext:
+    """Load separate chat and evaluator views without mutating stored rows."""
+    if not config.memory_enabled:
+        return MemoryContext(
+            chat_profile={},
+            evaluator_profile_facts=[],
+            relevant_memories=[],
+        )
 
-
-def _format_memory(memory: MemoryItem) -> str:
-    return f"- {memory.text}"
-
-
-async def load_memory_context(config: LLMChatConfigLike, user_id: str, channel_id: str, query: str) -> MemoryContext:
-    """Load stable profile facts and semantically relevant memories."""
     async with get_session() as session:
-        profile_facts = (
+        profile_rows = (
             (
                 await session.execute(
                     select(UserProfileFact).where(
@@ -64,42 +69,78 @@ async def load_memory_context(config: LLMChatConfigLike, user_id: str, channel_i
             .all()
         )
 
-    query_embedding: list[float] | None = None
-    if profile_facts or memory_rows:
-        query_embedding = await embed_text(config, query)
+    query_embedding = await embed_text(config, query) if profile_rows or memory_rows else None
 
-    stable_facts = [fact for fact in profile_facts if fact.confidence >= config.profile_fact_min_confidence]
-    stable_facts.sort(
-        key=lambda fact: fact_rank_key(query_embedding, fact.embedding_json, fact.confidence, fact.evidence_count),
-        reverse=True,
+    profile_candidates = [
+        ProfileFactCandidate(
+            id=row.id,
+            category=row.category,
+            key=row.key,
+            value=row.value,
+            confidence=row.confidence,
+            evidence_count=row.evidence_count,
+            updated_at=row.updated_at,
+            embedding=decode_embedding(row.embedding_json),
+        )
+        for row in profile_rows
+    ]
+    grouped_facts = group_profile_facts(
+        profile_candidates,
+        min_similarity=config.profile_alias_similarity,
     )
-    formatted_facts = [_format_profile_fact(fact) for fact in stable_facts[: config.memory_top_profile_facts]]
 
-    relevant_memories: list[MemoryItem] = []
-    if query_embedding is not None:
-        existing = [
-            ExistingMemory(
-                id=row.id,
-                text=row.text,
-                importance=row.importance,
-                embedding=decode_embedding(row.embedding_json),
-                created_at=row.created_at,
-            )
-            for row in memory_rows
-        ]
-        scored: list[tuple[ExistingMemory, float]] = []
-        for memory in existing:
-            if memory.embedding is None:
-                continue
-            score = cosine_similarity(query_embedding, memory.embedding)
-            if score >= config.memory_min_similarity:
-                scored.append((memory, score))
-        scored.sort(key=lambda item: (item[1], item[0].importance, item[0].created_at or datetime.min), reverse=True)
-        relevant_memories = [
-            MemoryItem(text=memory.text, importance=memory.importance)
-            for memory, _score in scored[: config.memory_top_memories]
-        ]
+    evaluator_candidates = sorted(
+        grouped_facts,
+        key=lambda fact: (
+            fact.confidence,
+            fact.evidence_count,
+            fact.updated_at or datetime.min,
+            -fact.id,
+        ),
+        reverse=True,
+    )[: max(0, config.memory_eval_profile_fact_limit)]
+    evaluator_candidates.sort(key=lambda fact: (fact.category, fact.key))
+    evaluator_profile_facts: list[ProfileFactData] = [
+        ProfileFactData(
+            category=fact.category,
+            key=fact.key,
+            value=fact.value,
+            confidence=fact.confidence,
+            aliases=list(fact.alias_keys),
+        )
+        for fact in evaluator_candidates
+    ]
+
+    chat_candidates = select_chat_profile_facts(
+        [fact for fact in grouped_facts if fact.confidence >= config.profile_fact_min_confidence],
+        query_embedding,
+        limit=config.memory_top_profile_facts,
+    )
+    chat_profile: dict[str, list[str]] = {}
+    for fact in chat_candidates:
+        chat_profile.setdefault(fact.category, []).append(normalize_prompt_text(fact.value))
+
+    memory_candidates = [
+        MemoryCandidate(
+            id=row.id,
+            text=row.text,
+            importance=row.importance,
+            created_at=row.created_at,
+            embedding=decode_embedding(row.embedding_json),
+        )
+        for row in memory_rows
+    ]
+    selected_memories = select_relevant_memories(
+        query_embedding,
+        memory_candidates,
+        min_importance=config.memory_min_importance,
+        min_similarity=config.memory_min_similarity,
+        dedup_similarity=config.memory_prompt_dedup_similarity,
+        limit=config.memory_top_memories,
+    )
 
     return MemoryContext(
-        profile_facts=formatted_facts, relevant_memories=[_format_memory(item) for item in relevant_memories]
+        chat_profile=chat_profile,
+        evaluator_profile_facts=evaluator_profile_facts,
+        relevant_memories=[normalize_prompt_text(memory.text) for memory in selected_memories],
     )

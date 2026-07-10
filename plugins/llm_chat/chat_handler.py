@@ -16,10 +16,12 @@ from arclet.entari.plugin.model import Plugin
 
 from .config import LLMChatConfig
 from .core.eval import apply_deltas
+from .core.media import strip_internal_media_records
+from .web_access import llm_chat_web_access_scope
 from .chat_context import (
     build_image_notes,
     build_chat_messages,
-    build_eval_transcript,
+    build_eval_conversation,
     model_supports_image_input,
     build_multimodal_user_content,
 )
@@ -92,7 +94,7 @@ async def on_chat(session: Session, ctx: Contexts):
         resentment=rel.resentment,
         familiarity=rel.familiarity,
         impression=rel.impression,
-        profile_facts=memory_context.profile_facts,
+        profile=memory_context.chat_profile,
         relevant_memories=memory_context.relevant_memories,
         user_name=user_name,
     )
@@ -100,12 +102,16 @@ async def on_chat(session: Session, ctx: Contexts):
     await append_message(channel_id, user_id, user_name, "user", content)
 
     try:
-        response = await llm.generate(cast(list[Message], messages), system=system, model=model_name, ctx=ctx)
+        with llm_chat_web_access_scope():
+            response = await llm.generate(cast(list[Message], messages), system=system, model=model_name, ctx=ctx)
     except Exception as exc:
         _LOGGER.warning(f"llm generate failed: {exc!r}")
         return None
 
-    reply = cast(str | None, response.choices[0].message.content) or ""
+    raw_reply = cast(str | None, response.choices[0].message.content) or ""
+    reply = strip_internal_media_records(raw_reply)
+    if reply != raw_reply:
+        _LOGGER.warning("stripped reserved media history marker from model reply")
     if reply and reply != "[END_OF_RESPONSE]":
         await session.send(reply)
         await append_message(channel_id, "", "bot", "assistant", reply)
@@ -123,15 +129,15 @@ async def on_chat(session: Session, ctx: Contexts):
     if counter >= config.eval_every_n:
         counter = 0
         recent = history[-config.eval_context_window :] if config.eval_context_window > 0 else []
-        transcript = build_eval_transcript(recent, user_id, user_name, content, reply)
+        conversation = build_eval_conversation(recent, user_id, user_name, content, reply)
         try:
             result = await run_evaluation(
                 config,
                 config.persona,
                 axes,
                 impression,
-                memory_context.profile_facts,
-                transcript,
+                memory_context.evaluator_profile_facts,
+                conversation,
                 user_name,
                 channel_id,
             )
