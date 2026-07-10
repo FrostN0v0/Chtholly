@@ -17,6 +17,7 @@ from arclet.entari.plugin.model import Plugin
 from .config import LLMChatConfig
 from .core.eval import apply_deltas
 from .core.media import strip_internal_media_records
+from .web_access import llm_chat_web_access_scope
 from .chat_context import (
     build_image_notes,
     build_chat_messages,
@@ -101,7 +102,8 @@ async def on_chat(session: Session, ctx: Contexts):
     await append_message(channel_id, user_id, user_name, "user", content)
 
     try:
-        response = await llm.generate(cast(list[Message], messages), system=system, model=model_name, ctx=ctx)
+        with llm_chat_web_access_scope():
+            response = await llm.generate(cast(list[Message], messages), system=system, model=model_name, ctx=ctx)
     except Exception as exc:
         _LOGGER.warning(f"llm generate failed: {exc!r}")
         return None

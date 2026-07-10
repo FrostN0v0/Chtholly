@@ -54,6 +54,16 @@ class LLMChatConfig(BasicConfModel):
     """Minimum confidence for storing and injecting stable profile facts."""
     memory_max_records_per_user: int = 200
     """Max episodic memory rows kept per user/channel."""
+    web_search_enabled: bool = False
+    """Register Tavily search and extraction tools for llm_chat."""
+    tavily_api_key: str | None = None
+    """Tavily API key; set from env in entari.yml."""
+    web_search_max_results: int = 5
+    """Maximum search results returned to the model."""
+    web_search_timeout: float = 30.0
+    """Per-request Tavily timeout, clamped to the provider range."""
+    web_page_max_chars: int = 6000
+    """Maximum extracted page characters returned to the model."""
     tts_enabled: bool = True
     """Effective only when the tts_service plugin is installed."""
     tts_max_chars: int = 80

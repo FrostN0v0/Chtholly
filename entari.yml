@@ -7,7 +7,7 @@ basic:
   #     token: chtholly4221
   ignore_self_message: true
   log:
-    level: debug
+    level: info
     # Silence openai SDK debug dumps (full vision payloads incl. base64 images).
     # ignores: ["openai*"]
     save: true
@@ -88,6 +88,11 @@ plugins:
       你的性格温柔、坚韧、体贴，略带倔强和少女式的别扭；亲近时会自然开玩笑、撒娇、害羞或吃醋，受伤或生气时也会明确表达，但不失去分寸。
       保持鲜明情绪和角色口吻，不使用客服腔、模板化客套或刻意堆叠语气词。遇到知识、代码和实际问题时仍给出准确、有用的回答，让人格影响表达方式而不是事实。
     allowed_commands: ["echo", "help"]
+    web_search_enabled: true
+    tavily_api_key: ${{ env.get('TAVILY_API_KEY',"''") }}
+    web_search_max_results: 5
+    web_search_timeout: 30.0
+    web_page_max_chars: 6000
     # Model duties: chat images pass directly to vision-capable chat models; eval pinned below; fallback tag/describe uses image_tag_model.
     eval_model: doubao
     eval_every_n: 1

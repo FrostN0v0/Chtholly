@@ -957,6 +957,12 @@ def test_yaml_and_default_llm_chat_configuration_are_exactly_synchronized():
         assert getattr(defaults, key) == expected
         assert llm_chat_plugin[key] == expected
     assert defaults.eval_every_n == llm_chat_plugin["eval_every_n"] == 1
+    assert defaults.web_search_enabled is False
+    assert defaults.tavily_api_key is None
+    assert defaults.web_search_max_results == llm_chat_plugin["web_search_max_results"] == 5
+    assert defaults.web_search_timeout == llm_chat_plugin["web_search_timeout"] == 30.0
+    assert defaults.web_page_max_chars == llm_chat_plugin["web_page_max_chars"] == 6000
+    assert llm_chat_plugin["web_search_enabled"] is True
 
     expected_persona = "\n".join(
         (
@@ -980,6 +986,39 @@ def test_yaml_and_default_llm_chat_configuration_are_exactly_synchronized():
 
     assert defaults.persona == DEFAULT_PERSONA == llm_chat_plugin["persona"].strip() == expected_persona
     assert llm_plugin["prompt"].strip() == expected_native_prompt
+
+
+def test_real_yaml_resolves_optional_tavily_key_without_template_residue():
+    config_path = Path(__file__).resolve().parents[1] / "entari.yml"
+    required_env = {
+        "WEBUI_PASSWORD": "''",
+        "LLM_API_KEY": "''",
+        "LLM_BASE_URL": "''",
+        "DOUBAO_API_KEY": "''",
+        "DEEPSEEK_API_KEY": "''",
+        "FISH_API_KEY": "''",
+        "FISH_REFERENCE_ID": "''",
+        "ONEBOT_TOKEN": "''",
+    }
+    original_instance = EntariConfig.instance
+    original_inited = EntariConfig._inited
+    try:
+        without_key = EntariConfig(config_path, env_vars=required_env)
+        without_key_plugin = cast(dict[str, Any], without_key.plugin["llm_chat"])
+        with_key = EntariConfig(
+            config_path,
+            env_vars={**required_env, "TAVILY_API_KEY": "fake-tavily-key"},
+        )
+        with_key_plugin = cast(dict[str, Any], with_key.plugin["llm_chat"])
+
+        assert without_key_plugin["tavily_api_key"] == ""
+        assert with_key_plugin["tavily_api_key"] == "fake-tavily-key"
+        assert "${{" not in repr(without_key_plugin)
+        assert "${{" not in repr(with_key_plugin)
+        assert without_key.basic.log.level == with_key.basic.log.level == "info"
+    finally:
+        EntariConfig.instance = original_instance
+        EntariConfig._inited = original_inited
 
 
 def test_allowed_commands_default_closed():

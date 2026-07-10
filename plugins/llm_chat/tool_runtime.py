@@ -18,6 +18,7 @@ from utils.path import AUDIO_DIR, IMAGE_DIR
 from .tools import tts_temp_path, truncate_for_tts, is_command_allowed
 from .config import LLMChatConfig
 from .models import ImageTag
+from .web_tools import register_web_access_tools
 from .core.media import match_audio, parse_audio_text, is_random_request
 from .image_tags import pick_image
 from .persona.store import append_message
@@ -173,3 +174,5 @@ if config.allowed_commands:
         return str(result) if result is not None else "指令已执行"
 
     registered_tools.append("call_plugin")
+
+registered_tools.extend(register_web_access_tools(tools, config))

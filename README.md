@@ -80,6 +80,10 @@ uv sync --all-extras
 
 编辑 `entari.yml` 调整网络、日志、插件加载等。敏感值（Token、超管 QQ、适配器端点等）放入 `.env.local`，通过 `${{ env.KEY }}` 插值，不要提交真实凭证。
 
+启用 `llm_chat` 的网页搜索与正文提取需在 `.env` 或 `.env.local` 中配置 `TAVILY_API_KEY`；未配置时两个工具都不会注册，新增或更换密钥后需完整重启 Bot。
+
+部署默认使用 `info` 日志级别，避免第三方 `debug` 日志展开密钥、搜索参数和工具实参。
+
 ### 🚀 运行
 
 ```shell
