@@ -33,6 +33,7 @@ def test_domain_and_tts_core_imports_do_not_load_plugin_entrypoints():
         assert "plugins.llm_chat.chat_handler" not in sys.modules
         assert "plugins.llm_chat.tool_runtime" not in sys.modules
         assert "plugins.llm_chat.web_tools" not in sys.modules
+        assert "plugins.llm_chat.generation" not in sys.modules
         assert "plugins.llm_chat.tag_runtime" not in sys.modules
         assert "plugins.tts_service" not in sys.modules
     finally:

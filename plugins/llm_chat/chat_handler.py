@@ -7,7 +7,6 @@ from datetime import datetime
 
 from arclet.entari import At, Session, MessageCreatedEvent, plugin_config
 from arclet.letoderea import BLOCK, enter_if
-from entari_plugin_llm import llm  # entari: plugin
 from arclet.entari.logger import log
 from arclet.letoderea.context import Contexts
 from entari_plugin_llm._types import Message
@@ -17,7 +16,8 @@ from arclet.entari.plugin.model import Plugin
 from .config import LLMChatConfig
 from .core.eval import apply_deltas
 from .core.media import strip_internal_media_records
-from .web_access import llm_chat_web_access_scope
+from .generation import generate_chat_response
+from .web_access import normalize_web_access_limits
 from .chat_context import (
     build_image_notes,
     build_chat_messages,
@@ -72,7 +72,7 @@ async def on_chat(session: Session, ctx: Contexts):
             content = " ".join(part for part in [content, *image_notes] if part)
 
     if not content:
-        return None
+        return BLOCK
 
     channel_id = session.channel.id
     user_id = session.user.id
@@ -84,6 +84,11 @@ async def on_chat(session: Session, ctx: Contexts):
     memory_context = await load_memory_context(config, user_id, channel_id, content)
     history = await load_history(channel_id, config.context_window)
     messages = build_chat_messages(history, user_name, content, current_content)
+    web_limits = normalize_web_access_limits(
+        config.web_search_max_calls_per_generation,
+        config.web_page_max_calls_per_generation,
+        config.web_total_max_calls_per_generation,
+    )
     system = compose_persona_prompt(
         config.persona,
         mood,
@@ -97,16 +102,25 @@ async def on_chat(session: Session, ctx: Contexts):
         profile=memory_context.chat_profile,
         relevant_memories=memory_context.relevant_memories,
         user_name=user_name,
+        web_search_limit=web_limits.search_limit,
+        web_page_limit=web_limits.read_limit,
+        web_total_limit=web_limits.total_limit,
     )
 
     await append_message(channel_id, user_id, user_name, "user", content)
 
     try:
-        with llm_chat_web_access_scope():
-            response = await llm.generate(cast(list[Message], messages), system=system, model=model_name, ctx=ctx)
+        response = await generate_chat_response(
+            cast(list[Message], messages),
+            system=system,
+            model=model_name,
+            channel_id=channel_id,
+            ctx=ctx,
+            web_limits=web_limits,
+        )
     except Exception as exc:
         _LOGGER.warning(f"llm generate failed: {exc!r}")
-        return None
+        return BLOCK
 
     raw_reply = cast(str | None, response.choices[0].message.content) or ""
     reply = strip_internal_media_records(raw_reply)
@@ -161,4 +175,10 @@ async def on_chat(session: Session, ctx: Contexts):
         familiarity=familiarity,
         eval_counter=counter,
     )
+    return BLOCK
+
+
+@plug.dispatch(MessageCreatedEvent).register(priority=999)
+@enter_if(_addressed_to_me)
+async def block_native_llm_fallback():
     return BLOCK

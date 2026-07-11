@@ -736,9 +736,9 @@ def test_web_access_scope_resets_after_normal_exit(web_access_module: ModuleType
     with pytest.raises(web_access_module.WebAccessError, match="outside llm_chat"):
         web_access_module.require_llm_chat_web_access()
 
-    with web_access_module.llm_chat_web_access_scope():
+    with web_access_module.llm_chat_web_access_scope(web_access_module.DEFAULT_WEB_ACCESS_LIMITS):
         assert web_access_module.require_llm_chat_web_access() is None
-        with web_access_module.llm_chat_web_access_scope():
+        with web_access_module.llm_chat_web_access_scope(web_access_module.DEFAULT_WEB_ACCESS_LIMITS):
             assert web_access_module.require_llm_chat_web_access() is None
         assert web_access_module.require_llm_chat_web_access() is None
 
@@ -751,7 +751,7 @@ def test_web_access_scope_resets_after_exception(web_access_module: ModuleType) 
         pass
 
     def fail_inside_scope() -> None:
-        with web_access_module.llm_chat_web_access_scope():
+        with web_access_module.llm_chat_web_access_scope(web_access_module.DEFAULT_WEB_ACCESS_LIMITS):
             assert web_access_module.require_llm_chat_web_access() is None
             raise ScopeFailure
 
@@ -769,7 +769,7 @@ async def test_web_access_scope_resets_after_cancellation(web_access_module: Mod
 
     async def cancellable_work() -> None:
         try:
-            with web_access_module.llm_chat_web_access_scope():
+            with web_access_module.llm_chat_web_access_scope(web_access_module.DEFAULT_WEB_ACCESS_LIMITS):
                 assert web_access_module.require_llm_chat_web_access() is None
                 entered.set()
                 await blocker.wait()
@@ -786,5 +786,82 @@ async def test_web_access_scope_resets_after_cancellation(web_access_module: Mod
         await task
 
     assert reset_observed.is_set()
+    with pytest.raises(web_access_module.WebAccessError, match="outside llm_chat"):
+        web_access_module.require_llm_chat_web_access()
+
+
+def test_web_access_budget_enforces_specific_and_total_limits(web_access_module: ModuleType) -> None:
+    normalized = web_access_module.normalize_web_access_limits(-1, 3, 99)
+    assert normalized == web_access_module.WebAccessLimits(0, 3, 3)
+
+    with web_access_module.llm_chat_web_access_scope(normalized):
+        with pytest.raises(web_access_module.WebAccessError) as search_error:
+            web_access_module.consume_llm_chat_web_access("web_search")
+        assert str(search_error.value) == (
+            "web_search budget exhausted; answer from collected evidence without more web tools"
+        )
+        for _ in range(3):
+            web_access_module.consume_llm_chat_web_access("read_web_page")
+        with pytest.raises(web_access_module.WebAccessError) as total_error:
+            web_access_module.consume_llm_chat_web_access("read_web_page")
+        assert str(total_error.value) == (
+            "Web access budget exhausted; answer from collected evidence without more web tools"
+        )
+
+    read_limited = web_access_module.normalize_web_access_limits(2, 1, 99)
+    assert read_limited == web_access_module.WebAccessLimits(2, 1, 3)
+    with web_access_module.llm_chat_web_access_scope(read_limited):
+        web_access_module.consume_llm_chat_web_access("read_web_page")
+        with pytest.raises(web_access_module.WebAccessError) as read_error:
+            web_access_module.consume_llm_chat_web_access("read_web_page")
+        assert str(read_error.value) == (
+            "read_web_page budget exhausted; answer from collected evidence without more web tools"
+        )
+        web_access_module.consume_llm_chat_web_access("web_search")
+        web_access_module.consume_llm_chat_web_access("web_search")
+        with pytest.raises(web_access_module.WebAccessError) as total_after_rejection:
+            web_access_module.consume_llm_chat_web_access("web_search")
+        assert str(total_after_rejection.value) == str(total_error.value)
+
+    zero_limits = web_access_module.normalize_web_access_limits(0, 0, 10)
+    assert zero_limits == web_access_module.WebAccessLimits(0, 0, 0)
+    with web_access_module.llm_chat_web_access_scope(zero_limits):
+        with pytest.raises(web_access_module.WebAccessError) as zero_error:
+            web_access_module.consume_llm_chat_web_access("web_search")
+        assert str(zero_error.value) == str(total_error.value)
+
+
+async def test_web_access_budget_resets_between_generations_and_shares_with_child_tasks(
+    web_access_module: ModuleType,
+) -> None:
+    limits = web_access_module.WebAccessLimits(1, 0, 1)
+
+    async def isolated_generation() -> None:
+        with web_access_module.llm_chat_web_access_scope(limits):
+            await asyncio.create_task(asyncio.sleep(0))
+            web_access_module.consume_llm_chat_web_access("web_search")
+            with pytest.raises(web_access_module.WebAccessError, match="Web access budget exhausted"):
+                web_access_module.consume_llm_chat_web_access("web_search")
+
+    await asyncio.gather(isolated_generation(), isolated_generation())
+
+    async def consume_in_child() -> None:
+        web_access_module.consume_llm_chat_web_access("web_search")
+
+    async def observe_shared_budget() -> str:
+        try:
+            web_access_module.consume_llm_chat_web_access("web_search")
+        except web_access_module.WebAccessError as exc:
+            return str(exc)
+        raise AssertionError("child task unexpectedly received a fresh budget")
+
+    with web_access_module.llm_chat_web_access_scope(limits):
+        await asyncio.create_task(consume_in_child())
+        exhausted = await asyncio.create_task(observe_shared_budget())
+        assert exhausted == "Web access budget exhausted; answer from collected evidence without more web tools"
+
+    with web_access_module.llm_chat_web_access_scope(limits):
+        web_access_module.consume_llm_chat_web_access("web_search")
+
     with pytest.raises(web_access_module.WebAccessError, match="outside llm_chat"):
         web_access_module.require_llm_chat_web_access()

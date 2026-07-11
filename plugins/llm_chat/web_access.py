@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import math
-from typing import TypedDict, TypeGuard
+from typing import Literal, TypedDict, TypeGuard
 import ipaddress
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from urllib.parse import urlsplit, parse_qsl, urlunsplit
 from collections.abc import Mapping, Iterator, Sequence
 from typing_extensions import Self
@@ -50,7 +51,48 @@ _SENSITIVE_QUERY_KEYS = {
     "cookie",
 }
 _SENSITIVE_QUERY_PREFIXES = ("x_amz_", "x_goog_", "oauth_")
-_WEB_ACCESS_ALLOWED: ContextVar[bool] = ContextVar("llm_chat_web_access_allowed", default=False)
+WebToolName = Literal["web_search", "read_web_page"]
+
+
+@dataclass(frozen=True)
+class WebAccessLimits:
+    search_limit: int
+    read_limit: int
+    total_limit: int
+
+
+DEFAULT_WEB_ACCESS_LIMITS = WebAccessLimits(2, 2, 4)
+
+
+def normalize_web_access_limits(
+    search_limit: int,
+    read_limit: int,
+    total_limit: int,
+) -> WebAccessLimits:
+    """Return non-negative per-tool limits with a reachable total cap."""
+
+    normalized_search = max(0, int(search_limit))
+    normalized_read = max(0, int(read_limit))
+    normalized_total = max(0, int(total_limit))
+    return WebAccessLimits(
+        search_limit=normalized_search,
+        read_limit=normalized_read,
+        total_limit=min(normalized_total, normalized_search + normalized_read),
+    )
+
+
+@dataclass
+class WebAccessBudget:
+    limits: WebAccessLimits
+    search_calls: int = 0
+    read_calls: int = 0
+    total_calls: int = 0
+
+
+_WEB_ACCESS_BUDGET: ContextVar[WebAccessBudget | None] = ContextVar(
+    "llm_chat_web_access_budget",
+    default=None,
+)
 
 
 class WebAccessError(RuntimeError):
@@ -74,21 +116,44 @@ class WebPageData(TypedDict):
 
 
 @contextmanager
-def llm_chat_web_access_scope() -> Iterator[None]:
-    """Allow web access only for the current llm_chat generation context."""
+def llm_chat_web_access_scope(
+    limits: WebAccessLimits = DEFAULT_WEB_ACCESS_LIMITS,
+) -> Iterator[None]:
+    """Create an isolated budget for the current llm_chat generation."""
 
-    token = _WEB_ACCESS_ALLOWED.set(True)
+    token = _WEB_ACCESS_BUDGET.set(WebAccessBudget(limits))
     try:
         yield
     finally:
-        _WEB_ACCESS_ALLOWED.reset(token)
+        _WEB_ACCESS_BUDGET.reset(token)
 
 
 def require_llm_chat_web_access() -> None:
     """Reject web execution outside the llm_chat generation context."""
 
-    if not _WEB_ACCESS_ALLOWED.get():
+    if _WEB_ACCESS_BUDGET.get() is None:
         raise WebAccessError("Web access is unavailable outside llm_chat")
+
+
+def consume_llm_chat_web_access(tool: WebToolName) -> None:
+    """Consume one generation-local web call before any asynchronous work."""
+
+    budget = _WEB_ACCESS_BUDGET.get()
+    if budget is None:
+        raise WebAccessError("Web access is unavailable outside llm_chat")
+    if budget.total_calls >= budget.limits.total_limit:
+        raise WebAccessError("Web access budget exhausted; answer from collected evidence without more web tools")
+    if tool == "web_search":
+        if budget.search_calls >= budget.limits.search_limit:
+            raise WebAccessError("web_search budget exhausted; answer from collected evidence without more web tools")
+        budget.search_calls += 1
+    else:
+        if budget.read_calls >= budget.limits.read_limit:
+            raise WebAccessError(
+                "read_web_page budget exhausted; answer from collected evidence without more web tools"
+            )
+        budget.read_calls += 1
+    budget.total_calls += 1
 
 
 def normalize_search_text(value: str, *, field: str) -> str:

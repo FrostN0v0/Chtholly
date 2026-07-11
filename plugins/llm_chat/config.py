@@ -56,6 +56,12 @@ class LLMChatConfig(BasicConfModel):
     """Max episodic memory rows kept per user/channel."""
     web_search_enabled: bool = False
     """Register Tavily search and extraction tools for llm_chat."""
+    web_search_max_calls_per_generation: int = 2
+    """Maximum web_search calls allowed in one chat generation."""
+    web_page_max_calls_per_generation: int = 2
+    """Maximum read_web_page calls allowed in one chat generation."""
+    web_total_max_calls_per_generation: int = 4
+    """Maximum combined web tool calls allowed in one chat generation."""
     tavily_api_key: str | None = None
     """Tavily API key; set from env in entari.yml."""
     web_search_max_results: int = 5

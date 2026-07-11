@@ -82,6 +82,8 @@ uv sync --all-extras
 
 启用 `llm_chat` 的网页搜索与正文提取需在 `.env` 或 `.env.local` 中配置 `TAVILY_API_KEY`；未配置时两个工具都不会注册，新增或更换密钥后需完整重启 Bot。
 
+`llm_chat` 每轮生成的网页调用预算由 `web_search_max_calls_per_generation`、`web_page_max_calls_per_generation` 与 `web_total_max_calls_per_generation` 配置，默认分别为 `2 / 2 / 4`；预算按生成上下文隔离，实际总额不会超过两个单项之和。若 LLM 工具循环耗尽，插件会基于本轮已积累的工具结果执行一次不携带任何工具的最终化；最终化仍失败时保持静默，不回退到原生自动对话。
+
 部署默认使用 `info` 日志级别，避免第三方 `debug` 日志展开密钥、搜索参数和工具实参。
 
 ### 🚀 运行

@@ -100,9 +100,8 @@ SYSTEM_SCAFFOLD = "\n".join(
             "禁止包含密钥、内部 ID、私人画像、长期记忆或无关对话内容。"
         ),
         (
-            "默认每次回答最多一次 web_search 和一次聚焦 read_web_page；"
-            "只有交叉验证或比较确有必要时才读取第二页。搜索结果为空时最多改写 query 再试一次，"
-            "仍无结果就诚实说明未找到，禁止失败后无限搜索。"
+            "网页工具失败或返回空结果时不得无限重试；遵守随后注入的本轮网页调用预算，"
+            "预算耗尽后立即基于已有证据回答并明确未核实部分。"
         ),
         (
             "send_image 只发送本地反应图、表情包或贴纸，不是图片生成或通用搜索；"
@@ -134,6 +133,29 @@ SYSTEM_SCAFFOLD = "\n".join(
         "不向用户提及内部工具名、参数、图库、标签、数据库或调用过程。",
     )
 )
+
+
+def build_web_tool_budget_contract(
+    search_limit: int,
+    read_limit: int,
+    total_limit: int,
+) -> str:
+    """Describe the effective generation-local web tool budget."""
+
+    return "\n".join(
+        (
+            "【本轮网页工具预算】",
+            (f"有效限额（web_search / read_web_page / total）：{search_limit} / {read_limit} / {total_limit}。"),
+            (
+                "若预算允许第二次 web_search，仅可用于首次搜索空结果后的 query 改写；"
+                "若预算允许第二次 read_web_page，仅可用于确有必要的交叉验证或比较。"
+            ),
+            (
+                "收到任何 budget exhausted 后不得继续调用网页工具，必须基于已收集的摘要、正文和已知信息回答，"
+                "并明确未核实部分。"
+            ),
+        )
+    )
 
 
 DEFAULT_IMAGE_TAG_PROMPT = (

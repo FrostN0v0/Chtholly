@@ -4,18 +4,29 @@ from __future__ import annotations
 
 import sys
 import json
+from uuid import uuid4
 from types import ModuleType, SimpleNamespace
 import base64
 from typing import Any, cast
+import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
+from contextlib import asynccontextmanager
+from importlib.util import module_from_spec, spec_from_file_location
 from collections.abc import AsyncIterator
+from importlib.machinery import ModuleSpec
 
 import pytest
+from satori import Event as OriginEvent, Channel, ChannelType
 from sqlalchemy import func, select
-from arclet.entari import Image, Session
+from satori.const import EventType
+from satori.model import User, Member, MessageObject
+from arclet.entari import Image, Session, MessageCreatedEvent
+from arclet.letoderea import BLOCK
 from arclet.entari.config import EntariConfig
+from arclet.letoderea.core import dispatch
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from arclet.entari.plugin.model import Plugin, current_plugin
 
 import plugins as _PLUGINS
 
@@ -64,6 +75,11 @@ sys.modules.pop("plugins.llm_chat", None)
 if getattr(_PLUGINS, "llm_chat", None) is _PACKAGE:
     delattr(_PLUGINS, "llm_chat")
 
+_ROOT = Path(__file__).resolve().parents[1]
+_LLM_CHAT_DIR = _ROOT / "plugins" / "llm_chat"
+_CHAT_HANDLER_PATH = _LLM_CHAT_DIR / "chat_handler.py"
+_MISSING = object()
+
 _PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
@@ -111,6 +127,123 @@ class _ImageSession:
 
     async def download(self, src: str) -> bytes:
         return self._downloads[src]
+
+
+class _ChatElements:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def extract_plain_text(self) -> str:
+        return self._text
+
+    def select(self, _element_type: type[Any]) -> list[Any]:
+        return []
+
+
+class _ChatSession:
+    def __init__(self, text: str, *, channel_id: str = "group-B", user_id: str = "same-user") -> None:
+        self.account = SimpleNamespace(self_id="bot", platform="test-platform")
+        self.channel = SimpleNamespace(id=channel_id, type=ChannelType.TEXT)
+        self.user = SimpleNamespace(id=user_id, name="Current User")
+        self.member = None
+        self.elements = _ChatElements(text)
+        self.sent: list[str] = []
+
+    async def send(self, content: str) -> None:
+        self.sent.append(content)
+
+
+async def _settle_plugin_tasks(tasks: set[asyncio.Task[Any]] | None) -> None:
+    if not tasks:
+        return
+    running_loop = asyncio.get_running_loop()
+    local_tasks: list[asyncio.Task[Any]] = []
+    for task in tasks:
+        if task.get_loop() is running_loop:
+            local_tasks.append(task)
+        else:
+            task.cancel()
+    if local_tasks:
+        await asyncio.gather(*local_tasks, return_exceptions=True)
+
+
+@asynccontextmanager
+async def _temporary_chat_handler(
+    config: dict[str, Any] | None = None,
+) -> AsyncIterator[SimpleNamespace]:
+    prefix = "plugins.llm_chat"
+    before_modules = {
+        name: module for name, module in sys.modules.items() if name == prefix or name.startswith(f"{prefix}.")
+    }
+    previous_package_attr = getattr(_PLUGINS, "llm_chat", _MISSING)
+
+    package = sys.modules.get(prefix)
+    package_was_created = package is None
+    if package is None:
+        package = ModuleType(prefix)
+        package.__package__ = prefix
+        package.__path__ = [str(_LLM_CHAT_DIR)]  # type: ignore[attr-defined]
+        package.__spec__ = ModuleSpec(prefix, loader=None, is_package=True)
+        if package.__spec__.submodule_search_locations is not None:
+            package.__spec__.submodule_search_locations.append(str(_LLM_CHAT_DIR))
+        sys.modules[prefix] = package
+    package_namespace = dict(vars(package))
+    setattr(_PLUGINS, "llm_chat", package)
+
+    module_name = f"plugins.llm_chat._chat_runtime_test_{uuid4().hex}"
+    spec = spec_from_file_location(module_name, _CHAT_HANDLER_PATH)
+    assert spec is not None
+    assert spec.loader is not None
+    module = module_from_spec(spec)
+    sys.modules[module_name] = module
+
+    plugin: Plugin | None = None
+    token: Any = None
+    try:
+        plugin = Plugin(module_name, module, config=dict(config or {}))
+        setattr(module, "__plugin__", plugin)
+        token = current_plugin.set(plugin)
+        spec.loader.exec_module(module)
+        yield SimpleNamespace(plugin=plugin, module=module)
+    finally:
+        if token is not None:
+            current_plugin.reset(token)
+        if plugin is not None and not plugin._is_disposed:
+            await _settle_plugin_tasks(plugin.dispose())
+        for name in [name for name in sys.modules if name == prefix or name.startswith(f"{prefix}.")]:
+            if name not in before_modules:
+                sys.modules.pop(name, None)
+        for name, previous_module in before_modules.items():
+            sys.modules[name] = previous_module
+
+        if not package_was_created:
+            package.__dict__.clear()
+            package.__dict__.update(package_namespace)
+        if previous_package_attr is _MISSING:
+            if getattr(_PLUGINS, "llm_chat", _MISSING) is package:
+                delattr(_PLUGINS, "llm_chat")
+        else:
+            setattr(_PLUGINS, "llm_chat", previous_package_attr)
+
+
+def _relation_state() -> SimpleNamespace:
+    return SimpleNamespace(
+        affection=50.0,
+        trust=50.0,
+        dependence=0.0,
+        resentment=0.0,
+        familiarity=10.0,
+        impression="",
+        eval_counter=0,
+    )
+
+
+def _memory_context() -> SimpleNamespace:
+    return SimpleNamespace(
+        chat_profile={},
+        relevant_memories=[],
+        evaluator_profile_facts=[],
+    )
 
 
 @pytest.fixture
@@ -938,6 +1071,164 @@ async def test_run_evaluation_uses_dedicated_json_payload_without_tools(
     assert native_prompt not in messages[1]["content"]
 
 
+@pytest.mark.asyncio
+async def test_on_chat_generation_failure_returns_block_without_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler() as harness:
+        module = harness.module
+        appended: list[tuple[str, str, str, str, str]] = []
+
+        async def no_image_notes(*_args: Any, **_kwargs: Any) -> list[str]:
+            return []
+
+        async def get_relation(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            return _relation_state()
+
+        async def get_mood(*_args: Any, **_kwargs: Any) -> float:
+            return 0.0
+
+        async def load_memory(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            return _memory_context()
+
+        async def load_history(*_args: Any, **_kwargs: Any) -> list[Any]:
+            return []
+
+        async def append_message(*args: str) -> None:
+            appended.append(cast(tuple[str, str, str, str, str], args))
+
+        async def fail_generation(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("provider failed")
+
+        monkeypatch.setattr(module, "get_model_config", lambda *_args: SimpleNamespace(name="test-model"))
+        monkeypatch.setattr(module, "model_supports_image_input", lambda _model: False)
+        monkeypatch.setattr(module, "build_image_notes", no_image_notes)
+        monkeypatch.setattr(module, "get_relation", get_relation)
+        monkeypatch.setattr(module, "get_mood", get_mood)
+        monkeypatch.setattr(module, "load_memory_context", load_memory)
+        monkeypatch.setattr(module, "load_history", load_history)
+        monkeypatch.setattr(module, "append_message", append_message)
+        monkeypatch.setattr(module, "generate_chat_response", fail_generation)
+
+        session = _ChatSession("NEW_GROUP_B_SENTINEL")
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        assert result is BLOCK
+        assert session.sent == []
+        assert appended == [("group-B", "same-user", "Current User", "user", "NEW_GROUP_B_SENTINEL")]
+
+
+@pytest.mark.asyncio
+async def test_on_chat_mention_only_returns_block_without_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler() as harness:
+        module = harness.module
+        generation_calls = 0
+
+        async def no_image_notes(*_args: Any, **_kwargs: Any) -> list[str]:
+            return []
+
+        async def unexpected_generation(*_args: Any, **_kwargs: Any) -> None:
+            nonlocal generation_calls
+            generation_calls += 1
+            raise AssertionError("mention-only messages must not generate")
+
+        monkeypatch.setattr(module, "get_model_config", lambda *_args: SimpleNamespace(name="test-model"))
+        monkeypatch.setattr(module, "model_supports_image_input", lambda _model: False)
+        monkeypatch.setattr(module, "build_image_notes", no_image_notes)
+        monkeypatch.setattr(module, "generate_chat_response", unexpected_generation)
+
+        session = _ChatSession("")
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        assert result is BLOCK
+        assert generation_calls == 0
+        assert session.sent == []
+
+
+@pytest.mark.asyncio
+async def test_block_native_llm_fallback_claims_addressed_public_message_after_uncaught_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler() as harness:
+        module = harness.module
+        native_calls = 0
+        native_persistence: list[tuple[str, str, str, str]] = []
+        old_native_session = {
+            "platform": "test-platform",
+            "user_id": "same-user",
+            "channel_id": "group-A",
+            "topic": "OLD_GROUP_A_NATIVE_CONTEXT",
+        }
+
+        async def no_image_notes(*_args: Any, **_kwargs: Any) -> list[str]:
+            return []
+
+        async def fail_before_generation(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("uncaught llm_chat dependency failure")
+
+        async def persist_native_message(channel_id: str, content: str) -> None:
+            native_persistence.append(
+                (
+                    old_native_session["platform"],
+                    old_native_session["user_id"],
+                    channel_id,
+                    content,
+                )
+            )
+
+        async def native_spy() -> object:
+            nonlocal native_calls
+            native_calls += 1
+            await persist_native_message("group-B", "NEW_GROUP_B_SENTINEL")
+            return BLOCK
+
+        native_spy.__module__ = module.__name__
+        module.plug.dispatch(MessageCreatedEvent).register(priority=1000)(native_spy)
+        monkeypatch.setattr(module, "get_model_config", lambda *_args: SimpleNamespace(name="test-model"))
+        monkeypatch.setattr(module, "model_supports_image_input", lambda _model: False)
+        monkeypatch.setattr(module, "build_image_notes", no_image_notes)
+        monkeypatch.setattr(module, "get_relation", fail_before_generation)
+
+        channel = Channel("group-B", ChannelType.TEXT)
+        user = User("same-user", "Current User")
+        member = Member(user=user, nick="Current User")
+        message = MessageObject(
+            "message-B",
+            '<at id="bot"/> NEW_GROUP_B_SENTINEL',
+            channel=channel,
+            member=member,
+            user=user,
+        )
+        origin = OriginEvent(
+            type=EventType.MESSAGE_CREATED,
+            timestamp=datetime.now(),
+            login=SimpleNamespace(),
+            channel=channel,
+            member=member,
+            message=message,
+            user=user,
+            sn=2026,
+        )
+        account = SimpleNamespace(
+            self_id="bot",
+            platform="test-platform",
+            protocol=SimpleNamespace(),
+        )
+        event = MessageCreatedEvent(account, origin)
+
+        await dispatch(event, scope=harness.plugin._scope)
+        await asyncio.sleep(0)
+
+        assert old_native_session["channel_id"] == "group-A"
+        assert event.channel.id == "group-B"
+        assert event.user.id == "same-user"
+        assert "NEW_GROUP_B_SENTINEL" in event.message.content
+        assert native_calls == 0
+        assert native_persistence == []
+
+
 def test_yaml_and_default_llm_chat_configuration_are_exactly_synchronized():
     llm_chat_plugin = cast(dict[str, Any], EntariConfig.instance.plugin["llm_chat"])
     llm_plugin = cast(dict[str, Any], EntariConfig.instance.plugin["llm"])
@@ -959,6 +1250,9 @@ def test_yaml_and_default_llm_chat_configuration_are_exactly_synchronized():
     assert defaults.eval_every_n == llm_chat_plugin["eval_every_n"] == 1
     assert defaults.web_search_enabled is False
     assert defaults.tavily_api_key is None
+    assert defaults.web_search_max_calls_per_generation == llm_chat_plugin["web_search_max_calls_per_generation"] == 2
+    assert defaults.web_page_max_calls_per_generation == llm_chat_plugin["web_page_max_calls_per_generation"] == 2
+    assert defaults.web_total_max_calls_per_generation == llm_chat_plugin["web_total_max_calls_per_generation"] == 4
     assert defaults.web_search_max_results == llm_chat_plugin["web_search_max_results"] == 5
     assert defaults.web_search_timeout == llm_chat_plugin["web_search_timeout"] == 30.0
     assert defaults.web_page_max_chars == llm_chat_plugin["web_page_max_chars"] == 6000

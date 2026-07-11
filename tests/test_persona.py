@@ -516,10 +516,30 @@ class TestComposePrompt:
         assert "仅在用户要求来源、引用或验证时展示本轮实际使用的 URL" in prompt
         assert "只包含回答当前问题所需的最小公开信息" in prompt
         assert "禁止包含密钥、内部 ID、私人画像、长期记忆或无关对话内容" in prompt
-        assert "默认每次回答最多一次 web_search 和一次聚焦 read_web_page" in prompt
-        assert "只有交叉验证或比较确有必要时才读取第二页" in prompt
-        assert "搜索结果为空时最多改写 query 再试一次" in prompt
-        assert "禁止失败后无限搜索" in prompt
+        assert "2 / 2 / 4" in prompt
+        assert "若预算允许第二次 web_search，仅可用于首次搜索空结果后的 query 改写" in prompt
+        assert "若预算允许第二次 read_web_page，仅可用于确有必要的交叉验证或比较" in prompt
+        assert "收到任何 budget exhausted 后不得继续调用网页工具" in prompt
+        assert "必须基于已收集的摘要、正文和已知信息回答" in prompt
+        assert "网页工具失败或返回空结果时不得无限重试" in prompt
+
+        custom_prompt = compose_persona_prompt(
+            "persona",
+            0.0,
+            1.0,
+            affection=50,
+            trust=50,
+            dependence=0,
+            resentment=0,
+            familiarity=30,
+            impression="",
+            user_name="A",
+            web_search_limit=1,
+            web_page_limit=0,
+            web_total_limit=1,
+        )
+        assert "1 / 0 / 1" in custom_prompt
+        assert "2 / 2 / 4" not in custom_prompt
         assert "默认一轮使用一个有发送副作用的媒体工具" in prompt
 
     @pytest.mark.parametrize(
