@@ -31,12 +31,12 @@ from arclet.entari.config import EntariConfig
 from arclet.letoderea.context import Contexts
 from satori.adapters.onebot11.message import OneBot11MessageEncoder
 
+from plugins.llm_chat.core.types import ChatMessage
 from plugins.llm_chat.core.delivery import llm_chat_delivery_scope
 
 _ROOT = Path(__file__).resolve().parents[1]
 if not hasattr(EntariConfig, "instance"):
     EntariConfig.instance = EntariConfig.load(_ROOT / "entari.yml")
-from entari_plugin_llm._types import Message as LLMMessage
 import entari_plugin_llm.service as llm_service_module
 from entari_plugin_llm.service import LLMService
 from arclet.entari.plugin.model import Plugin, PluginDispatcher, current_plugin
@@ -1665,9 +1665,9 @@ async def test_real_llm_service_without_scope_blocks_before_factory_and_leaks_no
             _model_response("web access was unavailable"),
         ],
     )
-    observed_messages: list[LLMMessage] = []
+    observed_messages: list[ChatMessage] = []
 
-    async def on_message(message: LLMMessage) -> None:
+    async def on_message(message: ChatMessage) -> None:
         observed_messages.append(message)
 
     try:

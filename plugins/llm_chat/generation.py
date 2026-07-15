@@ -8,10 +8,10 @@ import litellm
 from entari_plugin_llm import llm  # entari: plugin
 from arclet.entari.logger import log
 from arclet.letoderea.context import Contexts
-from entari_plugin_llm._types import Message
 from entari_plugin_llm.config import get_model_config
 
 from .core.media import strip_internal_media_records
+from .core.types import ChatMessage
 from .web_access import WebAccessLimits, llm_chat_web_access_scope
 from .core.delivery import DeliveryState, llm_chat_delivery_scope
 
@@ -45,7 +45,7 @@ def _has_visible_reply(response: litellm.ModelResponse) -> bool:
     return bool(visible and visible != _END_OF_RESPONSE)
 
 
-def _without_invalid_tail(messages: list[Message]) -> list[Message]:
+def _without_invalid_tail(messages: list[ChatMessage]) -> list[ChatMessage]:
     if not messages:
         return messages
     last = messages[-1]
@@ -55,7 +55,7 @@ def _without_invalid_tail(messages: list[Message]) -> list[Message]:
 
 
 async def generate_chat_response(
-    messages: list[Message],
+    messages: list[ChatMessage],
     *,
     system: str,
     model: str | None,
@@ -108,7 +108,7 @@ async def generate_chat_response(
 
 
 async def _finalize_without_tools(
-    messages: list[Message],
+    messages: list[ChatMessage],
     *,
     system: str,
     model: str | None,

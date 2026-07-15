@@ -6,10 +6,10 @@ from types import FunctionType
 from typing import Protocol
 
 from arclet.entari.logger import log
-from entari_plugin_llm._types import JSON_TYPE  # entari: plugin
 from arclet.entari.plugin.model import PluginDispatcher
 
 from .config import LLMChatConfig
+from .core.types import JSONType
 from .web_access import (
     WebPageData,
     WebSearchData,
@@ -56,7 +56,7 @@ class WebClientFactory(Protocol):
 
 
 def register_web_access_tools(
-    dispatcher: PluginDispatcher[JSON_TYPE],
+    dispatcher: PluginDispatcher[JSONType],
     config: LLMChatConfig,
     *,
     client_factory: WebClientFactory = TavilyWebClient,
@@ -107,7 +107,7 @@ def register_web_access_tools(
 
 
 def _register_owned(
-    dispatcher: PluginDispatcher[JSON_TYPE],
+    dispatcher: PluginDispatcher[JSONType],
     function: FunctionType,
 ) -> None:
     function.__module__ = dispatcher.plugin.module.__name__

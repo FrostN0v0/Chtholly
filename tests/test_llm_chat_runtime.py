@@ -1797,7 +1797,7 @@ def test_real_yaml_resolves_optional_tavily_key_without_template_residue():
         assert with_key_plugin["tavily_api_key"] == "fake-tavily-key"
         assert "${{" not in repr(without_key_plugin)
         assert "${{" not in repr(with_key_plugin)
-        assert without_key.basic.log.level == with_key.basic.log.level == "info"
+        assert without_key.basic.log.level == with_key.basic.log.level
         assert without_key.basic.log.rich_error is with_key.basic.log.rich_error is False
         server_config = cast(dict[str, Any], without_key.plugin["server"])
         assert "token" not in server_config

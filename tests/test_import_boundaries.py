@@ -23,6 +23,7 @@ def test_domain_and_tts_core_imports_do_not_load_plugin_entrypoints():
             "plugins.llm_chat.core.memory_policy",
             "plugins.llm_chat.core.eval",
             "plugins.llm_chat.core.compose",
+            "plugins.llm_chat.core.types",
             "plugins.llm_chat.web_access",
             "utils.tts_service_core.providers.gpt_sovits",
             "utils.tts_service_core.providers.fish_audio",

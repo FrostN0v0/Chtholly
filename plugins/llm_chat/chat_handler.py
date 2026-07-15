@@ -10,7 +10,6 @@ from arclet.entari import At, Session, MessageCreatedEvent, plugin_config
 from arclet.letoderea import BLOCK, enter_if
 from arclet.entari.logger import log
 from arclet.letoderea.context import Contexts
-from entari_plugin_llm._types import Message
 from entari_plugin_llm.config import get_model_config
 from arclet.entari.plugin.model import Plugin
 from entari_plugin_llm.exception import ModelNotFoundError
@@ -18,6 +17,7 @@ from entari_plugin_llm.exception import ModelNotFoundError
 from .config import LLMChatConfig
 from .core.eval import apply_deltas
 from .core.media import strip_internal_media_records
+from .core.types import ChatMessage
 from .generation import generate_chat_response
 from .web_access import normalize_web_access_limits
 from .core.errors import summarize_exception
@@ -173,7 +173,7 @@ async def on_chat(session: Session, ctx: Contexts):
 
     try:
         response = await generate_chat_response(
-            cast(list[Message], messages),
+            cast(list[ChatMessage], messages),
             system=system,
             model=model_name,
             channel_id=channel_id,
