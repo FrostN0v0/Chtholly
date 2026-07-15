@@ -9,6 +9,7 @@ from typing import Protocol, cast
 
 import litellm
 from entari_plugin_llm.config import get_model_config
+from entari_plugin_llm.exception import ModelNotFoundError
 
 from ..config import LLMChatConfig
 from ..core.eval import (
@@ -46,10 +47,11 @@ async def run_evaluation(
     """Run the relationship evaluator; returns None when parsing fails."""
     try:
         conf = get_model_config(config.eval_model or config.model, channel_id)
-    except Exception:
+    except ModelNotFoundError:
         # Stale channel default: fall back to the "$default" scope resolution.
         conf = get_model_config(config.eval_model or config.model)
-    extra = {key: value for key, value in conf.extra.items() if key not in {"tools", "tool_choice"}}
+    excluded_extra = {"tools", "tool_choice", "response_format", "timeout"}
+    extra = {key: value for key, value in conf.extra.items() if key not in excluded_extra}
     response = await litellm.acompletion(
         model=conf.name,
         messages=[
@@ -75,7 +77,7 @@ async def run_evaluation(
         base_url=conf.base_url,
         api_key=conf.api_key,
         temperature=0,
-        response_format={"type": "json_object"},
+        timeout=config.eval_request_timeout,
         **extra,
     )
     completion = cast(_CompletionLike, response)

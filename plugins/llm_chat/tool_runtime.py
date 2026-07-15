@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import random
 from typing import Protocol, cast
+import asyncio
 from pathlib import Path
 from collections import deque
+from collections.abc import Sequence
 
+from satori import Text, Message
 from launart import Launart
 from arclet.entari import Audio, Image, Session, MessageChain, plugin, command, plugin_config
 from entari_plugin_llm import LLMToolEvent  # entari: plugin
@@ -21,6 +24,18 @@ from .models import ImageTag
 from .web_tools import register_web_access_tools
 from .core.media import match_audio, parse_audio_text, is_random_request
 from .image_tags import pick_image
+from .core.delivery import (
+    DeliveryError,
+    DeliveryState,
+    wait_for_delivery,
+    reserve_text_message,
+    mark_delivery_attempt,
+    mark_delivery_success,
+    reserve_media_message,
+    normalize_delivery_delay,
+    reserve_forward_messages,
+    current_llm_chat_delivery,
+)
 from .persona.store import append_message
 
 DINGGONG_DIR = AUDIO_DIR / "dinggong"
@@ -33,6 +48,65 @@ class TTSServiceLike(Protocol):
     file_extension: str
 
     async def synthesize(self, text: str) -> bytes: ...
+
+
+async def _send_with_delivery(
+    session: Session,
+    payload: str | MessageChain,
+    state: DeliveryState | None,
+    *,
+    delay_seconds: float | None = None,
+    texts: Sequence[str] = (),
+) -> None:
+    if state is not None:
+        await wait_for_delivery(state, delay_seconds)
+    try:
+        await session.send(payload)
+    except asyncio.CancelledError:
+        if state is not None:
+            mark_delivery_attempt(state)
+        raise
+    except Exception:
+        if state is not None:
+            mark_delivery_attempt(state)
+        raise
+    if state is not None:
+        mark_delivery_success(state, texts)
+
+
+def _build_forward_chain(messages: Sequence[str]) -> MessageChain:
+    forward = Message(
+        forward=True,
+        content=[Message(content=[Text(text)]) for text in messages],
+    )
+    return MessageChain([forward])
+
+
+async def _send_forward_fallback(
+    session: Session,
+    state: DeliveryState,
+    messages: Sequence[str],
+    delay_seconds: float | None,
+) -> str:
+    total = len(messages)
+    for index, text in enumerate(messages):
+        await wait_for_delivery(state, delay_seconds)
+        try:
+            await session.send(text)
+        except asyncio.CancelledError:
+            mark_delivery_attempt(state)
+            raise
+        except Exception:
+            mark_delivery_attempt(state)
+            raise DeliveryError(
+                f"merged forward fallback confirmed {index}/{total} text messages before failure; "
+                "do not repeat the confirmed prefix"
+            ) from None
+        mark_delivery_success(state, [text])
+    return (
+        f"合并转发不可用，已按顺序回退发送 {total} 条普通文本；"
+        "不要在最终回复中重复，若无需补充只返回 [END_OF_RESPONSE]。"
+    )
 
 
 config = plugin_config(LLMChatConfig)
@@ -69,7 +143,10 @@ async def send_image(session: Session, context: str) -> str:
     full = IMAGE_DIR / rel_path
     if not full.exists():
         return "图片文件已丢失"
-    await session.send(MessageChain([Image.of(path=full)]))
+    delivery_state = current_llm_chat_delivery()
+    if delivery_state is not None:
+        delivery_state = reserve_media_message()
+    await _send_with_delivery(session, MessageChain([Image.of(path=full)]), delivery_state)
     recent.append(rel_path)
     row = next((item for item in rows if item.file_path == rel_path), None)
     tag_hint = "，".join((row.tags if row else context).split("，")[:5])
@@ -78,6 +155,81 @@ async def send_image(session: Session, context: str) -> str:
 
 
 registered_tools.append("send_image")
+
+
+@tools
+async def send_text(session: Session, text: str, delay_seconds: float | None = None) -> str:
+    """Send one paced text message during the current llm_chat generation.
+
+    Use only when a natural casual reply needs multiple independent chat beats. Keep one complete answer in the final
+    response instead. Choose send_text or send_merged_forward before the first text delivery and never mix them.
+
+    Args:
+        text (str): One complete visible text segment without internal control markers.
+        delay_seconds (float | None): Target interval from the previous confirmed or possibly confirmed delivery.
+    Returns:
+        str: Delivery result and final-response guidance.
+    """
+    delay = normalize_delivery_delay(delay_seconds)
+    delivery_state, normalized_text = reserve_text_message(text)
+    try:
+        await _send_with_delivery(
+            session,
+            normalized_text,
+            delivery_state,
+            delay_seconds=delay,
+            texts=[normalized_text],
+        )
+    except Exception as exc:
+        raise DeliveryError(f"send_text delivery failed: {type(exc).__name__}") from None
+    return "已发送 1 条文本消息；不要在最终回复中重复，若无需补充只返回 [END_OF_RESPONSE]。"
+
+
+registered_tools.append("send_text")
+
+
+@tools
+async def send_merged_forward(
+    session: Session,
+    messages: list[str],
+    delay_seconds: float | None = None,
+) -> str:
+    """Send one merged-forward message, with paced plain-text fallback when unavailable.
+
+    Prefer this when the reply would usually exceed the send_text message budget or contains several long sections.
+    Choose send_text or send_merged_forward before the first text delivery and never mix them.
+
+    Args:
+        messages (list[str]): Ordered visible text nodes without internal control markers.
+        delay_seconds (float | None): Target interval from the previous confirmed or possibly confirmed delivery.
+    Returns:
+        str: Delivery result and final-response guidance.
+    """
+    delay = normalize_delivery_delay(delay_seconds)
+    if type(messages) is not list or any(not isinstance(message, str) for message in messages):
+        raise DeliveryError("messages must be a list of strings")
+    delivery_state, normalized_messages = reserve_forward_messages(messages)
+
+    if session.account.platform != "onebot":
+        return await _send_forward_fallback(session, delivery_state, normalized_messages, delay)
+
+    await wait_for_delivery(delivery_state, delay)
+    try:
+        await session.send(_build_forward_chain(normalized_messages))
+    except asyncio.CancelledError:
+        mark_delivery_attempt(delivery_state)
+        raise
+    except Exception as exc:
+        mark_delivery_attempt(delivery_state)
+        _LOGGER.warning(f"merged forward failed; falling back to paced text: {type(exc).__name__}")
+        return await _send_forward_fallback(session, delivery_state, normalized_messages, delay)
+
+    mark_delivery_success(delivery_state, normalized_messages)
+    count = len(normalized_messages)
+    return f"已发送包含 {count} 个节点的合并转发；不要在最终回复中重复，若无需补充只返回 [END_OF_RESPONSE]。"
+
+
+registered_tools.append("send_merged_forward")
 
 if DINGGONG_DIR.exists():
     clip_texts = [text for file in sorted(DINGGONG_DIR.glob("*.mp3")) if (text := parse_audio_text(file.name))]
@@ -92,7 +244,10 @@ if DINGGONG_DIR.exists():
             matched = match_audio(context, files)
         if matched is None:
             return "没有合适的语音片段"
-        await session.send(MessageChain([Audio.of(path=matched)]))
+        delivery_state = current_llm_chat_delivery()
+        if delivery_state is not None:
+            delivery_state = reserve_media_message()
+        await _send_with_delivery(session, MessageChain([Audio.of(path=matched)]), delivery_state)
         await append_message(
             session.channel.id, "", "bot", "assistant", f"[发送了语音: {parse_audio_text(matched.name)}]"
         )
@@ -142,6 +297,9 @@ if config.tts_enabled:
         """
         )
         speech = truncate_for_tts(text, config.tts_max_chars)
+        delivery_state = current_llm_chat_delivery()
+        if delivery_state is not None:
+            delivery_state = reserve_media_message()
         try:
             service = cast(TTSServiceLike, Launart.current().get_component("tts.service"))
             audio = await service.synthesize(speech)
@@ -149,7 +307,7 @@ if config.tts_enabled:
             return "语音服务暂不可用"
         out = tts_temp_path(service.file_extension)
         Path(out).write_bytes(audio)
-        await session.send(MessageChain([Audio.of(path=out)]))
+        await _send_with_delivery(session, MessageChain([Audio.of(path=out)]), delivery_state)
         await append_message(session.channel.id, "", "bot", "assistant", f"[用语音说: {speech}]")
         return f"已用语音说出：{speech}"
 

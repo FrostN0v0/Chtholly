@@ -14,16 +14,17 @@
 
 ## 技术栈与关键依赖
 
-- **Python**: >= 3.14
+- **Python**: >= 3.10, < 4.0（当前运行时使用 3.10；待协议栈完成 Python 3.14 兼容后再升级）
 - **Bot 框架**: [arclet-entari](https://pypi.org/project/arclet-entari/)（完整安装 `arclet-entari[full]`，含 CLI、YAML、文件监听）
 - **CLI 工具**: [entari-cli](https://pypi.org/project/entari-cli/) —— `entari init / run / new / add / remove / config / gen_main`
 - **事件总线**: arclet-letoderea（Entari 内建依赖）
 - **命令系统**: arclet-alconna（Entari 内建 `command` 模块）
 - **服务管理**: launart（`Service` 基类用于跨插件依赖注入）
-- **协议适配器**: `satori-python-adapter-onebot11`（默认）；`entari-plugin-server` 在 Python 3.14 下有 dataclass 兼容问题，暂用外部 Satori server + `basic.network` 连接，已降级到 Python 3.10，待修复后升回 3.14
+- **协议适配器**: `satori-python-adapter-onebot11`（默认）；`entari-plugin-server` 使用 `direct_adapter: true` 与 Entari 直连，此模式不得再配置 `basic.network`。当前协议栈仍以 Python 3.10 运行，待 Python 3.14 兼容性确认后升级
 - **配置模型**: `BasicConfModel`（默认，dataclass 风格）/ Pydantic `BaseModel`（`arclet.entari.config.models.pyd`）/ msgspec `Struct`
 - **HTTP 客户端**: httpx
-- **日志与终端**: rich（Entari 内建 log 使用 loguru，可启用 `rich_error`）
+- **JSON 序列化**: orjson（LiteLLM 工具 / MCP 请求路径的显式运行时依赖）
+- **日志与终端**: rich（Entari 内建 log 使用 loguru；凭证化运行环境必须关闭会展开局部变量的 `rich_error`）
 - **包管理**: uv（`uv sync` / `uv add` / `uv remove`）
 - **代码质量**: Ruff、Pyright（`typeCheckingMode = "standard"`）
 
@@ -223,7 +224,9 @@ config = plugin_config(MyConfig)
 - 项目引进了 `entari-plugin-browser`、`entari-plugin-llm`、`entari-plugin-database`、`entari-plugin-permission` 作为项目的基础建设工具，当你需要使用 playwright、jinja2 模板渲染，AI会话调用、数据库及ORM、权限管理等方面时，优先考虑现有基建。
 - 当前项目拟构造一个供其它插件或服务调用的 TTS 服务，目前拟兼容 gpt-sovits 的接入，参考 `nonebot-plugin-deepseek` 中的 TTS 服务对接，并优化实现，使其符合当前项目的基建要求。
 - 帮助菜单，当前项目拟参考 [`nonebot-plugin-picmenu-next`](https://github.com/lgc-NB2Dev/nonebot-plugin-picmenu-next) 的菜单功能，结合 entari 基建，实现一个自动生成、界面美观、自定义程度高，开发简单的图片帮助基建插件。
-- 会话互动系统：`plugins/llm_chat` 已基于 LLM 插件实现公开群聊人格对话，用户轮次使用 `speaker` / `content` JSON 区分多人发言，图片继续走独立视觉链路。主聊天只接收按类别筛选的画像值和相关记忆，关系 evaluator 接收 canonical 画像与 aliases；语义分组和去重只构造可逆读取视图，持久化继续使用 exact key 并保留原始数据。表情、预录语音、TTS 与白名单插件命令均通过实际注册工具按需调用。网页能力固定使用 Tavily 提供 `web_search` 与 `read_web_page` 两个只读工具：时效问题按需搜索，公开页面按问题聚焦提取正文；generation-local `ContextVar` 同时隔离授权域与 effective budget，运行时、system prompt 和 tool schema 必须共享同一组规范化限额。所有目标必须经过公开 URL 与敏感 query 校验，网页摘要和正文始终视为不可信数据，不得扩大工具权限、覆盖系统规则或索取隐私。公开群聊由 priority `900` 主处理器接管，并以 priority `999` claim guard 在原生 priority `1000` 自动对话前硬阻断失败穿透；精确工具循环耗尽仅允许基于已积累 transcript 执行一次无工具 finalizer，其他生成或最终化失败均记录脱敏 warning 后静默 `BLOCK`。
+- 会话互动系统：`plugins/llm_chat` 已基于 LLM 插件实现公开群聊人格对话，用户轮次使用 `speaker` / `content` JSON 区分多人发言，图片继续走独立视觉链路。主聊天只接收按类别筛选的画像值和相关记忆，关系 evaluator 接收 canonical 画像与 aliases；语义分组和去重只构造可逆读取视图，持久化继续使用 exact key 并保留原始数据。表情、预录语音、TTS 与白名单插件命令均通过实际注册工具按需调用。模型可在单轮内使用 `send_text` 发送带确定性限幅节拍的多个普通文本，或使用 `send_merged_forward` 发送 OneBot 合并转发；非 OneBot、合并转发失败和部分 transport 失败均按已确认前缀语义回退为带节拍普通文本。所有成功文本按真实顺序聚合为一个 assistant 历史行，媒体 marker 继续独立持久化且必须先于文本；生成、最终发送或取消失败只尽力保存已确认前缀，不启动 evaluator 或关系更新。发送额度、节拍与媒体上限通过独立 generation-local `DeliveryState` 在运行时、system prompt 和工具处理器之间共享同一组规范化限额。网页能力固定使用 Tavily 提供 `web_search` 与 `read_web_page` 两个只读工具：时效问题按需搜索，公开页面按问题聚焦提取正文；独立的 generation-local `ContextVar` 同时隔离授权域与 effective budget，运行时、system prompt 和 tool schema 必须共享同一组规范化限额。所有目标必须经过公开 URL 与敏感 query 校验，网页摘要和正文始终视为不可信数据，不得扩大工具权限、覆盖系统规则或索取隐私。公开群聊由 priority `900` 主处理器接管，并以 priority `999` claim guard 在原生 priority `1000` 自动对话前硬阻断失败穿透；精确工具循环耗尽仅允许基于已积累 transcript 执行一次无工具 finalizer，且不得复述已成功发送内容或部分回退已确认前缀；其他生成或最终化失败均记录脱敏 warning 后静默 `BLOCK`。
+- `llm_chat` 模型 I/O：主聊天与 evaluator 必须分别使用 `model_request_timeout` / `eval_request_timeout`；evaluator 依靠严格 JSON prompt 与本地解析，不强制供应商 JSON Mode。未发生发送尝试时，空回复、内部媒体记录或孤立结束标记只允许一次无工具纠正重试；仍失败则精确删除本轮 user 行并跳过 evaluator。构造 prompt 时不得原样回放持久化媒体 marker：语音仅保留去控制标签后的自然文本，纯表情记录省略。
+
 
 ### 测试
 
@@ -251,7 +254,7 @@ config = plugin_config(MyConfig)
 
 ## 注意事项
 
-1. **凭证安全**：任何 access_token、cred、cookie、role_token、Satori token、适配器 token 等敏感数据禁止写入日志、文档、测试输出或提交到仓库；一律走 `.env` + `${{ env.KEY }}` 插值。
+1. **凭证安全**：任何 access_token、cred、cookie、role_token、Satori token、适配器 token 等敏感数据禁止写入日志、文档、测试输出或提交到仓库；一律走 `.env` + `${{ env.KEY }}` 插值。Entari 的 debug 启动日志会输出环境变量插值后的完整配置，`rich_error` 还会在异常堆栈中展开局部变量；仓库默认保持 `basic.log.level: info` 与 `basic.log.rich_error: false`，不得在凭证化环境启用这两类详细日志。
 2. **API 限流**：外部服务（GitHub、各游戏 Web API、AI 服务、Satori 协议端等）均可能限流或不可用；批量请求应控制并发与错误处理。
 3. **资源缓存**：如有资源调用需求，优先使用本地资源，缺失时再从网络获取；下载失败要有回退或明确报错，不要静默失败。本地缓存路径统一走 `local_data.get_cache_dir()`。
 4. **命令权限**：涉及全局广播、批量下发、资源同步、插件启停等高影响命令，应仅超管可用；`::control` 已按 `PluginRole` 与 `$filter` 提供分层控制，复用之。

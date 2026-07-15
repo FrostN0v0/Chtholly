@@ -17,18 +17,22 @@ from collections.abc import AsyncIterator
 from importlib.machinery import ModuleSpec
 
 import pytest
-from satori import Event as OriginEvent, Channel, ChannelType
+from satori import Event as OriginEvent, Login, Channel, ChannelType
 from sqlalchemy import func, select
 from satori.const import EventType
 from satori.model import User, Member, MessageObject
 from arclet.entari import Image, Session, MessageCreatedEvent
+from satori.client import Account
 from arclet.letoderea import BLOCK
 from arclet.entari.config import EntariConfig
 from arclet.letoderea.core import dispatch
+from satori.client.account import ApiInfo
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from arclet.entari.plugin.model import Plugin, current_plugin
 
 import plugins as _PLUGINS
+
+_PREVIOUS_GENERATION_MODULE = sys.modules.get("plugins.llm_chat.generation")
 
 _PACKAGE = ModuleType("plugins.llm_chat")
 setattr(_PACKAGE, "__path__", [str(Path(__file__).resolve().parents[1] / "plugins" / "llm_chat")])
@@ -38,7 +42,11 @@ if not hasattr(EntariConfig, "instance"):
     setattr(EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.yml"))
 from entari_plugin_database import Base
 
-from plugins.llm_chat import vision as vision_module, chat_context as chat_context_module
+from plugins.llm_chat import (
+    vision as vision_module,
+    generation as generation_module,
+    chat_context as chat_context_module,
+)
 from plugins.llm_chat.tools import is_command_allowed
 from plugins.llm_chat.config import LLMChatConfig
 from plugins.llm_chat.models import UserMemory, Conversation, UserProfileFact
@@ -51,12 +59,14 @@ from plugins.llm_chat.vision import (
     image_file_to_data_url,
 )
 from plugins.llm_chat.persona import (
+    store as store_module,
     runner as runner_module,
     embedding as embedding_module,
     memory_update as memory_update_module,
     memory_context as memory_context_module,
 )
 from plugins.llm_chat.core.eval import EvalResult
+from plugins.llm_chat.core.errors import summarize_exception
 from plugins.llm_chat.chat_context import (
     build_chat_messages,
     collect_message_images,
@@ -66,10 +76,21 @@ from plugins.llm_chat.chat_context import (
 )
 from plugins.llm_chat.core.profile import MemoryItem
 from plugins.llm_chat.core.prompts import DEFAULT_PERSONA
+from plugins.llm_chat.core.delivery import (
+    DeliveryState,
+    reserve_text_message,
+    mark_delivery_success,
+    llm_chat_delivery_scope,
+)
 from plugins.llm_chat.persona.runner import run_evaluation
 from plugins.llm_chat.persona.embedding import embed_text
 from plugins.llm_chat.persona.memory_update import apply_memory_updates, resolve_fact_embedding_update
 from plugins.llm_chat.persona.memory_context import load_memory_context
+
+if _PREVIOUS_GENERATION_MODULE is None:
+    sys.modules.pop("plugins.llm_chat.generation", None)
+else:
+    sys.modules["plugins.llm_chat.generation"] = _PREVIOUS_GENERATION_MODULE
 
 sys.modules.pop("plugins.llm_chat", None)
 if getattr(_PLUGINS, "llm_chat", None) is _PACKAGE:
@@ -151,6 +172,114 @@ class _ChatSession:
 
     async def send(self, content: str) -> None:
         self.sent.append(content)
+
+
+class _FailingChatSession(_ChatSession):
+    def __init__(self, text: str, *, fail_attempt: int) -> None:
+        super().__init__(text)
+        self.attempts = 0
+        self.fail_attempt = fail_attempt
+
+    async def send(self, content: str) -> None:
+        self.attempts += 1
+        if self.attempts == self.fail_attempt:
+            raise RuntimeError("final send failed")
+        await super().send(content)
+
+
+class _HandlerClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _handler_response(content: str | None) -> SimpleNamespace:
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+
+def _install_handler_stubs(
+    monkeypatch: pytest.MonkeyPatch,
+    module: ModuleType,
+) -> SimpleNamespace:
+    records = SimpleNamespace(
+        appended=[],
+        evaluations=[],
+        memory_updates=[],
+        moods=[],
+        relations=[],
+        deleted=[],
+    )
+
+    async def no_image_notes(*_args: Any, **_kwargs: Any) -> list[str]:
+        return []
+
+    async def get_relation(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return _relation_state()
+
+    async def get_mood(*_args: Any, **_kwargs: Any) -> float:
+        return 0.0
+
+    async def load_memory(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return _memory_context()
+
+    async def load_history(*_args: Any, **_kwargs: Any) -> list[Any]:
+        return []
+
+    async def append_message(*args: Any) -> int:
+        records.appended.append(args)
+        return len(records.appended)
+
+    async def delete_message(message_id: int | None) -> None:
+        records.deleted.append(message_id)
+
+    async def run_evaluation(*args: Any) -> None:
+        records.evaluations.append(args[5])
+
+    async def apply_memory_updates(*args: Any, **kwargs: Any) -> None:
+        records.memory_updates.append((args, kwargs))
+
+    async def set_mood(*args: Any, **kwargs: Any) -> None:
+        records.moods.append((args, kwargs))
+
+    async def save_relation(*args: Any, **kwargs: Any) -> None:
+        records.relations.append((args, kwargs))
+
+    monkeypatch.setattr(module, "get_model_config", lambda *_args: SimpleNamespace(name="test-model"))
+    monkeypatch.setattr(module, "model_supports_image_input", lambda _model: False)
+    monkeypatch.setattr(module, "build_image_notes", no_image_notes)
+    monkeypatch.setattr(module, "get_relation", get_relation)
+    monkeypatch.setattr(module, "get_mood", get_mood)
+    monkeypatch.setattr(module, "load_memory_context", load_memory)
+    monkeypatch.setattr(module, "load_history", load_history)
+    monkeypatch.setattr(module, "append_message", append_message)
+    monkeypatch.setattr(module, "delete_message", delete_message)
+    monkeypatch.setattr(module, "run_evaluation", run_evaluation)
+    monkeypatch.setattr(module, "apply_memory_updates", apply_memory_updates)
+    monkeypatch.setattr(module, "set_mood", set_mood)
+    monkeypatch.setattr(module, "save_relation", save_relation)
+    return records
+
+
+async def _deliver_tool_texts(
+    state: Any,
+    session: _ChatSession,
+    texts: tuple[str, ...],
+    clock: _HandlerClock,
+) -> None:
+    state.sleep = clock.sleep
+    state.clock = clock.monotonic
+    with llm_chat_delivery_scope(state):
+        for text in texts:
+            reserved, normalized = reserve_text_message(text)
+            await session.send(normalized)
+            mark_delivery_success(reserved, [normalized])
 
 
 async def _settle_plugin_tasks(tasks: set[asyncio.Task[Any]] | None) -> None:
@@ -343,21 +472,46 @@ def test_build_chat_messages_serializes_each_user_turn_without_speaker_spoofing(
     }
 
 
-def test_assistant_history_cleans_leaked_markers_but_keeps_real_media_records():
+def test_assistant_history_removes_media_records_and_keeps_spoken_content():
     leaked_reply = "[发送了表情包: 纠结，挑选]只看立绘的话，我会选提丰。"
-    real_record = "[发送了表情包: 开心，可爱]"
     history = [
         _conversation(role="assistant", user_id="bot", user_name="Chtholly", content=leaked_reply),
-        _conversation(role="assistant", user_id="bot", user_name="Chtholly", content=real_record, offset=1),
+        _conversation(
+            role="assistant",
+            user_id="bot",
+            user_name="Chtholly",
+            content="[发送了表情包: 开心，可爱]",
+            offset=1,
+        ),
+        _conversation(
+            role="assistant",
+            user_id="bot",
+            user_name="Chtholly",
+            content="[用语音说: [softly] 晚安。[happy] 明天见。]",
+            offset=2,
+        ),
+        _conversation(
+            role="assistant",
+            user_id="bot",
+            user_name="Chtholly",
+            content="[发送了语音: 你这个笨蛋！]",
+            offset=3,
+        ),
     ]
 
     messages = build_chat_messages(history, "Alice", "继续聊")
     conversation = build_eval_conversation(history, "user", "Alice", "继续聊", "好的")
 
-    assert messages[0]["content"] == "只看立绘的话，我会选提丰。"
-    assert messages[1]["content"] == real_record
-    assert conversation["recent_history"][0]["content"] == "只看立绘的话，我会选提丰。"
-    assert conversation["recent_history"][1]["content"] == real_record
+    assert [message["content"] for message in messages[:-1]] == [
+        "只看立绘的话，我会选提丰。",
+        "晚安。明天见。",
+        "你这个笨蛋！",
+    ]
+    assert [message["content"] for message in conversation["recent_history"]] == [
+        "只看立绘的话，我会选提丰。",
+        "晚安。明天见。",
+        "你这个笨蛋！",
+    ]
 
 
 def test_build_eval_conversation_keeps_history_and_each_current_turn_separate():
@@ -976,7 +1130,12 @@ async def test_run_evaluation_uses_dedicated_json_payload_without_tools(
             base_url="https://evaluator.invalid/v1",
             api_key="test-only-key",
             prompt=native_prompt,
-            extra={"seed": 7},
+            extra={
+                "seed": 7,
+                "response_format": {"type": "json_object"},
+                "timeout": 999,
+                "tools": [{"type": "function"}],
+            },
         )
 
     async def fake_acompletion(**kwargs: Any) -> SimpleNamespace:
@@ -1002,6 +1161,7 @@ async def test_run_evaluation_uses_dedicated_json_payload_without_tools(
     config.eval_model = "eval-alias"
     config.profile_fact_min_confidence = 0.72
     config.memory_min_importance = 0.64
+    config.eval_request_timeout = 23.0
     conversation = build_eval_conversation([], "user", "目标用户", "普通问候", "你好呀")
 
     result = await run_evaluation(
@@ -1031,7 +1191,8 @@ async def test_run_evaluation_uses_dedicated_json_payload_without_tools(
     assert request["base_url"] == "https://evaluator.invalid/v1"
     assert request["api_key"] == "test-only-key"
     assert request["temperature"] == 0
-    assert request["response_format"] == {"type": "json_object"}
+    assert "response_format" not in request
+    assert request["timeout"] == 23.0
     assert request["seed"] == 7
     assert "tools" not in request
     assert "tool_choice" not in request
@@ -1072,42 +1233,130 @@ async def test_run_evaluation_uses_dedicated_json_payload_without_tools(
 
 
 @pytest.mark.asyncio
-async def test_on_chat_generation_failure_returns_block_without_reply(
+@pytest.mark.parametrize(
+    "invalid_content",
+    [None, "", "[END_OF_RESPONSE]", "[用语音说: [softly] 这不是一次真实发送。]"],
+)
+async def test_generation_retries_invisible_reply_once_without_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_content: str | None,
+) -> None:
+    primary_requests: list[dict[str, Any]] = []
+    final_requests: list[dict[str, Any]] = []
+
+    async def fake_generate(messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
+        primary_requests.append(kwargs)
+        messages.append({"role": "assistant", "content": invalid_content})
+        return _handler_response(invalid_content)
+
+    async def fake_acompletion(**kwargs: Any) -> SimpleNamespace:
+        final_requests.append(kwargs)
+        return _handler_response("现在直接回复。")
+
+    monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
+    monkeypatch.setattr(generation_module.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(
+        generation_module,
+        "get_model_config",
+        lambda *_args: SimpleNamespace(
+            name="resolved-model",
+            base_url="https://model.invalid/v1",
+            api_key="test-only-key",
+            extra={
+                "seed": 7,
+                "response_format": {"type": "json_object"},
+                "timeout": 999,
+                "tools": [{"type": "function"}],
+                "tool_choice": "required",
+            },
+        ),
+    )
+
+    response = await generation_module.generate_chat_response(
+        cast(list[Any], [{"role": "user", "content": "hello"}]),
+        system="system",
+        model="deepseek",
+        channel_id="group",
+        ctx=cast(Any, SimpleNamespace()),
+        web_limits=generation_module.WebAccessLimits(0, 0, 0),
+        delivery_state=DeliveryState(),
+        request_timeout=12.5,
+    )
+
+    assert response.choices[0].message.content == "现在直接回复。"
+    assert primary_requests[0]["timeout"] == 12.5
+    assert len(final_requests) == 1
+    final_request = final_requests[0]
+    assert final_request["timeout"] == 12.5
+    assert final_request["seed"] == 7
+    assert "tools" not in final_request
+    assert "tool_choice" not in final_request
+    assert "response_format" not in final_request
+    assert [message["role"] for message in final_request["messages"]] == ["system", "user"]
+
+
+@pytest.mark.asyncio
+async def test_generation_accepts_end_marker_after_confirmed_media_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = DeliveryState()
+    mark_delivery_success(state)
+
+    async def fake_generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return _handler_response("[END_OF_RESPONSE]")
+
+    async def unexpected_acompletion(**_kwargs: Any) -> None:
+        raise AssertionError("confirmed delivery must not trigger a corrective retry")
+
+    monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
+    monkeypatch.setattr(generation_module.litellm, "acompletion", unexpected_acompletion)
+
+    response = await generation_module.generate_chat_response(
+        cast(list[Any], [{"role": "user", "content": "hello"}]),
+        system="system",
+        model="deepseek",
+        channel_id="group",
+        ctx=cast(Any, SimpleNamespace()),
+        web_limits=generation_module.WebAccessLimits(0, 0, 0),
+        delivery_state=state,
+        request_timeout=12.5,
+    )
+
+    assert response.choices[0].message.content == "[END_OF_RESPONSE]"
+
+
+@pytest.mark.asyncio
+async def test_message_append_and_exact_delete_round_trip(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_memory_store: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(store_module, "get_session", isolated_memory_store.session_factory)
+
+    message_id = await store_module.append_message("channel", "user", "Alice", "user", "hello")
+    async with isolated_memory_store.session_factory() as session:
+        assert await session.get(Conversation, message_id) is not None
+
+    await store_module.delete_message(message_id)
+
+    async with isolated_memory_store.session_factory() as session:
+        assert await session.get(Conversation, message_id) is None
+
+
+@pytest.mark.asyncio
+async def test_on_chat_generation_failure_rolls_back_unstarted_user_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with _temporary_chat_handler() as harness:
         module = harness.module
-        appended: list[tuple[str, str, str, str, str]] = []
-
-        async def no_image_notes(*_args: Any, **_kwargs: Any) -> list[str]:
-            return []
-
-        async def get_relation(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
-            return _relation_state()
-
-        async def get_mood(*_args: Any, **_kwargs: Any) -> float:
-            return 0.0
-
-        async def load_memory(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
-            return _memory_context()
-
-        async def load_history(*_args: Any, **_kwargs: Any) -> list[Any]:
-            return []
-
-        async def append_message(*args: str) -> None:
-            appended.append(cast(tuple[str, str, str, str, str], args))
+        records = _install_handler_stubs(monkeypatch, module)
+        warnings: list[str] = []
+        monkeypatch.setattr(module._LOGGER, "warning", warnings.append)
 
         async def fail_generation(*_args: Any, **_kwargs: Any) -> None:
-            raise RuntimeError("provider failed")
+            failure = RuntimeError("provider failed")
+            failure.__cause__ = ModuleNotFoundError("No module named 'orjson'")
+            raise failure
 
-        monkeypatch.setattr(module, "get_model_config", lambda *_args: SimpleNamespace(name="test-model"))
-        monkeypatch.setattr(module, "model_supports_image_input", lambda _model: False)
-        monkeypatch.setattr(module, "build_image_notes", no_image_notes)
-        monkeypatch.setattr(module, "get_relation", get_relation)
-        monkeypatch.setattr(module, "get_mood", get_mood)
-        monkeypatch.setattr(module, "load_memory_context", load_memory)
-        monkeypatch.setattr(module, "load_history", load_history)
-        monkeypatch.setattr(module, "append_message", append_message)
         monkeypatch.setattr(module, "generate_chat_response", fail_generation)
 
         session = _ChatSession("NEW_GROUP_B_SENTINEL")
@@ -1115,7 +1364,227 @@ async def test_on_chat_generation_failure_returns_block_without_reply(
 
         assert result is BLOCK
         assert session.sent == []
-        assert appended == [("group-B", "same-user", "Current User", "user", "NEW_GROUP_B_SENTINEL")]
+        assert records.appended == [("group-B", "same-user", "Current User", "user", "NEW_GROUP_B_SENTINEL")]
+        assert records.deleted == [1]
+        assert records.evaluations == []
+        assert records.relations == []
+        assert warnings == [
+            "llm generate failed: RuntimeError: provider failed <- ModuleNotFoundError: No module named 'orjson'"
+        ]
+
+
+@pytest.mark.asyncio
+async def test_segmented_delivery_is_aggregated_once_and_reuses_normalized_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        clock = _HandlerClock()
+        captured_limits: list[Any] = []
+
+        def compose_prompt(*_args: Any, **kwargs: Any) -> str:
+            captured_limits.append(kwargs["delivery_limits"])
+            return "delivery system"
+
+        session = _ChatSession("send three messages")
+
+        async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+            state = kwargs["delivery_state"]
+            captured_limits.append(state.limits)
+            await _deliver_tool_texts(state, session, ("晚安", "做个好梦", "明天见"), clock)
+            return _handler_response("  [END_OF_RESPONSE]  ")
+
+        monkeypatch.setattr(module, "compose_persona_prompt", compose_prompt)
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        aggregated = "晚安\n\n做个好梦\n\n明天见"
+        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
+        assert result is BLOCK
+        assert session.sent == ["晚安", "做个好梦", "明天见"]
+        assert assistant_rows == [("group-B", "", "bot", "assistant", aggregated)]
+        assert records.evaluations[0]["current_turn"]["assistant"]["content"] == aggregated
+        assert captured_limits[0] is captured_limits[1]
+        assert len(records.relations) == 1
+
+
+@pytest.mark.asyncio
+async def test_segmented_delivery_final_supplement_stays_in_one_history_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        clock = _HandlerClock()
+        session = _ChatSession("add one supplement")
+
+        async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+            await _deliver_tool_texts(kwargs["delivery_state"], session, ("first segment",), clock)
+            return _handler_response("final supplement")
+
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        aggregated = "first segment\n\nfinal supplement"
+        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
+        assert result is BLOCK
+        assert session.sent == ["first segment", "final supplement"]
+        assert clock.sleeps == [1.2]
+        assert assistant_rows == [("group-B", "", "bot", "assistant", aggregated)]
+        assert records.evaluations[0]["current_turn"]["assistant"]["content"] == aggregated
+
+
+@pytest.mark.asyncio
+async def test_segmented_delivery_suppresses_final_supplement_outside_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler(
+        {
+            "eval_every_n": 1,
+            "delivery_max_text_chars_per_message": 5,
+            "delivery_max_total_text_chars_per_generation": 5,
+        }
+    ) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        warnings: list[str] = []
+        monkeypatch.setattr(module, "_LOGGER", SimpleNamespace(warning=warnings.append))
+        clock = _HandlerClock()
+        session = _ChatSession("exhaust supplement budget")
+
+        async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+            await _deliver_tool_texts(kwargs["delivery_state"], session, ("12345",), clock)
+            return _handler_response("extra")
+
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
+        assert result is BLOCK
+        assert session.sent == ["12345"]
+        assert assistant_rows == [("group-B", "", "bot", "assistant", "12345")]
+        assert records.evaluations[0]["current_turn"]["assistant"]["content"] == "12345"
+        assert "suppressed final supplement outside delivery budget" in warnings
+
+
+@pytest.mark.asyncio
+async def test_delivery_generation_failure_persists_confirmed_prefix_without_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        clock = _HandlerClock()
+        session = _ChatSession("generation fails after tool send")
+
+        async def generate(*_args: Any, **kwargs: Any) -> None:
+            await _deliver_tool_texts(kwargs["delivery_state"], session, ("confirmed prefix",), clock)
+            raise RuntimeError("provider failed")
+
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
+        assert result is BLOCK
+        assert session.sent == ["confirmed prefix"]
+        assert assistant_rows == [("group-B", "", "bot", "assistant", "confirmed prefix")]
+        assert records.evaluations == []
+        assert records.memory_updates == []
+        assert records.moods == []
+        assert records.relations == []
+
+
+@pytest.mark.asyncio
+async def test_delivery_generation_cancellation_persists_prefix_and_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        clock = _HandlerClock()
+        session = _ChatSession("generation is cancelled")
+
+        async def generate(*_args: Any, **kwargs: Any) -> None:
+            await _deliver_tool_texts(kwargs["delivery_state"], session, ("confirmed prefix",), clock)
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        with pytest.raises(asyncio.CancelledError):
+            await module.on_chat.callable_target(session, SimpleNamespace())
+
+        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
+        assert session.sent == ["confirmed prefix"]
+        assert assistant_rows == [("group-B", "", "bot", "assistant", "confirmed prefix")]
+        assert records.evaluations == []
+        assert records.memory_updates == []
+        assert records.moods == []
+        assert records.relations == []
+
+
+@pytest.mark.asyncio
+async def test_delivery_final_send_failure_persists_only_confirmed_prefix_and_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        clock = _HandlerClock()
+        session = _FailingChatSession("final send fails", fail_attempt=2)
+
+        async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+            await _deliver_tool_texts(kwargs["delivery_state"], session, ("confirmed prefix",), clock)
+            return _handler_response("unsent supplement")
+
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        with pytest.raises(RuntimeError, match="^final send failed$"):
+            await module.on_chat.callable_target(session, SimpleNamespace())
+
+        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
+        assert session.sent == ["confirmed prefix"]
+        assert assistant_rows == [("group-B", "", "bot", "assistant", "confirmed prefix")]
+        assert records.evaluations == []
+        assert records.memory_updates == []
+        assert records.moods == []
+        assert records.relations == []
+
+
+@pytest.mark.asyncio
+async def test_delivery_pure_media_keeps_evaluator_assistant_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        session = _ChatSession("send only media")
+
+        async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+            mark_delivery_success(kwargs["delivery_state"])
+            await module.append_message(
+                "group-B",
+                "",
+                "bot",
+                "assistant",
+                "[发送了表情包: happy]",
+            )
+            return _handler_response("[END_OF_RESPONSE]")
+
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
+        assert result is BLOCK
+        assert session.sent == []
+        assert assistant_rows == [("group-B", "", "bot", "assistant", "[发送了表情包: happy]")]
+        assert records.evaluations[0]["current_turn"]["assistant"] is None
+        assert len(records.relations) == 1
 
 
 @pytest.mark.asyncio
@@ -1201,21 +1670,18 @@ async def test_block_native_llm_fallback_claims_addressed_public_message_after_u
             member=member,
             user=user,
         )
+        login = Login(platform="test-platform", user=User("bot", "Bot"))
         origin = OriginEvent(
             type=EventType.MESSAGE_CREATED,
             timestamp=datetime.now(),
-            login=SimpleNamespace(),
+            login=login,
             channel=channel,
             member=member,
             message=message,
             user=user,
             sn=2026,
         )
-        account = SimpleNamespace(
-            self_id="bot",
-            platform="test-platform",
-            protocol=SimpleNamespace(),
-        )
+        account = Account(login, ApiInfo(), [])
         event = MessageCreatedEvent(account, origin)
 
         await dispatch(event, scope=harness.plugin._scope)
@@ -1227,6 +1693,26 @@ async def test_block_native_llm_fallback_claims_addressed_public_message_after_u
         assert "NEW_GROUP_B_SENTINEL" in event.message.content
         assert native_calls == 0
         assert native_persistence == []
+
+
+def test_yaml_and_default_delivery_configuration_are_synchronized() -> None:
+    llm_chat_plugin = cast(dict[str, Any], EntariConfig.instance.plugin["llm_chat"])
+    defaults = LLMChatConfig()
+    expected: dict[str, int | float] = {
+        "delivery_min_interval_seconds": 1.1,
+        "delivery_default_interval_seconds": 1.2,
+        "delivery_max_interval_seconds": 5.0,
+        "delivery_max_text_messages_per_generation": 5,
+        "delivery_max_text_chars_per_message": 1000,
+        "delivery_max_forward_nodes": 20,
+        "delivery_max_forward_chars_per_node": 2000,
+        "delivery_max_total_text_chars_per_generation": 12000,
+        "delivery_max_media_messages_per_generation": 2,
+    }
+
+    for key, value in expected.items():
+        assert getattr(defaults, key) == value
+        assert llm_chat_plugin[key] == value
 
 
 def test_yaml_and_default_llm_chat_configuration_are_exactly_synchronized():
@@ -1248,6 +1734,8 @@ def test_yaml_and_default_llm_chat_configuration_are_exactly_synchronized():
         assert getattr(defaults, key) == expected
         assert llm_chat_plugin[key] == expected
     assert defaults.eval_every_n == llm_chat_plugin["eval_every_n"] == 1
+    assert defaults.model_request_timeout == llm_chat_plugin["model_request_timeout"] == 90.0
+    assert defaults.eval_request_timeout == llm_chat_plugin["eval_request_timeout"] == 60.0
     assert defaults.web_search_enabled is False
     assert defaults.tavily_api_key is None
     assert defaults.web_search_max_calls_per_generation == llm_chat_plugin["web_search_max_calls_per_generation"] == 2
@@ -1285,14 +1773,14 @@ def test_yaml_and_default_llm_chat_configuration_are_exactly_synchronized():
 def test_real_yaml_resolves_optional_tavily_key_without_template_residue():
     config_path = Path(__file__).resolve().parents[1] / "entari.yml"
     required_env = {
-        "WEBUI_PASSWORD": "''",
-        "LLM_API_KEY": "''",
-        "LLM_BASE_URL": "''",
-        "DOUBAO_API_KEY": "''",
-        "DEEPSEEK_API_KEY": "''",
-        "FISH_API_KEY": "''",
-        "FISH_REFERENCE_ID": "''",
-        "ONEBOT_TOKEN": "''",
+        "WEBUI_PASSWORD": "",
+        "LLM_API_KEY": "",
+        "LLM_BASE_URL": "",
+        "DOUBAO_API_KEY": "",
+        "DEEPSEEK_API_KEY": "",
+        "FISH_API_KEY": "",
+        "FISH_REFERENCE_ID": "",
+        "ONEBOT_TOKEN": "",
     }
     original_instance = EntariConfig.instance
     original_inited = EntariConfig._inited
@@ -1310,6 +1798,9 @@ def test_real_yaml_resolves_optional_tavily_key_without_template_residue():
         assert "${{" not in repr(without_key_plugin)
         assert "${{" not in repr(with_key_plugin)
         assert without_key.basic.log.level == with_key.basic.log.level == "info"
+        assert without_key.basic.log.rich_error is with_key.basic.log.rich_error is False
+        server_config = cast(dict[str, Any], without_key.plugin["server"])
+        assert "token" not in server_config
     finally:
         EntariConfig.instance = original_instance
         EntariConfig._inited = original_inited
@@ -1317,6 +1808,18 @@ def test_real_yaml_resolves_optional_tavily_key_without_template_residue():
 
 def test_allowed_commands_default_closed():
     assert LLMChatConfig().allowed_commands == []
+
+
+def test_summarize_exception_redacts_secrets_and_keeps_root_cause():
+    cause = ModuleNotFoundError("No module named 'orjson'")
+    failure = RuntimeError("api_key=secret Bearer token-value https://example.com/path?token=secret sk-abcdefgh123")
+    failure.__cause__ = cause
+
+    assert summarize_exception(failure) == (
+        "RuntimeError: api_key=[REDACTED] Bearer [REDACTED] "
+        "https://example.com/path?[REDACTED] sk-[REDACTED]"
+        " <- ModuleNotFoundError: No module named 'orjson'"
+    )
 
 
 @pytest.mark.parametrize(

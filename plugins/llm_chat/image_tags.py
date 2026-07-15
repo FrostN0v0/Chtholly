@@ -18,6 +18,7 @@ from .config import LLMChatConfig
 from .models import ImageTag
 from .vision import generate_image_tags, image_file_to_data_url
 from .core.media import match_image, is_random_request
+from .core.errors import summarize_exception
 from .core.profile import decode_embedding, encode_embedding, cosine_similarity
 from .persona.embedding import embed_text
 
@@ -120,7 +121,7 @@ async def tag_images(
                     raise
                 except Exception as exc:
                     counter["failed"] += 1
-                    _LOGGER.warning(f"tagging failed for {path.name}: {exc!r}")
+                    _LOGGER.warning(f"tagging failed for {path.name}: {summarize_exception(exc)}")
             done = counter["tagged"] + counter["failed"]
             if on_progress is not None and done % 50 == 0 and done < total:
                 await on_progress(counter["tagged"], counter["failed"], total)
@@ -131,5 +132,5 @@ async def tag_images(
     except asyncio.CancelledError:
         pass
     except Exception as exc:
-        _LOGGER.warning(f"image tagging pass aborted: {exc!r}")
+        _LOGGER.warning(f"image tagging pass aborted: {summarize_exception(exc)}")
     return counter["tagged"], counter["failed"], remaining

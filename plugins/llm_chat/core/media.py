@@ -17,10 +17,14 @@ _AUDIO_NORMALIZE_RE = re.compile(r"[\W_\s]+")
 _LOW_SIGNAL_CHARS = frozenset("的了呢啊吗吧呀哦嗯哈我你他她它是不在有和跟给就都也还才又很真这那一个")
 _AUDIO_SYNONYM_GROUPS = (("早上问好", "早安", "早上好", "您早上好", "问早"),)
 _RANDOM_REQUEST_RE = re.compile(r"随便|随意|任意|都行|都可以|random", re.IGNORECASE)
+_TTS_CONTROL_TAG_RE = re.compile(r"\[[^\[\]\r\n]{1,40}\]\s*")
+_STICKER_RECORD_PREFIX = "[发送了表情包:"
+_AUDIO_RECORD_PREFIX = "[发送了语音:"
+_TTS_RECORD_PREFIX = "[用语音说:"
 _INTERNAL_MEDIA_RECORD_PREFIXES = (
-    "[发送了表情包:",
-    "[发送了语音:",
-    "[用语音说:",
+    _STICKER_RECORD_PREFIX,
+    _AUDIO_RECORD_PREFIX,
+    _TTS_RECORD_PREFIX,
 )
 
 
@@ -77,9 +81,21 @@ def strip_internal_media_records(text: str) -> str:
     return "".join(parts).strip()
 
 
-def sanitize_assistant_history(text: str) -> str:
-    """Keep real standalone media records while cleaning leaked mixed replies."""
-    return text if is_internal_media_record(text) else strip_internal_media_records(text)
+def sanitize_assistant_history(text: str) -> str | None:
+    """Render stored assistant history without exposing reserved media records."""
+    stripped = text.strip()
+    if not is_internal_media_record(stripped):
+        return strip_internal_media_records(stripped) or None
+    if stripped.startswith(_STICKER_RECORD_PREFIX):
+        return None
+    for prefix in (_AUDIO_RECORD_PREFIX, _TTS_RECORD_PREFIX):
+        if stripped.startswith(prefix):
+            payload = stripped[len(prefix) : -1].strip()
+            if prefix == _TTS_RECORD_PREFIX:
+                payload = _TTS_CONTROL_TAG_RE.sub("", payload)
+            normalized = " ".join(payload.split())
+            return normalized or None
+    return None
 
 
 def is_random_request(text: str) -> bool:

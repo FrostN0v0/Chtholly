@@ -7,7 +7,7 @@ authors = [{ name = "FrostN_0v0", email = "suny25802@gmail.com" }]
 license = { text = "AGPL-3.0" }
 requires-python = ">=3.10, <4.0"
 dependencies = [
-    "arclet-entari[full]>=0.18.1",
+    "arclet-entari[full]>=0.18.3",
     "entari-plugin-browser[jinja2]>=0.6.1",
     "entari-plugin-database>=0.3.3",
     "entari-plugin-llm>=0.2.1",
@@ -15,6 +15,7 @@ dependencies = [
     "entari-plugin-server>=0.7.1",
     "entari-plugin-webui>=1.0.1",
     "httpx[http2]>=0.27.2",
+    "orjson>=3.11.9",
     "rich>=13.9.4",
 ]
 

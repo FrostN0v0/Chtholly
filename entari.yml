@@ -1,19 +1,12 @@
 basic:
-  # network:
-  #   - type: ws
-  #     host: localhost
-  #     port: 8120
-  #     path: satori
-  #     token: chtholly4221
   ignore_self_message: true
   log:
     level: info
-    # Silence openai SDK debug dumps (full vision payloads incl. base64 images).
-    # ignores: ["openai*"]
+    # Keep third-party debug payloads and Rich local-variable tracebacks disabled around credentials.
     save: true
     rotation: "00:00"
     compression: "zip"
-    rich_error: true
+    rich_error: false
     short_level: true
   prefix:
     - /
@@ -54,7 +47,7 @@ plugins:
     api_key: ${{ env.LLM_API_KEY }}
     base_url: ${{ env.LLM_BASE_URL }}
     models:
-      - name: "gpt-5.5"
+      - name: "gpt-5.6-sol"
         alias: "gpt"
       - name: "openai/doubao-seed-evolving"
         alias: "doubao"
@@ -92,12 +85,23 @@ plugins:
     web_search_max_calls_per_generation: 2
     web_page_max_calls_per_generation: 2
     web_total_max_calls_per_generation: 4
-    tavily_api_key: ${{ env.get('TAVILY_API_KEY',"''") }}
+    tavily_api_key: ${{ env.get('TAVILY_API_KEY', '') }}
     web_search_max_results: 5
     web_search_timeout: 30.0
     web_page_max_chars: 6000
+    delivery_min_interval_seconds: 1.1
+    delivery_default_interval_seconds: 1.2
+    delivery_max_interval_seconds: 5.0
+    delivery_max_text_messages_per_generation: 5
+    delivery_max_text_chars_per_message: 1000
+    delivery_max_forward_nodes: 20
+    delivery_max_forward_chars_per_node: 2000
+    delivery_max_total_text_chars_per_generation: 12000
+    delivery_max_media_messages_per_generation: 2
     # Model duties: chat images pass directly to vision-capable chat models; eval pinned below; fallback tag/describe uses image_tag_model.
     eval_model: doubao
+    model_request_timeout: 90.0
+    eval_request_timeout: 60.0
     eval_every_n: 1
     image_tag_model: doubao
     tag_batch_size: 50
@@ -124,7 +128,6 @@ plugins:
     access_token: ${{ env.ONEBOT_TOKEN }}
     port: 8120
     path: satori
-    token: chtholly4221
     options:
       access_log: false # kill /api/health polling and other HTTP access lines
     adapters:

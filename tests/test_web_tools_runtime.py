@@ -10,24 +10,33 @@ import sys
 import json
 from uuid import uuid4
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, cast
 import asyncio
 from pathlib import Path
 import importlib
 from contextlib import contextmanager, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import field, dataclass
 from importlib.util import module_from_spec, spec_from_file_location
-from collections.abc import Mapping, Callable, Iterator, AsyncIterator
+from collections.abc import Mapping, Callable, Iterator, Sequence, AsyncIterator
 from importlib.machinery import ModuleSpec
 
 import httpx
 import pytest
+from satori import Text, User, Login, Message as SatoriMessage
 import litellm
+from arclet.entari import Session, MessageChain
+from litellm.exceptions import APIError
+from arclet.entari.const import ITEM_SESSION
 from arclet.entari.config import EntariConfig
+from arclet.letoderea.context import Contexts
+from satori.adapters.onebot11.message import OneBot11MessageEncoder
+
+from plugins.llm_chat.core.delivery import llm_chat_delivery_scope
 
 _ROOT = Path(__file__).resolve().parents[1]
 if not hasattr(EntariConfig, "instance"):
     EntariConfig.instance = EntariConfig.load(_ROOT / "entari.yml")
+from entari_plugin_llm._types import Message as LLMMessage
 import entari_plugin_llm.service as llm_service_module
 from entari_plugin_llm.service import LLMService
 from arclet.entari.plugin.model import Plugin, PluginDispatcher, current_plugin
@@ -122,6 +131,71 @@ class _MockClientFactory:
             await self.client.aclose()
 
 
+@dataclass
+class _FakeClock:
+    now: float = 0.0
+    sleeps: list[float] = field(default_factory=list)
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class _DeliveryToolSession(Session[Any]):
+    def __init__(
+        self,
+        *,
+        platform: str = "onebot",
+        fail_attempts: set[int] | None = None,
+        cancel_attempts: set[int] | None = None,
+    ) -> None:
+        self.account = cast(Any, SimpleNamespace(platform=platform, self_id="10001"))
+        self.event = cast(
+            Any,
+            SimpleNamespace(
+                channel=SimpleNamespace(id="12345"),
+                user=SimpleNamespace(id="user", name="User"),
+            ),
+        )
+        self.sent: list[Any] = []
+        self.attempts: list[Any] = []
+        self.fail_attempts = fail_attempts or set()
+        self.cancel_attempts = cancel_attempts or set()
+
+    async def send(self, message: Any, *_args: Any, **_kwargs: Any) -> list[Any]:
+        self.attempts.append(message)
+        attempt = len(self.attempts)
+        if attempt in self.cancel_attempts:
+            raise asyncio.CancelledError
+        if attempt in self.fail_attempts:
+            raise RuntimeError("sanitized transport failure")
+        self.sent.append(message)
+        return []
+
+
+class _FakeOneBotNetwork:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call_api(self, action: str, params: dict[str, Any]) -> dict[str, str]:
+        self.calls.append((action, params))
+        return {"message_id": "forward-message"}
+
+
+def _tool_context(session: Session[Any]) -> Contexts:
+    context = Contexts()
+    context[ITEM_SESSION] = session
+    return context
+
+
+def _tool_callable(module: ModuleType, name: str) -> Callable[..., Any]:
+    registered = getattr(module, name)
+    return cast(Callable[..., Any], getattr(registered, "callable_target", registered))
+
+
 def _registry_snapshot() -> _RegistrySnapshot:
     return _RegistrySnapshot(tuple(tools), dict(available_functions))
 
@@ -173,11 +247,13 @@ def _load_local_modules() -> Iterator[SimpleNamespace]:
 
     try:
         web_access = importlib.import_module("plugins.llm_chat.web_access")
+        delivery = importlib.import_module("plugins.llm_chat.core.delivery")
         config = importlib.import_module("plugins.llm_chat.config")
         web_tools = importlib.import_module("plugins.llm_chat.web_tools")
         generation = importlib.import_module("plugins.llm_chat.generation")
         yield SimpleNamespace(
             web_access=web_access,
+            delivery=delivery,
             config=config,
             web_tools=web_tools,
             generation=generation,
@@ -311,7 +387,7 @@ def _model_response(
 
 def _install_completion_script(
     monkeypatch: pytest.MonkeyPatch,
-    script: list[litellm.ModelResponse | BaseException],
+    script: Sequence[litellm.ModelResponse | BaseException],
 ) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
     index = 0
@@ -500,7 +576,7 @@ async def test_actual_tool_runtime_uses_configured_gate_order_and_disposal(
         assert runtime.config.web_search_timeout == 11.0
         assert runtime.config.web_page_max_chars == 3456
         assert delta_names == runtime.registered_tools
-        assert runtime.registered_tools[0] == "send_image"
+        assert runtime.registered_tools[:3] == ["send_image", "send_text", "send_merged_forward"]
         assert [
             name for name in runtime.registered_tools if name in {"web_search", "read_web_page"}
         ] == expected_web_names
@@ -553,6 +629,562 @@ async def test_actual_media_tool_schemas_encourage_proactive_expression(
         _assert_registry_matches(baseline)
 
     _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_delivery_tool_schemas_expose_only_supported_arguments(local_modules: SimpleNamespace) -> None:
+    baseline = _registry_snapshot()
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        delta = _schema_delta(baseline)
+        assert _schema_names(delta)[:3] == ["send_image", "send_text", "send_merged_forward"]
+        schemas = {schema["function"]["name"]: schema["function"] for schema in delta}
+
+        text_parameters = schemas["send_text"]["parameters"]
+        assert set(text_parameters["properties"]) == {"text", "delay_seconds"}
+        assert text_parameters["required"] == ["text"]
+        assert text_parameters["additionalProperties"] is False
+
+        forward_parameters = schemas["send_merged_forward"]["parameters"]
+        assert set(forward_parameters["properties"]) == {"messages", "delay_seconds"}
+        assert forward_parameters["required"] == ["messages"]
+        assert forward_parameters["additionalProperties"] is False
+        assert forward_parameters["properties"]["messages"]["type"] == "array"
+        assert forward_parameters["properties"]["messages"]["items"]["type"] == "string"
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_send_text_tool_loop_paces_multiple_calls_without_final_duplicate(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(
+                tool_calls=[
+                    _tool_call("text-1", "send_text", {"text": "晚安", "delay_seconds": 0.2}),
+                    _tool_call("text-2", "send_text", {"text": "做个好梦", "delay_seconds": 2.0}),
+                    _tool_call("text-3", "send_text", {"text": "明天见", "delay_seconds": 1.2}),
+                ]
+            ),
+            _model_response("[END_OF_RESPONSE]"),
+        ],
+    )
+    monkeypatch.setattr(
+        local_modules.generation,
+        "get_model_config",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("unexpected finalizer")),
+    )
+    clock = _FakeClock()
+    state = local_modules.delivery.DeliveryState(sleep=clock.sleep, clock=clock.monotonic)
+    session = _DeliveryToolSession()
+    messages = [{"role": "user", "content": "send three paced messages"}]
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        response = await local_modules.generation.generate_chat_response(
+            messages,
+            system="delivery system",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=state,
+        )
+
+    assert response.choices[0].message.content == "[END_OF_RESPONSE]"
+    assert session.sent == ["晚安", "做个好梦", "明天见"]
+    assert clock.sleeps == [2.0, 1.2]
+    assert state.delivered_texts == ["晚安", "做个好梦", "明天见"]
+    assert len(payloads) == 2
+    results = [json.loads(message["content"]) for message in _tool_messages(payloads[1])]
+    assert [result["ok"] for result in results] == [True, True, True]
+    assert all("不要在最终回复中重复" in cast(str, result["data"]) for result in results)
+
+
+@pytest.mark.asyncio
+async def test_send_text_sixth_call_is_rejected_without_sending(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool_calls = [_tool_call(f"text-{index}", "send_text", {"text": f"segment-{index}"}) for index in range(1, 7)]
+    payloads = _install_completion_script(
+        monkeypatch,
+        [_model_response(tool_calls=tool_calls), _model_response("[END_OF_RESPONSE]")],
+    )
+    state = local_modules.delivery.DeliveryState(sleep=_FakeClock().sleep)
+    session = _DeliveryToolSession()
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        await local_modules.generation.generate_chat_response(
+            [{"role": "user", "content": "send too many messages"}],
+            system="delivery system",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=state,
+        )
+
+    assert session.sent == [f"segment-{index}" for index in range(1, 6)]
+    assert state.text_messages == 5
+    assert state.delivered_texts == session.sent
+    results = [json.loads(message["content"]) for message in _tool_messages(payloads[1])]
+    assert [result["ok"] for result in results] == [True, True, True, True, True, False]
+    assert "send_text budget exhausted; finish with one final reply" in results[-1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_malformed_delivery_tool_json_is_sanitized_and_side_effect_free(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(
+                tool_calls=[
+                    _tool_call("bad-text", "send_text", {"text": 7}),
+                    _tool_call("bad-container", "send_merged_forward", {"messages": "abc"}),
+                    _tool_call("bad-node", "send_merged_forward", {"messages": ["ok", 7]}),
+                    _tool_call("bad-delay", "send_text", {"text": "hidden", "delay_seconds": "fast"}),
+                ]
+            ),
+            _model_response("[END_OF_RESPONSE]"),
+            _model_response("safe fallback"),
+        ],
+    )
+    state = local_modules.delivery.DeliveryState()
+    session = _DeliveryToolSession()
+    monkeypatch.setattr(
+        local_modules.generation,
+        "get_model_config",
+        lambda *_args: SimpleNamespace(
+            name="final-model",
+            base_url="https://final.invalid/v1",
+            api_key="final-key",
+            extra={"tools": ["forbidden"], "tool_choice": "required"},
+        ),
+    )
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        response = await local_modules.generation.generate_chat_response(
+            [{"role": "user", "content": "malformed calls"}],
+            system="delivery system",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=state,
+        )
+
+    assert response.choices[0].message.content == "safe fallback"
+    assert len(payloads) == 3
+    assert "tools" not in payloads[2]
+    assert "tool_choice" not in payloads[2]
+
+    results = [json.loads(message["content"]) for message in _tool_messages(payloads[1])]
+    errors = [cast(str, result["error"]) for result in results]
+    assert [result["ok"] for result in results] == [False, False, False, False]
+    assert "text must be a string" in errors[0]
+    assert "messages must be a list of strings" in errors[1]
+    assert "messages must be a list of strings" in errors[2]
+    assert "delay_seconds must be a number or null" in errors[3]
+    assert all(value not in error for error in errors for value in ("abc", "fast", "hidden"))
+    assert session.sent == []
+    assert (
+        state.mode,
+        state.text_messages,
+        state.forward_calls,
+        state.media_messages,
+        state.text_chars,
+        state.delivery_attempts,
+        state.confirmed_deliveries,
+        state.delivered_texts,
+    ) == (None, 0, 0, 0, 0, 0, 0, [])
+
+
+@pytest.mark.asyncio
+async def test_merged_forward_handler_requires_an_exact_list_container(local_modules: SimpleNamespace) -> None:
+    baseline = _registry_snapshot()
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        target = _tool_callable(runtime, "send_merged_forward")
+        state = runtime.DeliveryState()
+        session = _DeliveryToolSession()
+
+        with llm_chat_delivery_scope(state):
+            for messages in (("one", "two"), {"one": "two"}):
+                before = (
+                    state.mode,
+                    state.text_messages,
+                    state.forward_calls,
+                    state.text_chars,
+                    tuple(state.delivered_texts),
+                )
+                with pytest.raises(runtime.DeliveryError, match="^messages must be a list of strings$"):
+                    await target(session, messages, None)
+                assert (
+                    state.mode,
+                    state.text_messages,
+                    state.forward_calls,
+                    state.text_chars,
+                    tuple(state.delivered_texts),
+                ) == before
+
+        assert session.sent == []
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_merged_forward_uses_public_satori_shape_and_onebot_encoder(local_modules: SimpleNamespace) -> None:
+    baseline = _registry_snapshot()
+    session = _DeliveryToolSession(platform="onebot")
+    state_module: ModuleType | None = None
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        state_module = harness.module
+        state = state_module.DeliveryState()
+        target = _tool_callable(state_module, "send_merged_forward")
+        messages = [f"node-{index}" for index in range(1, 7)]
+        with llm_chat_delivery_scope(state):
+            result = await target(session, messages, None)
+
+        assert "6 个节点" in result
+        assert len(session.sent) == 1
+        chain = cast(MessageChain, session.sent[0])
+        forward = cast(SatoriMessage, chain[0])
+        assert forward.forward is True
+        assert [cast(Text, node.children[0]).text for node in forward.children] == messages
+        assert state.delivered_texts == messages
+
+        network = _FakeOneBotNetwork()
+        encoder = OneBot11MessageEncoder(
+            Login(platform="onebot", user=User(id="10001", name="Bot")),
+            cast(Any, network),
+            "12345",
+        )
+        await encoder.send(str(chain))
+
+        assert len(network.calls) == 1
+        action, params = network.calls[0]
+        assert action == "send_group_forward_msg"
+        assert params["group_id"] == 12345
+        nodes = cast(list[dict[str, Any]], params["messages"])
+        assert len(nodes) == 6
+        assert [node["data"]["uin"] for node in nodes] == ["10001"] * 6
+        assert [node["data"]["name"] for node in nodes] == ["Bot"] * 6
+        assert [node["data"]["content"][0]["data"]["text"] for node in nodes] == messages
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+    assert state_module is not None
+
+
+@pytest.mark.asyncio
+async def test_merged_forward_fallbacks_are_paced_and_report_confirmed_prefix(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _registry_snapshot()
+    warnings: list[str] = []
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        monkeypatch.setattr(runtime, "_LOGGER", SimpleNamespace(warning=warnings.append))
+        target = _tool_callable(runtime, "send_merged_forward")
+        messages = [f"node-{index}" for index in range(1, 7)]
+
+        non_onebot_clock = _FakeClock()
+        non_onebot_state = runtime.DeliveryState(
+            sleep=non_onebot_clock.sleep,
+            clock=non_onebot_clock.monotonic,
+        )
+        non_onebot = _DeliveryToolSession(platform="satori")
+        with llm_chat_delivery_scope(non_onebot_state):
+            fallback_result = await target(non_onebot, messages, 0.2)
+        assert non_onebot.sent == messages
+        assert non_onebot_clock.sleeps == [1.1] * 5
+        assert "回退发送 6 条普通文本" in fallback_result
+
+        onebot_clock = _FakeClock()
+        onebot_state = runtime.DeliveryState(sleep=onebot_clock.sleep, clock=onebot_clock.monotonic)
+        onebot = _DeliveryToolSession(platform="onebot", fail_attempts={1})
+        with llm_chat_delivery_scope(onebot_state):
+            await target(onebot, messages, 0.2)
+        assert onebot.sent == messages
+        assert onebot_clock.sleeps == [1.1] * 6
+        assert warnings == ["merged forward failed; falling back to paced text: RuntimeError"]
+
+        partial_clock = _FakeClock()
+        partial_state = runtime.DeliveryState(sleep=partial_clock.sleep, clock=partial_clock.monotonic)
+        partial = _DeliveryToolSession(platform="onebot", fail_attempts={1, 4})
+        with llm_chat_delivery_scope(partial_state):
+            with pytest.raises(
+                runtime.DeliveryError,
+                match=(
+                    "^merged forward fallback confirmed 2/6 text messages before failure; "
+                    "do not repeat the confirmed prefix$"
+                ),
+            ):
+                await target(partial, messages, 0.2)
+        assert partial.sent == messages[:2]
+        assert partial_state.delivered_texts == messages[:2]
+        assert len(partial.attempts) == 4
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_delivery_attempts_are_recorded_without_false_confirmation(
+    local_modules: SimpleNamespace,
+) -> None:
+    baseline = _registry_snapshot()
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        send_text_target = _tool_callable(runtime, "send_text")
+        forward_target = _tool_callable(runtime, "send_merged_forward")
+
+        text_state = runtime.DeliveryState()
+        text_session = _DeliveryToolSession(cancel_attempts={1})
+        with llm_chat_delivery_scope(text_state):
+            with pytest.raises(asyncio.CancelledError):
+                await send_text_target(text_session, "possibly delivered", None)
+        assert text_state.delivery_attempts == 1
+        assert text_state.confirmed_deliveries == 0
+        assert text_state.delivered_texts == []
+
+        forward_state = runtime.DeliveryState()
+        forward_session = _DeliveryToolSession(platform="onebot", cancel_attempts={1})
+        with llm_chat_delivery_scope(forward_state):
+            with pytest.raises(asyncio.CancelledError):
+                await forward_target(forward_session, ["one", "two"], None)
+        assert forward_state.delivery_attempts == 1
+        assert forward_state.confirmed_deliveries == 0
+        assert forward_state.delivered_texts == []
+
+        fallback_clock = _FakeClock()
+        fallback_state = runtime.DeliveryState(sleep=fallback_clock.sleep, clock=fallback_clock.monotonic)
+        fallback_session = _DeliveryToolSession(platform="satori", cancel_attempts={2})
+        with llm_chat_delivery_scope(fallback_state):
+            with pytest.raises(asyncio.CancelledError):
+                await forward_target(fallback_session, ["confirmed", "possibly delivered"], None)
+        assert fallback_state.delivery_attempts == 2
+        assert fallback_state.confirmed_deliveries == 1
+        assert fallback_state.delivered_texts == ["confirmed"]
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+    _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_delivery_scope_blocks_text_outside_generation_but_preserves_media_behavior(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    baseline = _registry_snapshot()
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        send_text_target = _tool_callable(runtime, "send_text")
+        send_image_target = _tool_callable(runtime, "send_image")
+        session = _DeliveryToolSession()
+
+        with pytest.raises(
+            runtime.DeliveryError,
+            match="^Delivery tools are unavailable outside llm_chat generation$",
+        ):
+            await send_text_target(session, "outside", None)
+        assert session.sent == []
+
+        image_path = tmp_path / "reaction.png"
+        image_path.write_bytes(b"image")
+        row = SimpleNamespace(file_path=image_path.name, tags="happy，smile")
+
+        class FakeResult:
+            def scalars(self) -> FakeResult:
+                return self
+
+            def all(self) -> list[Any]:
+                return [row]
+
+        class FakeDatabase:
+            async def execute(self, _statement: Any) -> FakeResult:
+                return FakeResult()
+
+        @asynccontextmanager
+        async def fake_get_session() -> AsyncIterator[FakeDatabase]:
+            yield FakeDatabase()
+
+        async def fake_pick_image(*_args: Any, **_kwargs: Any) -> str:
+            return image_path.name
+
+        markers: list[tuple[Any, ...]] = []
+
+        async def fake_append_message(*args: Any) -> None:
+            markers.append(args)
+
+        monkeypatch.setattr(runtime, "IMAGE_DIR", tmp_path)
+        monkeypatch.setattr(runtime, "get_session", fake_get_session)
+        monkeypatch.setattr(runtime, "pick_image", fake_pick_image)
+        monkeypatch.setattr(runtime, "append_message", fake_append_message)
+
+        outside_result = await send_image_target(session, "happy")
+        assert outside_result.startswith("已发送图片")
+        assert len(session.sent) == 1
+        assert markers[-1][-1] == "[发送了表情包: happy，smile]"
+
+        clock = _FakeClock()
+        state = runtime.DeliveryState(sleep=clock.sleep, clock=clock.monotonic)
+        scoped_session = _DeliveryToolSession()
+        with llm_chat_delivery_scope(state):
+            await send_image_target(scoped_session, "happy")
+            await send_text_target(scoped_session, "after image", None)
+            with pytest.raises(runtime.DeliveryError, match="^Media must be sent before text delivery$"):
+                await send_image_target(scoped_session, "happy")
+
+        assert len(scoped_session.sent) == 2
+        assert isinstance(scoped_session.sent[0], MessageChain)
+        assert scoped_session.sent[1] == "after image"
+        assert clock.sleeps == [1.2]
+        assert state.media_messages == 1
+        assert state.delivered_texts == ["after image"]
+        assert len(markers) == 2
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_delivery_send_tool_success_survives_exact_loop_exhaustion_without_repetition(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    search_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal search_calls
+        assert request.url.path == "/search"
+        search_calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "title": f"Result {search_calls}",
+                        "url": f"https://example.com/{search_calls}",
+                        "content": f"evidence-{search_calls}",
+                    }
+                ]
+            },
+        )
+
+    factory = _MockClientFactory(local_modules.web_access.TavilyWebClient, handler)
+    script = [
+        _model_response(tool_calls=[_tool_call("text-1", "send_text", {"text": "EXHAUSTION_SENTINEL"})]),
+        *[
+            _model_response(tool_calls=[_tool_call(f"search-{index}", "web_search", {"query": f"query {index}"})])
+            for index in range(1, 8)
+        ],
+        _model_response("[END_OF_RESPONSE]"),
+    ]
+    payloads = _install_completion_script(monkeypatch, script)
+    monkeypatch.setattr(llm_service_module._conf, "toolcall_max_steps", 8)
+    monkeypatch.setattr(
+        local_modules.generation,
+        "get_model_config",
+        lambda _model, _channel: SimpleNamespace(
+            name="final-model",
+            base_url="https://final.invalid/v1",
+            api_key="final-key",
+            extra={"tools": ["forbidden"], "tool_choice": "required"},
+        ),
+    )
+    state = local_modules.delivery.DeliveryState()
+    session = _DeliveryToolSession()
+    messages = [{"role": "user", "content": "exhaust tools"}]
+
+    try:
+        async with _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ) as harness:
+            names = local_modules.web_tools.register_web_access_tools(
+                harness.dispatcher,
+                local_modules.config.LLMChatConfig(
+                    web_search_enabled=True,
+                    tavily_api_key="fake-tavily-key",
+                    web_search_max_calls_per_generation=7,
+                    web_page_max_calls_per_generation=0,
+                    web_total_max_calls_per_generation=7,
+                ),
+                client_factory=factory,
+            )
+            assert names == ("web_search", "read_web_page")
+            response = await local_modules.generation.generate_chat_response(
+                messages,
+                system="EXHAUSTION_SYSTEM",
+                model="production-model",
+                channel_id="12345",
+                ctx=_tool_context(session),
+                web_limits=local_modules.web_access.WebAccessLimits(7, 0, 7),
+                delivery_state=state,
+            )
+
+        assert response.choices[0].message.content == "[END_OF_RESPONSE]"
+        assert session.sent == ["EXHAUSTION_SENTINEL"]
+        assert state.delivered_texts == ["EXHAUSTION_SENTINEL"]
+        assert search_calls == 7
+        assert len(payloads) == 9
+        final_payload = payloads[-1]
+        assert "tools" not in final_payload
+        assert "tool_choice" not in final_payload
+        assert "已有任意发送工具成功，不得复述已发送内容" in final_payload["messages"][0]["content"]
+        tool_messages = _tool_messages(final_payload)
+        assert [message["name"] for message in tool_messages] == ["send_text", *("web_search" for _ in range(7))]
+        first_result = json.loads(tool_messages[0]["content"])
+        assert first_result["ok"] is True
+        assert "不要在最终回复中重复" in first_result["data"]
+    finally:
+        await factory.aclose()
 
 
 @pytest.mark.asyncio
@@ -624,6 +1256,7 @@ async def test_real_llm_service_runs_search_extract_final_and_carries_tool_messa
                 channel_id="group-success",
                 ctx=None,
                 web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+                delivery_state=local_modules.delivery.DeliveryState(),
             )
 
             assert response.choices[0].message.content == "verified final answer"
@@ -771,6 +1404,7 @@ async def test_generate_chat_response_caps_web_calls_and_finalizes_without_tools
                 channel_id="group-B",
                 ctx=None,
                 web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+                delivery_state=local_modules.delivery.DeliveryState(),
             )
 
         assert response.choices[0].message.content == "FINAL_SENTINEL"
@@ -837,7 +1471,7 @@ async def test_generate_chat_response_does_not_finalize_unrelated_failures(
     monkeypatch.setattr(local_modules.generation, "get_model_config", unexpected_finalizer)
     failures: list[BaseException] = [
         RuntimeError("different runtime failure"),
-        litellm.APIError(503, "provider failure", "test-provider", "test-model"),
+        APIError(503, "provider failure", "test-provider", "test-model"),
     ]
 
     for failure in failures:
@@ -857,6 +1491,7 @@ async def test_generate_chat_response_does_not_finalize_unrelated_failures(
                 channel_id="group-failure",
                 ctx=None,
                 web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+                delivery_state=local_modules.delivery.DeliveryState(),
             )
         assert captured.value is failure
         assert calls == 1
@@ -906,6 +1541,7 @@ async def test_generate_chat_response_rejects_blank_finalization(
             channel_id="group-blank",
             ctx=None,
             web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=local_modules.delivery.DeliveryState(),
         )
 
     assert generate_calls == 1
@@ -1029,9 +1665,9 @@ async def test_real_llm_service_without_scope_blocks_before_factory_and_leaks_no
             _model_response("web access was unavailable"),
         ],
     )
-    observed_messages: list[dict[str, Any]] = []
+    observed_messages: list[LLMMessage] = []
 
-    async def on_message(message: dict[str, Any]) -> None:
+    async def on_message(message: LLMMessage) -> None:
         observed_messages.append(message)
 
     try:
@@ -1069,7 +1705,7 @@ async def test_real_llm_service_without_scope_blocks_before_factory_and_leaks_no
 
 
 @pytest.mark.asyncio
-async def test_generation_exception_resets_llm_chat_web_access_scope(
+async def test_generation_exception_resets_web_and_delivery_scopes(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1094,10 +1730,13 @@ async def test_generation_exception_resets_llm_chat_web_access_scope(
                     channel_id="group-error",
                     ctx=None,
                     web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+                    delivery_state=local_modules.delivery.DeliveryState(),
                 )
 
             with pytest.raises(local_modules.web_access.WebAccessError, match="outside llm_chat"):
                 local_modules.web_access.require_llm_chat_web_access()
+            with pytest.raises(local_modules.delivery.DeliveryError, match="outside llm_chat generation"):
+                local_modules.delivery.require_llm_chat_delivery()
             assert factory.calls == []
             assert factory.client is None
     finally:

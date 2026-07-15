@@ -15,6 +15,7 @@ from .models import Conversation
 from .vision import describe_image, fetch_image_data_url
 from .core.eval import EvalMessage, EvalConversation
 from .core.media import format_image_note, sanitize_assistant_history
+from .core.errors import summarize_exception
 
 
 def serialize_user_turn(user_name: str, content: str) -> str:
@@ -33,17 +34,19 @@ def build_chat_messages(
     current_content: str | list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert stored history plus the current user turn into LLM messages."""
-    messages: list[dict[str, Any]] = [
-        {
-            "role": row.role if row.role == "assistant" else "user",
-            "content": (
-                sanitize_assistant_history(row.content)
-                if row.role == "assistant"
-                else serialize_user_turn(row.user_name, row.content)
-            ),
-        }
-        for row in history
-    ]
+    messages: list[dict[str, Any]] = []
+    for row in history:
+        if row.role == "assistant":
+            assistant_content = sanitize_assistant_history(row.content)
+            if assistant_content:
+                messages.append({"role": "assistant", "content": assistant_content})
+            continue
+        messages.append(
+            {
+                "role": "user",
+                "content": serialize_user_turn(row.user_name, row.content),
+            }
+        )
     messages.append(
         {
             "role": "user",
@@ -61,22 +64,28 @@ def build_eval_conversation(
     reply: str,
 ) -> EvalConversation:
     """Separate recent history from the evaluator's current-turn evidence."""
-    recent_history: list[EvalMessage] = [
-        {
-            "role": "assistant",
-            "speaker": "bot",
-            "target": False,
-            "content": sanitize_assistant_history(row.content),
-        }
-        if row.role == "assistant"
-        else {
-            "role": "user",
-            "speaker": row.user_name,
-            "target": row.user_id == user_id,
-            "content": row.content,
-        }
-        for row in history
-    ]
+    recent_history: list[EvalMessage] = []
+    for row in history:
+        if row.role == "assistant":
+            assistant_content = sanitize_assistant_history(row.content)
+            if assistant_content:
+                recent_history.append(
+                    {
+                        "role": "assistant",
+                        "speaker": "bot",
+                        "target": False,
+                        "content": assistant_content,
+                    }
+                )
+            continue
+        recent_history.append(
+            {
+                "role": "user",
+                "speaker": row.user_name,
+                "target": row.user_id == user_id,
+                "content": row.content,
+            }
+        )
     assistant: EvalMessage | None = (
         {
             "role": "assistant",
@@ -170,7 +179,7 @@ async def build_image_notes(config: LLMChatConfig, session: Session, warn: Calla
         try:
             description = await describe_image(config, session, img.src)
         except Exception as exc:
-            warn(f"image describe failed: {exc!r}")
+            warn(f"image describe failed: {summarize_exception(exc)}")
             description = ""
         return format_image_note(description, quoted=is_quoted)
 

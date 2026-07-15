@@ -1,7 +1,9 @@
 """Interactive group chat plugin runtime entrypoint."""
 # ruff: noqa: I001
 
+import litellm
 from arclet.entari import metadata
+from arclet.entari import plugin
 from arclet.entari.logger import log
 from arclet.entari.plugin import PluginRole
 from arclet.entari.plugin.model import Plugin
@@ -12,7 +14,20 @@ _LOGGER = log.wrapper("[llm_chat]")
 
 plug = Plugin.current()
 
+
+def _configure_litellm_logging() -> None:
+    previous = litellm.suppress_debug_info
+    litellm.suppress_debug_info = True
+
+    def restore() -> None:
+        if litellm.suppress_debug_info is True:
+            litellm.suppress_debug_info = previous
+
+    plugin.collect_disposes(restore)
+
+
 if plug is not None:
+    _configure_litellm_logging()
     metadata(
         name="llm_chat",
         author=[{"name": "FrostN0v0"}],

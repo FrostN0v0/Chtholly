@@ -9,6 +9,7 @@ from .core.prompts import (
     DEFAULT_IMAGE_TAG_PROMPT,
     DEFAULT_IMAGE_DESCRIBE_PROMPT,
 )
+from .core.delivery import DEFAULT_DELIVERY_LIMITS
 
 
 class LLMChatConfig(BasicConfModel):
@@ -20,6 +21,10 @@ class LLMChatConfig(BasicConfModel):
     """Model alias for conversation; None uses the llm plugin default."""
     eval_model: str | None = None
     """Model alias for relationship evaluation; None uses the main model."""
+    model_request_timeout: float = 90.0
+    """Per-completion timeout for the main chat model."""
+    eval_request_timeout: float = 60.0
+    """Per-completion timeout for the relationship evaluator."""
     eval_every_n: int = 1
     """Run the relationship evaluator every N bot replies (per user)."""
     eval_context_window: int = 8
@@ -70,6 +75,24 @@ class LLMChatConfig(BasicConfModel):
     """Per-request Tavily timeout, clamped to the provider range."""
     web_page_max_chars: int = 6000
     """Maximum extracted page characters returned to the model."""
+    delivery_min_interval_seconds: float = DEFAULT_DELIVERY_LIMITS.min_interval_seconds
+    """Minimum paced interval between delivery attempts."""
+    delivery_default_interval_seconds: float = DEFAULT_DELIVERY_LIMITS.default_interval_seconds
+    """Default paced interval between delivery attempts."""
+    delivery_max_interval_seconds: float = DEFAULT_DELIVERY_LIMITS.max_interval_seconds
+    """Maximum model-requested paced interval."""
+    delivery_max_text_messages_per_generation: int = DEFAULT_DELIVERY_LIMITS.max_text_messages
+    """Maximum send_text calls reserved in one generation."""
+    delivery_max_text_chars_per_message: int = DEFAULT_DELIVERY_LIMITS.max_text_chars_per_message
+    """Maximum normalized characters in one send_text message."""
+    delivery_max_forward_nodes: int = DEFAULT_DELIVERY_LIMITS.max_forward_nodes
+    """Maximum normalized nodes in one merged forward."""
+    delivery_max_forward_chars_per_node: int = DEFAULT_DELIVERY_LIMITS.max_forward_chars_per_node
+    """Maximum normalized characters in one merged-forward node."""
+    delivery_max_total_text_chars_per_generation: int = DEFAULT_DELIVERY_LIMITS.max_total_text_chars
+    """Maximum normalized tool-delivered text characters per generation."""
+    delivery_max_media_messages_per_generation: int = DEFAULT_DELIVERY_LIMITS.max_media_messages
+    """Maximum media sends reserved before text delivery in one generation."""
     tts_enabled: bool = True
     """Effective only when the tts_service plugin is installed."""
     tts_max_chars: int = 80

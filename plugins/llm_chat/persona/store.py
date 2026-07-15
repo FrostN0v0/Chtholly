@@ -90,17 +90,27 @@ async def load_history(channel_id: str, limit: int) -> list[Conversation]:
         return list(reversed(rows))
 
 
-async def append_message(channel_id: str, user_id: str, user_name: str, role: str, content: str) -> None:
+async def append_message(channel_id: str, user_id: str, user_name: str, role: str, content: str) -> int:
     async with get_session() as session:
-        session.add(
-            Conversation(
-                channel_id=channel_id,
-                user_id=user_id,
-                user_name=user_name,
-                role=role,
-                content=content,
-            )
+        message = Conversation(
+            channel_id=channel_id,
+            user_id=user_id,
+            user_name=user_name,
+            role=role,
+            content=content,
         )
+        session.add(message)
+        await session.flush()
+        message_id = message.id
+        await session.commit()
+        return message_id
+
+
+async def delete_message(message_id: int | None) -> None:
+    if message_id is None:
+        return
+    async with get_session() as session:
+        await session.execute(delete(Conversation).where(Conversation.id == message_id))
         await session.commit()
 
 

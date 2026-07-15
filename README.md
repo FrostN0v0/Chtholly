@@ -78,13 +78,19 @@ uv sync --all-extras
 
 ### ⚙️ 配置
 
-编辑 `entari.yml` 调整网络、日志、插件加载等。敏感值（Token、超管 QQ、适配器端点等）放入 `.env.local`，通过 `${{ env.KEY }}` 插值，不要提交真实凭证。
+编辑 `entari.yml` 调整网络、日志、插件加载等。敏感值（Token、API Key、密码等）放入 `.env.local`，通过 `${{ env.KEY }}` 插值，不要提交真实凭证。
 
 启用 `llm_chat` 的网页搜索与正文提取需在 `.env` 或 `.env.local` 中配置 `TAVILY_API_KEY`；未配置时两个工具都不会注册，新增或更换密钥后需完整重启 Bot。
 
 `llm_chat` 每轮生成的网页调用预算由 `web_search_max_calls_per_generation`、`web_page_max_calls_per_generation` 与 `web_total_max_calls_per_generation` 配置，默认分别为 `2 / 2 / 4`；预算按生成上下文隔离，实际总额不会超过两个单项之和。若 LLM 工具循环耗尽，插件会基于本轮已积累的工具结果执行一次不携带任何工具的最终化；最终化仍失败时保持静默，不回退到原生自动对话。
 
-部署默认使用 `info` 日志级别，避免第三方 `debug` 日志展开密钥、搜索参数和工具实参。
+`llm_chat` 会在单轮生成内向模型提供 `send_text` 与 `send_merged_forward`。自然闲聊需要多个独立节拍时可按顺序发送最多 5 条普通文本；相邻发送由 `delivery_min_interval_seconds`、`delivery_default_interval_seconds`、`delivery_max_interval_seconds` 控制，默认 `1.1 / 1.2 / 5.0` 秒，配置只能收紧安全上限。普通文本单条、合并转发节点、整轮文本与媒体数量分别由对应的 `delivery_max_*` 配置限制；所有成功文本最终聚合为一条 assistant 历史，避免一次回复占用多个历史窗口行。
+
+预计超过普通文本条数或各部分较长时，模型可改用一次合并转发。OneBot V11 使用公开 Satori `Message(forward=True)` 发送；其他平台或 OneBot 发送失败时，插件会按原顺序和同一安全节拍回退为普通文本。媒体必须先于本轮文本或合并转发；生成、最终发送或取消中断时，仅尽力保存已确认送达的文本前缀，不执行关系评估或关系更新。
+
+主聊天与关系 evaluator 的单次模型请求分别由 `model_request_timeout` 与 `eval_request_timeout` 限时，默认 `90 / 60` 秒。关系 evaluator 只使用严格 JSON 提示与本地解析，不强制供应商 JSON Mode；主模型若在没有任何发送尝试时返回空内容、内部媒体记录或孤立的 `[END_OF_RESPONSE]`，会执行一次无工具纠正重试。纠正仍失败时删除本轮尚未开始交付的 user 记录，不启动 evaluator；历史中的语音只以自然文本提供给模型，纯表情记录不进入提示历史。
+
+部署默认使用 `info` 日志级别并关闭 `rich_error`，避免第三方 `debug` 日志或异常局部变量展开密钥、搜索参数和工具实参。
 
 ### 🚀 运行
 
@@ -92,7 +98,7 @@ uv sync --all-extras
 entari run
 ```
 
-> 运行前需确保 OneBot V11 协议端（如 Lagrange.OneBot）已启动，并在 `.env.local` 中填好 `ONEBOT11_ENDPOINT` / `ONEBOT11_ACCESS_TOKEN`。
+> 运行前需确保 OneBot V11 协议端（如 Lagrange.OneBot）已启动，并在 `.env.local` 中填好 `ONEBOT_TOKEN`；反向 WebSocket 路径需与 `entari.yml` 的适配器配置一致。
 
 详细的框架使用见 [Entari 文档](https://arclet.top/tutorial/entari/)。
 

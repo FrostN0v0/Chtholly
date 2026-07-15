@@ -8,6 +8,7 @@ import httpx
 import litellm
 from arclet.entari.logger import log
 
+from ..core.errors import summarize_exception
 from .config_types import LLMChatConfigLike
 
 _LOGGER = log.wrapper("[llm_chat]")
@@ -90,5 +91,5 @@ async def embed_text(config: LLMChatConfigLike, text: str) -> list[float] | None
             embedding = extract_embedding(response)
         return embedding or None
     except Exception as exc:
-        _LOGGER.warning(f"embedding failed: {exc!r}")
+        _LOGGER.warning(f"embedding failed: {summarize_exception(exc)}")
         return None
