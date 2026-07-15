@@ -88,6 +88,8 @@ uv sync --all-extras
 
 预计超过普通文本条数或各部分较长时，模型可改用一次合并转发。OneBot V11 使用公开 Satori `Message(forward=True)` 发送；其他平台或 OneBot 发送失败时，插件会按原顺序和同一安全节拍回退为普通文本。媒体必须先于本轮文本或合并转发；生成、最终发送或取消中断时，仅尽力保存已确认送达的文本前缀，不执行关系评估或关系更新。
 
+群内收到 OneBot V11 合并转发时，`llm_chat` 会通过 `get_forward_msg` 读取各节点，保留原发送者归属，并对限额内图片沿用独立视觉描述链路。顶层合并转发默认视为一次明确会话，可用 `merged_forward_auto_reply: false` 关闭；抓取超时、节点数、单节点字符数与总字符数分别由 `merged_forward_fetch_timeout`、`merged_forward_max_messages`、`merged_forward_max_chars_per_message`、`merged_forward_max_total_chars` 控制。转发内容只作为引用上下文，不写成当前发送者的画像或记忆事实。
+
 主聊天与关系 evaluator 的单次模型请求分别由 `model_request_timeout` 与 `eval_request_timeout` 限时，默认 `90 / 60` 秒。关系 evaluator 只使用严格 JSON 提示与本地解析，不强制供应商 JSON Mode；主模型若在没有任何发送尝试时返回空内容、内部媒体记录或孤立的 `[END_OF_RESPONSE]`，会执行一次无工具纠正重试。纠正仍失败时删除本轮尚未开始交付的 user 记录，不启动 evaluator；历史中的语音只以自然文本提供给模型，纯表情记录不进入提示历史。
 
 部署默认使用 `info` 日志级别并关闭 `rich_error`，避免第三方 `debug` 日志或异常局部变量展开密钥、搜索参数和工具实参。

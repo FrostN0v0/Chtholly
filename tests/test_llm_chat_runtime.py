@@ -13,7 +13,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from importlib.util import module_from_spec, spec_from_file_location
-from collections.abc import AsyncIterator
+from collections.abc import Mapping, AsyncIterator
 from importlib.machinery import ModuleSpec
 
 import pytest
@@ -21,8 +21,9 @@ from satori import Event as OriginEvent, Login, Channel, ChannelType
 from sqlalchemy import func, select
 from satori.const import EventType
 from satori.model import User, Member, MessageObject
-from arclet.entari import Image, Session, MessageCreatedEvent
+from arclet.entari import Image, Session, MessageChain, MessageCreatedEvent
 from satori.client import Account
+from satori.element import Custom
 from arclet.letoderea import BLOCK
 from arclet.entari.config import EntariConfig
 from arclet.letoderea.core import dispatch
@@ -46,6 +47,7 @@ from plugins.llm_chat import (
     vision as vision_module,
     generation as generation_module,
     chat_context as chat_context_module,
+    forward_context as forward_context_module,
 )
 from plugins.llm_chat.tools import is_command_allowed
 from plugins.llm_chat.config import LLMChatConfig
@@ -73,6 +75,11 @@ from plugins.llm_chat.chat_context import (
     build_eval_conversation,
     model_supports_image_input,
     build_multimodal_user_content,
+)
+from plugins.llm_chat.core.forward import (
+    ForwardedMessage,
+    parse_forward_payload,
+    render_forwarded_storage,
 )
 from plugins.llm_chat.core.profile import MemoryItem
 from plugins.llm_chat.core.prompts import DEFAULT_PERSONA
@@ -150,6 +157,30 @@ class _ImageSession:
         return self._downloads[src]
 
 
+class _ForwardContextSession:
+    def __init__(
+        self,
+        payloads: Mapping[str, object],
+        *,
+        direct_ids: tuple[str, ...] = ("forward-1",),
+        quoted_ids: tuple[str, ...] = (),
+        downloads: dict[str, bytes] | None = None,
+    ) -> None:
+        self.elements = MessageChain([Custom("onebot:forward", {"id": value}) for value in direct_ids])
+        self.quote = SimpleNamespace(children=[Custom("onebot:forward", {"id": value}) for value in quoted_ids])
+        self.payloads = payloads
+        self.downloads = downloads or {}
+        self.internal_calls: list[tuple[str, str]] = []
+
+    async def internal(self, action: str, **kwargs: Any) -> object:
+        message_id = cast(str, kwargs["message_id"])
+        self.internal_calls.append((action, message_id))
+        return self.payloads[message_id]
+
+    async def download(self, src: str) -> bytes:
+        return self.downloads[src]
+
+
 class _ChatElements:
     def __init__(self, text: str) -> None:
         self._text = text
@@ -168,10 +199,18 @@ class _ChatSession:
         self.user = SimpleNamespace(id=user_id, name="Current User")
         self.member = None
         self.elements = _ChatElements(text)
+        self.quote = None
         self.sent: list[str] = []
 
     async def send(self, content: str) -> None:
         self.sent.append(content)
+
+
+class _MergedForwardChatSession(_ChatSession):
+    def __init__(self, text: str = "", *, message_id: str = "forward-1") -> None:
+        super().__init__(text)
+        self.elements = MessageChain([text, Custom("onebot:forward", {"id": message_id})])
+        self.quote = None
 
 
 class _FailingChatSession(_ChatSession):
@@ -220,6 +259,9 @@ def _install_handler_stubs(
     async def no_image_notes(*_args: Any, **_kwargs: Any) -> list[str]:
         return []
 
+    async def no_forward_messages(*_args: Any, **_kwargs: Any) -> list[ForwardedMessage]:
+        return []
+
     async def get_relation(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
         return _relation_state()
 
@@ -254,6 +296,7 @@ def _install_handler_stubs(
     monkeypatch.setattr(module, "get_model_config", lambda *_args: SimpleNamespace(name="test-model"))
     monkeypatch.setattr(module, "model_supports_image_input", lambda _model: False)
     monkeypatch.setattr(module, "build_image_notes", no_image_notes)
+    monkeypatch.setattr(module, "resolve_merged_forward_messages", no_forward_messages)
     monkeypatch.setattr(module, "get_relation", get_relation)
     monkeypatch.setattr(module, "get_mood", get_mood)
     monkeypatch.setattr(module, "load_memory_context", load_memory)
@@ -472,6 +515,24 @@ def test_build_chat_messages_serializes_each_user_turn_without_speaker_spoofing(
     }
 
 
+def test_build_chat_messages_keeps_forwarded_speakers_structured_and_attribution_safe():
+    forwarded: list[ForwardedMessage] = [
+        {"speaker": "Alice", "content": "Quoted statement", "source": "direct"},
+        {"speaker": "Bob", "content": "[Image: diagram]", "source": "direct"},
+    ]
+
+    messages = build_chat_messages([], "Current User", "Please review", None, forwarded)
+    payload = json.loads(cast(str, messages[-1]["content"]))
+    stored = json.loads(render_forwarded_storage("Please review", forwarded))
+
+    assert payload == {
+        "speaker": "Current User",
+        "content": "Please review",
+        "forwarded_messages": forwarded,
+    }
+    assert stored == {"content": "Please review", "forwarded_messages": forwarded}
+
+
 def test_assistant_history_removes_media_records_and_keeps_spoken_content():
     leaked_reply = "[发送了表情包: 纠结，挑选]只看立绘的话，我会选提丰。"
     history = [
@@ -684,6 +745,125 @@ def test_collect_message_images_returns_direct_then_quoted():
     images = collect_message_images(session)
 
     assert images == [(direct, False), (quoted, True)]
+
+
+def test_parse_forward_payload_supports_event_and_standard_node_shapes():
+    nodes = parse_forward_payload(
+        {
+            "messages": [
+                {
+                    "sender": {"card": "Alice", "nickname": "Alice N", "user_id": 1},
+                    "message": [
+                        {"type": "text", "data": {"text": "Look here"}},
+                        {"type": "image", "data": {"url": "https://example.com/image.png"}},
+                        {"type": "at", "data": {"qq": "42"}},
+                    ],
+                },
+                {
+                    "type": "node",
+                    "data": {
+                        "name": "Bob",
+                        "uin": 2,
+                        "content": [
+                            {"type": "record", "data": {"file": "voice.wav"}},
+                            {"type": "forward", "data": {"id": "nested-forward"}},
+                        ],
+                    },
+                },
+            ]
+        }
+    )
+
+    assert [node.speaker for node in nodes] == ["Alice", "Bob"]
+    assert [part.kind for part in nodes[0].parts] == ["text", "image", "text"]
+    assert nodes[0].parts[2].text == "@42"
+    assert [part.kind for part in nodes[1].parts] == ["audio", "forward"]
+    assert nodes[1].parts[1].source == "nested-forward"
+
+
+@pytest.mark.asyncio
+async def test_resolve_merged_forward_fetches_nested_nodes_and_describes_bounded_images(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads = {
+        "forward-1": {
+            "messages": [
+                {
+                    "sender": {"nickname": "Alice", "user_id": 1},
+                    "message": [
+                        {"type": "text", "data": {"text": "Look"}},
+                        {"type": "image", "data": {"url": "https://example.com/image.png"}},
+                        {"type": "forward", "data": {"id": "nested-forward"}},
+                    ],
+                }
+            ]
+        },
+        "nested-forward": {
+            "messages": [
+                {
+                    "type": "node",
+                    "data": {
+                        "name": "Bob",
+                        "content": [{"type": "text", "data": {"text": "Nested text"}}],
+                    },
+                }
+            ]
+        },
+    }
+    session = _ForwardContextSession(payloads)
+    config = LLMChatConfig(
+        image_understanding_enabled=True,
+        image_describe_max_per_message=1,
+        merged_forward_max_messages=5,
+    )
+
+    async def describe(_config: LLMChatConfig, _session: Session, src: str) -> str:
+        assert src == "https://example.com/image.png"
+        return "a diagram"
+
+    monkeypatch.setattr(forward_context_module, "describe_image", describe)
+    warnings: list[str] = []
+
+    messages = await forward_context_module.resolve_merged_forward_messages(
+        config,
+        cast(Session, session),
+        warnings.append,
+    )
+
+    assert session.internal_calls == [
+        ("get_forward_msg", "forward-1"),
+        ("get_forward_msg", "nested-forward"),
+    ]
+    assert messages == [
+        {
+            "speaker": "Alice",
+            "content": "Look [Image: a diagram] [Nested merged forward]",
+            "source": "direct",
+        },
+        {"speaker": "Bob", "content": "Nested text", "source": "direct"},
+    ]
+    assert warnings == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_merged_forward_degrades_when_onebot_fetch_fails() -> None:
+    session = _ForwardContextSession({})
+    warnings: list[str] = []
+
+    messages = await forward_context_module.resolve_merged_forward_messages(
+        LLMChatConfig(image_understanding_enabled=False),
+        cast(Session, session),
+        warnings.append,
+    )
+
+    assert messages == [
+        {
+            "speaker": "Merged forward",
+            "content": "[Forwarded content unavailable]",
+            "source": "direct",
+        }
+    ]
+    assert warnings == ["merged forward fetch failed: KeyError"]
 
 
 def test_model_supports_image_input_uses_litellm(monkeypatch: pytest.MonkeyPatch):
@@ -1614,6 +1794,53 @@ async def test_on_chat_mention_only_returns_block_without_generation(
         assert result is BLOCK
         assert generation_calls == 0
         assert session.sent == []
+
+
+@pytest.mark.asyncio
+async def test_direct_merged_forward_auto_reply_can_be_disabled() -> None:
+    session = _MergedForwardChatSession()
+    async with _temporary_chat_handler({"merged_forward_auto_reply": True}) as harness:
+        assert await harness.module._addressed_to_me(session)
+    async with _temporary_chat_handler({"merged_forward_auto_reply": False}) as harness:
+        assert not await harness.module._addressed_to_me(session)
+
+
+@pytest.mark.asyncio
+async def test_on_chat_passes_forwarded_nodes_as_structured_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler() as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        forwarded: list[ForwardedMessage] = [
+            {"speaker": "Alice", "content": "Quoted statement", "source": "direct"},
+            {"speaker": "Bob", "content": "[Image: diagram]", "source": "direct"},
+        ]
+        observed_payload: dict[str, Any] = {}
+
+        async def resolve(*_args: Any, **_kwargs: Any) -> list[ForwardedMessage]:
+            return forwarded
+
+        async def generate(messages: list[dict[str, Any]], **_kwargs: Any) -> SimpleNamespace:
+            observed_payload.update(json.loads(cast(str, messages[-1]["content"])))
+            return _handler_response("Reviewed")
+
+        monkeypatch.setattr(module, "resolve_merged_forward_messages", resolve)
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        session = _MergedForwardChatSession()
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        stored_user_content = json.loads(records.appended[0][4])
+        assert result is BLOCK
+        assert observed_payload == {
+            "speaker": "Current User",
+            "content": "",
+            "forwarded_messages": forwarded,
+        }
+        assert stored_user_content == {"content": "", "forwarded_messages": forwarded}
+        assert records.evaluations[0]["current_turn"]["user"]["content"] == records.appended[0][4]
+        assert session.sent == ["Reviewed"]
 
 
 @pytest.mark.asyncio

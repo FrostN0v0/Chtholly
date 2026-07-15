@@ -29,6 +29,7 @@ from .chat_context import (
     build_multimodal_user_content,
 )
 from .core.compose import energy_at, compose_persona_prompt
+from .core.forward import render_forwarded_storage
 from .core.delivery import (
     DeliveryError,
     DeliveryState,
@@ -49,6 +50,7 @@ from .persona.store import (
     delete_message,
 )
 from .persona.runner import run_evaluation
+from .forward_context import has_direct_merged_forward, resolve_merged_forward_messages
 from .persona.memory_update import apply_memory_updates
 from .persona.memory_context import load_memory_context
 
@@ -56,11 +58,13 @@ _LOGGER = log.wrapper("[llm_chat]")
 
 
 async def _addressed_to_me(session: Session, is_reply_me: bool = False, is_notice_me: bool = False) -> bool:
-    """Accept to-me replies/notices plus At(bot) at any position."""
+    """Accept explicit mentions/replies and optionally direct merged forwards."""
     if is_reply_me or is_notice_me:
         return True
     self_id = session.account.self_id
-    return any(at.id == self_id for at in session.elements.select(At) if at.id)
+    if any(at.id == self_id for at in session.elements.select(At) if at.id):
+        return True
+    return config.merged_forward_auto_reply and has_direct_merged_forward(session)
 
 
 config = plugin_config(LLMChatConfig)
@@ -70,10 +74,19 @@ plug = Plugin.current()
 @plug.dispatch(MessageCreatedEvent).register(priority=900)
 @enter_if(_addressed_to_me)
 async def on_chat(session: Session, ctx: Contexts):
-    content = session.elements.extract_plain_text().strip()
+    model_text = session.elements.extract_plain_text().strip()
+    channel_id = session.channel.id
+    user_id = session.user.id
+    user_name = (session.member.nick if session.member else None) or session.user.name or user_id
 
     try:
-        model_name = get_model_config(config.model, session.channel.id).name
+        forwarded_messages = await resolve_merged_forward_messages(config, session, _LOGGER.warning)
+    except Exception as exc:
+        _LOGGER.warning(f"merged forward normalization failed: {type(exc).__name__}")
+        forwarded_messages = []
+
+    try:
+        model_name = get_model_config(config.model, channel_id).name
     except ModelNotFoundError as exc:
         _LOGGER.warning(f"channel model resolve failed, using global default: {summarize_exception(exc)}")
         model_name = None
@@ -83,28 +96,32 @@ async def on_chat(session: Session, ctx: Contexts):
         current_content, content = await build_multimodal_user_content(
             config,
             session,
-            (session.member.nick if session.member else None) or session.user.name or session.user.id,
-            content,
+            user_name,
+            model_text,
             _LOGGER.warning,
+            forwarded_messages=forwarded_messages,
         )
     else:
         image_notes = await build_image_notes(config, session, _LOGGER.warning)
         if image_notes:
-            content = " ".join(part for part in [content, *image_notes] if part)
+            model_text = " ".join(part for part in [model_text, *image_notes] if part)
+        content = render_forwarded_storage(model_text, forwarded_messages)
 
     if not content:
         return BLOCK
-
-    channel_id = session.channel.id
-    user_id = session.user.id
-    user_name = (session.member.nick if session.member else None) or session.user.name or user_id
 
     rel = await get_relation(user_id, channel_id)
     mood = await get_mood(channel_id)
     energy = energy_at(datetime.now().hour)
     memory_context = await load_memory_context(config, user_id, channel_id, content)
     history = await load_history(channel_id, config.context_window)
-    messages = build_chat_messages(history, user_name, content, current_content)
+    messages = build_chat_messages(
+        history,
+        user_name,
+        model_text,
+        current_content,
+        forwarded_messages,
+    )
     web_limits = normalize_web_access_limits(
         config.web_search_max_calls_per_generation,
         config.web_page_max_calls_per_generation,
