@@ -23,8 +23,8 @@ from .core.forward import (
 )
 
 _FORWARD_TAG = "onebot:forward"
-_MAX_FORWARD_BUNDLES = 3
-_MAX_NESTED_DEPTH = 2
+_MAX_FORWARD_BUNDLES = 8
+_MAX_NESTED_DEPTH = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,18 +93,24 @@ async def _describe_sources(
     return dict(pairs)
 
 
-def _limit_total_chars(messages: Sequence[ForwardedMessage], max_total_chars: int) -> list[ForwardedMessage]:
-    remaining = _normalized_limit(max_total_chars, minimum=128, maximum=32_000)
+def _limit_total_chars(
+    messages: Sequence[ForwardedMessage],
+    max_total_chars: int,
+) -> tuple[list[ForwardedMessage], bool]:
+    remaining = _normalized_limit(max_total_chars, minimum=128, maximum=128_000)
     bounded: list[ForwardedMessage] = []
+    truncated = False
     for message in messages:
         if remaining <= 0:
+            truncated = True
             break
         content = message["content"]
         if len(content) > remaining:
             content = f"{content[: max(1, remaining - 1)]}…"
+            truncated = True
         bounded.append({**message, "content": content})
         remaining -= len(content)
-    return bounded
+    return bounded, truncated or len(bounded) < len(messages)
 
 
 async def resolve_merged_forward_messages(
@@ -117,12 +123,13 @@ async def resolve_merged_forward_messages(
     if not initial:
         return []
 
-    max_messages = _normalized_limit(config.merged_forward_max_messages, minimum=1, maximum=50)
-    max_chars = _normalized_limit(config.merged_forward_max_chars_per_message, minimum=64, maximum=4000)
+    max_messages = _normalized_limit(config.merged_forward_max_messages, minimum=1, maximum=500)
+    max_chars = _normalized_limit(config.merged_forward_max_chars_per_message, minimum=64, maximum=8000)
     pending = deque(initial)
     seen: set[str] = set()
     resolved: list[ResolvedEntry] = []
     bundles = 0
+    omitted_nodes = 0
 
     while pending and bundles < _MAX_FORWARD_BUNDLES and len(resolved) < max_messages:
         reference = pending.popleft()
@@ -159,6 +166,7 @@ async def resolve_merged_forward_messages(
 
         remaining = max_messages - len(resolved)
         selected = nodes[:remaining]
+        omitted_nodes += len(nodes) - len(selected)
         resolved.extend((reference.source, node) for node in selected)
         if reference.depth < _MAX_NESTED_DEPTH:
             for nested_id in collect_nested_forward_ids(selected):
@@ -166,7 +174,7 @@ async def resolve_merged_forward_messages(
 
     normalized_nodes = [entry[1] for entry in resolved if isinstance(entry, tuple)]
     image_sources = collect_forward_image_sources(normalized_nodes)
-    image_limit = _normalized_limit(config.image_describe_max_per_message, minimum=0, maximum=10)
+    image_limit = _normalized_limit(config.merged_forward_max_described_images, minimum=0, maximum=32)
     descriptions = (
         await _describe_sources(config, session, image_sources[:image_limit], warn)
         if config.image_understanding_enabled and image_limit
@@ -186,12 +194,14 @@ async def resolve_merged_forward_messages(
             )
         else:
             rendered.append(entry)
-    if pending or len(resolved) >= max_messages:
+    rendered, chars_truncated = _limit_total_chars(rendered, config.merged_forward_max_total_chars)
+    if pending or omitted_nodes or chars_truncated:
+        warn("merged forward truncated by configured limits")
         rendered.append(
             {
                 "speaker": "Merged forward",
-                "content": "[Additional forwarded messages omitted]",
+                "content": "[Additional forwarded content omitted by configured limits]",
                 "source": initial[0].source,
             }
         )
-    return _limit_total_chars(rendered[:max_messages], config.merged_forward_max_total_chars)
+    return rendered

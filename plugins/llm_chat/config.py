@@ -21,12 +21,14 @@ class LLMChatConfig(BasicConfModel):
     """Treat a direct OneBot merged-forward message as an explicit chat turn."""
     merged_forward_fetch_timeout: float = 15.0
     """Timeout for one OneBot get_forward_msg request."""
-    merged_forward_max_messages: int = 20
+    merged_forward_max_messages: int = 200
     """Maximum forwarded nodes exposed to one chat generation."""
-    merged_forward_max_chars_per_message: int = 1000
+    merged_forward_max_chars_per_message: int = 2000
     """Maximum normalized characters retained from one forwarded node."""
-    merged_forward_max_total_chars: int = 8000
+    merged_forward_max_total_chars: int = 32000
     """Maximum combined forwarded-node characters exposed per generation."""
+    merged_forward_max_described_images: int = 12
+    """Maximum forwarded images described through the vision model."""
     model: str | None = None
     """Model alias for conversation; None uses the llm plugin default."""
     eval_model: str | None = None

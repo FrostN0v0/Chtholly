@@ -866,6 +866,58 @@ async def test_resolve_merged_forward_degrades_when_onebot_fetch_fails() -> None
     assert warnings == ["merged forward fetch failed: KeyError"]
 
 
+@pytest.mark.asyncio
+async def test_default_merged_forward_limits_keep_seventy_nine_nodes_complete() -> None:
+    payload = {
+        "messages": [
+            {
+                "sender": {"nickname": f"Speaker {index}", "user_id": index},
+                "message": [{"type": "text", "data": {"text": f"Message {index}"}}],
+            }
+            for index in range(79)
+        ]
+    }
+    session = _ForwardContextSession({"forward-1": payload})
+    warnings: list[str] = []
+
+    messages = await forward_context_module.resolve_merged_forward_messages(
+        LLMChatConfig(image_understanding_enabled=False),
+        cast(Session, session),
+        warnings.append,
+    )
+
+    assert len(messages) == 79
+    assert messages[0]["content"] == "Message 0"
+    assert messages[-1]["content"] == "Message 78"
+    assert warnings == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_merged_forward_limit_keeps_visible_omission_marker() -> None:
+    payload = {
+        "messages": [
+            {
+                "sender": {"nickname": f"Speaker {index}", "user_id": index},
+                "message": [{"type": "text", "data": {"text": f"Message {index}"}}],
+            }
+            for index in range(25)
+        ]
+    }
+    session = _ForwardContextSession({"forward-1": payload})
+    warnings: list[str] = []
+
+    messages = await forward_context_module.resolve_merged_forward_messages(
+        LLMChatConfig(image_understanding_enabled=False, merged_forward_max_messages=20),
+        cast(Session, session),
+        warnings.append,
+    )
+
+    assert len(messages) == 21
+    assert messages[19]["content"] == "Message 19"
+    assert messages[20]["content"] == "[Additional forwarded content omitted by configured limits]"
+    assert warnings == ["merged forward truncated by configured limits"]
+
+
 def test_model_supports_image_input_uses_litellm(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(chat_context_module.litellm, "supports_vision", lambda model: model == "vision-model")
 
