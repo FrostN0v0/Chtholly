@@ -26,6 +26,7 @@ from plugins.llm_chat.core.delivery import (
     current_llm_chat_delivery,
     normalize_delivery_limits,
     require_llm_chat_delivery,
+    reserve_final_text_messages,
 )
 
 
@@ -272,6 +273,29 @@ def test_final_supplement_uses_remaining_total_budget_only_after_tool_delivery()
         == "ordinary final reply remains unlimited"
     )
     assert ordinary.text_chars == 0
+
+
+def test_multiline_final_text_reserves_independent_messages_without_splitting_structured_content() -> None:
+    state = DeliveryState(limits=_limits(max_text_messages=3, max_text_chars_per_message=20, max_total_text_chars=40))
+
+    assert reserve_final_text_messages(state, "first beat\nsecond beat") == ("first beat", "second beat")
+    assert state.mode == "segments"
+    assert state.text_messages == 2
+    assert state.text_chars == 21
+
+    structured = DeliveryState()
+    markdown = "Steps:\n- first\n- second"
+    assert reserve_final_text_messages(structured, markdown) == (markdown,)
+    assert structured.mode is None
+    assert structured.text_messages == 0
+
+
+def test_multiline_final_text_stays_atomic_when_segment_budget_is_insufficient() -> None:
+    state = DeliveryState(limits=_limits(max_text_messages=1, max_text_chars_per_message=20, max_total_text_chars=40))
+
+    assert reserve_final_text_messages(state, "first beat\nsecond beat") == ("first beat\nsecond beat",)
+    assert state.mode is None
+    assert state.text_messages == 0
 
 
 def test_forward_validation_limits_and_atomic_rejection() -> None:

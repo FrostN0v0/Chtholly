@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import math
 import time
 from typing import Literal
@@ -17,6 +18,7 @@ DeliveryMode = Literal["segments", "forward"]
 _END_OF_RESPONSE = "[END_OF_RESPONSE]"
 _MIN_INTERVAL_HARD_FLOOR = 1.1
 _MAX_INTERVAL_HARD_CEILING = 5.0
+_STRUCTURED_FINAL_LINE = re.compile(r"^(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|\|)")
 
 
 @dataclass(frozen=True)
@@ -274,6 +276,38 @@ def reserve_media_message() -> DeliveryState:
         raise DeliveryError("Media delivery budget exhausted")
     state.media_messages += 1
     return state
+
+
+def _split_final_text(normalized: str) -> tuple[str, ...]:
+    if "```" in normalized or "~~~" in normalized:
+        return (normalized,)
+    segments = tuple(part.strip() for part in re.split(r"[\r\n]+", normalized) if part.strip())
+    if len(segments) < 2 or any(_STRUCTURED_FINAL_LINE.match(segment) for segment in segments):
+        return (normalized,)
+    return segments
+
+
+def reserve_final_text_messages(state: DeliveryState, text: object) -> tuple[str, ...]:
+    """Reserve natural newline-separated final text as paced chat messages when budgets allow."""
+
+    normalized = normalize_delivery_text(text, field="text")
+    segments = _split_final_text(normalized)
+    if len(segments) < 2 or state.mode == "forward":
+        return (reserve_final_text(state, normalized),)
+
+    remaining_messages = state.limits.max_text_messages - state.text_messages
+    total_chars = sum(map(len, segments))
+    if (
+        len(segments) > remaining_messages
+        or any(len(segment) > state.limits.max_text_chars_per_message for segment in segments)
+        or state.text_chars + total_chars > state.limits.max_total_text_chars
+    ):
+        return (reserve_final_text(state, normalized),)
+
+    state.mode = "segments"
+    state.text_messages += len(segments)
+    state.text_chars += total_chars
+    return segments
 
 
 def reserve_final_text(state: DeliveryState, text: object) -> str:

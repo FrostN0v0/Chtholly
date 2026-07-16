@@ -1679,6 +1679,37 @@ async def test_segmented_delivery_is_aggregated_once_and_reuses_normalized_limit
 
 
 @pytest.mark.asyncio
+async def test_multiline_final_reply_after_media_is_sent_as_paced_separate_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        clock = _HandlerClock()
+        session = _ChatSession("return two visible chat beats")
+
+        async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+            state = kwargs["delivery_state"]
+            state.sleep = clock.sleep
+            state.clock = clock.monotonic
+            mark_delivery_success(state)
+            clock.now = 2.0
+            return _handler_response("first beat\nsecond beat")
+
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        aggregated = "first beat\n\nsecond beat"
+        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
+        assert result is BLOCK
+        assert session.sent == ["first beat", "second beat"]
+        assert clock.sleeps == [1.2]
+        assert assistant_rows == [("group-B", "", "bot", "assistant", aggregated)]
+        assert records.evaluations[0]["current_turn"]["assistant"]["content"] == aggregated
+
+
+@pytest.mark.asyncio
 async def test_segmented_delivery_final_supplement_stays_in_one_history_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

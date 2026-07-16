@@ -34,11 +34,11 @@ from .core.delivery import (
     DeliveryError,
     DeliveryState,
     wait_for_delivery,
-    reserve_final_text,
     mark_delivery_attempt,
     mark_delivery_success,
     render_delivered_text,
     normalize_delivery_limits,
+    reserve_final_text_messages,
 )
 from .persona.store import (
     get_mood,
@@ -217,17 +217,16 @@ async def on_chat(session: Session, ctx: Contexts):
         _LOGGER.warning("model reply produced no confirmed delivery")
         return BLOCK
     if reply and reply != "[END_OF_RESPONSE]":
-        if delivery_state.mode is not None:
-            try:
-                reply = reserve_final_text(delivery_state, reply)
-            except DeliveryError:
-                _LOGGER.warning("suppressed final supplement outside delivery budget")
-                reply = ""
-        if not reply and delivery_state.confirmed_deliveries == 0:
+        try:
+            final_replies = reserve_final_text_messages(delivery_state, reply)
+        except DeliveryError:
+            _LOGGER.warning("suppressed final supplement outside delivery budget")
+            final_replies = ()
+        if not final_replies and delivery_state.confirmed_deliveries == 0:
             await rollback_unstarted_turn()
             _LOGGER.warning("final reply was suppressed without confirmed delivery")
             return BLOCK
-        if reply:
+        for final_reply in final_replies:
             try:
                 await wait_for_delivery(delivery_state)
             except asyncio.CancelledError:
@@ -239,7 +238,7 @@ async def on_chat(session: Session, ctx: Contexts):
                 await rollback_unstarted_turn()
                 raise
             try:
-                await session.send(reply)
+                await session.send(final_reply)
             except asyncio.CancelledError:
                 mark_delivery_attempt(delivery_state)
                 await persist_delivered_text(preserve_original=True)
@@ -248,7 +247,7 @@ async def on_chat(session: Session, ctx: Contexts):
                 mark_delivery_attempt(delivery_state)
                 await persist_delivered_text(preserve_original=True)
                 raise
-            mark_delivery_success(delivery_state, [reply])
+            mark_delivery_success(delivery_state, [final_reply])
 
     assistant_reply = await persist_delivered_text()
     familiarity = min(100.0, rel.familiarity + 1)
