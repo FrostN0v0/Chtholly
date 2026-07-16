@@ -70,6 +70,7 @@ from plugins.llm_chat.persona import (
     memory_context as memory_context_module,
 )
 from plugins.llm_chat.core.eval import EvalResult
+from plugins.llm_chat.core.media import RECENT_MEME_HISTORY_NOTE, format_meme_collection_record
 from plugins.llm_chat.core.errors import summarize_exception
 from plugins.llm_chat.chat_context import (
     build_image_notes,
@@ -133,8 +134,6 @@ class _EmbeddingConfig:
     profile_value_similarity = 0.9
     profile_fact_min_confidence = 0.55
     memory_max_records_per_user = 200
-
-
 
 
 class _ImageSession:
@@ -565,6 +564,13 @@ def test_assistant_history_removes_media_records_and_keeps_spoken_content():
             content="[发送了语音: 你这个笨蛋！]",
             offset=3,
         ),
+        _conversation(
+            role="assistant",
+            user_id="bot",
+            user_name="Chtholly",
+            content=format_meme_collection_record("memes/64.jpg", "reaction,happy"),
+            offset=4,
+        ),
     ]
 
     messages = build_chat_messages(history, "Alice", "继续聊")
@@ -574,11 +580,13 @@ def test_assistant_history_removes_media_records_and_keeps_spoken_content():
         "只看立绘的话，我会选提丰。",
         "晚安。明天见。",
         "你这个笨蛋！",
+        RECENT_MEME_HISTORY_NOTE,
     ]
     assert [message["content"] for message in conversation["recent_history"]] == [
         "只看立绘的话，我会选提丰。",
         "晚安。明天见。",
         "你这个笨蛋！",
+        RECENT_MEME_HISTORY_NOTE,
     ]
 
 
@@ -1084,7 +1092,6 @@ async def test_build_image_notes_uses_hydrated_reply_after_direct_images(
     notes = await build_image_notes(LLMChatConfig(), cast(Session, session), pytest.fail)
 
     assert notes == ["[图片: direct note]", "[引用图片: quoted note]"]
-
 
 
 @pytest.mark.asyncio

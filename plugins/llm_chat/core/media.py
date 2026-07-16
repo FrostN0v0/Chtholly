@@ -1,6 +1,7 @@
 """Pure media matching: image tag search + dinggong audio filename matching."""
 
 import re
+import json
 import math
 import random
 from difflib import SequenceMatcher
@@ -21,10 +22,13 @@ _TTS_CONTROL_TAG_RE = re.compile(r"\[[^\[\]\r\n]{1,40}\]\s*")
 _STICKER_RECORD_PREFIX = "[发送了表情包:"
 _AUDIO_RECORD_PREFIX = "[发送了语音:"
 _TTS_RECORD_PREFIX = "[用语音说:"
+MEME_COLLECTION_RECORD_PREFIX = "[收藏了表情包:"
+RECENT_MEME_HISTORY_NOTE = "[最近成功收藏了一张表情包，可按用户要求重新发送]"
 _INTERNAL_MEDIA_RECORD_PREFIXES = (
     _STICKER_RECORD_PREFIX,
     _AUDIO_RECORD_PREFIX,
     _TTS_RECORD_PREFIX,
+    MEME_COLLECTION_RECORD_PREFIX,
 )
 
 
@@ -60,6 +64,36 @@ def _find_internal_media_records(text: str) -> list[tuple[int, int]]:
     return spans
 
 
+def format_meme_collection_record(relative_path: str, tags: str) -> str:
+    """Build one internal history record for a confirmed meme import."""
+    payload = json.dumps(
+        {"path": relative_path, "tags": tags},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return f"{MEME_COLLECTION_RECORD_PREFIX} {payload}]"
+
+
+def parse_meme_collection_record(text: str) -> tuple[str, str] | None:
+    """Parse one internal meme collection record without accepting partial text."""
+    stripped = text.strip()
+    if not stripped.startswith(MEME_COLLECTION_RECORD_PREFIX) or not stripped.endswith("]"):
+        return None
+    try:
+        payload = json.loads(stripped[len(MEME_COLLECTION_RECORD_PREFIX) : -1].strip())
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    relative_path = payload.get("path")
+    tags = payload.get("tags")
+    if not isinstance(relative_path, str) or not relative_path:
+        return None
+    if not isinstance(tags, str) or not tags:
+        return None
+    return relative_path, tags
+
+
 def is_internal_media_record(text: str) -> bool:
     """Return whether text is exactly one reserved media history record."""
     stripped = text.strip()
@@ -86,6 +120,8 @@ def sanitize_assistant_history(text: str) -> str | None:
     stripped = text.strip()
     if not is_internal_media_record(stripped):
         return strip_internal_media_records(stripped) or None
+    if stripped.startswith(MEME_COLLECTION_RECORD_PREFIX):
+        return RECENT_MEME_HISTORY_NOTE
     if stripped.startswith(_STICKER_RECORD_PREFIX):
         return None
     for prefix in (_AUDIO_RECORD_PREFIX, _TTS_RECORD_PREFIX):

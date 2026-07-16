@@ -643,6 +643,13 @@ async def test_delivery_tool_schemas_expose_only_supported_arguments(local_modul
         assert _schema_names(delta)[:3] == ["send_image", "send_text", "send_merged_forward"]
         schemas = {schema["function"]["name"]: schema["function"] for schema in delta}
 
+        image_parameters = schemas["send_image"]["parameters"]
+        assert set(image_parameters["properties"]) == {"context", "use_latest_collected"}
+        assert image_parameters["required"] == ["context"]
+        assert image_parameters["properties"]["use_latest_collected"]["type"] == "boolean"
+        assert image_parameters["additionalProperties"] is False
+        assert "newest confirmed meme collection" in schemas["send_image"]["description"]
+
         text_parameters = schemas["send_text"]["parameters"]
         assert set(text_parameters["properties"]) == {"text", "delay_seconds"}
         assert text_parameters["required"] == ["text"]

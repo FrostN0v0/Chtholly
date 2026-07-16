@@ -36,7 +36,7 @@ from .core.delivery import (
     reserve_forward_messages,
     current_llm_chat_delivery,
 )
-from .persona.store import append_message
+from .persona.store import append_message, load_latest_meme_collection
 
 DINGGONG_DIR = AUDIO_DIR / "dinggong"
 _RECENT_IMAGE_WINDOW = 5
@@ -109,25 +109,63 @@ async def _send_forward_fallback(
     )
 
 
+def _normalize_image_reference(value: str) -> str:
+    return value.strip().strip("`'\"").replace("\\", "/").casefold()
+
+
+def _find_image_row(rows: Sequence[ImageTag], relative_path: str) -> ImageTag | None:
+    expected = _normalize_image_reference(relative_path)
+    return next(
+        (row for row in rows if _normalize_image_reference(row.file_path) == expected),
+        None,
+    )
+
+
+def _find_explicit_image_row(rows: Sequence[ImageTag], context: str) -> ImageTag | None:
+    normalized_context = _normalize_image_reference(context)
+    candidates = sorted(rows, key=lambda row: len(row.file_path), reverse=True)
+    return next(
+        (
+            row
+            for row in candidates
+            if (reference := _normalize_image_reference(row.file_path)) and reference in normalized_context
+        ),
+        None,
+    )
+
+
+def _resolve_image_file(relative_path: str) -> Path | None:
+    try:
+        root = IMAGE_DIR.resolve()
+        full = (IMAGE_DIR / relative_path).resolve()
+        full.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    return full
+
+
 config = plugin_config(LLMChatConfig)
 tools = plugin.dispatch(LLMToolEvent)
 registered_tools: list[str] = []
 
 
 @tools
-async def send_image(session: Session, context: str) -> str:
+async def send_image(session: Session, context: str, use_latest_collected: bool = False) -> str:
     (
         """
-    Send one local reaction image or sticker matching compact context keywords. """
-        """Use proactively for explicit requests and natural emotional reactions in casual conversation, including """
-        """greetings, teasing, embarrassment, affection, comfort, celebration, surprise, jealousy, exasperation, """
-        """or light complaints. Prefer it when a sticker expresses the feeling more naturally """
-        """than another text sentence. """
-        """Do not wait for an explicit sticker request when the emotional fit is clear. """
-        """This is not image generation, web search, or analysis of an attached image.
+    Send one registered local reaction image or sticker. """
+        """When the user asks to resend the image that was just collected, set use_latest_collected to true to send """
+        """the newest confirmed meme collection for this channel. When the user explicitly provides a registered """
+        """relative path such as memes/64.jpg, include only that path in context; an exact registered path takes """
+        """priority over semantic matching. Otherwise use compact emotion, scenario, and subject keywords. Use """
+        """proactively for explicit requests and natural emotional reactions in casual conversation, including """
+        """greetings, teasing, embarrassment, affection, comfort, celebration, surprise, jealousy, exasperation, or """
+        """light complaints. Do not wait for an explicit sticker request when a fitting image would express the tone """
+        """more naturally. This is not image generation, web search, or analysis of an attached image.
 
     Args:
-        context (str): Short emotion/scenario tags, for example "害羞 可爱 早安"; "随便" picks randomly.
+        context (str): Exact user-provided registered path or compact emotion/scenario tags.
+        use_latest_collected (bool): Send the newest confirmed meme collection for this channel. Defaults to false.
     Returns:
         str: Delivery result.
     """
@@ -136,20 +174,34 @@ async def send_image(session: Session, context: str) -> str:
         rows = list((await db.execute(select(ImageTag))).scalars().all())
     if not rows:
         return "没有可用的图片"
+
+    row = _find_explicit_image_row(rows, context)
+    if row is None and use_latest_collected:
+        latest = await load_latest_meme_collection(session.channel.id)
+        if latest is None:
+            return "没有最近收藏的图片"
+        row = _find_image_row(rows, latest[0])
+        if row is None:
+            return "最近收藏的图片标签记录已丢失"
+
     recent = _recent_images.setdefault(session.channel.id, deque(maxlen=_RECENT_IMAGE_WINDOW))
-    rel_path = await pick_image(config, rows, context, recent)
-    if rel_path is None:
-        return "没有合适的图片"
-    full = IMAGE_DIR / rel_path
-    if not full.exists():
+    if row is None:
+        rel_path = await pick_image(config, rows, context, recent)
+        if rel_path is None:
+            return "没有合适的图片"
+        row = _find_image_row(rows, rel_path)
+    if row is None:
+        return "图片标签记录已丢失"
+
+    full = _resolve_image_file(row.file_path)
+    if full is None or not full.exists():
         return "图片文件已丢失"
     delivery_state = current_llm_chat_delivery()
     if delivery_state is not None:
         delivery_state = reserve_media_message()
     await _send_with_delivery(session, MessageChain([Image.of(path=full)]), delivery_state)
-    recent.append(rel_path)
-    row = next((item for item in rows if item.file_path == rel_path), None)
-    tag_hint = "，".join((row.tags if row else context).split("，")[:5])
+    recent.append(row.file_path)
+    tag_hint = "，".join(row.tags.split("，")[:5])
     await append_message(session.channel.id, "", "bot", "assistant", f"[发送了表情包: {tag_hint}]")
     return f"已发送图片（{context}）"
 

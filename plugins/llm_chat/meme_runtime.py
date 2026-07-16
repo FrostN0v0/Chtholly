@@ -10,17 +10,37 @@ from arclet.alconna import Arg, AllParam
 from arclet.letoderea import STOP
 from entari_plugin_llm import LLMToolEvent  # entari: plugin
 from arclet.entari.filter import superusers
+from arclet.entari.logger import log
 from arclet.entari.command import Match
 
 from .config import LLMChatConfig
+from .core.media import format_meme_collection_record
 from .meme_store import MemeImportError, MemeImportResult, import_meme_image
+from .core.errors import summarize_exception
 from .chat_context import collect_quoted_images, collect_message_images
 from .core.delivery import current_llm_chat_delivery
+from .persona.store import append_message
 
 config = plugin_config(LLMChatConfig)
 tools = plugin.dispatch(LLMToolEvent)
 registered_tools = ["tag_image"]
 _superuser_check = superusers().check
+_LOGGER = log.wrapper("[llm_chat]")
+
+
+async def _remember_collection(session: Session, result: MemeImportResult) -> None:
+    record = format_meme_collection_record(result.relative_path, result.tags)
+    task = asyncio.create_task(append_message(session.channel.id, "", "bot", "assistant", record))
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        except Exception as exc:
+            _LOGGER.warning(f"meme collection history failed: {summarize_exception(exc)}")
+        raise
+    except Exception as exc:
+        _LOGGER.warning(f"meme collection history failed: {summarize_exception(exc)}")
 
 
 @tools
@@ -47,6 +67,7 @@ async def tag_image(session: Session, image_index: int = 1) -> str:
         raise MemeImportError("image_index does not identify a current direct or replied image")
 
     result = await import_meme_image(config, session, candidates[image_index - 1][0])
+    await _remember_collection(session, result)
     if result.status == "created":
         return "Collected the current image as a reusable meme."
     if result.status == "duplicate":
@@ -100,6 +121,7 @@ async def tag_meme_cmd(session: Session, payload: Match[MessageChain]) -> str:
     assert image is not None
     try:
         result = await import_meme_image(config, session, image)
+        await _remember_collection(session, result)
     except asyncio.CancelledError:
         raise
     except MemeImportError as exc:

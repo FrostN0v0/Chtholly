@@ -57,8 +57,10 @@ from plugins.llm_chat.config import LLMChatConfig
 from plugins.llm_chat.models import ImageTag, Conversation
 from plugins.llm_chat.vision import IMAGE_FETCH_MAX_BYTES
 from plugins.llm_chat.persona import store as persona_store_module
+from plugins.llm_chat.core.media import RECENT_MEME_HISTORY_NOTE, format_meme_collection_record
 from plugins.llm_chat.meme_store import MemeImportError, MemeImportResult, import_meme_image
 from plugins.llm_chat.web_access import DEFAULT_WEB_ACCESS_LIMITS
+from plugins.llm_chat.chat_context import build_chat_messages
 from plugins.llm_chat.core.delivery import DeliveryState, llm_chat_delivery_scope
 
 sys.modules.pop("plugins.llm_chat", None)
@@ -396,9 +398,7 @@ async def test_cancellation_waits_for_successful_tag_commit_and_preserves_duplic
     monkeypatch.setattr(meme_store_module, "upsert_image_tag", blocking_upsert)
     data = _PNG_BYTES + b"cancel-success"
     session = cast(Session, _MemeSession({"local://cancel": data}))
-    importer = asyncio.create_task(
-        import_meme_image(meme_env.config, session, Image.of(url="local://cancel"))
-    )
+    importer = asyncio.create_task(import_meme_image(meme_env.config, session, Image.of(url="local://cancel")))
     await started.wait()
     importer.cancel()
     release.set()
@@ -580,11 +580,7 @@ class _RuntimeSession(Session[Any]):
     ) -> None:
         self.elements = MessageChain(direct or [])
         self._quote = None if quoted is None else SimpleNamespace(children=quoted)
-        self.reply = (
-            None
-            if quoted is None
-            else SimpleNamespace(origin=SimpleNamespace(message=MessageChain(quoted)))
-        )
+        self.reply = None if quoted is None else SimpleNamespace(origin=SimpleNamespace(message=MessageChain(quoted)))
         self.downloads = downloads or {}
         channel = SimpleNamespace(id="channel")
         self.account = SimpleNamespace(platform="test")
@@ -723,9 +719,7 @@ async def test_tag_meme_command_parses_reply_and_direct_image_and_rejects_ambigu
         calls_before = len(imported)
         for message, session in [
             (
-                MessageChain(
-                    [Text("llmchat tag-meme "), Image.of(url="local://one"), Image.of(url="local://two")]
-                ),
+                MessageChain([Text("llmchat tag-meme "), Image.of(url="local://one"), Image.of(url="local://two")]),
                 cast(Session, _RuntimeSession()),
             ),
             (MessageChain([Text("llmchat tag-meme manual-tag")]), cast(Session, _RuntimeSession())),
@@ -766,6 +760,7 @@ async def test_tag_meme_command_claims_permission_and_failure_results(
 
         async def allow(_session: Session) -> None:
             return None
+
         current_result = MemeImportResult("created", "memes/1.png", "reaction，happy")
 
         async def status_import(*_args: Any, **_kwargs: Any) -> MemeImportResult:
@@ -905,10 +900,12 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
             await session.send(final_text)
             await persona_store_module.append_message("channel", "", "bot", "assistant", final_text)
 
+            relative_path = str(Path("memes") / "1.png")
+            collection_record = format_meme_collection_record(relative_path, meme_env.state.tag_result)
             files = _stored_images(meme_env.meme_dir)
             rows = await _image_rows(meme_env.session_factory)
             assert len(files) == len(rows) == 1
-            assert rows[0].file_path == str(Path("memes") / "1.png")
+            assert rows[0].file_path == relative_path
             tool_messages = [message for message in payloads[1]["messages"] if message["role"] == "tool"]
             assert len(tool_messages) == 1
             assert "memes/1.png" not in tool_messages[0]["content"]
@@ -922,13 +919,36 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
                         )
                     ).scalars()
                 )
-            assert [row.content for row in history] == ["Visible collection reply"]
+            assert [row.content for row in history] == [collection_record, "Visible collection reply"]
+            assert await persona_store_module.load_latest_meme_collection("channel") == (
+                relative_path,
+                meme_env.state.tag_result,
+            )
+            next_turn_messages = build_chat_messages(history, "Alice", "send it")
+            assistant_context = [message["content"] for message in next_turn_messages if message["role"] == "assistant"]
+            assert RECENT_MEME_HISTORY_NOTE in assistant_context
+            rendered_context = json.dumps(next_turn_messages, ensure_ascii=False)
+            assert relative_path not in rendered_context
+            assert meme_env.state.tag_result not in rendered_context
+
+            distractor_path = str(Path("memes") / "2.png")
+            (meme_env.meme_dir / "2.png").write_bytes(_PNG_BYTES + b"distractor")
+            async with meme_env.session_factory() as database:
+                database.add(ImageTag(file_path=distractor_path, tags="reaction，happy，sticker", embedding_json=""))
+                await database.commit()
 
             send_image = _callable(tool_runtime.module, "send_image")
             with llm_chat_delivery_scope(DeliveryState()):
-                send_result = await send_image(session, "happy reaction")
+                send_result = await send_image(session, "recently collected", True)
             assert send_result.startswith("已发送图片")
-            assert isinstance(session.sent[-1], MessageChain)
+            sent_chain = cast(MessageChain, session.sent[-1])
+            assert sent_chain.get(Image)[0].src.replace("\\", "/").endswith("/1.png")
+
+            with llm_chat_delivery_scope(DeliveryState()):
+                explicit_result = await send_image(session, r"please send memes\2.png", False)
+            assert explicit_result.startswith("已发送图片")
+            explicit_chain = cast(MessageChain, session.sent[-1])
+            assert explicit_chain.get(Image)[0].src.replace("\\", "/").endswith("/2.png")
 
             async with meme_env.session_factory() as database:
                 sent_history = list(
@@ -939,7 +959,9 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
                     ).scalars()
                 )
             assert [row.content for row in sent_history] == [
+                collection_record,
                 "Visible collection reply",
+                "[发送了表情包: reaction，happy，sticker]",
                 "[发送了表情包: reaction，happy，sticker]",
             ]
 
@@ -953,8 +975,8 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
             )
             assert isinstance(duplicate, str)
             assert "Already collected" in duplicate
-            assert len(_stored_images(meme_env.meme_dir)) == 1
-            assert len(await _image_rows(meme_env.session_factory)) == 1
+            assert len(_stored_images(meme_env.meme_dir)) == 2
+            assert len(await _image_rows(meme_env.session_factory)) == 2
 
 
 @pytest.mark.asyncio
