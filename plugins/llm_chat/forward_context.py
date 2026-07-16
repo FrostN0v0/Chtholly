@@ -52,17 +52,11 @@ def _select_references(elements: MessageChain, source: ForwardSource) -> list[Fo
 
 
 def collect_merged_forward_references(session: Session) -> list[ForwardReference]:
-    """Collect direct forwards first, then forwards from a quoted message."""
-    references = _select_references(session.elements, "direct")
+    """Collect merged forwards only from the quoted message."""
     quote = session.quote
-    if quote and quote.children:
-        references.extend(_select_references(MessageChain(quote.children), "quoted"))
-    return references
-
-
-def has_direct_merged_forward(session: Session) -> bool:
-    """Return whether the current outer message contains a merged forward."""
-    return bool(_select_references(session.elements, "direct"))
+    if not quote or not quote.children:
+        return []
+    return _select_references(MessageChain(quote.children), "quoted")
 
 
 def _normalized_limit(value: int, *, minimum: int, maximum: int) -> int:

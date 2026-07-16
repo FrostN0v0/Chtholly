@@ -162,8 +162,8 @@ class _ForwardContextSession:
         self,
         payloads: Mapping[str, object],
         *,
-        direct_ids: tuple[str, ...] = ("forward-1",),
-        quoted_ids: tuple[str, ...] = (),
+        direct_ids: tuple[str, ...] = (),
+        quoted_ids: tuple[str, ...] = ("forward-1",),
         downloads: dict[str, bytes] | None = None,
     ) -> None:
         self.elements = MessageChain([Custom("onebot:forward", {"id": value}) for value in direct_ids])
@@ -207,10 +207,20 @@ class _ChatSession:
 
 
 class _MergedForwardChatSession(_ChatSession):
-    def __init__(self, text: str = "", *, message_id: str = "forward-1") -> None:
+    def __init__(
+        self,
+        text: str = "",
+        *,
+        message_id: str = "forward-1",
+        direct: bool = False,
+        quoted: bool = True,
+    ) -> None:
         super().__init__(text)
-        self.elements = MessageChain([text, Custom("onebot:forward", {"id": message_id})])
-        self.quote = None
+        elements: list[str | Custom] = [text]
+        if direct:
+            elements.append(Custom("onebot:forward", {"id": message_id}))
+        self.elements = MessageChain(elements)
+        self.quote = SimpleNamespace(children=[Custom("onebot:forward", {"id": message_id})] if quoted else [])
 
 
 class _FailingChatSession(_ChatSession):
@@ -517,8 +527,8 @@ def test_build_chat_messages_serializes_each_user_turn_without_speaker_spoofing(
 
 def test_build_chat_messages_keeps_forwarded_speakers_structured_and_attribution_safe():
     forwarded: list[ForwardedMessage] = [
-        {"speaker": "Alice", "content": "Quoted statement", "source": "direct"},
-        {"speaker": "Bob", "content": "[Image: diagram]", "source": "direct"},
+        {"speaker": "Alice", "content": "Quoted statement", "source": "quoted"},
+        {"speaker": "Bob", "content": "[Image: diagram]", "source": "quoted"},
     ]
 
     messages = build_chat_messages([], "Current User", "Please review", None, forwarded)
@@ -838,9 +848,9 @@ async def test_resolve_merged_forward_fetches_nested_nodes_and_describes_bounded
         {
             "speaker": "Alice",
             "content": "Look [Image: a diagram] [Nested merged forward]",
-            "source": "direct",
+            "source": "quoted",
         },
-        {"speaker": "Bob", "content": "Nested text", "source": "direct"},
+        {"speaker": "Bob", "content": "Nested text", "source": "quoted"},
     ]
     assert warnings == []
 
@@ -860,10 +870,36 @@ async def test_resolve_merged_forward_degrades_when_onebot_fetch_fails() -> None
         {
             "speaker": "Merged forward",
             "content": "[Forwarded content unavailable]",
-            "source": "direct",
+            "source": "quoted",
         }
     ]
     assert warnings == ["merged forward fetch failed: KeyError"]
+
+
+@pytest.mark.asyncio
+async def test_direct_merged_forward_is_not_fetched() -> None:
+    payload = {
+        "messages": [
+            {
+                "sender": {"nickname": "Alice", "user_id": 1},
+                "message": [{"type": "text", "data": {"text": "Ignored"}}],
+            }
+        ]
+    }
+    session = _ForwardContextSession(
+        {"forward-1": payload},
+        direct_ids=("forward-1",),
+        quoted_ids=(),
+    )
+
+    messages = await forward_context_module.resolve_merged_forward_messages(
+        LLMChatConfig(image_understanding_enabled=False),
+        cast(Session, session),
+        lambda _message: None,
+    )
+
+    assert messages == []
+    assert session.internal_calls == []
 
 
 @pytest.mark.asyncio
@@ -1849,12 +1885,18 @@ async def test_on_chat_mention_only_returns_block_without_generation(
 
 
 @pytest.mark.asyncio
-async def test_direct_merged_forward_auto_reply_can_be_disabled() -> None:
-    session = _MergedForwardChatSession()
-    async with _temporary_chat_handler({"merged_forward_auto_reply": True}) as harness:
-        assert await harness.module._addressed_to_me(session)
-    async with _temporary_chat_handler({"merged_forward_auto_reply": False}) as harness:
+async def test_direct_merged_forward_does_not_claim_chat() -> None:
+    session = _MergedForwardChatSession(direct=True, quoted=False)
+    async with _temporary_chat_handler() as harness:
         assert not await harness.module._addressed_to_me(session)
+
+
+@pytest.mark.asyncio
+async def test_quoted_merged_forward_requires_bot_mention() -> None:
+    session = _MergedForwardChatSession()
+    async with _temporary_chat_handler() as harness:
+        assert not await harness.module._addressed_to_me(session)
+        assert await harness.module._addressed_to_me(session, is_notice_me=True)
 
 
 @pytest.mark.asyncio
@@ -1865,8 +1907,8 @@ async def test_on_chat_passes_forwarded_nodes_as_structured_context(
         module = harness.module
         records = _install_handler_stubs(monkeypatch, module)
         forwarded: list[ForwardedMessage] = [
-            {"speaker": "Alice", "content": "Quoted statement", "source": "direct"},
-            {"speaker": "Bob", "content": "[Image: diagram]", "source": "direct"},
+            {"speaker": "Alice", "content": "Quoted statement", "source": "quoted"},
+            {"speaker": "Bob", "content": "[Image: diagram]", "source": "quoted"},
         ]
         observed_payload: dict[str, Any] = {}
 

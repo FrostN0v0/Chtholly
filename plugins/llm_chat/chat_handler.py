@@ -50,7 +50,7 @@ from .persona.store import (
     delete_message,
 )
 from .persona.runner import run_evaluation
-from .forward_context import has_direct_merged_forward, resolve_merged_forward_messages
+from .forward_context import resolve_merged_forward_messages
 from .persona.memory_update import apply_memory_updates
 from .persona.memory_context import load_memory_context
 
@@ -58,13 +58,11 @@ _LOGGER = log.wrapper("[llm_chat]")
 
 
 async def _addressed_to_me(session: Session, is_reply_me: bool = False, is_notice_me: bool = False) -> bool:
-    """Accept explicit mentions/replies and optionally direct merged forwards."""
+    """Accept explicit mentions/replies plus At(bot) at any position."""
     if is_reply_me or is_notice_me:
         return True
     self_id = session.account.self_id
-    if any(at.id == self_id for at in session.elements.select(At) if at.id):
-        return True
-    return config.merged_forward_auto_reply and has_direct_merged_forward(session)
+    return any(at.id == self_id for at in session.elements.select(At) if at.id)
 
 
 config = plugin_config(LLMChatConfig)

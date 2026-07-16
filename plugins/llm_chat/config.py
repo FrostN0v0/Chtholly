@@ -17,8 +17,6 @@ class LLMChatConfig(BasicConfModel):
     """Character text ONLY; framework rules live in SYSTEM_SCAFFOLD."""
     context_window: int = 20
     """Number of history messages loaded per reply."""
-    merged_forward_auto_reply: bool = True
-    """Treat a direct OneBot merged-forward message as an explicit chat turn."""
     merged_forward_fetch_timeout: float = 15.0
     """Timeout for one OneBot get_forward_msg request."""
     merged_forward_max_messages: int = 200
