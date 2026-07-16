@@ -84,7 +84,7 @@ uv sync --all-extras
 
 `llm_chat` 每轮生成的网页调用预算由 `web_search_max_calls_per_generation`、`web_page_max_calls_per_generation` 与 `web_total_max_calls_per_generation` 配置，默认分别为 `2 / 2 / 4`；预算按生成上下文隔离，实际总额不会超过两个单项之和。若 LLM 工具循环耗尽，插件会基于本轮已积累的工具结果执行一次不携带任何工具的最终化；最终化仍失败时保持静默，不回退到原生自动对话。
 
-`llm_chat` 会在单轮生成内向模型提供 `send_text` 与 `send_merged_forward`。自然闲聊需要多个独立节拍时可按顺序发送最多 5 条普通文本；相邻发送由 `delivery_min_interval_seconds`、`delivery_default_interval_seconds`、`delivery_max_interval_seconds` 控制，默认 `1.1 / 1.2 / 5.0` 秒，配置只能收紧安全上限。普通文本单条、合并转发节点、整轮文本与媒体数量分别由对应的 `delivery_max_*` 配置限制；所有成功文本最终聚合为一条 assistant 历史，避免一次回复占用多个历史窗口行。
+`llm_chat` 会在单轮生成内向模型提供 `send_text` 与 `send_merged_forward`。只有一个短而完整的聊天气泡时才直接使用最终普通文本；只要回答自然包含两个以上独立节拍，模型会优先按顺序调用 `send_text`，事实问答和严肃求助也可将结论、理由或限制、后续建议分条表达，但不会切碎单个句子或机械地每句一条。单轮最多发送 5 条普通文本；相邻发送由 `delivery_min_interval_seconds`、`delivery_default_interval_seconds`、`delivery_max_interval_seconds` 控制，默认 `1.1 / 1.2 / 5.0` 秒，配置只能收紧安全上限。普通文本单条、合并转发节点、整轮文本与媒体数量分别由对应的 `delivery_max_*` 配置限制；所有成功文本最终聚合为一条 assistant 历史，避免一次回复占用多个历史窗口行。
 
 预计超过普通文本条数或各部分较长时，模型可改用一次合并转发。OneBot V11 使用公开 Satori `Message(forward=True)` 发送；其他平台或 OneBot 发送失败时，插件会按原顺序和同一安全节拍回退为普通文本。媒体必须先于本轮文本或合并转发；生成、最终发送或取消中断时，仅尽力保存已确认送达的文本前缀，不执行关系评估或关系更新。
 

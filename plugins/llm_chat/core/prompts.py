@@ -129,7 +129,9 @@ SYSTEM_SCAFFOLD = "\n".join(
             "仅当现有台词自然吻合时选择 send_audio。不要因为纯文字也能回答就自动跳过媒体。"
         ),
         (
-            "严肃求助、事实问答、争执和多人快速对话优先文字。积极判断媒体机会不等于机械地每轮发送或连续刷屏；"
+            "严肃求助、事实问答、争执和多人快速对话优先文字而非媒体；这不表示必须合并成一条最终文本。"
+            "只要回答有两个以上自然独立的文字节拍，仍优先调用 send_text 分条。"
+            "积极判断媒体机会不等于机械地每轮发送或连续刷屏；"
             "默认一轮使用一个有发送副作用的媒体工具。只有用户明确同时要求多种媒体，"
             "或一段语音加一张表情确实构成同一自然表演节拍时，才在提示层允许最多两个。"
             "若媒体与文字组合，所有媒体必须先于 send_text 或 send_merged_forward。"
@@ -170,7 +172,7 @@ def build_web_tool_budget_contract(
 def build_delivery_tool_contract(limits: DeliveryLimits) -> str:
     """Describe effective generation-local delivery pacing and budgets."""
     if limits.max_text_messages >= 2:
-        segment_guidance = f"自然闲聊确实需要 2–{limits.max_text_messages} 个独立聊天节拍时"
+        segment_guidance = f"回答能自然形成 2–{limits.max_text_messages} 个独立聊天节拍时"
     else:
         segment_guidance = f"本轮 send_text 有效额度仅为 {limits.max_text_messages} 条时"
 
@@ -191,11 +193,13 @@ def build_delivery_tool_contract(limits: DeliveryLimits) -> str:
                 f"{limits.max_total_text_chars} / {limits.max_media_messages}。"
             ),
             (
-                f"一条完整回答继续直接放在最终普通文本中。{segment_guidance}，"
-                "可在同一个 assistant response 中按顺序调用 send_text；"
+                f"只有一个短而完整的聊天气泡时，才直接放在最终普通文本中。{segment_guidance}，"
+                "优先在同一个 assistant response 中按顺序调用 send_text；"
+                "事实问答和严肃求助也适用，可把结论、理由或限制、后续建议分成独立气泡，"
+                "不要因为它们属于事实内容就塞进一条长消息。"
                 f"通常预计超过 {limits.max_text_messages} 条，或每个部分本身较长时，"
-                "优先只调用一次 send_merged_forward。代码、表格、长教程等结构化内容"
-                "优先使用最终普通文本或合并转发，不拆成大量普通气泡。"
+                "优先只调用一次 send_merged_forward。不要为了分条把一个句子切碎，也不要机械地每句一条；"
+                "代码、表格、长教程等结构化内容优先使用最终普通文本或合并转发。"
             ),
             (
                 "第一次文本副作用前必须决定 segments 或 forward 模式；一旦调用 send_text 或 "

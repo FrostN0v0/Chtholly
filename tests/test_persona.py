@@ -497,7 +497,9 @@ class TestComposePrompt:
         assert "仅当现有台词自然吻合时选择 send_audio" in prompt
         assert "不要因为纯文字也能回答就自动跳过媒体" in prompt
         assert "普通闲聊可主动发送明显贴合情绪的表情包或偶发语音" not in prompt
-        assert "严肃求助、事实问答、争执和多人快速对话优先文字" in prompt
+        assert "严肃求助、事实问答、争执和多人快速对话优先文字而非媒体" in prompt
+        assert "这不表示必须合并成一条最终文本" in prompt
+        assert "只要回答有两个以上自然独立的文字节拍，仍优先调用 send_text 分条" in prompt
         assert "积极判断媒体机会不等于机械地每轮发送或连续刷屏" in prompt
         assert "默认一轮使用一个有发送副作用的媒体工具" in prompt
         assert "一段语音加一张表情确实构成同一自然表演节拍" in prompt
@@ -515,7 +517,10 @@ class TestComposePrompt:
         assert "1.5 / 2.0 / 3.0" in prompt
         assert "3 / 200 / 7 / 400 / 1000 / 1" in prompt
         assert "delay_seconds 表示与上一条已确认或可能已确认消息之间的目标间隔" in prompt
-        assert "一条完整回答继续直接放在最终普通文本中" in prompt
+        assert "只有一个短而完整的聊天气泡时，才直接放在最终普通文本中" in prompt
+        assert "事实问答和严肃求助也适用" in prompt
+        assert "不要因为它们属于事实内容就塞进一条长消息" in prompt
+        assert "不要为了分条把一个句子切碎，也不要机械地每句一条" in prompt
         assert "第一次文本副作用前必须决定 segments 或 forward 模式" in prompt
         assert "一旦调用 send_text 或 send_merged_forward 就不得切换" in prompt
         assert "代码、表格、长教程等结构化内容优先使用最终普通文本或合并转发" in prompt
@@ -525,7 +530,7 @@ class TestComposePrompt:
         default_prompt = _prompt()
         assert "1.1 / 1.2 / 5.0" in default_prompt
         assert "5 / 1000 / 20 / 2000 / 12000 / 2" in default_prompt
-        assert "2–5 个独立聊天节拍" in default_prompt
+        assert "回答能自然形成 2–5 个独立聊天节拍时" in default_prompt
 
     def test_scaffold_uses_web_tools_only_when_available_and_minimizes_private_context(self):
         prompt = _prompt()

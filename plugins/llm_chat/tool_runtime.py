@@ -159,10 +159,12 @@ registered_tools.append("send_image")
 
 @tools
 async def send_text(session: Session, text: str, delay_seconds: float | None = None) -> str:
-    """Send one paced text message during the current llm_chat generation.
+    """Send one paced text message as one visible chat bubble during the current llm_chat generation.
 
-    Use only when a natural casual reply needs multiple independent chat beats. Keep one complete answer in the final
-    response instead. Choose send_text or send_merged_forward before the first text delivery and never mix them.
+    Prefer this when a reply has two or more naturally separate chat beats, including factual answers with a
+    conclusion followed by a reason, caveat, or follow-up. Use final response text only for one short self-contained
+    bubble or content that should remain intact. Call once per beat, choose send_text or send_merged_forward before
+    the first text delivery, and never mix them.
 
     Args:
         text (str): One complete visible text segment without internal control markers.

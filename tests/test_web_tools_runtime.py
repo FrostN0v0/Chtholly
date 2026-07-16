@@ -647,6 +647,11 @@ async def test_delivery_tool_schemas_expose_only_supported_arguments(local_modul
         assert set(text_parameters["properties"]) == {"text", "delay_seconds"}
         assert text_parameters["required"] == ["text"]
         assert text_parameters["additionalProperties"] is False
+        text_description = schemas["send_text"]["description"]
+        assert "two or more naturally separate chat beats" in text_description
+        assert "including factual answers" in text_description
+        assert "Use final response text only" in text_description
+        assert "one short self-contained" in text_description
 
         forward_parameters = schemas["send_merged_forward"]["parameters"]
         assert set(forward_parameters["properties"]) == {"messages", "delay_seconds"}
