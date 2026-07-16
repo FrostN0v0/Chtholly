@@ -2,6 +2,7 @@
 
 from plugins.llm_chat.core.media import (
     format_image_note,
+    normalize_image_tags,
     is_internal_media_record,
     normalize_image_description,
     strip_internal_media_records,
@@ -43,6 +44,23 @@ class TestNormalizeImageDescription:
         collapsed = " ".join(["cd"] * 50)
         result = normalize_image_description(text, limit=len(collapsed))
         assert result == collapsed
+
+
+class TestNormalizeImageTags:
+    def test_mixed_separators_prefixes_and_duplicates_preserve_order(self):
+        raw = "1. happy; - cute，happy\n• sticker、3) cat；cute"
+
+        assert normalize_image_tags(raw) == "happy，cute，sticker，cat"
+
+    def test_limits_to_twenty_tags_and_uses_chinese_commas(self):
+        raw = ";".join(f"{index}. tag-{index}" for index in range(1, 23))
+        result = normalize_image_tags(raw)
+
+        assert result.split("，") == [f"tag-{index}" for index in range(1, 21)]
+        assert "," not in result
+
+    def test_empty_input_returns_empty(self):
+        assert normalize_image_tags(" \n ; ， 、 ") == ""
 
 
 class TestFormatImageNote:

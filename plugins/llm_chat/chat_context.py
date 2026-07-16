@@ -119,11 +119,26 @@ def build_eval_conversation(
     }
 
 
+def collect_top_level_images(elements: MessageChain) -> list[Image]:
+    """Collect images that are direct children of one message chain."""
+    return [element for element in elements if isinstance(element, Image)]
+
+
+def collect_quoted_images(session: Session) -> list[Image]:
+    """Collect top-level images from the hydrated reply or quote fallback."""
+    reply = getattr(session, "reply", None)
+    if reply is not None:
+        return collect_top_level_images(MessageChain(reply.origin.message))
+    quote = session.quote
+    if quote is None or not quote.children:
+        return []
+    return collect_top_level_images(MessageChain(quote.children))
+
+
 def collect_message_images(session: Session) -> list[tuple[Image, bool]]:
     """Collect direct images first, then quoted images."""
-    direct = list(session.elements.select(Image))
-    quote = session.quote
-    quoted = list(MessageChain(quote.children).select(Image)) if quote and quote.children else []
+    direct = collect_top_level_images(session.elements)
+    quoted = collect_quoted_images(session)
     return [(img, False) for img in direct] + [(img, True) for img in quoted]
 
 

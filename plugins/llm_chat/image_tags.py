@@ -26,6 +26,7 @@ ProgressReporter: TypeAlias = Callable[[int, int, int], Awaitable[None]]
 
 _LOGGER = log.wrapper("[llm_chat]")
 _image_vectors: dict[str, list[float]] = {}
+_image_tag_lock = asyncio.Lock()
 
 
 async def pick_image(config: LLMChatConfig, rows: Sequence[ImageTag], context: str, recent: deque[str]) -> str | None:
@@ -55,6 +56,33 @@ async def pick_image(config: LLMChatConfig, rows: Sequence[ImageTag], context: s
     tagged = [(row.file_path, row.tags) for row in rows]
     fallback = [(path, tags) for path, tags in tagged if path not in recent] or tagged
     return match_image(context, fallback)
+
+
+async def get_image_tag(relative_path: str) -> ImageTag | None:
+    """Load one persisted image tag row by relative resource path."""
+    async with get_session() as db:
+        return (
+            await db.execute(select(ImageTag).where(ImageTag.file_path == relative_path))
+        ).scalar_one_or_none()
+
+
+async def upsert_image_tag(config: LLMChatConfig, relative_path: str, tags: str) -> None:
+    """Persist one tag row while preserving usable existing embeddings."""
+    vector = await embed_text(config, tags)
+    embedding_json = encode_embedding(vector) if vector is not None else ""
+    async with _image_tag_lock:
+        async with get_session() as db:
+            existing = (
+                await db.execute(select(ImageTag).where(ImageTag.file_path == relative_path))
+            ).scalar_one_or_none()
+            if existing is None:
+                db.add(ImageTag(file_path=relative_path, tags=tags, embedding_json=embedding_json))
+            else:
+                existing.tags = tags
+                if embedding_json:
+                    existing.embedding_json = embedding_json
+            await db.commit()
+        _image_vectors.pop(relative_path, None)
 
 
 async def tag_images(
@@ -102,20 +130,7 @@ async def tag_images(
                     if not tags:
                         counter["failed"] += 1
                         return
-                    vector = await embed_text(config, tags)
-                    embedding_json = encode_embedding(vector) if vector is not None else ""
-                    async with get_session() as db:
-                        existing = (
-                            await db.execute(select(ImageTag).where(ImageTag.file_path == rel_path))
-                        ).scalar_one_or_none()
-                        if existing is None:
-                            db.add(ImageTag(file_path=rel_path, tags=tags, embedding_json=embedding_json))
-                        else:
-                            existing.tags = tags
-                            if embedding_json:
-                                existing.embedding_json = embedding_json
-                        await db.commit()
-                    _image_vectors.pop(rel_path, None)
+                    await upsert_image_tag(config, rel_path, tags)
                     counter["tagged"] += 1
                 except asyncio.CancelledError:
                     raise

@@ -17,11 +17,11 @@ from collections.abc import Mapping, AsyncIterator
 from importlib.machinery import ModuleSpec
 
 import pytest
-from satori import Event as OriginEvent, Login, Channel, ChannelType
+from satori import Event as OriginEvent, Login, Channel, Message, ChannelType
 from sqlalchemy import func, select
 from satori.const import EventType
 from satori.model import User, Member, MessageObject
-from arclet.entari import Image, Session, MessageChain, MessageCreatedEvent
+from arclet.entari import Image, Quote, Session, MessageChain, MessageCreatedEvent
 from satori.client import Account
 from satori.element import Custom
 from arclet.letoderea import BLOCK
@@ -56,7 +56,9 @@ from plugins.llm_chat.vision import (
     VISION_TAG_TIMEOUT,
     IMAGE_FETCH_MAX_BYTES,
     VISION_DESCRIBE_TIMEOUT,
+    fetch_image_bytes,
     vision_completion,
+    fetch_image_data_url,
     raw_to_image_data_url,
     image_file_to_data_url,
 )
@@ -70,6 +72,7 @@ from plugins.llm_chat.persona import (
 from plugins.llm_chat.core.eval import EvalResult
 from plugins.llm_chat.core.errors import summarize_exception
 from plugins.llm_chat.chat_context import (
+    build_image_notes,
     build_chat_messages,
     collect_message_images,
     build_eval_conversation,
@@ -132,12 +135,6 @@ class _EmbeddingConfig:
     memory_max_records_per_user = 200
 
 
-class _Elements:
-    def __init__(self, images: list[Image]) -> None:
-        self._images = images
-
-    def select(self, element_type: type[Any]) -> list[Image]:
-        return self._images if element_type is Image else []
 
 
 class _ImageSession:
@@ -149,7 +146,7 @@ class _ImageSession:
     ) -> None:
         direct_images = direct if isinstance(direct, list) else ([] if direct is None else [direct])
         quoted_images = quoted if isinstance(quoted, list) else ([] if quoted is None else [quoted])
-        self.elements = _Elements(direct_images)
+        self.elements = MessageChain(direct_images)
         self.quote = SimpleNamespace(children=quoted_images)
         self._downloads = downloads or {}
 
@@ -703,6 +700,56 @@ def test_image_file_to_data_url_sniffs_webp_without_suffix_guessing(tmp_path):
     assert not data_url.startswith("data:image/jpeg")
 
 
+@pytest.mark.asyncio
+async def test_fetch_image_bytes_supports_inline_and_remote_sources():
+    encoded = base64.b64encode(_PNG_BYTES).decode("ascii")
+    session = cast(Session, _ImageSession(None, None, {"local://remote": _PNG_BYTES}))
+
+    assert await fetch_image_bytes(session, f"data:image/jpeg;base64,{encoded}") == _PNG_BYTES
+    assert await fetch_image_bytes(session, f"base64://{encoded}") == _PNG_BYTES
+    assert await fetch_image_bytes(session, "local://remote") == _PNG_BYTES
+
+
+@pytest.mark.asyncio
+async def test_fetch_image_bytes_enforces_limit_for_every_source():
+    oversized = b"0" * (IMAGE_FETCH_MAX_BYTES + 1)
+    encoded = base64.b64encode(oversized).decode("ascii")
+    session = cast(Session, _ImageSession(None, None, {"local://large": oversized}))
+
+    assert await fetch_image_bytes(session, f"data:image/png;base64,{encoded}") is None
+    assert await fetch_image_bytes(session, f"base64://{encoded}") is None
+    assert await fetch_image_bytes(session, "local://large") is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_image_bytes_rejects_malformed_inline_and_download_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class SlowSession:
+        async def download(self, _src: str) -> bytes:
+            await asyncio.sleep(1)
+            return _PNG_BYTES
+
+    monkeypatch.setattr(vision_module, "_IMAGE_FETCH_TIMEOUT", 0.001)
+
+    assert await fetch_image_bytes(cast(Session, SlowSession()), "data:image/png,AAAA") is None
+    assert await fetch_image_bytes(cast(Session, SlowSession()), "data:image/png;base64,!!!!") is None
+    assert await fetch_image_bytes(cast(Session, SlowSession()), "local://slow") is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_image_data_url_sniffs_instead_of_trusting_declared_mime():
+    valid = base64.b64encode(_PNG_BYTES).decode("ascii")
+    invalid = base64.b64encode(b"not image").decode("ascii")
+    session = cast(Session, _ImageSession(None, None))
+
+    data_url = await fetch_image_data_url(session, f"data:image/jpeg;base64,{valid}")
+
+    assert data_url is not None
+    assert data_url.startswith("data:image/png")
+    assert await fetch_image_data_url(session, f"data:image/png;base64,{invalid}") is None
+
+
 def test_resolve_fact_embedding_update_clears_stale_embedding_on_replacement():
     embedding_json, should_update = resolve_fact_embedding_update("coffee", "coffee", None, [1.0], None)
 
@@ -747,14 +794,38 @@ async def test_vision_completion_forwards_timeout(monkeypatch: pytest.MonkeyPatc
     assert seen == [VISION_DESCRIBE_TIMEOUT, VISION_TAG_TIMEOUT]
 
 
-def test_collect_message_images_returns_direct_then_quoted():
+def test_collect_message_images_prefers_hydrated_reply_and_keeps_direct_first():
     direct = Image.of(url="local://direct")
-    quoted = Image.of(url="local://quoted")
-    session = cast(Session, _ImageSession(direct, quoted))
+    hydrated = Image.of(url="local://hydrated")
+    fallback = Image.of(url="local://fallback")
+    session = _ImageSession(direct, fallback)
+    session.quote = Quote("reply-id")
+    session.reply = SimpleNamespace(origin=SimpleNamespace(message=MessageChain([hydrated])))
 
-    images = collect_message_images(session)
+    images = collect_message_images(cast(Session, session))
 
-    assert images == [(direct, False), (quoted, True)]
+    assert images == [(direct, False), (hydrated, True)]
+
+
+def test_collect_message_images_excludes_nested_quote_images():
+    top_level = Image.of(url="local://top-level")
+    nested = Image.of(url="local://nested")
+    session = _ImageSession(None, None)
+    session.reply = SimpleNamespace(
+        origin=SimpleNamespace(message=MessageChain([top_level, Quote("nested", content=[nested])]))
+    )
+
+    assert collect_message_images(cast(Session, session)) == [(top_level, True)]
+
+
+def test_collect_message_images_excludes_forward_container_images():
+    nested = Image.of(url="local://forwarded")
+    session = _ImageSession(None, None)
+    session.reply = SimpleNamespace(
+        origin=SimpleNamespace(message=MessageChain([Message(forward=True, content=[nested])]))
+    )
+
+    assert collect_message_images(cast(Session, session)) == []
 
 
 def test_parse_forward_payload_supports_event_and_standard_node_shapes():
@@ -993,6 +1064,27 @@ async def test_build_multimodal_user_content_attaches_images_without_description
 
     messages = build_chat_messages([], "Alice", stored_text, current_content)
     assert messages == [{"role": "user", "content": current_content}]
+
+
+@pytest.mark.asyncio
+async def test_build_image_notes_uses_hydrated_reply_after_direct_images(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    direct = Image.of(url="local://direct")
+    hydrated = Image.of(url="local://hydrated")
+    fallback = Image.of(url="local://fallback")
+    session = _ImageSession(direct, fallback)
+    session.reply = SimpleNamespace(origin=SimpleNamespace(message=MessageChain([hydrated])))
+
+    async def fake_describe(_config: LLMChatConfig, _session: Session, src: str) -> str:
+        return {"local://direct": "direct note", "local://hydrated": "quoted note"}[src]
+
+    monkeypatch.setattr(chat_context_module, "describe_image", fake_describe)
+
+    notes = await build_image_notes(LLMChatConfig(), cast(Session, session), pytest.fail)
+
+    assert notes == ["[图片: direct note]", "[引用图片: quoted note]"]
+
 
 
 @pytest.mark.asyncio

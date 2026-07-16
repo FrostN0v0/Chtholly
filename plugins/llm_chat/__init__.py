@@ -38,5 +38,7 @@ if plug is not None:
     from . import chat_handler as chat_handler  # entari: package
     from . import tag_runtime as tag_runtime  # entari: package
     from . import tool_runtime as tool_runtime  # entari: package
+    from . import meme_runtime as meme_runtime  # entari: package
 
-    _LOGGER.info(f"registered LLM tools: {', '.join(tool_runtime.registered_tools) or '(none)'}")
+    registered_tools = [*tool_runtime.registered_tools, *meme_runtime.registered_tools]
+    _LOGGER.info(f"registered LLM tools: {', '.join(registered_tools) or '(none)'}")
