@@ -21,11 +21,12 @@ from satori import Event as OriginEvent, Login, Channel, Message, ChannelType
 from sqlalchemy import func, select
 from satori.const import EventType
 from satori.model import User, Member, MessageObject
-from arclet.entari import Image, Quote, Session, MessageChain, MessageCreatedEvent
+from arclet.entari import Text, Image, Quote, Author, Session, MessageChain, MessageCreatedEvent
 from satori.client import Account
 from satori.element import Custom
 from arclet.letoderea import BLOCK
 from arclet.entari.config import EntariConfig
+from arclet.entari.message import Reply
 from arclet.letoderea.core import dispatch
 from satori.client.account import ApiInfo
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -2065,6 +2066,50 @@ async def test_on_chat_passes_forwarded_nodes_as_structured_context(
         assert stored_user_content == {"content": "", "forwarded_messages": forwarded}
         assert records.evaluations[0]["current_turn"]["user"]["content"] == records.appended[0][4]
         assert session.sent == ["Reviewed"]
+
+
+@pytest.mark.asyncio
+async def test_on_chat_passes_ordinary_quoted_text_as_structured_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler() as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        observed_payload: dict[str, Any] = {}
+
+        async def generate(messages: list[dict[str, Any]], **_kwargs: Any) -> SimpleNamespace:
+            observed_payload.update(json.loads(cast(str, messages[-1]["content"])))
+            return _handler_response("Reviewed quote")
+
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        quote = Quote(
+            "reply-id",
+            content=[Author("quoted-user", "Alice in group"), Text("Quoted statement")],
+        )
+        quoted_origin = MessageObject.from_elements("reply-id", quote.children)
+        session = _ChatSession("What does this mean?")
+        setattr(session, "quote", quote)
+        setattr(session, "reply", Reply(quote, quoted_origin))
+
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        quoted_context: list[ForwardedMessage] = [
+            {"speaker": "Alice in group", "content": "Quoted statement", "source": "quoted"}
+        ]
+        assert result is BLOCK
+        assert observed_payload == {
+            "speaker": "Current User",
+            "content": "What does this mean?",
+            "forwarded_messages": quoted_context,
+        }
+        stored_user_content = json.loads(records.appended[0][4])
+        assert stored_user_content == {
+            "content": "What does this mean?",
+            "forwarded_messages": quoted_context,
+        }
+        assert records.evaluations[0]["current_turn"]["user"]["content"] == records.appended[0][4]
+        assert session.sent == ["Reviewed quote"]
 
 
 @pytest.mark.asyncio

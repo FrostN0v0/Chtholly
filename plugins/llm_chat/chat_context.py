@@ -8,7 +8,7 @@ import asyncio
 from collections.abc import Callable, Sequence
 
 import litellm
-from arclet.entari import Image, Session, MessageChain
+from arclet.entari import Image, Author, Session, MessageChain
 
 from .config import LLMChatConfig
 from .models import Conversation
@@ -122,6 +122,43 @@ def build_eval_conversation(
 def collect_top_level_images(elements: MessageChain) -> list[Image]:
     """Collect images that are direct children of one message chain."""
     return [element for element in elements if isinstance(element, Image)]
+
+
+def collect_quoted_text_message(session: Session) -> ForwardedMessage | None:
+    """Collect one ordinary reply as attribution-safe structured context."""
+    reply = getattr(session, "reply", None)
+    if reply is not None:
+        origin = reply.origin
+        elements = MessageChain(origin.message)
+        member = getattr(origin, "member", None)
+        user = getattr(origin, "user", None)
+        quote = getattr(reply, "quote", None)
+        author = (
+            next((element for element in quote.children if isinstance(element, Author)), None)
+            if quote is not None
+            else None
+        )
+        speaker = (
+            getattr(member, "nick", None)
+            or getattr(user, "nick", None)
+            or getattr(user, "name", None)
+            or getattr(user, "id", None)
+            or (author.name if author else None)
+            or (author.id if author else None)
+            or "Unknown sender"
+        )
+    else:
+        quote = session.quote
+        if quote is None or not quote.children:
+            return None
+        elements = MessageChain(quote.children)
+        author = next((element for element in quote.children if isinstance(element, Author)), None)
+        speaker = (author.name if author else None) or (author.id if author else None) or "Unknown sender"
+
+    content = elements.extract_plain_text().strip()
+    if not content:
+        return None
+    return {"speaker": speaker, "content": content, "source": "quoted"}
 
 
 def collect_quoted_images(session: Session) -> list[Image]:

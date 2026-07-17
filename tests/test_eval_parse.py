@@ -48,6 +48,7 @@ class TestEvalSystem:
             "recent_history 仅用于理解基线、语境和连续性",
             "不得把旧事件在后续评估中再次计分",
             "profile_patches 与 memory_items 只允许从 conversation.current_turn.user 提取",
+            "普通引用或合并转发的 forwarded_messages 只是他人原话的引用上下文",
             "其他用户和 assistant 只作语境",
             "同一历史消息跨后续评估轮次不得再次产出关系增量、画像或记忆写入",
         )

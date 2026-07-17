@@ -26,6 +26,7 @@ from .chat_context import (
     build_chat_messages,
     build_eval_conversation,
     model_supports_image_input,
+    collect_quoted_text_message,
     build_multimodal_user_content,
 )
 from .core.compose import energy_at, compose_persona_prompt
@@ -82,6 +83,10 @@ async def on_chat(session: Session, ctx: Contexts):
     except Exception as exc:
         _LOGGER.warning(f"merged forward normalization failed: {type(exc).__name__}")
         forwarded_messages = []
+
+    quoted_message = collect_quoted_text_message(session)
+    if quoted_message is not None:
+        forwarded_messages.insert(0, quoted_message)
 
     try:
         model_name = get_model_config(config.model, channel_id).name

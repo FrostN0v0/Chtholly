@@ -88,8 +88,8 @@ def build_eval_system(min_profile_confidence: float, min_memory_importance: floa
             ),
             (
                 "profile_patches 与 memory_items 只允许从 conversation.current_turn.user 提取；"
-                "其中合并转发的 forwarded_messages 或持久化转发 JSON 都只是他人原话的引用上下文，"
-                "不得归因给当前目标用户，也不得作为其画像、记忆或关系增量的直接证据。"
+                "普通引用或合并转发的 forwarded_messages 只是他人原话的引用上下文；对应的持久化 JSON 同样如此，"
+                "两者都不得归因给当前目标用户，也不得作为其画像、记忆或关系增量的直接证据。"
                 "recent_history 只用于解释本轮关系变化与最近印象，其他用户和 assistant 只作语境。"
                 "同一历史消息跨后续评估轮次不得再次产出关系增量、画像或记忆写入。"
             ),
