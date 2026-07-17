@@ -57,10 +57,8 @@ from plugins.llm_chat.config import LLMChatConfig
 from plugins.llm_chat.models import ImageTag, Conversation
 from plugins.llm_chat.vision import IMAGE_FETCH_MAX_BYTES
 from plugins.llm_chat.persona import store as persona_store_module
-from plugins.llm_chat.core.media import RECENT_MEME_HISTORY_NOTE, format_meme_collection_record
 from plugins.llm_chat.meme_store import MemeImportError, MemeImportResult, import_meme_image
 from plugins.llm_chat.web_access import DEFAULT_WEB_ACCESS_LIMITS
-from plugins.llm_chat.chat_context import build_chat_messages
 from plugins.llm_chat.core.delivery import DeliveryState, llm_chat_delivery_scope
 
 sys.modules.pop("plugins.llm_chat", None)
@@ -946,7 +944,6 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
             await persona_store_module.append_message("channel", "", "bot", "assistant", final_text)
 
             relative_path = str(Path("memes") / "1.png")
-            collection_record = format_meme_collection_record(relative_path, meme_env.state.tag_result)
             files = _stored_images(meme_env.meme_dir)
             rows = await _image_rows(meme_env.session_factory)
             assert len(files) == len(rows) == 1
@@ -964,17 +961,7 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
                         )
                     ).scalars()
                 )
-            assert [row.content for row in history] == [collection_record, "Visible collection reply"]
-            assert await persona_store_module.load_latest_meme_collection("channel") == (
-                relative_path,
-                meme_env.state.tag_result,
-            )
-            next_turn_messages = build_chat_messages(history, "Alice", "send it")
-            assistant_context = [message["content"] for message in next_turn_messages if message["role"] == "assistant"]
-            assert RECENT_MEME_HISTORY_NOTE in assistant_context
-            rendered_context = json.dumps(next_turn_messages, ensure_ascii=False)
-            assert relative_path not in rendered_context
-            assert meme_env.state.tag_result not in rendered_context
+            assert [row.content for row in history] == ["Visible collection reply"]
 
             distractor_path = str(Path("memes") / "2.png")
             (meme_env.meme_dir / "2.png").write_bytes(_PNG_BYTES + b"distractor")
@@ -982,15 +969,28 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
                 database.add(ImageTag(file_path=distractor_path, tags="reaction，happy，sticker", embedding_json=""))
                 await database.commit()
 
+            list_image_resources = _callable(tool_runtime.module, "list_image_resources")
+            catalog = json.loads(await list_image_resources(limit=2, offset=0))
+            catalog_paths = [entry["path"] for entry in catalog["images"]]
+            assert catalog_paths == [distractor_path, relative_path]
+            assert [entry["tags"] for entry in catalog["images"]] == [
+                "reaction，happy，sticker",
+                meme_env.state.tag_result,
+            ]
+
+            async def no_sleep(_seconds: float) -> None:
+                return None
+
             send_image = _callable(tool_runtime.module, "send_image")
-            with llm_chat_delivery_scope(DeliveryState()):
-                send_result = await send_image(session, "recently collected", True)
-            assert send_result.startswith("已发送图片")
-            sent_chain = cast(MessageChain, session.sent[-1])
-            assert sent_chain.get(Image)[0].src.replace("\\", "/").endswith("/1.png")
+            with llm_chat_delivery_scope(DeliveryState(sleep=no_sleep)):
+                send_result = await send_image(session=session, image_paths=catalog_paths)
+            assert send_result.startswith("已发送 2 张图片")
+            sent_chains = [cast(MessageChain, value) for value in session.sent[-2:]]
+            assert sent_chains[0].get(Image)[0].src.replace("\\", "/").endswith("/2.png")
+            assert sent_chains[1].get(Image)[0].src.replace("\\", "/").endswith("/1.png")
 
             with llm_chat_delivery_scope(DeliveryState()):
-                explicit_result = await send_image(session, r"please send memes\2.png", False)
+                explicit_result = await send_image(session, r"please send memes\2.png")
             assert explicit_result.startswith("已发送图片")
             explicit_chain = cast(MessageChain, session.sent[-1])
             assert explicit_chain.get(Image)[0].src.replace("\\", "/").endswith("/2.png")
@@ -1004,8 +1004,8 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
                     ).scalars()
                 )
             assert [row.content for row in sent_history] == [
-                collection_record,
                 "Visible collection reply",
+                "[发送了表情包: reaction，happy，sticker]",
                 "[发送了表情包: reaction，happy，sticker]",
                 "[发送了表情包: reaction，happy，sticker]",
             ]
@@ -1022,6 +1022,16 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
             assert "Already collected" in duplicate
             assert len(_stored_images(meme_env.meme_dir)) == 2
             assert len(await _image_rows(meme_env.session_factory)) == 2
+
+            async with meme_env.session_factory() as database:
+                final_history = list(
+                    (
+                        await database.execute(
+                            select(Conversation).where(Conversation.channel_id == "channel").order_by(Conversation.id)
+                        )
+                    ).scalars()
+                )
+            assert [row.content for row in final_history] == [row.content for row in sent_history]
 
 
 @pytest.mark.asyncio

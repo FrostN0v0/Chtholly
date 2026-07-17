@@ -24,7 +24,7 @@ import httpx
 import pytest
 from satori import Text, User, Login, Message as SatoriMessage
 import litellm
-from arclet.entari import Session, MessageChain
+from arclet.entari import Image, Session, MessageChain
 from litellm.exceptions import APIError
 from arclet.entari.const import ITEM_SESSION
 from arclet.entari.config import EntariConfig
@@ -615,7 +615,7 @@ async def test_actual_media_tool_schemas_encourage_proactive_expression(
         assert "greetings, teasing, embarrassment, affection, comfort, celebration" in image_schema["description"]
         assert "Do not wait for an explicit sticker request" in image_schema["description"]
         assert "Use only for an explicit local reaction" not in image_schema["description"]
-        assert image_schema["parameters"]["required"] == ["context"]
+        assert image_schema["parameters"]["required"] == []
 
         assert "Use proactively when vocal delivery adds warmth" in speak_schema["description"]
         assert "intimacy, playfulness, comfort, celebration, surprise" in speak_schema["description"]
@@ -644,11 +644,31 @@ async def test_delivery_tool_schemas_expose_only_supported_arguments(local_modul
         schemas = {schema["function"]["name"]: schema["function"] for schema in delta}
 
         image_parameters = schemas["send_image"]["parameters"]
-        assert set(image_parameters["properties"]) == {"context", "use_latest_collected"}
-        assert image_parameters["required"] == ["context"]
-        assert image_parameters["properties"]["use_latest_collected"]["type"] == "boolean"
+        assert set(image_parameters["properties"]) == {"context", "image_paths"}
+        assert image_parameters["required"] == []
+        assert image_parameters["properties"]["image_paths"]["type"] == "array"
+        assert image_parameters["properties"]["image_paths"]["items"]["type"] == "string"
         assert image_parameters["additionalProperties"] is False
-        assert "newest confirmed meme collection" in schemas["send_image"]["description"]
+        image_description = schemas["send_image"]["description"]
+        assert "exact registered relative paths" in image_description
+        assert "multiple images in order" in image_description
+        assert "use_latest_collected" not in image_description
+        catalog_parameters = schemas["list_image_resources"]["parameters"]
+        assert set(catalog_parameters["properties"]) == {"limit", "offset"}
+        assert catalog_parameters["required"] == []
+        assert catalog_parameters["properties"]["limit"]["type"] == "integer"
+        assert catalog_parameters["properties"]["offset"]["type"] == "integer"
+        assert catalog_parameters["additionalProperties"] is False
+        catalog_description = schemas["list_image_resources"]["description"]
+        assert "registered relative paths and tags" in catalog_description
+        assert "internal tool data" in catalog_description
+
+        assert _schema_names(delta)[:4] == [
+            "send_image",
+            "send_text",
+            "send_merged_forward",
+            "list_image_resources",
+        ]
 
         text_parameters = schemas["send_text"]["parameters"]
         assert set(text_parameters["properties"]) == {"text", "delay_seconds"}
@@ -666,6 +686,75 @@ async def test_delivery_tool_schemas_expose_only_supported_arguments(local_modul
         assert forward_parameters["additionalProperties"] is False
         assert forward_parameters["properties"]["messages"]["type"] == "array"
         assert forward_parameters["properties"]["messages"]["items"]["type"] == "string"
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_list_image_resources_returns_newest_valid_registered_rows_with_pagination(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    baseline = _registry_snapshot()
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        target = _tool_callable(runtime, "list_image_resources")
+        meme_dir = tmp_path / "memes"
+        meme_dir.mkdir()
+
+        rows: list[SimpleNamespace] = []
+        for image_id in range(1, 25):
+            relative_path = f"memes/{image_id}.png"
+            (meme_dir / f"{image_id}.png").write_bytes(f"image-{image_id}".encode())
+            rows.append(SimpleNamespace(id=image_id, file_path=relative_path, tags=f"tag-{image_id}"))
+        rows.extend(
+            [
+                SimpleNamespace(id=25, file_path="memes/missing.png", tags="missing"),
+                SimpleNamespace(id=26, file_path="../outside.png", tags="outside"),
+            ]
+        )
+        (tmp_path.parent / "outside.png").write_bytes(b"outside")
+
+        class FakeResult:
+            def scalars(self) -> FakeResult:
+                return self
+
+            def all(self) -> list[SimpleNamespace]:
+                return rows
+
+        class FakeDatabase:
+            async def execute(self, _statement: Any) -> FakeResult:
+                return FakeResult()
+
+        @asynccontextmanager
+        async def fake_get_session() -> AsyncIterator[FakeDatabase]:
+            yield FakeDatabase()
+
+        monkeypatch.setattr(runtime, "IMAGE_DIR", tmp_path)
+        monkeypatch.setattr(runtime, "get_session", fake_get_session)
+
+        first_page = json.loads(await target(limit=100, offset=0))
+        assert first_page == {
+            "total": 24,
+            "offset": 0,
+            "images": [{"path": f"memes/{image_id}.png", "tags": f"tag-{image_id}"} for image_id in range(24, 4, -1)],
+        }
+
+        second_page = json.loads(await target(limit=2, offset=1))
+        assert second_page == {
+            "total": 24,
+            "offset": 1,
+            "images": [
+                {"path": "memes/23.png", "tags": "tag-23"},
+                {"path": "memes/22.png", "tags": "tag-22"},
+            ],
+        }
 
         await harness.dispose()
         _assert_registry_matches(baseline)
@@ -1100,6 +1189,138 @@ async def test_delivery_scope_blocks_text_outside_generation_but_preserves_media
         assert state.media_messages == 1
         assert state.delivered_texts == ["after image"]
         assert len(markers) == 2
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    baseline = _registry_snapshot()
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        target = _tool_callable(runtime, "send_image")
+        first_path = tmp_path / "first.png"
+        second_path = tmp_path / "second.png"
+        first_path.write_bytes(b"first")
+        second_path.write_bytes(b"second")
+        rows = [
+            SimpleNamespace(id=1, file_path=first_path.name, tags="first-tag"),
+            SimpleNamespace(id=2, file_path=second_path.name, tags="second-tag"),
+        ]
+
+        class FakeResult:
+            def scalars(self) -> FakeResult:
+                return self
+
+            def all(self) -> list[SimpleNamespace]:
+                return rows
+
+        class FakeDatabase:
+            async def execute(self, _statement: Any) -> FakeResult:
+                return FakeResult()
+
+        @asynccontextmanager
+        async def fake_get_session() -> AsyncIterator[FakeDatabase]:
+            yield FakeDatabase()
+
+        markers: list[tuple[Any, ...]] = []
+
+        async def fake_append_message(*args: Any) -> None:
+            markers.append(args)
+
+        monkeypatch.setattr(runtime, "IMAGE_DIR", tmp_path)
+        monkeypatch.setattr(runtime, "get_session", fake_get_session)
+        monkeypatch.setattr(runtime, "append_message", fake_append_message)
+
+        clock = _FakeClock()
+        state = runtime.DeliveryState(sleep=clock.sleep, clock=clock.monotonic)
+        session = _DeliveryToolSession()
+        with llm_chat_delivery_scope(state):
+            result = await target(image_paths=["second.png", "first.png", "second.png"], session=session)
+
+        assert result.startswith("已发送 2 张图片")
+        sent_images = [cast(MessageChain, chain).get(Image)[0].src.replace("\\", "/") for chain in session.sent]
+        assert sent_images[0].endswith("/second.png")
+        assert sent_images[1].endswith("/first.png")
+        assert clock.sleeps == [1.2]
+        assert state.media_messages == 2
+        assert [marker[-1] for marker in markers] == [
+            "[发送了表情包: second-tag]",
+            "[发送了表情包: first-tag]",
+        ]
+
+        invalid_session = _DeliveryToolSession()
+        invalid_state = runtime.DeliveryState()
+        with llm_chat_delivery_scope(invalid_state):
+            with pytest.raises(runtime.DeliveryError, match="^Registered image path is unavailable$"):
+                await target(session=invalid_session, image_paths=["first.png", "missing.png"])
+        assert invalid_session.sent == []
+        assert invalid_state.media_messages == 0
+
+        exhausted_session = _DeliveryToolSession()
+        exhausted_state = runtime.DeliveryState()
+        with llm_chat_delivery_scope(exhausted_state):
+            runtime.reserve_media_message()
+            with pytest.raises(runtime.DeliveryError, match="^Media delivery budget exhausted$"):
+                await target(session=exhausted_session, image_paths=["first.png", "second.png"])
+        assert exhausted_session.sent == []
+        assert exhausted_state.media_messages == 1
+
+        ambiguous_session = _DeliveryToolSession()
+        ambiguous_state = runtime.DeliveryState()
+        with llm_chat_delivery_scope(ambiguous_state):
+            with pytest.raises(
+                runtime.DeliveryError,
+                match="^Provide exactly one of context or image_paths$",
+            ):
+                await target(session=ambiguous_session, context="happy", image_paths=["first.png"])
+        assert ambiguous_session.sent == []
+        assert ambiguous_state.media_messages == 0
+
+        partial_session = _DeliveryToolSession(fail_attempts={2})
+        partial_state = runtime.DeliveryState()
+        with llm_chat_delivery_scope(partial_state):
+            with pytest.raises(
+                runtime.DeliveryError,
+                match=("^image delivery confirmed 1/2 images before failure; do not repeat the confirmed prefix$"),
+            ):
+                await target(session=partial_session, image_paths=["first.png", "second.png"])
+        assert len(partial_session.sent) == 1
+        assert partial_state.confirmed_deliveries == 1
+        assert partial_state.delivery_attempts == 2
+
+        marker_attempts = 0
+        marker_warnings: list[str] = []
+
+        async def flaky_append_message(*_args: Any) -> None:
+            nonlocal marker_attempts
+            marker_attempts += 1
+            if marker_attempts == 1:
+                raise RuntimeError("database unavailable")
+
+        monkeypatch.setattr(runtime, "append_message", flaky_append_message)
+        monkeypatch.setattr(runtime, "_LOGGER", SimpleNamespace(warning=marker_warnings.append))
+        marker_failure_session = _DeliveryToolSession()
+        marker_failure_state = runtime.DeliveryState()
+        with llm_chat_delivery_scope(marker_failure_state):
+            marker_failure_result = await target(
+                session=marker_failure_session,
+                image_paths=["first.png", "second.png"],
+            )
+        assert marker_failure_result.startswith("已发送 2 张图片")
+        assert len(marker_failure_session.sent) == 2
+        assert marker_failure_state.confirmed_deliveries == 2
+        assert marker_attempts == 2
+        assert marker_warnings == ["image delivery history failed: RuntimeError"]
 
         await harness.dispose()
         _assert_registry_matches(baseline)

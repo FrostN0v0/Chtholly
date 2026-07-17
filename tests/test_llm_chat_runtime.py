@@ -71,7 +71,7 @@ from plugins.llm_chat.persona import (
     memory_context as memory_context_module,
 )
 from plugins.llm_chat.core.eval import EvalResult
-from plugins.llm_chat.core.media import RECENT_MEME_HISTORY_NOTE, format_meme_collection_record
+from plugins.llm_chat.core.media import RECENT_MEME_HISTORY_NOTE
 from plugins.llm_chat.core.errors import summarize_exception
 from plugins.llm_chat.chat_context import (
     build_image_notes,
@@ -569,7 +569,7 @@ def test_assistant_history_removes_media_records_and_keeps_spoken_content():
             role="assistant",
             user_id="bot",
             user_name="Chtholly",
-            content=format_meme_collection_record("memes/64.jpg", "reaction,happy"),
+            content='[收藏了表情包:{"path":"memes/64.jpg","tags":"reaction,happy"}]',
             offset=4,
         ),
     ]

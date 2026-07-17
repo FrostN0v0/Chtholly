@@ -266,16 +266,24 @@ def reserve_forward_messages(messages: object) -> tuple[DeliveryState, tuple[str
     return state, normalized
 
 
-def reserve_media_message() -> DeliveryState:
-    """Reserve one media delivery before any text mode begins."""
+def reserve_media_messages(count: int) -> DeliveryState:
+    """Atomically reserve media deliveries before any text mode begins."""
 
+    if type(count) is not int or count < 1:
+        raise DeliveryError("Media delivery count must be a positive integer")
     state = require_llm_chat_delivery()
     if state.mode is not None:
         raise DeliveryError("Media must be sent before text delivery")
-    if state.media_messages >= state.limits.max_media_messages:
+    if state.media_messages + count > state.limits.max_media_messages:
         raise DeliveryError("Media delivery budget exhausted")
-    state.media_messages += 1
+    state.media_messages += count
     return state
+
+
+def reserve_media_message() -> DeliveryState:
+    """Reserve one media delivery before any text mode begins."""
+
+    return reserve_media_messages(1)
 
 
 def _split_final_text(normalized: str) -> tuple[str, ...]:

@@ -7,9 +7,7 @@ from plugins.llm_chat.core.media import (
     is_internal_media_record,
     sanitize_assistant_history,
     normalize_image_description,
-    parse_meme_collection_record,
     strip_internal_media_records,
-    format_meme_collection_record,
 )
 
 
@@ -107,14 +105,12 @@ class TestInternalMediaRecords:
         assert is_internal_media_record("[用语音说: [softly] 晚安。]")
         assert not is_internal_media_record("[发送了表情包: 开心]文字回复")
 
-    def test_collection_record_is_confirmed_context_without_path_leakage(self):
-        record = format_meme_collection_record("memes/64.jpg", "reaction,happy")
+    def test_legacy_collection_record_remains_hidden_from_model_history(self):
+        record = '[收藏了表情包:{"path":"memes/64.jpg","tags":"reaction,happy"}]'
 
-        assert parse_meme_collection_record(record) == ("memes/64.jpg", "reaction,happy")
         assert is_internal_media_record(record)
-        assert sanitize_assistant_history(record) == RECENT_MEME_HISTORY_NOTE
-        assert "memes/64.jpg" not in sanitize_assistant_history(record)
+        sanitized = sanitize_assistant_history(record)
+        assert sanitized is not None
+        assert sanitized == RECENT_MEME_HISTORY_NOTE
+        assert "memes/64.jpg" not in sanitized
         assert strip_internal_media_records(f"{record}Visible reply") == "Visible reply"
-
-    def test_collection_record_parser_rejects_malformed_payload(self):
-        assert parse_meme_collection_record('[收藏了表情包: {"path":"memes/64.jpg"}]') is None

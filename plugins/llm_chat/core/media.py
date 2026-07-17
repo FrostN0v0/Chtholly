@@ -1,7 +1,6 @@
 """Pure media matching: image tag search + dinggong audio filename matching."""
 
 import re
-import json
 import math
 import random
 from difflib import SequenceMatcher
@@ -62,36 +61,6 @@ def _find_internal_media_records(text: str) -> list[tuple[int, int]]:
         spans.append((start, end))
         cursor = end
     return spans
-
-
-def format_meme_collection_record(relative_path: str, tags: str) -> str:
-    """Build one internal history record for a confirmed meme import."""
-    payload = json.dumps(
-        {"path": relative_path, "tags": tags},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return f"{MEME_COLLECTION_RECORD_PREFIX} {payload}]"
-
-
-def parse_meme_collection_record(text: str) -> tuple[str, str] | None:
-    """Parse one internal meme collection record without accepting partial text."""
-    stripped = text.strip()
-    if not stripped.startswith(MEME_COLLECTION_RECORD_PREFIX) or not stripped.endswith("]"):
-        return None
-    try:
-        payload = json.loads(stripped[len(MEME_COLLECTION_RECORD_PREFIX) : -1].strip())
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    relative_path = payload.get("path")
-    tags = payload.get("tags")
-    if not isinstance(relative_path, str) or not relative_path:
-        return None
-    if not isinstance(tags, str) or not tags:
-        return None
-    return relative_path, tags
 
 
 def is_internal_media_record(text: str) -> bool:

@@ -20,6 +20,7 @@ from plugins.llm_chat.core.delivery import (
     mark_delivery_success,
     render_delivered_text,
     reserve_media_message,
+    reserve_media_messages,
     llm_chat_delivery_scope,
     normalize_delivery_delay,
     reserve_forward_messages,
@@ -333,19 +334,26 @@ def test_forward_validation_limits_and_atomic_rejection() -> None:
 def test_media_budget_must_precede_text_and_rejections_do_not_mutate() -> None:
     state = DeliveryState()
     with llm_chat_delivery_scope(state):
-        assert reserve_media_message() is state
-        assert reserve_media_message() is state
+        assert reserve_media_messages(2) is state
+        assert state.media_messages == 2
         before = _state_snapshot(state)
         with pytest.raises(DeliveryError, match="^Media delivery budget exhausted$"):
             reserve_media_message()
         assert _state_snapshot(state) == before
+
+    invalid_count = DeliveryState()
+    with llm_chat_delivery_scope(invalid_count):
+        before = _state_snapshot(invalid_count)
+        with pytest.raises(DeliveryError, match="^Media delivery count must be a positive integer$"):
+            reserve_media_messages(0)
+        assert _state_snapshot(invalid_count) == before
 
     after_text = DeliveryState()
     with llm_chat_delivery_scope(after_text):
         reserve_text_message("text")
         before = _state_snapshot(after_text)
         with pytest.raises(DeliveryError, match="^Media must be sent before text delivery$"):
-            reserve_media_message()
+            reserve_media_messages(2)
         assert _state_snapshot(after_text) == before
 
 

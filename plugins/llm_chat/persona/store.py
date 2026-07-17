@@ -6,7 +6,6 @@ from sqlalchemy import delete, update
 from entari_plugin_database import select, get_session
 
 from ..models import BotState, Conversation, UserRelation, UserProfileFact
-from ..core.media import MEME_COLLECTION_RECORD_PREFIX, parse_meme_collection_record
 
 AFFECTION_BASELINE = 30.0
 TRUST_BASELINE = 30.0
@@ -89,31 +88,6 @@ async def load_history(channel_id: str, limit: int) -> list[Conversation]:
             .all()
         )
         return list(reversed(rows))
-
-
-async def load_latest_meme_collection(channel_id: str) -> tuple[str, str] | None:
-    """Return the newest confirmed meme collection record for one channel."""
-    async with get_session() as session:
-        contents = (
-            (
-                await session.execute(
-                    select(Conversation.content)
-                    .where(
-                        Conversation.channel_id == channel_id,
-                        Conversation.role == "assistant",
-                        Conversation.content.startswith(MEME_COLLECTION_RECORD_PREFIX),
-                    )
-                    .order_by(Conversation.id.desc())
-                    .limit(10)
-                )
-            )
-            .scalars()
-            .all()
-        )
-    for content in contents:
-        if parsed := parse_meme_collection_record(content):
-            return parsed
-    return None
 
 
 async def append_message(channel_id: str, user_id: str, user_name: str, role: str, content: str) -> int:

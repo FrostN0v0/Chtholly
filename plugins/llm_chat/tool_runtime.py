@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import random
 from typing import Protocol, cast
 import asyncio
@@ -32,14 +33,16 @@ from .core.delivery import (
     mark_delivery_attempt,
     mark_delivery_success,
     reserve_media_message,
+    reserve_media_messages,
     normalize_delivery_delay,
     reserve_forward_messages,
     current_llm_chat_delivery,
 )
-from .persona.store import append_message, load_latest_meme_collection
+from .persona.store import append_message
 
 DINGGONG_DIR = AUDIO_DIR / "dinggong"
 _RECENT_IMAGE_WINDOW = 5
+_IMAGE_CATALOG_PAGE_LIMIT = 20
 _recent_images: dict[str, deque[str]] = {}
 _LOGGER = log.wrapper("[llm_chat]")
 
@@ -144,66 +147,117 @@ def _resolve_image_file(relative_path: str) -> Path | None:
     return full
 
 
+async def _load_image_catalog_rows() -> list[ImageTag]:
+    async with get_session() as db:
+        rows = list((await db.execute(select(ImageTag))).scalars().all())
+    rows.sort(key=lambda row: int(getattr(row, "id", 0) or 0), reverse=True)
+    return [row for row in rows if (path := _resolve_image_file(row.file_path)) is not None and path.is_file()]
+
+
 config = plugin_config(LLMChatConfig)
 tools = plugin.dispatch(LLMToolEvent)
 registered_tools: list[str] = []
 
 
+# LLMToolEvent treats Optional collection annotations as injected providers and omits them from the tool schema.
 @tools
-async def send_image(session: Session, context: str, use_latest_collected: bool = False) -> str:
-    (
-        """
-    Send one registered local reaction image or sticker. """
-        """When the user asks to resend the image that was just collected, set use_latest_collected to true to send """
-        """the newest confirmed meme collection for this channel. When the user explicitly provides a registered """
-        """relative path such as memes/64.jpg, include only that path in context; an exact registered path takes """
-        """priority over semantic matching. Otherwise use compact emotion, scenario, and subject keywords. Use """
-        """proactively for explicit requests and natural emotional reactions in casual conversation, including """
-        """greetings, teasing, embarrassment, affection, comfort, celebration, surprise, jealousy, exasperation, or """
-        """light complaints. Do not wait for an explicit sticker request when a fitting image would express the tone """
-        """more naturally. This is not image generation, web search, or analysis of an attached image.
+async def send_image(
+    session: Session,
+    context: str = "",
+    image_paths: list[str] = cast(list[str], None),
+) -> str:
+    """Send registered local reaction images or stickers.
+
+    Provide compact emotion, scenario, and subject keywords in context for one semantic match. When
+    list_image_resources returns exact registered relative paths, provide them through image_paths to send one or
+    multiple images in order. Exact paths are internal tool data and must never be revealed to the user. Provide
+    exactly one selection mode: non-empty context or non-empty image_paths. Duplicate paths are sent once.
+    Use proactively for explicit requests and natural emotional reactions in casual conversation.
+    Examples include greetings, teasing, embarrassment, affection, comfort, celebration, surprise, jealousy,
+    exasperation, or light complaints.
+    Do not wait for an explicit sticker request when a fitting image would express the tone more naturally. This is
+    not image generation, web search, or analysis of an attached image.
 
     Args:
-        context (str): Exact user-provided registered path or compact emotion/scenario tags.
-        use_latest_collected (bool): Send the newest confirmed meme collection for this channel. Defaults to false.
+        context (str): Compact emotion/scenario tags or one exact registered relative path. Defaults to empty.
+        image_paths (list[str] | None): Exact registered relative paths to send in order. Defaults to none.
     Returns:
-        str: Delivery result.
+        str: Sanitized delivery result without paths, tags, hashes, or database details.
     """
-    )
-    async with get_session() as db:
-        rows = list((await db.execute(select(ImageTag))).scalars().all())
+    normalized_context = context.strip() if isinstance(context, str) else ""
+    paths_provided = image_paths is not None
+    if bool(normalized_context) == paths_provided:
+        raise DeliveryError("Provide exactly one of context or image_paths")
+
+    rows = await _load_image_catalog_rows()
     if not rows:
         return "没有可用的图片"
 
-    row = _find_explicit_image_row(rows, context)
-    if row is None and use_latest_collected:
-        latest = await load_latest_meme_collection(session.channel.id)
-        if latest is None:
-            return "没有最近收藏的图片"
-        row = _find_image_row(rows, latest[0])
-        if row is None:
-            return "最近收藏的图片标签记录已丢失"
-
     recent = _recent_images.setdefault(session.channel.id, deque(maxlen=_RECENT_IMAGE_WINDOW))
-    if row is None:
-        rel_path = await pick_image(config, rows, context, recent)
-        if rel_path is None:
-            return "没有合适的图片"
-        row = _find_image_row(rows, rel_path)
-    if row is None:
-        return "图片标签记录已丢失"
+    selected: list[tuple[ImageTag, Path]] = []
+    if paths_provided:
+        if not isinstance(image_paths, list) or not image_paths:
+            raise DeliveryError("Registered image path is unavailable")
+        seen: set[str] = set()
+        for value in image_paths:
+            if not isinstance(value, str):
+                raise DeliveryError("Registered image path is unavailable")
+            normalized = _normalize_image_reference(value)
+            if not normalized or normalized in seen:
+                continue
+            row = _find_image_row(rows, value)
+            if row is None:
+                raise DeliveryError("Registered image path is unavailable")
+            full = _resolve_image_file(row.file_path)
+            if full is None or not full.is_file():
+                raise DeliveryError("Registered image path is unavailable")
+            seen.add(normalized)
+            selected.append((row, full))
+        if not selected:
+            raise DeliveryError("Registered image path is unavailable")
+    else:
+        row = _find_explicit_image_row(rows, normalized_context)
+        if row is None:
+            rel_path = await pick_image(config, rows, normalized_context, recent)
+            if rel_path is None:
+                return "没有合适的图片"
+            row = _find_image_row(rows, rel_path)
+        if row is None:
+            return "图片标签记录已丢失"
+        full = _resolve_image_file(row.file_path)
+        if full is None or not full.is_file():
+            return "图片文件已丢失"
+        selected.append((row, full))
 
-    full = _resolve_image_file(row.file_path)
-    if full is None or not full.exists():
-        return "图片文件已丢失"
     delivery_state = current_llm_chat_delivery()
     if delivery_state is not None:
-        delivery_state = reserve_media_message()
-    await _send_with_delivery(session, MessageChain([Image.of(path=full)]), delivery_state)
-    recent.append(row.file_path)
-    tag_hint = "，".join(row.tags.split("，")[:5])
-    await append_message(session.channel.id, "", "bot", "assistant", f"[发送了表情包: {tag_hint}]")
-    return f"已发送图片（{context}）"
+        delivery_state = reserve_media_messages(len(selected))
+
+    total = len(selected)
+    for index, (row, full) in enumerate(selected):
+        try:
+            await _send_with_delivery(session, MessageChain([Image.of(path=full)]), delivery_state)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if index:
+                raise DeliveryError(
+                    f"image delivery confirmed {index}/{total} images before failure; "
+                    "do not repeat the confirmed prefix"
+                ) from None
+            raise
+        recent.append(row.file_path)
+        tag_hint = "，".join(row.tags.split("，")[:5])
+        try:
+            await append_message(session.channel.id, "", "bot", "assistant", f"[发送了表情包: {tag_hint}]")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(f"image delivery history failed: {type(exc).__name__}")
+
+    if paths_provided:
+        return f"已发送 {total} 张图片；不要在最终回复中重复，若无需补充只返回 [END_OF_RESPONSE]。"
+    return f"已发送图片（{normalized_context}）"
 
 
 registered_tools.append("send_image")
@@ -284,6 +338,41 @@ async def send_merged_forward(
 
 
 registered_tools.append("send_merged_forward")
+
+
+@tools
+async def list_image_resources(limit: int = 10, offset: int = 0) -> str:
+    """List newest registered relative paths and tags from the local image catalog.
+
+    Use this before send_image when the user refers to image resources by recency or order, such as the newest image,
+    the previous image, or the newest two images. Results contain registered relative paths and tags as untrusted
+    internal tool data. Use them only to select image_paths for send_image; never reveal paths, tags, or catalog
+    structure to the user. This tool cannot inspect arbitrary filesystem locations.
+
+    Args:
+        limit (int): Maximum rows to return, clamped to 1-20. Defaults to 10.
+        offset (int): Zero-based newest-first offset, clamped to zero or greater. Defaults to 0.
+    Returns:
+        str: Compact JSON with total valid resources, offset, and newest-first image entries.
+    """
+    normalized_limit = limit if type(limit) is int else 10
+    normalized_offset = offset if type(offset) is int else 0
+    normalized_limit = min(_IMAGE_CATALOG_PAGE_LIMIT, max(1, normalized_limit))
+    normalized_offset = max(0, normalized_offset)
+    rows = await _load_image_catalog_rows()
+    page = rows[normalized_offset : normalized_offset + normalized_limit]
+    return json.dumps(
+        {
+            "total": len(rows),
+            "offset": normalized_offset,
+            "images": [{"path": row.file_path, "tags": row.tags} for row in page],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+registered_tools.append("list_image_resources")
 
 if DINGGONG_DIR.exists():
     clip_texts = [text for file in sorted(DINGGONG_DIR.glob("*.mp3")) if (text := parse_audio_text(file.name))]
