@@ -35,11 +35,12 @@ class MemeImportError(RuntimeError):
 
 
 _LOGGER = log.wrapper("[llm_chat]")
-_SUPPORTED_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+_SUPPORTED_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif"})
 _MIME_SUFFIXES = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
     "image/webp": ".webp",
+    "image/gif": ".gif",
 }
 _import_lock = asyncio.Lock()
 _indexed_root: Path | None = None
@@ -100,11 +101,7 @@ def _relative_path(path: Path) -> str:
 
 
 def _next_numeric_stem() -> int:
-    numeric_stems = [
-        int(path.stem)
-        for path in MEME_DIR.iterdir()
-        if path.is_file() and path.stem.isdigit()
-    ]
+    numeric_stems = [int(path.stem) for path in MEME_DIR.iterdir() if path.is_file() and path.stem.isdigit()]
     return max(numeric_stems, default=0) + 1
 
 
@@ -194,7 +191,7 @@ async def import_meme_image(
     mime = data_url[5:].partition(";")[0]
     suffix = _MIME_SUFFIXES.get(mime)
     if suffix is None:
-        raise MemeImportError("Unsupported image format; only JPEG, PNG, and WebP are accepted")
+        raise MemeImportError("Unsupported image format; only JPEG, PNG, WebP, and GIF are accepted")
 
     digest = hashlib.sha256(data).hexdigest()
     async with _import_lock:

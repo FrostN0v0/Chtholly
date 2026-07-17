@@ -70,8 +70,10 @@ if getattr(_PLUGINS, "llm_chat", None) is _PACKAGE:
 _PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
-_GIF_BYTES = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
-_SUPPORTED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+_GIF_BYTES = base64.b64decode(
+    "R0lGODlhAQABAIAAAAAAAP///yH5BAAKAAAALAAAAAABAAEAAAIBTAAh+QQACgAAACwAAAAAAQABAAACAUwAOw=="
+)
+_SUPPORTED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 
 class _MemeSession:
@@ -194,6 +196,54 @@ async def test_duplicate_bytes_skip_repeated_tagging(meme_env: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_animated_gif_import_preserves_original_bytes_and_deduplicates(meme_env: Any) -> None:
+    session = cast(
+        Session,
+        _MemeSession({"local://animated": _GIF_BYTES, "local://duplicate": _GIF_BYTES}),
+    )
+
+    first = await import_meme_image(meme_env.config, session, Image.of(url="local://animated"))
+    second = await import_meme_image(meme_env.config, session, Image.of(url="local://duplicate"))
+
+    expected_path = str(Path("memes") / "1.gif")
+    assert _GIF_BYTES.count(b"\x2c") == 2
+    assert first == MemeImportResult("created", expected_path, meme_env.state.tag_result)
+    assert second == MemeImportResult("duplicate", expected_path, meme_env.state.tag_result)
+    assert (meme_env.meme_dir / "1.gif").read_bytes() == _GIF_BYTES
+    assert len(_stored_images(meme_env.meme_dir)) == 1
+    rows = await _image_rows(meme_env.session_factory)
+    assert [(row.file_path, row.tags) for row in rows] == [(expected_path, meme_env.state.tag_result)]
+    assert meme_env.state.visual_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_tagging_discovers_existing_gif(
+    meme_env: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gif_path = meme_env.meme_dir / "existing.gif"
+    gif_path.write_bytes(_GIF_BYTES)
+    data_urls: list[str] = []
+
+    async def generate_tags(_config: LLMChatConfig, data_url: str) -> str:
+        data_urls.append(data_url)
+        return cast(str, meme_env.state.tag_result)
+
+    monkeypatch.setattr(image_tags_module, "IMAGE_DIR", meme_env.image_dir)
+    monkeypatch.setattr(image_tags_module, "generate_image_tags", generate_tags)
+
+    result = await image_tags_module.tag_images(meme_env.config)
+
+    assert result == (1, 0, 0)
+    assert len(data_urls) == 1
+    assert data_urls[0].startswith("data:image/gif;base64,")
+    rows = await _image_rows(meme_env.session_factory)
+    assert [(row.file_path, row.tags) for row in rows] == [
+        (str(Path("memes") / "existing.gif"), meme_env.state.tag_result)
+    ]
+
+
+@pytest.mark.asyncio
 async def test_existing_untagged_file_is_repaired_without_replacing_embedding(meme_env: Any) -> None:
     repair_data = _PNG_BYTES + b"repair"
     repair_path = meme_env.meme_dir / "7.png"
@@ -259,11 +309,6 @@ async def test_invalid_inputs_and_empty_tags_leave_storage_unchanged(meme_env: A
     oversized = b"0" * (IMAGE_FETCH_MAX_BYTES + 1)
     oversized_src = "base64://" + base64.b64encode(oversized).decode("ascii")
     cases = [
-        (
-            cast(Session, _MemeSession({"local://gif": _GIF_BYTES})),
-            Image.of(url="local://gif"),
-            "Unsupported image format",
-        ),
         (
             cast(Session, _MemeSession({"local://invalid": b"not image"})),
             Image.of(url="local://invalid"),

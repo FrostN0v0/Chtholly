@@ -61,9 +61,7 @@ async def pick_image(config: LLMChatConfig, rows: Sequence[ImageTag], context: s
 async def get_image_tag(relative_path: str) -> ImageTag | None:
     """Load one persisted image tag row by relative resource path."""
     async with get_session() as db:
-        return (
-            await db.execute(select(ImageTag).where(ImageTag.file_path == relative_path))
-        ).scalar_one_or_none()
+        return (await db.execute(select(ImageTag).where(ImageTag.file_path == relative_path))).scalar_one_or_none()
 
 
 async def upsert_image_tag(config: LLMChatConfig, relative_path: str, tags: str) -> None:
@@ -101,7 +99,7 @@ async def tag_images(
         candidates = [
             path
             for path in sorted(IMAGE_DIR.rglob("*"))
-            if path.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")
+            if path.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".gif")
             and (retag or str(path.relative_to(IMAGE_DIR)) not in known)
         ]
         batch = candidates if limit is None else candidates[: max(0, limit)]
