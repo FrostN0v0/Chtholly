@@ -136,10 +136,17 @@ plugins:
     path: satori
     options:
       access_log: false # kill /api/health polling and other HTTP access lines
+      loop: asyncio
     adapters:
       - $path: "@onebot11.reverse"
         access_token: ${{ env.ONEBOT_TOKEN }}
         path: "onebot/v11"
         endpoint: "ws"
+      - $path: "@qq.websocket"
+        app_id: ${{ env.QQ_APP_ID }}
+        secret: ${{ env.QQ_APP_SECRET }}
+        token: ${{ env.QQ_TOKEN }}
+        is_sandbox: true
+        c2c_group_at_messages: true
   poke: {}
 
