@@ -80,7 +80,8 @@ uv sync --all-extras
 
 编辑 `entari.yml` 调整网络、日志、插件加载等。敏感值（Token、API Key、密码等）放入 `.env.local`，通过 `${{ env.KEY }}` 插值，不要提交真实凭证。
 
-启用 `llm_chat` 的网页搜索与正文提取需在 `.env` 或 `.env.local` 中配置 `TAVILY_API_KEY`；未配置时两个工具都不会注册，新增或更换密钥后需完整重启 Bot。
+启用 `llm_chat` 的网页搜索与正文提取需在 `.env` 或 `.env.local` 中配置 `EXA_API_KEY`；未配置时两个工具都不会注册，新增或更换密钥后需完整重启 Bot。
+Exa 默认使用 `auto` 搜索；可通过 `exa_search_type` 切换 `fast`、`deep-lite`、`deep`、`deep-reasoning`、`neural` 或 `instant`，并用 `exa_search_category`、`exa_include_domains`、`exa_exclude_domains`、`exa_start_published_date` 与 `exa_end_published_date` 设置类别、域名和发布时间过滤。所有调用仍受本地公开 URL 校验、敏感 query 拦截、结果限幅和 generation-local 预算约束。
 
 `llm_chat` 每轮生成的网页调用预算由 `web_search_max_calls_per_generation`、`web_page_max_calls_per_generation` 与 `web_total_max_calls_per_generation` 配置，默认分别为 `2 / 2 / 4`；预算按生成上下文隔离，实际总额不会超过两个单项之和。若 LLM 工具循环耗尽，插件会基于本轮已积累的工具结果执行一次不携带任何工具的最终化；最终化仍失败时保持静默，不回退到原生自动对话。
 
