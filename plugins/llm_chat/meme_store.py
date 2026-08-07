@@ -16,9 +16,10 @@ from arclet.entari.logger import log
 from utils.path import MEME_DIR, IMAGE_DIR
 
 from .config import LLMChatConfig
-from .vision import fetch_image_bytes, generate_image_tags, raw_to_image_data_url
+from .vision import generate_image_tags
 from .image_tags import get_image_tag, upsert_image_tag
 from .core.errors import summarize_exception
+from .core.image_source import fetch_image_bytes, raw_to_image_data_url
 
 MemeImportStatus = Literal["created", "duplicate", "tagged_existing"]
 

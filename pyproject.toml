@@ -14,11 +14,15 @@ dependencies = [
     "entari-plugin-permission>=0.1.1",
     "entari-plugin-server>=0.7.1",
     "entari-plugin-webui>=1.0.1",
+    "exa-py>=2.16.2",
     "httpx[http2]>=0.27.2",
     "orjson>=3.11.9",
     "rich>=13.9.4",
+    "tzdata>=2026.3",
 ]
 
+[tool.uv.sources]
+entari-plugin_llm = { git = "https://github.com/ArcletProject/entari-plugin-llm"}
 
 [project.optional-dependencies]
 adapters = [

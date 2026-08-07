@@ -1,57 +1,22 @@
-"""LLM tool and administrator command for meme collection."""
+"""Administrator command for manual meme collection."""
 
 from __future__ import annotations
 
 import asyncio
 
 from satori import Text
-from arclet.entari import Image, Session, MessageChain, plugin, command, plugin_config
+from arclet.entari import Image, Session, MessageChain, command, plugin_config
 from arclet.alconna import Arg, AllParam
 from arclet.letoderea import STOP
-from entari_plugin_llm import LLMToolEvent  # entari: plugin
 from arclet.entari.filter import superusers
 from arclet.entari.command import Match
 
 from .config import LLMChatConfig
 from .meme_store import MemeImportError, MemeImportResult, import_meme_image
-from .chat_context import collect_quoted_images, collect_message_images
-from .core.delivery import current_llm_chat_delivery
+from .chat_context import collect_quoted_images
 
 config = plugin_config(LLMChatConfig)
-tools = plugin.dispatch(LLMToolEvent)
-registered_tools = ["tag_image"]
 _superuser_check = superusers().check
-
-
-@tools
-async def tag_image(session: Session, image_index: int = 1) -> str:
-    """Collect one reusable meme, reaction image, or sticker from the current direct or replied images.
-
-    Use only for an image already attached directly to the current message or its hydrated reply when it is clearly
-    reusable as an emotional reaction, reply scene, sticker, or meme. image_index is a 1-based index over all direct
-    images first and then all replied images. Never use this for generated or sent images, bare unavailable markers,
-    ordinary or sensitive images, or images inside forwarded messages.
-
-    Args:
-        image_index (int): Optional 1-based direct-then-replied image index. Defaults to 1.
-    Returns:
-        str: Privacy-safe collection status without paths, tags, hashes, or database details.
-    """
-    if current_llm_chat_delivery() is None:
-        raise MemeImportError("Image collection is unavailable outside an active llm_chat generation")
-    if type(image_index) is not int or image_index < 1:
-        raise MemeImportError("image_index must be a positive 1-based integer")
-
-    candidates = collect_message_images(session)
-    if image_index > len(candidates):
-        raise MemeImportError("image_index does not identify a current direct or replied image")
-
-    result = await import_meme_image(config, session, candidates[image_index - 1][0])
-    if result.status == "created":
-        return "Collected the current image as a reusable meme."
-    if result.status == "duplicate":
-        return "The current image is already in the meme collection."
-    return "The existing meme now has searchable tags."
 
 
 def _select_command_image(payload: Match[MessageChain], session: Session) -> tuple[Image | None, str | None]:

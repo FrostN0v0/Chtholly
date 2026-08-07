@@ -13,12 +13,14 @@ from dataclasses import field, dataclass
 from collections.abc import Callable, Iterator, Sequence, Awaitable
 
 from .media import strip_internal_media_records
+from .media_delivery import strip_media_unavailable_marker
 
 DeliveryMode = Literal["segments", "forward"]
 _END_OF_RESPONSE = "[END_OF_RESPONSE]"
 _MIN_INTERVAL_HARD_FLOOR = 1.1
 _MAX_INTERVAL_HARD_CEILING = 5.0
 _STRUCTURED_FINAL_LINE = re.compile(r"^(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|\|)")
+_TRAILING_END_OF_RESPONSE = re.compile(rf"(?:\s*{re.escape(_END_OF_RESPONSE)})+\s*$")
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,7 @@ class DeliveryState:
     last_delivery_at: float | None = None
     delivery_attempts: int = 0
     confirmed_deliveries: int = 0
+    confirmed_media_deliveries: int = 0
     delivered_texts: list[str] = field(default_factory=list)
 
 
@@ -164,13 +167,21 @@ def normalize_delivery_limits(
     )
 
 
+def strip_trailing_end_of_response(text: str) -> str:
+    """Remove one or more reserved end markers only from the response tail."""
+
+    return _TRAILING_END_OF_RESPONSE.sub("", text).rstrip()
+
+
 def normalize_delivery_text(text: object, *, field: str) -> str:
-    """Return model-authored delivery text without internal media records."""
+    """Return model-authored delivery text without internal control records."""
 
     if not isinstance(text, str):
         raise DeliveryError(f"{field} must be a string")
-    normalized = strip_internal_media_records(text).strip()
-    if not normalized or normalized == _END_OF_RESPONSE:
+    normalized = strip_trailing_end_of_response(
+        strip_media_unavailable_marker(strip_internal_media_records(text).strip())
+    )
+    if not normalized:
         raise DeliveryError("Delivery text is empty or reserved for internal control")
     return normalized
 
@@ -374,11 +385,15 @@ def mark_delivery_attempt(state: DeliveryState) -> None:
 def mark_delivery_success(
     state: DeliveryState,
     texts: Sequence[str] = (),
+    *,
+    media: bool = False,
 ) -> None:
     """Record a confirmed send and append delivered texts in order."""
 
     state.delivery_attempts += 1
     state.confirmed_deliveries += 1
+    if media:
+        state.confirmed_media_deliveries += 1
     state.last_delivery_at = state.clock()
     state.delivered_texts.extend(texts)
 

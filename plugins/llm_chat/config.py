@@ -1,5 +1,6 @@
 """Configuration model and built-in prompt scaffold for llm_chat."""
 
+from typing import Literal
 from dataclasses import field
 
 from arclet.entari import BasicConfModel
@@ -70,21 +71,35 @@ class LLMChatConfig(BasicConfModel):
     memory_max_records_per_user: int = 200
     """Max episodic memory rows kept per user/channel."""
     web_search_enabled: bool = False
-    """Register Tavily search and extraction tools for llm_chat."""
+    """Register Exa search and content retrieval tools for llm_chat."""
     web_search_max_calls_per_generation: int = 2
     """Maximum web_search calls allowed in one chat generation."""
     web_page_max_calls_per_generation: int = 2
     """Maximum read_web_page calls allowed in one chat generation."""
     web_total_max_calls_per_generation: int = 4
     """Maximum combined web tool calls allowed in one chat generation."""
-    tavily_api_key: str | None = None
-    """Tavily API key; set from env in entari.yml."""
+    exa_api_key: str | None = None
+    """Exa API key; set from env in entari.yml."""
+    exa_search_type: Literal["auto", "fast", "deep-lite", "deep", "deep-reasoning", "neural", "instant"] = "auto"
+    """Exa search algorithm used for web_search."""
+    exa_search_category: (
+        Literal["company", "news", "publication", "personal site", "financial report", "people"] | None
+    ) = None
+    """Optional Exa data category applied to every search."""
+    exa_include_domains: list[str] = field(default_factory=list)
+    """Optional domain allowlist passed to Exa search."""
+    exa_exclude_domains: list[str] = field(default_factory=list)
+    """Optional domain denylist passed to Exa search."""
+    exa_start_published_date: str | None = None
+    """Optional inclusive lower publication-date filter in ISO 8601 form."""
+    exa_end_published_date: str | None = None
+    """Optional inclusive upper publication-date filter in ISO 8601 form."""
     web_search_max_results: int = 5
     """Maximum search results returned to the model."""
     web_search_timeout: float = 30.0
-    """Per-request Tavily timeout, clamped to the provider range."""
+    """Per-request Exa timeout, clamped to the provider range."""
     web_page_max_chars: int = 6000
-    """Maximum extracted page characters returned to the model."""
+    """Maximum retrieved page characters returned to the model."""
     delivery_min_interval_seconds: float = DEFAULT_DELIVERY_LIMITS.min_interval_seconds
     """Minimum paced interval between delivery attempts."""
     delivery_default_interval_seconds: float = DEFAULT_DELIVERY_LIMITS.default_interval_seconds

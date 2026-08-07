@@ -28,6 +28,10 @@ def _configure_litellm_logging() -> None:
 
 if plug is not None:
     _configure_litellm_logging()
+    from .agno_compat import install_agno_tool_bridge  # entari: package
+
+    install_agno_tool_bridge()
+
     metadata(
         name="llm_chat",
         author=[{"name": "FrostN0v0"}],
@@ -38,7 +42,7 @@ if plug is not None:
     from . import chat_handler as chat_handler  # entari: package
     from . import tag_runtime as tag_runtime  # entari: package
     from . import tool_runtime as tool_runtime  # entari: package
-    from . import meme_runtime as meme_runtime  # entari: package
+    from . import meme_command as meme_command  # entari: package
 
-    registered_tools = [*tool_runtime.registered_tools, *meme_runtime.registered_tools]
+    registered_tools = tool_runtime.registered_tools
     _LOGGER.info(f"registered LLM tools: {', '.join(registered_tools) or '(none)'}")

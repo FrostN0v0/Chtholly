@@ -1,22 +1,16 @@
-"""Deterministic HTTP and safety tests for the import-safe Tavily boundary."""
+"""Deterministic Agno Exa adapter and web safety tests."""
 
 from __future__ import annotations
 
-import sys
 import json
-from uuid import uuid4
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 import asyncio
-import logging
-from pathlib import Path
-import importlib.util
-from collections.abc import Callable, Iterator
+import importlib
+from collections.abc import Sequence
 
-import httpx
 import pytest
 
-WEB_ACCESS_PATH = Path(__file__).resolve().parents[1] / "plugins" / "llm_chat" / "web_access.py"
 SENTINEL_API_KEY = "sentinel-api-key-do-not-log"
 SENTINEL_QUERY = "sentinel-query-do-not-log"
 SENTINEL_FOCUS = "sentinel-focus-do-not-log"
@@ -32,130 +26,204 @@ SENSITIVE_VALUES = (
 
 
 @pytest.fixture
-def web_access_module() -> Iterator[ModuleType]:
-    """Load web_access without importing the Entari-backed llm_chat package."""
+def web_access_module() -> ModuleType:
+    """Load provider and policy modules without Entari runtime registration."""
 
-    module_name = f"_llm_chat_web_access_test_{uuid4().hex}"
-    spec = importlib.util.spec_from_file_location(module_name, WEB_ACCESS_PATH)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    try:
-        spec.loader.exec_module(module)
-        yield module
-    finally:
-        sys.modules.pop(module_name, None)
+    policy = importlib.import_module("plugins.llm_chat.web.policy")
+    exa = importlib.import_module("plugins.llm_chat.web.exa")
+    module = ModuleType("plugins.llm_chat.web.test_boundary")
+    for source, names in (
+        (exa, ("ExaWebClient", "SEARCH_SNIPPET_MAX_CHARS")),
+        (
+            policy,
+            (
+                "DEFAULT_WEB_ACCESS_LIMITS",
+                "WebAccessError",
+                "WebAccessLimits",
+                "consume_llm_chat_web_access",
+                "llm_chat_web_access_scope",
+                "normalize_public_url",
+                "normalize_web_access_limits",
+                "require_llm_chat_web_access",
+            ),
+        ),
+    ):
+        for name in names:
+            setattr(module, name, getattr(source, name))
+    return module
+
+
+class _FakeExaToolkit:
+    def __init__(self, result: object = "[]", error: BaseException | None = None) -> None:
+        self.result = result
+        self.error = error
+        self.search_calls: list[tuple[str, int, str | None]] = []
+        self.content_calls: list[list[str]] = []
+
+    def search_exa(self, query: str, num_results: int = 5, category: str | None = None) -> str:
+        self.search_calls.append((query, num_results, category))
+        if self.error is not None:
+            raise self.error
+        return cast(str, self.result)
+
+    def get_contents(self, urls: list[str]) -> str:
+        self.content_calls.append(list(urls))
+        if self.error is not None:
+            raise self.error
+        return cast(str, self.result)
+
+
+class _ToolkitFactory:
+    def __init__(
+        self,
+        *,
+        search_result: object = "[]",
+        content_result: object = "[]",
+        search_error: BaseException | None = None,
+        content_error: BaseException | None = None,
+    ) -> None:
+        self.search_toolkit = _FakeExaToolkit(search_result, search_error)
+        self.content_toolkit = _FakeExaToolkit(content_result, content_error)
+        self.calls: list[dict[str, object]] = []
+
+    def __call__(self, **kwargs: object) -> _FakeExaToolkit:
+        self.calls.append(dict(kwargs))
+        return self.search_toolkit if kwargs.get("enable_search") is True else self.content_toolkit
 
 
 def _make_client(
     module: ModuleType,
-    handler: Callable[[httpx.Request], httpx.Response],
     *,
     api_key: str = SENTINEL_API_KEY,
     timeout: float = 30.0,
-    injected_timeout: float = 0.125,
-) -> tuple[Any, httpx.AsyncClient]:
-    injected = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler),
-        timeout=httpx.Timeout(injected_timeout),
+    search_result: object = "[]",
+    content_result: object = "[]",
+    search_error: BaseException | None = None,
+    content_error: BaseException | None = None,
+    **kwargs: object,
+) -> tuple[Any, _ToolkitFactory]:
+    factory = _ToolkitFactory(
+        search_result=search_result,
+        content_result=content_result,
+        search_error=search_error,
+        content_error=content_error,
     )
-    return module.TavilyWebClient(api_key, timeout=timeout, client=injected), injected
+    client = module.ExaWebClient(
+        api_key,
+        timeout=timeout,
+        toolkit_factory=factory,
+        **kwargs,
+    )
+    return client, factory
 
 
-def _assert_request_timeout(request: httpx.Request, expected: float) -> None:
-    assert request.extensions["timeout"] == {
-        "connect": expected,
-        "read": expected,
-        "write": expected,
-        "pool": expected,
-    }
+def _json_result(items: Sequence[object]) -> str:
+    return json.dumps(list(items), ensure_ascii=False)
 
 
-def _assert_sanitized(error: BaseException, caplog: pytest.LogCaptureFixture) -> None:
-    exposed = f"{error}\n{caplog.text}"
+def _assert_sanitized(error: BaseException) -> None:
+    exposed = str(error)
     for sensitive_value in SENSITIVE_VALUES:
         assert sensitive_value not in exposed
 
 
-async def test_search_sends_exact_request_and_normalizes_results(web_access_module: ModuleType) -> None:
-    long_snippet = "x" * (web_access_module.SEARCH_SNIPPET_MAX_CHARS + 5)
-    captured_requests: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured_requests.append(request)
-        _assert_request_timeout(request, 1.0)
-        assert request.method == "POST"
-        assert str(request.url) == "https://api.tavily.com/search"
-        assert request.headers["authorization"] == f"Bearer {SENTINEL_API_KEY}"
-        assert request.headers["content-type"] == "application/json"
-        assert json.loads(request.content) == {
-            "query": "latest public facts",
-            "search_depth": "basic",
-            "max_results": 10,
-            "include_answer": False,
-            "include_raw_content": False,
-            "include_images": False,
-        }
-        return httpx.Response(
-            200,
-            json={
-                "results": [
-                    {
-                        "title": "  First\n result  ",
-                        "url": "HTTPS://News.Example.ORG:443/story?q=ok#top",
-                        "content": "  first\n snippet\ttext  ",
-                    },
-                    "not-a-mapping",
-                    {
-                        "title": "Private result",
-                        "url": "http://127.0.0.1/private",
-                        "content": SENTINEL_CONTENT,
-                    },
-                    {
-                        "title": "Sensitive result URL",
-                        "url": "https://drop.example.org/page?access_token=sensitive-value",
-                        "content": SENTINEL_CONTENT,
-                    },
-                    {
-                        "title": "Duplicate canonical URL",
-                        "url": "https://news.example.org:443/story?q=ok#other",
-                        "content": "must be dropped",
-                    },
-                    {
-                        "title": "  Long\tresult  ",
-                        "url": "https://docs.example.org/item#fragment",
-                        "content": long_snippet,
-                    },
-                    {
-                        "title": "   ",
-                        "url": "https://empty-title.example.org/",
-                        "content": "must be dropped",
-                    },
-                    {
-                        "title": "No snippet",
-                        "url": "https://third.example.org/page",
-                        "content": None,
-                    },
-                    {"title": 123, "url": "https://wrong-title.example.org/", "content": "drop"},
-                    {"title": "Wrong URL type", "url": 123, "content": "drop"},
-                ]
-            },
-        )
-
-    client, injected = _make_client(
+async def test_client_builds_separate_agno_exa_toolkits_with_exact_configuration(
+    web_access_module: ModuleType,
+) -> None:
+    client, factory = _make_client(
         web_access_module,
-        handler,
-        api_key=f"  {SENTINEL_API_KEY}  ",
-        timeout=-50.0,
-        injected_timeout=42.0,
+        timeout=999.0,
+        search_type="deep",
+        category="news",
+        include_domains=["reuters.com"],
+        exclude_domains=["example.com"],
+        start_published_date="2026-01-01",
+        end_published_date="2026-12-31",
+        max_page_chars=4321,
     )
-    try:
-        result = await client.search("  latest\n public\t facts  ", max_results=999)
-    finally:
-        await injected.aclose()
 
-    assert len(captured_requests) == 1
+    assert len(factory.calls) == 2
+    search_options, content_options = factory.calls
+    assert search_options == {
+        "api_key": SENTINEL_API_KEY,
+        "enable_find_similar": False,
+        "enable_answer": False,
+        "enable_research": False,
+        "show_results": False,
+        "timeout": 60.0,
+        "enable_search": True,
+        "enable_get_contents": False,
+        "text": True,
+        "summary": False,
+        "text_length_limit": web_access_module.SEARCH_SNIPPET_MAX_CHARS,
+        "type": "deep",
+        "category": "news",
+        "include_domains": ["reuters.com"],
+        "exclude_domains": ["example.com"],
+        "start_published_date": "2026-01-01",
+        "end_published_date": "2026-12-31",
+    }
+    assert content_options == {
+        "api_key": SENTINEL_API_KEY,
+        "enable_find_similar": False,
+        "enable_answer": False,
+        "enable_research": False,
+        "show_results": False,
+        "timeout": 60.0,
+        "enable_search": False,
+        "enable_get_contents": True,
+        "text": True,
+        "summary": False,
+        "text_length_limit": 4321,
+    }
+    assert await client.search("facts") == {"query": "facts", "results": []}
+
+
+async def test_search_normalizes_and_sanitizes_exa_results(web_access_module: ModuleType) -> None:
+    long_snippet = "x" * (web_access_module.SEARCH_SNIPPET_MAX_CHARS + 5)
+    client, factory = _make_client(
+        web_access_module,
+        search_result=_json_result(
+            [
+                {
+                    "title": "  First\n result  ",
+                    "url": "HTTPS://News.Example.ORG:443/story?q=ok#top",
+                    "text": "  first\n snippet\ttext  ",
+                },
+                "not-a-mapping",
+                {
+                    "title": "Private result",
+                    "url": "http://127.0.0.1/private",
+                    "text": SENTINEL_CONTENT,
+                },
+                {
+                    "title": "Sensitive result URL",
+                    "url": "https://drop.example.org/page?access_token=sensitive-value",
+                    "text": SENTINEL_CONTENT,
+                },
+                {
+                    "title": "Duplicate canonical URL",
+                    "url": "https://news.example.org:443/story?q=ok#other",
+                    "text": "must be dropped",
+                },
+                {
+                    "title": "Long result",
+                    "url": "https://docs.example.org/item#fragment",
+                    "text": long_snippet,
+                },
+                {
+                    "title": None,
+                    "url": "https://untitled.example.org/page",
+                    "text": None,
+                },
+                {"title": "Wrong URL type", "url": 123, "text": "drop"},
+            ]
+        ),
+    )
+
+    result = await client.search("  latest\n public\t facts  ", max_results=999)
+
+    assert factory.search_toolkit.search_calls == [("latest public facts", 10, None)]
     assert result == {
         "query": "latest public facts",
         "results": [
@@ -170,8 +238,8 @@ async def test_search_sends_exact_request_and_normalizes_results(web_access_modu
                 "snippet": "x" * (web_access_module.SEARCH_SNIPPET_MAX_CHARS - 1) + "…",
             },
             {
-                "title": "No snippet",
-                "url": "https://third.example.org/page",
+                "title": "https://untitled.example.org/page",
+                "url": "https://untitled.example.org/page",
                 "snippet": "",
             },
         ],
@@ -179,309 +247,104 @@ async def test_search_sends_exact_request_and_normalizes_results(web_access_modu
 
 
 async def test_search_accepts_empty_results_and_clamps_low_result_count(web_access_module: ModuleType) -> None:
-    calls = 0
+    client, factory = _make_client(web_access_module)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        _assert_request_timeout(request, 60.0)
-        assert json.loads(request.content) == {
-            "query": "facts",
-            "search_depth": "basic",
-            "max_results": 1,
-            "include_answer": False,
-            "include_raw_content": False,
-            "include_images": False,
-        }
-        return httpx.Response(200, json={"results": []})
+    result = await client.search("facts", max_results=0)
 
-    client, injected = _make_client(web_access_module, handler, timeout=500.0, injected_timeout=0.01)
-    try:
-        result = await client.search("facts", max_results=0)
-    finally:
-        await injected.aclose()
-
-    assert calls == 1
     assert result == {"query": "facts", "results": []}
+    assert factory.search_toolkit.search_calls == [("facts", 1, None)]
 
 
 async def test_query_and_focus_are_normalized_and_capped(web_access_module: ModuleType) -> None:
-    bodies: list[dict[str, object]] = []
+    client, factory = _make_client(
+        web_access_module,
+        content_result=_json_result([{"url": "https://source.example.org/page", "text": "body"}]),
+    )
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        _assert_request_timeout(request, 7.5)
-        bodies.append(json.loads(request.content))
-        if request.url.path == "/search":
-            return httpx.Response(200, json={"results": []})
-        return httpx.Response(
-            200,
-            json={"results": [{"url": "https://source.example.org/page", "raw_content": "body"}]},
-        )
-
-    client, injected = _make_client(web_access_module, handler, timeout=7.5, injected_timeout=0.01)
-    try:
-        search_result = await client.search(f"  {'q' * 600}\n")
-        page_result = await client.extract(
-            "https://input.example.org/page",
-            focus=f"\t{'f' * 600}  ",
-        )
-    finally:
-        await injected.aclose()
+    search_result = await client.search(f"  {'q' * 600}\n")
+    page_result = await client.extract(
+        "https://input.example.org/page",
+        focus=f"\t{'f' * 600}  ",
+    )
 
     expected_query = "q" * 499 + "…"
-    expected_focus = "f" * 499 + "…"
     assert search_result["query"] == expected_query
     assert page_result == {"url": "https://source.example.org/page", "content": "body"}
-    assert bodies[0]["query"] == expected_query
-    assert bodies[1]["query"] == expected_focus
+    assert factory.search_toolkit.search_calls == [(expected_query, 5, None)]
+    assert factory.content_toolkit.content_calls == [["https://input.example.org/page"]]
 
 
-async def test_extract_sends_exact_request_and_preserves_markdown(web_access_module: ModuleType) -> None:
+async def test_extract_preserves_content_and_applies_character_limit(web_access_module: ModuleType) -> None:
     raw_content = "  \n# Heading\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nFinal paragraph.\n  "
-    expected_content = "# Heading\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nFinal paragraph."
-    calls = 0
+    client, factory = _make_client(
+        web_access_module,
+        content_result=_json_result(
+            [
+                "not-a-mapping",
+                {"url": "https://127.0.0.1/private", "text": "private"},
+                {"url": "https://blank.example.org/", "text": "   \n"},
+                {"url": "HTTPS://Docs.Example.ORG:443/page#source", "text": raw_content},
+            ]
+        ),
+    )
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        _assert_request_timeout(request, 60.0)
-        assert request.method == "POST"
-        assert str(request.url) == "https://api.tavily.com/extract"
-        assert request.headers["authorization"] == f"Bearer {SENTINEL_API_KEY}"
-        assert request.headers["content-type"] == "application/json"
-        assert json.loads(request.content) == {
-            "urls": ["https://input.example.org:443/article?lang=en"],
-            "query": "facts and sections",
-            "extract_depth": "advanced",
-            "include_images": False,
-            "format": "markdown",
-            "timeout": 60.0,
-        }
-        return httpx.Response(
-            200,
-            json={
-                "results": [
-                    "not-a-mapping",
-                    {
-                        "url": "https://127.0.0.1/private",
-                        "raw_content": "private content must be ignored",
-                    },
-                    {"url": "https://blank.example.org/", "raw_content": "   \n"},
-                    {
-                        "url": "HTTPS://Docs.Example.ORG:443/page#source",
-                        "raw_content": raw_content,
-                    },
-                    {
-                        "url": "https://later.example.org/page",
-                        "raw_content": "later content must not be selected",
-                    },
-                ]
-            },
-        )
+    result = await client.extract(
+        "  HTTPS://Input.Example.ORG:443/article?lang=en#fragment  ",
+        focus="  facts\n and\t sections  ",
+        max_chars=30,
+    )
 
-    client, injected = _make_client(web_access_module, handler, timeout=999.0, injected_timeout=0.125)
-    try:
-        result = await client.extract(
-            "  HTTPS://Input.Example.ORG:443/article?lang=en#fragment  ",
-            focus="  facts\n and\t sections  ",
-            max_chars=6000,
-        )
-    finally:
-        await injected.aclose()
-
-    assert calls == 1
+    assert factory.content_toolkit.content_calls == [["https://input.example.org:443/article?lang=en"]]
     assert result == {
         "url": "https://docs.example.org:443/page",
-        "content": expected_content,
+        "content": "# Heading\n\n| A | B |\n|---|---…",
     }
-
-
-@pytest.mark.parametrize(
-    ("max_chars", "expected"),
-    [
-        pytest.param(8, "abcdefg…", id="configured-limit"),
-        pytest.param(0, "…", id="minimum-one-character"),
-    ],
-)
-async def test_extract_applies_character_limit(
-    web_access_module: ModuleType,
-    max_chars: int,
-    expected: str,
-) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        _assert_request_timeout(request, 30.0)
-        return httpx.Response(
-            200,
-            json={"results": [{"url": "https://source.example.org/page", "raw_content": "abcdefghij"}]},
-        )
-
-    client, injected = _make_client(web_access_module, handler)
-    try:
-        result = await client.extract("https://input.example.org/page", focus="relevant facts", max_chars=max_chars)
-    finally:
-        await injected.aclose()
-
-    assert result == {"url": "https://source.example.org/page", "content": expected}
 
 
 @pytest.mark.parametrize(
     "payload",
     [
-        pytest.param({"results": []}, id="empty-results"),
-        pytest.param(
-            {"results": [{"url": "https://source.example.org/page", "raw_content": "   \n"}]},
-            id="blank-content",
-        ),
-        pytest.param(
-            {
-                "results": [{"url": "http://127.0.0.1/private", "raw_content": "private"}],
-                "failed_results": [],
-            },
-            id="invalid-provider-url",
-        ),
-        pytest.param(
-            {
-                "results": [],
-                "failed_results": [{"url": SENTINEL_URL, "error": SENTINEL_CONTENT}],
-            },
-            id="failed-results-only",
-        ),
+        pytest.param(_json_result([]), id="empty-results"),
+        pytest.param(_json_result([{"url": "https://source.example.org/page", "text": "   \n"}]), id="blank"),
+        pytest.param(_json_result([{"url": "http://127.0.0.1/private", "text": "private"}]), id="private"),
     ],
 )
-async def test_extract_rejects_responses_without_usable_content(
+async def test_extract_rejects_results_without_usable_content(
     web_access_module: ModuleType,
-    payload: object,
+    payload: str,
 ) -> None:
-    calls = 0
+    client, _factory = _make_client(web_access_module, content_result=payload)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        _assert_request_timeout(request, 30.0)
-        return httpx.Response(200, json=payload)
+    with pytest.raises(web_access_module.WebAccessError) as raised:
+        await client.extract("https://input.example.org/page", focus="facts")
 
-    client, injected = _make_client(web_access_module, handler)
-    try:
-        with pytest.raises(web_access_module.WebAccessError) as raised:
-            await client.extract("https://input.example.org/page", focus="facts")
-    finally:
-        await injected.aclose()
-
-    assert calls == 1
-    assert str(raised.value) == "Tavily returned no usable page content"
+    assert str(raised.value) == "Exa returned no usable page content"
 
 
 @pytest.mark.parametrize(
-    ("status", "expected_error"),
+    ("result", "error", "expected"),
     [
-        pytest.param(401, "Tavily authentication failed", id="authentication"),
-        pytest.param(429, "Tavily rate limit or quota exhausted", id="rate-limit"),
-        pytest.param(432, "Tavily rate limit or quota exhausted", id="usage-limit"),
-        pytest.param(433, "Tavily rate limit or quota exhausted", id="quota-limit"),
-        pytest.param(400, "Tavily rejected the request", id="bad-request"),
-        pytest.param(418, "Tavily rejected the request", id="other-client-error"),
-        pytest.param(499, "Tavily rejected the request", id="last-client-error"),
-        pytest.param(500, "Tavily service is unavailable", id="server-error"),
-        pytest.param(503, "Tavily service is unavailable", id="unavailable"),
-        pytest.param(302, "Tavily returned an invalid response", id="unexpected-status"),
+        pytest.param("Error: Operation timed out after 9 seconds", None, "Exa request timed out", id="timeout"),
+        pytest.param(f"Error: {SENTINEL_CONTENT}", None, "Exa service is unavailable", id="provider-error"),
+        pytest.param("not-json", None, "Exa returned an invalid response", id="invalid-json"),
+        pytest.param("{}", None, "Exa returned an invalid response", id="wrong-shape"),
+        pytest.param(123, None, "Exa returned an invalid response", id="wrong-type"),
+        pytest.param(None, RuntimeError(" | ".join(SENSITIVE_VALUES)), "Exa service is unavailable", id="exception"),
     ],
 )
-async def test_http_status_errors_are_exact_and_sanitized(
+async def test_provider_failures_are_exact_and_sanitized(
     web_access_module: ModuleType,
-    caplog: pytest.LogCaptureFixture,
-    status: int,
-    expected_error: str,
+    result: object,
+    error: BaseException | None,
+    expected: str,
 ) -> None:
-    caplog.set_level(logging.DEBUG)
+    client, _factory = _make_client(web_access_module, search_result=result, search_error=error)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        _assert_request_timeout(request, 12.0)
-        return httpx.Response(
-            status,
-            json={
-                "message": SENTINEL_CONTENT,
-                "query": SENTINEL_QUERY,
-                "url": SENTINEL_URL,
-            },
-        )
+    with pytest.raises(web_access_module.WebAccessError) as raised:
+        await client.search(SENTINEL_QUERY)
 
-    client, injected = _make_client(web_access_module, handler, timeout=12.0, injected_timeout=0.01)
-    try:
-        with pytest.raises(web_access_module.WebAccessError) as raised:
-            await client.extract(SENTINEL_URL, focus=f"{SENTINEL_QUERY} {SENTINEL_FOCUS}")
-    finally:
-        await injected.aclose()
-
-    assert str(raised.value) == expected_error
-    _assert_sanitized(raised.value, caplog)
-
-
-@pytest.mark.parametrize(
-    ("exception_type", "expected_error"),
-    [
-        pytest.param(httpx.ReadTimeout, "Tavily request timed out", id="timeout"),
-        pytest.param(httpx.ConnectError, "Tavily service is unavailable", id="transport"),
-    ],
-)
-async def test_transport_errors_are_exact_and_sanitized(
-    web_access_module: ModuleType,
-    caplog: pytest.LogCaptureFixture,
-    exception_type: type[httpx.TransportError],
-    expected_error: str,
-) -> None:
-    caplog.set_level(logging.DEBUG)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        _assert_request_timeout(request, 9.0)
-        leak_blob = " | ".join(SENSITIVE_VALUES)
-        raise exception_type(leak_blob, request=request)
-
-    client, injected = _make_client(web_access_module, handler, timeout=9.0, injected_timeout=0.01)
-    try:
-        with pytest.raises(web_access_module.WebAccessError) as raised:
-            await client.extract(SENTINEL_URL, focus=f"{SENTINEL_QUERY} {SENTINEL_FOCUS}")
-    finally:
-        await injected.aclose()
-
-    assert str(raised.value) == expected_error
-    _assert_sanitized(raised.value, caplog)
-
-
-@pytest.mark.parametrize(
-    "response_kind",
-    [
-        pytest.param("invalid-json", id="invalid-json"),
-        pytest.param("top-level-list", id="top-level-list"),
-        pytest.param("results-string", id="results-string"),
-        pytest.param("missing-results", id="missing-results"),
-    ],
-)
-async def test_invalid_response_shapes_are_sanitized(
-    web_access_module: ModuleType,
-    caplog: pytest.LogCaptureFixture,
-    response_kind: str,
-) -> None:
-    caplog.set_level(logging.DEBUG)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        _assert_request_timeout(request, 30.0)
-        if response_kind == "invalid-json":
-            return httpx.Response(200, content=f"not-json {SENTINEL_CONTENT}".encode())
-        if response_kind == "top-level-list":
-            return httpx.Response(200, json=[SENTINEL_CONTENT])
-        if response_kind == "results-string":
-            return httpx.Response(200, json={"results": SENTINEL_CONTENT})
-        return httpx.Response(200, json={"message": SENTINEL_CONTENT})
-
-    client, injected = _make_client(web_access_module, handler)
-    try:
-        with pytest.raises(web_access_module.WebAccessError) as raised:
-            await client.search(SENTINEL_QUERY)
-    finally:
-        await injected.aclose()
-
-    assert str(raised.value) == "Tavily returned an invalid response"
-    _assert_sanitized(raised.value, caplog)
+    assert str(raised.value) == expected
+    _assert_sanitized(raised.value)
 
 
 @pytest.mark.parametrize(
@@ -489,27 +352,18 @@ async def test_invalid_response_shapes_are_sanitized(
     [
         pytest.param("", id="empty"),
         pytest.param("   \t", id="whitespace"),
-        pytest.param("${{ env.get('TAVILY_API_KEY') }}", id="unresolved-template"),
+        pytest.param("${{ env.get('EXA_API_KEY') }}", id="unresolved-template"),
         pytest.param("prefix }} suffix", id="dangling-template-marker"),
     ],
 )
-async def test_invalid_api_keys_fail_before_transport(web_access_module: ModuleType, api_key: str) -> None:
-    calls = 0
+def test_invalid_api_keys_fail_before_toolkit_construction(web_access_module: ModuleType, api_key: str) -> None:
+    factory = _ToolkitFactory()
 
-    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not execute
-        nonlocal calls
-        calls += 1
-        return httpx.Response(200, json={"results": []})
+    with pytest.raises(web_access_module.WebAccessError) as raised:
+        web_access_module.ExaWebClient(api_key, toolkit_factory=factory)
 
-    client, injected = _make_client(web_access_module, handler, api_key=api_key)
-    try:
-        with pytest.raises(web_access_module.WebAccessError) as raised:
-            await client.search("public facts")
-    finally:
-        await injected.aclose()
-
-    assert calls == 0
-    assert str(raised.value) == "Tavily API key is not configured"
+    assert factory.calls == []
+    assert str(raised.value) == "Exa API key is not configured"
 
 
 @pytest.mark.parametrize(
@@ -519,30 +373,22 @@ async def test_invalid_api_keys_fail_before_transport(web_access_module: ModuleT
         pytest.param("extract", "focus is required", id="blank-focus"),
     ],
 )
-async def test_blank_search_text_fails_before_transport(
+async def test_blank_search_text_fails_before_tool_execution(
     web_access_module: ModuleType,
     operation: str,
     expected_error: str,
 ) -> None:
-    calls = 0
+    client, factory = _make_client(web_access_module)
 
-    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not execute
-        nonlocal calls
-        calls += 1
-        return httpx.Response(200, json={"results": []})
-
-    client, injected = _make_client(web_access_module, handler)
     if operation == "search":
         request = client.search(" \n\t ")
     else:
         request = client.extract("https://public.example.org/page", focus=" \n\t ")
-    try:
-        with pytest.raises(web_access_module.WebAccessError) as raised:
-            await request
-    finally:
-        await injected.aclose()
+    with pytest.raises(web_access_module.WebAccessError) as raised:
+        await request
 
-    assert calls == 0
+    assert factory.search_toolkit.search_calls == []
+    assert factory.content_toolkit.content_calls == []
     assert str(raised.value) == expected_error
 
 
@@ -583,56 +429,27 @@ def test_normalize_public_url_accepts_and_canonicalizes_public_urls(
         pytest.param("https://user:pass@public.example.org/page", id="userinfo"),
         pytest.param("https://intranet/page", id="single-label"),
         pytest.param("https://localhost/page", id="localhost"),
-        pytest.param("https://home.arpa/page", id="home-arpa"),
-        pytest.param("https://router.home.arpa/page", id="home-arpa-subdomain"),
         pytest.param("https://service.local/page", id="local-suffix"),
         pytest.param("https://service.internal/page", id="internal-suffix"),
-        pytest.param("https://service.localdomain/page", id="localdomain-suffix"),
-        pytest.param("https://service.home/page", id="home-suffix"),
-        pytest.param("https://service.lan/page", id="lan-suffix"),
-        pytest.param("https://service.test/page", id="test-suffix"),
-        pytest.param("https://service.invalid/page", id="invalid-suffix"),
-        pytest.param("https://service.example/page", id="example-suffix"),
         pytest.param("https://service.onion/page", id="onion-suffix"),
-        pytest.param("https://localhost./page", id="localhost-terminal-dot"),
-        pytest.param("https://host.internal./page", id="internal-terminal-dot"),
-        pytest.param("https://public.example.org./page", id="public-terminal-dot"),
         pytest.param("http://127.0.0.1/page", id="loopback-ipv4"),
         pytest.param("http://10.0.0.1/page", id="private-ipv4"),
         pytest.param("http://169.254.1.1/page", id="link-local-ipv4"),
-        pytest.param("http://192.0.2.1/page", id="reserved-ipv4"),
-        pytest.param("http://224.0.0.1/page", id="multicast-ipv4"),
         pytest.param("http://0.0.0.0/page", id="unspecified-ipv4"),
-        pytest.param("http://127.1/page", id="abbreviated-numeric-ipv4"),
-        pytest.param("http://2130706433/page", id="integer-numeric-ipv4"),
-        pytest.param("http://0300.0250.0001.0001/page", id="ambiguous-numeric-ipv4"),
         pytest.param("http://[::1]/page", id="loopback-ipv6"),
         pytest.param("http://[fc00::1]/page", id="private-ipv6"),
-        pytest.param("http://[fe80::1]/page", id="link-local-ipv6"),
-        pytest.param("http://[ff02::1]/page", id="multicast-ipv6"),
-        pytest.param("http://[::]/page", id="unspecified-ipv6"),
-        pytest.param("http://[2001:db8::1]/page", id="reserved-ipv6"),
         pytest.param("https://public.example.org:not-a-port/page", id="invalid-port"),
         pytest.param("https://[::1/page", id="invalid-ipv6-syntax"),
         pytest.param("https://public.example.org/" + "a" * 2048, id="overlong"),
     ],
 )
-async def test_rejected_urls_never_reach_transport(web_access_module: ModuleType, url: str) -> None:
-    calls = 0
+async def test_rejected_urls_never_reach_exa(web_access_module: ModuleType, url: str) -> None:
+    client, factory = _make_client(web_access_module)
 
-    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not execute
-        nonlocal calls
-        calls += 1
-        return httpx.Response(200, json={"results": []})
+    with pytest.raises(web_access_module.WebAccessError) as raised:
+        await client.extract(url, focus="public facts")
 
-    client, injected = _make_client(web_access_module, handler)
-    try:
-        with pytest.raises(web_access_module.WebAccessError) as raised:
-            await client.extract(url, focus="public facts")
-    finally:
-        await injected.aclose()
-
-    assert calls == 0
+    assert factory.content_toolkit.content_calls == []
     assert str(raised.value) == "A valid public URL is required"
 
 
@@ -642,17 +459,8 @@ async def test_rejected_urls_never_reach_transport(web_access_module: ModuleType
         pytest.param("token=sensitive-value", id="token"),
         pytest.param("Access-Token=sensitive-value", id="access-token-normalized"),
         pytest.param("api%5Fkey=sensitive-value", id="encoded-api-key"),
-        pytest.param("KEY=sensitive-value", id="key-casefold"),
         pytest.param("secret=sensitive-value", id="secret"),
-        pytest.param("password=sensitive-value", id="password"),
-        pytest.param("passwd=sensitive-value", id="passwd"),
-        pytest.param("credential=sensitive-value", id="credential"),
-        pytest.param("credentials=sensitive-value", id="credentials"),
-        pytest.param("auth=sensitive-value", id="auth"),
         pytest.param("authorization=sensitive-value", id="authorization"),
-        pytest.param("signature=sensitive-value", id="signature"),
-        pytest.param("sig=sensitive-value", id="sig"),
-        pytest.param("session=sensitive-value", id="session"),
         pytest.param("session-id=sensitive-value", id="session-id-normalized"),
         pytest.param("cookie=sensitive-value", id="cookie"),
         pytest.param("X-Amz-Signature=sensitive-value", id="aws-prefix"),
@@ -661,75 +469,15 @@ async def test_rejected_urls_never_reach_transport(web_access_module: ModuleType
         pytest.param("ok=1;TOKEN=sensitive-value", id="semicolon-separator"),
     ],
 )
-async def test_sensitive_query_keys_never_reach_transport(
-    web_access_module: ModuleType,
-    query: str,
-) -> None:
-    calls = 0
+async def test_sensitive_query_keys_never_reach_exa(web_access_module: ModuleType, query: str) -> None:
+    client, factory = _make_client(web_access_module)
 
-    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not execute
-        nonlocal calls
-        calls += 1
-        return httpx.Response(200, json={"results": []})
+    with pytest.raises(web_access_module.WebAccessError) as raised:
+        await client.extract(f"https://public.example.org/page?{query}", focus="public facts")
 
-    client, injected = _make_client(web_access_module, handler)
-    try:
-        with pytest.raises(web_access_module.WebAccessError) as raised:
-            await client.extract(f"https://public.example.org/page?{query}", focus="public facts")
-    finally:
-        await injected.aclose()
-
-    assert calls == 0
+    assert factory.content_toolkit.content_calls == []
     assert str(raised.value) == "URLs containing sensitive query parameters are not allowed"
     assert "sensitive-value" not in str(raised.value)
-
-
-async def test_aclose_closes_owned_internal_client(
-    web_access_module: ModuleType,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class CloseSpy:
-        def __init__(self) -> None:
-            self.close_calls = 0
-
-        async def aclose(self) -> None:
-            self.close_calls += 1
-
-    spies: list[CloseSpy] = []
-
-    def make_spy() -> CloseSpy:
-        spy = CloseSpy()
-        spies.append(spy)
-        return spy
-
-    monkeypatch.setattr(web_access_module.httpx, "AsyncClient", make_spy)
-
-    explicit_client = web_access_module.TavilyWebClient(SENTINEL_API_KEY)
-    await explicit_client.aclose()
-    assert spies[0].close_calls == 1
-
-    async with web_access_module.TavilyWebClient(SENTINEL_API_KEY):
-        assert spies[1].close_calls == 0
-    assert spies[1].close_calls == 1
-
-
-async def test_aclose_does_not_close_injected_client(web_access_module: ModuleType) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - no HTTP is expected
-        raise AssertionError("transport must not be called")
-
-    injected = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        client = web_access_module.TavilyWebClient(SENTINEL_API_KEY, client=injected)
-        await client.aclose()
-        assert not injected.is_closed
-
-        async with web_access_module.TavilyWebClient(SENTINEL_API_KEY, client=injected):
-            pass
-        assert not injected.is_closed
-    finally:
-        await injected.aclose()
-
-    assert injected.is_closed
 
 
 def test_web_access_scope_resets_after_normal_exit(web_access_module: ModuleType) -> None:

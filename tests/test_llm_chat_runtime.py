@@ -24,7 +24,7 @@ from satori.model import User, Member, MessageObject
 from arclet.entari import Text, Image, Quote, Author, Session, MessageChain, MessageCreatedEvent
 from satori.client import Account
 from satori.element import Custom
-from arclet.letoderea import BLOCK
+from arclet.letoderea import BLOCK, Contexts
 from arclet.entari.config import EntariConfig
 from arclet.entari.message import Reply
 from arclet.letoderea.core import dispatch
@@ -47,22 +47,15 @@ from entari_plugin_database import Base
 from plugins.llm_chat import (
     vision as vision_module,
     generation as generation_module,
+    agno_compat as agno_compat_module,
     chat_context as chat_context_module,
     forward_context as forward_context_module,
 )
+from plugins.llm_chat.core import image_source as image_source_module
 from plugins.llm_chat.tools import is_command_allowed
 from plugins.llm_chat.config import LLMChatConfig
 from plugins.llm_chat.models import UserMemory, Conversation, UserProfileFact
-from plugins.llm_chat.vision import (
-    VISION_TAG_TIMEOUT,
-    IMAGE_FETCH_MAX_BYTES,
-    VISION_DESCRIBE_TIMEOUT,
-    fetch_image_bytes,
-    vision_completion,
-    fetch_image_data_url,
-    raw_to_image_data_url,
-    image_file_to_data_url,
-)
+from plugins.llm_chat.vision import VISION_TAG_TIMEOUT, VISION_DESCRIBE_TIMEOUT, vision_completion
 from plugins.llm_chat.persona import (
     store as store_module,
     runner as runner_module,
@@ -95,6 +88,14 @@ from plugins.llm_chat.core.delivery import (
     llm_chat_delivery_scope,
 )
 from plugins.llm_chat.persona.runner import run_evaluation
+from plugins.llm_chat.runtime_context import copy_llm_chat_context, llm_chat_context_scope
+from plugins.llm_chat.core.image_source import (
+    IMAGE_FETCH_MAX_BYTES,
+    fetch_image_bytes,
+    fetch_image_data_url,
+    raw_to_image_data_url,
+    image_file_to_data_url,
+)
 from plugins.llm_chat.persona.embedding import embed_text
 from plugins.llm_chat.persona.memory_update import apply_memory_updates, resolve_fact_embedding_update
 from plugins.llm_chat.persona.memory_context import load_memory_context
@@ -147,7 +148,8 @@ class _ImageSession:
         direct_images = direct if isinstance(direct, list) else ([] if direct is None else [direct])
         quoted_images = quoted if isinstance(quoted, list) else ([] if quoted is None else [quoted])
         self.elements = MessageChain(direct_images)
-        self.quote = SimpleNamespace(children=quoted_images)
+        self.quote: Any = SimpleNamespace(children=quoted_images)
+        self.reply: Any = None
         self._downloads = downloads or {}
 
     async def download(self, src: str) -> bytes:
@@ -247,7 +249,7 @@ class _HandlerClock:
 
 
 def _handler_response(content: str | None) -> SimpleNamespace:
-    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+    return SimpleNamespace(content=content, choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
 
 
 def _install_handler_stubs(
@@ -739,7 +741,7 @@ async def test_fetch_image_bytes_rejects_malformed_inline_and_download_timeout(
             await asyncio.sleep(1)
             return _PNG_BYTES
 
-    monkeypatch.setattr(vision_module, "_IMAGE_FETCH_TIMEOUT", 0.001)
+    monkeypatch.setattr(image_source_module, "_IMAGE_FETCH_TIMEOUT", 0.001)
 
     assert await fetch_image_bytes(cast(Session, SlowSession()), "data:image/png,AAAA") is None
     assert await fetch_image_bytes(cast(Session, SlowSession()), "data:image/png;base64,!!!!") is None
@@ -1601,9 +1603,77 @@ async def test_run_evaluation_uses_dedicated_json_payload_without_tools(
 
 
 @pytest.mark.asyncio
+async def test_generation_context_scope_propagates_to_tool_tasks() -> None:
+    sentinel = object()
+    context = Contexts({"sentinel": sentinel})
+
+    async def copy_context() -> Contexts | None:
+        return copy_llm_chat_context()
+
+    with llm_chat_context_scope(context):
+        copied = await asyncio.create_task(copy_context())
+
+    assert copied is not context
+    assert copied is not None
+    assert copied["sentinel"] is sentinel
+    assert copy_llm_chat_context() is None
+
+
+@pytest.mark.asyncio
+async def test_agno_tool_bridge_merges_arguments_and_inherits_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    handled: list[tuple[dict[str, Any], bool]] = []
+
+    class FakeSubscriber:
+        def __init__(self) -> None:
+            self.__name__ = "probe"
+            self.__doc__ = "Probe the compatibility bridge."
+            self.params: list[Any] = []
+
+        async def handle(self, context: Contexts, inner: bool = False) -> dict[str, str]:
+            handled.append((dict(context), inner))
+            return {"value": context["value"], "sentinel": context["sentinel"]}
+
+    monkeypatch.setattr(agno_compat_module, "available_functions", {"probe": FakeSubscriber()})
+    monkeypatch.setattr(
+        agno_compat_module,
+        "tools",
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "probe",
+                    "description": "Probe the compatibility bridge.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ],
+    )
+    tool = agno_compat_module.build_agno_tools()[0]
+    assert tool.entrypoint is not None
+
+    with llm_chat_context_scope(Contexts({"sentinel": "event-context"})):
+        result = json.loads(await tool.entrypoint(value="tool-argument"))
+
+    assert result == {"ok": True, "data": {"value": "tool-argument", "sentinel": "event-context"}}
+    assert handled[0][1] is True
+    assert handled[0][0]["value"] == "tool-argument"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "invalid_content",
-    [None, "", "[END_OF_RESPONSE]", "[用语音说: [softly] 这不是一次真实发送。]"],
+    [
+        None,
+        "",
+        "[END_OF_RESPONSE]",
+        "[END_OF_RESPONSE]\n[END_OF_RESPONSE]",
+        "[用语音说: [softly] 这不是一次真实发送。]",
+    ],
 )
 async def test_generation_retries_invisible_reply_once_without_tools(
     monkeypatch: pytest.MonkeyPatch,
@@ -1614,6 +1684,7 @@ async def test_generation_retries_invisible_reply_once_without_tools(
 
     async def fake_generate(messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
         primary_requests.append(kwargs)
+        json.dumps(kwargs)
         messages.append({"role": "assistant", "content": invalid_content})
         return _handler_response(invalid_content)
 
@@ -1645,14 +1716,15 @@ async def test_generation_retries_invisible_reply_once_without_tools(
         system="system",
         model="deepseek",
         channel_id="group",
-        ctx=cast(Any, SimpleNamespace()),
+        ctx=Contexts(),
         web_limits=generation_module.WebAccessLimits(0, 0, 0),
         delivery_state=DeliveryState(),
         request_timeout=12.5,
     )
 
-    assert response.choices[0].message.content == "现在直接回复。"
+    assert generation_module.response_content(response) == "现在直接回复。"
     assert primary_requests[0]["timeout"] == 12.5
+    assert "ctx" not in primary_requests[0]
     assert len(final_requests) == 1
     final_request = final_requests[0]
     assert final_request["timeout"] == 12.5
@@ -1664,14 +1736,84 @@ async def test_generation_retries_invisible_reply_once_without_tools(
 
 
 @pytest.mark.asyncio
+async def test_generation_retries_explicit_media_request_until_delivery_is_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = DeliveryState()
+    requests: list[dict[str, Any]] = []
+
+    async def fake_generate(_messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
+        requests.append(kwargs)
+        if len(requests) == 1:
+            return _handler_response("刚才漏发了，这次真给你补上。")
+        mark_delivery_success(state, media=True)
+        return _handler_response("[END_OF_RESPONSE]")
+
+    async def unexpected_acompletion(**_kwargs: Any) -> None:
+        raise AssertionError("media recovery must retain tool access")
+
+    monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
+    monkeypatch.setattr(generation_module.litellm, "acompletion", unexpected_acompletion)
+
+    response = await generation_module.generate_chat_response(
+        cast(
+            list[Any],
+            [{"role": "user", "content": '{"speaker":"FrostN0v0","content":"你发的图呢？"}'}],
+        ),
+        system="system",
+        model="deepseek",
+        channel_id="group",
+        ctx=Contexts(),
+        web_limits=generation_module.WebAccessLimits(2, 2, 4),
+        delivery_state=state,
+        request_timeout=12.5,
+    )
+
+    assert generation_module.response_content(response) == "[END_OF_RESPONSE]"
+    assert len(requests) == 2
+    assert "上一条候选回复没有产生任何确认的媒体发送" in requests[1]["system"]
+    assert state.confirmed_media_deliveries == 1
+
+
+@pytest.mark.asyncio
+async def test_generation_rejects_repeated_false_media_delivery_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[dict[str, Any]] = []
+
+    async def fake_generate(_messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
+        requests.append(kwargs)
+        return _handler_response("这次真给你补上，大概就是这种样子。")
+
+    monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
+
+    with pytest.raises(
+        RuntimeError,
+        match="^LLM media recovery did not confirm delivery or report unavailability$",
+    ):
+        await generation_module.generate_chat_response(
+            cast(list[Any], [{"role": "user", "content": "来张图我看看什么样子"}]),
+            system="system",
+            model="deepseek",
+            channel_id="group",
+            ctx=Contexts(),
+            web_limits=generation_module.WebAccessLimits(2, 2, 4),
+            delivery_state=DeliveryState(),
+            request_timeout=12.5,
+        )
+
+    assert len(requests) == 2
+
+
+@pytest.mark.asyncio
 async def test_generation_accepts_end_marker_after_confirmed_media_without_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = DeliveryState()
-    mark_delivery_success(state)
+    mark_delivery_success(state, media=True)
 
     async def fake_generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
-        return _handler_response("[END_OF_RESPONSE]")
+        return SimpleNamespace(content="[END_OF_RESPONSE]")
 
     async def unexpected_acompletion(**_kwargs: Any) -> None:
         raise AssertionError("confirmed delivery must not trigger a corrective retry")
@@ -1684,13 +1826,13 @@ async def test_generation_accepts_end_marker_after_confirmed_media_without_retry
         system="system",
         model="deepseek",
         channel_id="group",
-        ctx=cast(Any, SimpleNamespace()),
+        ctx=Contexts(),
         web_limits=generation_module.WebAccessLimits(0, 0, 0),
         delivery_state=state,
         request_timeout=12.5,
     )
 
-    assert response.choices[0].message.content == "[END_OF_RESPONSE]"
+    assert generation_module.response_content(response) == "[END_OF_RESPONSE]"
 
 
 @pytest.mark.asyncio
@@ -1779,6 +1921,52 @@ async def test_segmented_delivery_is_aggregated_once_and_reuses_normalized_limit
 
 
 @pytest.mark.asyncio
+async def test_trailing_end_marker_is_not_sent_or_persisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        session = _ChatSession("return one visible reply")
+
+        async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            return _handler_response("visible final reply\n[END_OF_RESPONSE]")
+
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
+        assert result is BLOCK
+        assert session.sent == ["visible final reply"]
+        assert assistant_rows == [("group-B", "", "bot", "assistant", "visible final reply")]
+        assert records.evaluations[0]["current_turn"]["assistant"]["content"] == "visible final reply"
+
+
+@pytest.mark.asyncio
+async def test_media_unavailable_marker_is_not_sent_or_persisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        session = _ChatSession("你发的图呢？")
+
+        async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            return _handler_response("[MEDIA_UNAVAILABLE] 这轮没有确认发出图片。")
+
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
+        assert result is BLOCK
+        assert session.sent == ["这轮没有确认发出图片。"]
+        assert assistant_rows == [("group-B", "", "bot", "assistant", "这轮没有确认发出图片。")]
+        assert records.evaluations[0]["current_turn"]["assistant"]["content"] == "这轮没有确认发出图片。"
+
+
+@pytest.mark.asyncio
 async def test_multiline_final_reply_after_media_is_sent_as_paced_separate_messages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1792,7 +1980,7 @@ async def test_multiline_final_reply_after_media_is_sent_as_paced_separate_messa
             state = kwargs["delivery_state"]
             state.sleep = clock.sleep
             state.clock = clock.monotonic
-            mark_delivery_success(state)
+            mark_delivery_success(state, media=True)
             clock.now = 2.0
             return _handler_response("first beat\nsecond beat")
 
@@ -1964,7 +2152,7 @@ async def test_delivery_pure_media_keeps_evaluator_assistant_empty(
         session = _ChatSession("send only media")
 
         async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
-            mark_delivery_success(kwargs["delivery_state"])
+            mark_delivery_success(kwargs["delivery_state"], media=True)
             await module.append_message(
                 "group-B",
                 "",
@@ -2233,10 +2421,23 @@ def test_yaml_and_default_llm_chat_configuration_are_exactly_synchronized():
     assert defaults.model_request_timeout == llm_chat_plugin["model_request_timeout"] == 90.0
     assert defaults.eval_request_timeout == llm_chat_plugin["eval_request_timeout"] == 60.0
     assert defaults.web_search_enabled is False
-    assert defaults.tavily_api_key is None
-    assert defaults.web_search_max_calls_per_generation == llm_chat_plugin["web_search_max_calls_per_generation"] == 2
-    assert defaults.web_page_max_calls_per_generation == llm_chat_plugin["web_page_max_calls_per_generation"] == 2
-    assert defaults.web_total_max_calls_per_generation == llm_chat_plugin["web_total_max_calls_per_generation"] == 4
+    assert defaults.exa_api_key is None
+    assert defaults.exa_search_type == llm_chat_plugin["exa_search_type"] == "auto"
+    assert defaults.exa_search_category is llm_chat_plugin["exa_search_category"] is None
+    assert defaults.exa_include_domains == llm_chat_plugin["exa_include_domains"] == []
+    assert defaults.exa_exclude_domains == llm_chat_plugin["exa_exclude_domains"] == []
+    assert defaults.exa_start_published_date is llm_chat_plugin["exa_start_published_date"] is None
+    assert defaults.exa_end_published_date is llm_chat_plugin["exa_end_published_date"] is None
+    assert defaults.web_search_max_calls_per_generation == 2
+    assert defaults.web_page_max_calls_per_generation == 2
+    assert defaults.web_total_max_calls_per_generation == 4
+    configured_web_limits = (
+        llm_chat_plugin["web_search_max_calls_per_generation"],
+        llm_chat_plugin["web_page_max_calls_per_generation"],
+        llm_chat_plugin["web_total_max_calls_per_generation"],
+    )
+    assert all(type(value) is int and value >= 0 for value in configured_web_limits)
+    assert configured_web_limits[2] <= configured_web_limits[0] + configured_web_limits[1]
     assert defaults.web_search_max_results == llm_chat_plugin["web_search_max_results"] == 5
     assert defaults.web_search_timeout == llm_chat_plugin["web_search_timeout"] == 30.0
     assert defaults.web_page_max_chars == llm_chat_plugin["web_page_max_chars"] == 6000
@@ -2266,7 +2467,7 @@ def test_yaml_and_default_llm_chat_configuration_are_exactly_synchronized():
     assert llm_plugin["prompt"].strip() == expected_native_prompt
 
 
-def test_real_yaml_resolves_optional_tavily_key_without_template_residue():
+def test_real_yaml_resolves_optional_exa_key_without_template_residue():
     config_path = Path(__file__).resolve().parents[1] / "entari.yml"
     required_env = {
         "WEBUI_PASSWORD": "",
@@ -2285,12 +2486,12 @@ def test_real_yaml_resolves_optional_tavily_key_without_template_residue():
         without_key_plugin = cast(dict[str, Any], without_key.plugin["llm_chat"])
         with_key = EntariConfig(
             config_path,
-            env_vars={**required_env, "TAVILY_API_KEY": "fake-tavily-key"},
+            env_vars={**required_env, "EXA_API_KEY": "fake-exa-key"},
         )
         with_key_plugin = cast(dict[str, Any], with_key.plugin["llm_chat"])
 
-        assert without_key_plugin["tavily_api_key"] == ""
-        assert with_key_plugin["tavily_api_key"] == "fake-tavily-key"
+        assert without_key_plugin["exa_api_key"] == ""
+        assert with_key_plugin["exa_api_key"] == "fake-exa-key"
         assert "${{" not in repr(without_key_plugin)
         assert "${{" not in repr(with_key_plugin)
         assert without_key.basic.log.level == with_key.basic.log.level

@@ -16,10 +16,9 @@ from entari_plugin_llm.exception import ModelNotFoundError
 
 from .config import LLMChatConfig
 from .core.eval import apply_deltas
-from .core.media import strip_internal_media_records
 from .core.types import ChatMessage
-from .generation import generate_chat_response
-from .web_access import normalize_web_access_limits
+from .generation import response_content, generate_chat_response
+from .web.policy import normalize_web_access_limits
 from .core.errors import summarize_exception
 from .chat_context import (
     build_image_notes,
@@ -31,16 +30,7 @@ from .chat_context import (
 )
 from .core.compose import energy_at, compose_persona_prompt
 from .core.forward import render_forwarded_storage
-from .core.delivery import (
-    DeliveryError,
-    DeliveryState,
-    wait_for_delivery,
-    mark_delivery_attempt,
-    mark_delivery_success,
-    render_delivered_text,
-    normalize_delivery_limits,
-    reserve_final_text_messages,
-)
+from .core.delivery import DeliveryState, normalize_delivery_limits
 from .persona.store import (
     get_mood,
     set_mood,
@@ -51,6 +41,7 @@ from .persona.store import (
     delete_message,
 )
 from .persona.runner import run_evaluation
+from .turn_lifecycle import ActiveChatTurn
 from .forward_context import resolve_merged_forward_messages
 from .persona.memory_update import apply_memory_updates
 from .persona.memory_context import load_memory_context
@@ -163,34 +154,14 @@ async def on_chat(session: Session, ctx: Contexts):
 
     user_message_id = await append_message(channel_id, user_id, user_name, "user", content)
 
-    assistant_persist_attempted = False
-
-    async def persist_delivered_text(*, preserve_original: bool = False) -> str:
-        nonlocal assistant_persist_attempted
-        delivered_text = render_delivered_text(delivery_state)
-        if assistant_persist_attempted or not delivered_text:
-            return delivered_text
-        assistant_persist_attempted = True
-        try:
-            await append_message(channel_id, "", "bot", "assistant", delivered_text)
-        except asyncio.CancelledError:
-            _LOGGER.warning("assistant delivery persistence cancelled")
-            if not preserve_original:
-                raise
-        except Exception as exc:
-            _LOGGER.warning(f"assistant delivery persistence failed: {type(exc).__name__}")
-        return delivered_text
-
-    async def rollback_unstarted_turn() -> None:
-        if delivery_state.delivery_attempts:
-            return
-        try:
-            await delete_message(user_message_id)
-        except asyncio.CancelledError:
-            _LOGGER.warning("user turn rollback cancelled")
-        except Exception as exc:
-            _LOGGER.warning(f"user turn rollback failed: {type(exc).__name__}")
-
+    turn = ActiveChatTurn(
+        channel_id=channel_id,
+        user_message_id=user_message_id,
+        delivery_state=delivery_state,
+        append_history=append_message,
+        delete_history=delete_message,
+        warn=lambda message: _LOGGER.warning(message),
+    )
     try:
         response = await generate_chat_response(
             cast(list[ChatMessage], messages),
@@ -203,58 +174,16 @@ async def on_chat(session: Session, ctx: Contexts):
             request_timeout=config.model_request_timeout,
         )
     except asyncio.CancelledError:
-        await persist_delivered_text(preserve_original=True)
-        await rollback_unstarted_turn()
+        await turn.preserve_and_rollback()
         raise
     except Exception as exc:
-        await persist_delivered_text(preserve_original=True)
-        await rollback_unstarted_turn()
+        await turn.preserve_and_rollback()
         _LOGGER.warning(f"llm generate failed: {summarize_exception(exc)}")
         return BLOCK
 
-    raw_reply = cast(str | None, response.choices[0].message.content) or ""
-    stripped_raw_reply = raw_reply.strip()
-    reply = strip_internal_media_records(raw_reply).strip()
-    if reply != stripped_raw_reply:
-        _LOGGER.warning("stripped reserved media history marker from model reply")
-    if (not reply or reply == "[END_OF_RESPONSE]") and delivery_state.confirmed_deliveries == 0:
-        await rollback_unstarted_turn()
-        _LOGGER.warning("model reply produced no confirmed delivery")
+    if not await turn.deliver_model_reply(session, response_content(response)):
         return BLOCK
-    if reply and reply != "[END_OF_RESPONSE]":
-        try:
-            final_replies = reserve_final_text_messages(delivery_state, reply)
-        except DeliveryError:
-            _LOGGER.warning("suppressed final supplement outside delivery budget")
-            final_replies = ()
-        if not final_replies and delivery_state.confirmed_deliveries == 0:
-            await rollback_unstarted_turn()
-            _LOGGER.warning("final reply was suppressed without confirmed delivery")
-            return BLOCK
-        for final_reply in final_replies:
-            try:
-                await wait_for_delivery(delivery_state)
-            except asyncio.CancelledError:
-                await persist_delivered_text(preserve_original=True)
-                await rollback_unstarted_turn()
-                raise
-            except Exception:
-                await persist_delivered_text(preserve_original=True)
-                await rollback_unstarted_turn()
-                raise
-            try:
-                await session.send(final_reply)
-            except asyncio.CancelledError:
-                mark_delivery_attempt(delivery_state)
-                await persist_delivered_text(preserve_original=True)
-                raise
-            except Exception:
-                mark_delivery_attempt(delivery_state)
-                await persist_delivered_text(preserve_original=True)
-                raise
-            mark_delivery_success(delivery_state, [final_reply])
-
-    assistant_reply = await persist_delivered_text()
+    assistant_reply = await turn.persist_delivered_text()
     familiarity = min(100.0, rel.familiarity + 1)
     axes = {
         "affection": rel.affection,

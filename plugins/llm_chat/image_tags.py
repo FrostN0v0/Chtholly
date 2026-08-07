@@ -16,10 +16,11 @@ from utils.path import IMAGE_DIR
 
 from .config import LLMChatConfig
 from .models import ImageTag
-from .vision import generate_image_tags, image_file_to_data_url
+from .vision import generate_image_tags
 from .core.media import match_image, is_random_request
 from .core.errors import summarize_exception
 from .core.profile import decode_embedding, encode_embedding, cosine_similarity
+from .core.image_source import image_file_to_data_url
 from .persona.embedding import embed_text
 
 ProgressReporter: TypeAlias = Callable[[int, int, int], Awaitable[None]]

@@ -52,14 +52,15 @@ from plugins.llm_chat import (
     generation as generation_module,
     image_tags as image_tags_module,
     meme_store as meme_store_module,
+    agno_compat as agno_compat_module,
 )
 from plugins.llm_chat.config import LLMChatConfig
 from plugins.llm_chat.models import ImageTag, Conversation
-from plugins.llm_chat.vision import IMAGE_FETCH_MAX_BYTES
 from plugins.llm_chat.persona import store as persona_store_module
 from plugins.llm_chat.meme_store import MemeImportError, MemeImportResult, import_meme_image
-from plugins.llm_chat.web_access import DEFAULT_WEB_ACCESS_LIMITS
+from plugins.llm_chat.web.policy import DEFAULT_WEB_ACCESS_LIMITS
 from plugins.llm_chat.core.delivery import DeliveryState, llm_chat_delivery_scope
+from plugins.llm_chat.core.image_source import IMAGE_FETCH_MAX_BYTES
 
 sys.modules.pop("plugins.llm_chat", None)
 if getattr(_PLUGINS, "llm_chat", None) is _PACKAGE:
@@ -526,7 +527,7 @@ class _RuntimeHarness:
 
 _ROOT = Path(__file__).resolve().parents[1]
 _LLM_CHAT_DIR = _ROOT / "plugins" / "llm_chat"
-_MEME_RUNTIME_PATH = _LLM_CHAT_DIR / "meme_runtime.py"
+_MEME_COMMAND_PATH = _LLM_CHAT_DIR / "meme_command.py"
 _TOOL_RUNTIME_PATH = _LLM_CHAT_DIR / "tool_runtime.py"
 _MISSING = object()
 
@@ -578,7 +579,7 @@ async def _temporary_plugin(module_path: Path) -> AsyncIterator[_RuntimeHarness]
     setattr(_PLUGINS, "llm_chat", package)
 
     snapshot = _runtime_snapshot()
-    module_name = f"plugins.llm_chat._meme_runtime_test_{uuid4().hex}"
+    module_name = f"plugins.llm_chat._runtime_test_{uuid4().hex}"
     spec = spec_from_file_location(module_name, module_path)
     assert spec is not None
     assert spec.loader is not None
@@ -592,6 +593,7 @@ async def _temporary_plugin(module_path: Path) -> AsyncIterator[_RuntimeHarness]
         setattr(module, "__plugin__", plugin)
         token = current_plugin.set(plugin)
         harness = _RuntimeHarness(plugin=plugin, module=module, snapshot=snapshot)
+        agno_compat_module.install_agno_tool_bridge()
         spec.loader.exec_module(module)
         yield harness
     finally:
@@ -623,19 +625,22 @@ class _RuntimeSession(Session[Any]):
     ) -> None:
         self.elements = MessageChain(direct or [])
         self._quote = None if quoted is None else SimpleNamespace(children=quoted)
-        self.reply = None if quoted is None else SimpleNamespace(origin=SimpleNamespace(message=MessageChain(quoted)))
+        self.reply = cast(
+            Any,
+            None if quoted is None else SimpleNamespace(origin=SimpleNamespace(message=MessageChain(quoted))),
+        )
         self.downloads = downloads or {}
         channel = SimpleNamespace(id="channel")
         self.account = SimpleNamespace(platform="test")
-        self.event = SimpleNamespace(user=SimpleNamespace(id="user"), channel=channel)
+        self.event = SimpleNamespace(user=SimpleNamespace(id="user"), channel=channel, message=None)
         self.sent: list[Any] = []
 
     @property
     def quote(self) -> Any:
         return self._quote
 
-    async def download(self, src: str) -> bytes:
-        result = self.downloads[src]
+    async def download(self, url: str) -> bytes:
+        result = self.downloads[url]
         if isinstance(result, BaseException):
             raise result
         return result
@@ -657,24 +662,25 @@ async def _execute_registered_command(
     context[EVENT] = CommandExecute(chain, session)
     context[ITEM_MESSAGE_CONTENT] = chain
     context[ITEM_SESSION] = session
-    original_post = command_provider_module.post
-    command_provider_module.post = ignore_event
+    original_post = getattr(command_provider_module, "post")
+    setattr(command_provider_module, "post", ignore_event)
     try:
         result = await _commands.execute(chain, context)
     finally:
-        command_provider_module.post = original_post
+        setattr(command_provider_module, "post", original_post)
     if result is None:
         return None
-    return cast(str | MessageChain | None, result.args[0])
+    return cast(str | MessageChain | None, getattr(result, "args")[0])
 
 
 @pytest.mark.asyncio
 async def test_tag_image_schema_scope_indexing_and_privacy(monkeypatch: pytest.MonkeyPatch) -> None:
-    async with _temporary_plugin(_MEME_RUNTIME_PATH) as harness:
+    async with _temporary_plugin(_TOOL_RUNTIME_PATH) as harness:
         schemas = _tool_schema_delta(harness.snapshot)
-        assert harness.module.registered_tools == ["tag_image"]
-        assert [schema["function"]["name"] for schema in schemas] == ["tag_image"]
-        schema = schemas[0]["function"]
+        assert harness.module.registered_tools[-1] == "tag_image"
+        tag_schemas = [schema for schema in schemas if schema["function"]["name"] == "tag_image"]
+        assert len(tag_schemas) == 1
+        schema = tag_schemas[0]["function"]
         assert schema["parameters"]["required"] == []
         assert schema["parameters"]["properties"]["image_index"]["type"] == "integer"
         description = schema["description"]
@@ -697,7 +703,7 @@ async def test_tag_image_schema_scope_indexing_and_privacy(monkeypatch: pytest.M
             imported.append(image)
             return MemeImportResult("created", "memes/secret.png", "secret，tags")
 
-        monkeypatch.setattr(harness.module, "import_meme_image", fake_import)
+        monkeypatch.setattr(harness.module.tag_image_context, "import_image", fake_import)
 
         with pytest.raises(MemeImportError, match="outside an active"):
             await target(session)
@@ -728,7 +734,7 @@ async def test_tag_image_schema_scope_indexing_and_privacy(monkeypatch: pytest.M
 async def test_tag_meme_command_parses_reply_and_direct_image_and_rejects_ambiguous_payloads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _temporary_plugin(_MEME_RUNTIME_PATH) as harness:
+    async with _temporary_plugin(_MEME_COMMAND_PATH) as harness:
         imported: list[Image] = []
 
         async def allow(_session: Session) -> None:
@@ -785,7 +791,7 @@ async def test_tag_meme_command_parses_reply_and_direct_image_and_rejects_ambigu
 async def test_tag_meme_command_claims_permission_and_failure_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _temporary_plugin(_MEME_RUNTIME_PATH) as harness:
+    async with _temporary_plugin(_MEME_COMMAND_PATH) as harness:
         image = Image.of(url="local://image")
         session = cast(Session, _RuntimeSession(direct=[image]))
 
@@ -868,6 +874,7 @@ def _model_response(
                 },
             }
         ],
+        usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
     )
 
 
@@ -921,10 +928,10 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
     )
     monkeypatch.setattr(persona_store_module, "get_session", meme_env.session_factory)
 
-    async with _temporary_plugin(_MEME_RUNTIME_PATH) as meme_runtime:
+    async with _temporary_plugin(_MEME_COMMAND_PATH) as meme_command:
         async with _temporary_plugin(_TOOL_RUNTIME_PATH) as tool_runtime:
-            monkeypatch.setattr(tool_runtime.module, "IMAGE_DIR", meme_env.image_dir)
-            monkeypatch.setattr(tool_runtime.module, "get_session", meme_env.session_factory)
+            monkeypatch.setattr(tool_runtime.module.image_catalog, "image_dir", meme_env.image_dir)
+            monkeypatch.setattr(tool_runtime.module.image_catalog, "session_factory", meme_env.session_factory)
 
             context = Contexts()
             context[ITEM_SESSION] = session
@@ -938,7 +945,7 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
                 delivery_state=DeliveryState(),
             )
 
-            final_text = response.choices[0].message.content
+            final_text = generation_module.response_content(response)
             assert final_text == "Visible collection reply"
             await session.send(final_text)
             await persona_store_module.append_message("channel", "", "bot", "assistant", final_text)
@@ -1013,7 +1020,7 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
             async def allow(_session: Session) -> None:
                 return None
 
-            monkeypatch.setattr(meme_runtime.module, "_superuser_check", allow)
+            monkeypatch.setattr(meme_command.module, "_superuser_check", allow)
             duplicate = await _execute_registered_command(
                 MessageChain([Text("llmchat tag-meme "), image]),
                 cast(Session, session),
@@ -1035,11 +1042,18 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
 
 
 @pytest.mark.asyncio
-async def test_meme_runtime_dispose_restores_tool_and_command_registries() -> None:
+async def test_tool_and_meme_command_dispose_restore_their_registries() -> None:
     snapshot = _runtime_snapshot()
-    async with _temporary_plugin(_MEME_RUNTIME_PATH) as harness:
+    async with _temporary_plugin(_TOOL_RUNTIME_PATH) as tool_harness:
         assert _tool_schema_delta(snapshot)
-        assert tuple(id(item) for item in command_manager.get_commands()) != snapshot.command_ids
-        await harness.dispose()
+        assert tuple(id(item) for item in command_manager.get_commands()) == snapshot.command_ids
+        await tool_harness.dispose()
         _assert_runtime_snapshot(snapshot)
+
+    async with _temporary_plugin(_MEME_COMMAND_PATH) as command_harness:
+        assert not _tool_schema_delta(snapshot)
+        assert tuple(id(item) for item in command_manager.get_commands()) != snapshot.command_ids
+        await command_harness.dispose()
+        _assert_runtime_snapshot(snapshot)
+
     _assert_runtime_snapshot(snapshot)

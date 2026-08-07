@@ -29,6 +29,44 @@ from plugins.llm_chat.core.delivery import (
     require_llm_chat_delivery,
     reserve_final_text_messages,
 )
+from plugins.llm_chat.core.media_delivery import (
+    MEDIA_UNAVAILABLE_MARKER,
+    is_media_unavailable_reply,
+    latest_user_requests_media,
+    strip_media_unavailable_marker,
+)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "来张图我看看什么样子",
+        '{"speaker":"FrostN0v0","content":"你发的图呢？"}',
+        "send me a picture",
+    ],
+)
+def test_latest_user_media_request_detection_handles_chat_payloads(content: str) -> None:
+    assert latest_user_requests_media([{"role": "user", "content": content}])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "不要发图，只用文字描述",
+        "这张图里面是什么",
+        '{"speaker":"FrostN0v0","content":"普通聊天"}',
+    ],
+)
+def test_latest_user_media_request_detection_rejects_non_delivery_intent(content: str) -> None:
+    assert not latest_user_requests_media([{"role": "user", "content": content}])
+
+
+def test_media_unavailable_marker_requires_visible_text_and_never_reaches_delivery() -> None:
+    marked = f"{MEDIA_UNAVAILABLE_MARKER} 这轮没有确认发出图片。"
+
+    assert is_media_unavailable_reply(marked)
+    assert not is_media_unavailable_reply(MEDIA_UNAVAILABLE_MARKER)
+    assert strip_media_unavailable_marker(marked) == "这轮没有确认发出图片。"
 
 
 @dataclass
@@ -57,6 +95,7 @@ def _state_snapshot(state: DeliveryState) -> tuple[object, ...]:
         state.last_delivery_at,
         state.delivery_attempts,
         state.confirmed_deliveries,
+        state.confirmed_media_deliveries,
         tuple(state.delivered_texts),
     )
 
@@ -355,6 +394,27 @@ def test_media_budget_must_precede_text_and_rejections_do_not_mutate() -> None:
         with pytest.raises(DeliveryError, match="^Media must be sent before text delivery$"):
             reserve_media_messages(2)
         assert _state_snapshot(after_text) == before
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param("visible reply\n[END_OF_RESPONSE]", "visible reply", id="newline-suffix"),
+        pytest.param("visible reply[END_OF_RESPONSE]", "visible reply", id="attached-suffix"),
+        pytest.param(
+            "visible reply\n[END_OF_RESPONSE]\n[END_OF_RESPONSE]",
+            "visible reply",
+            id="repeated-suffix",
+        ),
+    ],
+)
+def test_trailing_end_marker_is_removed_from_visible_delivery_text(value: str, expected: str) -> None:
+    state = DeliveryState()
+    with llm_chat_delivery_scope(state):
+        reserved, normalized = reserve_text_message(value)
+
+    assert reserved is state
+    assert normalized == expected
 
 
 def test_media_records_and_internal_sentinel_are_removed_or_rejected_atomically() -> None:

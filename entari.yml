@@ -82,10 +82,16 @@ plugins:
       保持鲜明情绪和角色口吻，不使用客服腔、模板化客套或刻意堆叠语气词。遇到知识、代码和实际问题时仍给出准确、有用的回答，让人格影响表达方式而不是事实。
     allowed_commands: ["echo", "help"]
     web_search_enabled: true
-    web_search_max_calls_per_generation: 2
-    web_page_max_calls_per_generation: 2
-    web_total_max_calls_per_generation: 4
-    tavily_api_key: ${{ env.get('TAVILY_API_KEY', '') }}
+    web_search_max_calls_per_generation: 10
+    web_page_max_calls_per_generation: 10
+    web_total_max_calls_per_generation: 20
+    exa_api_key: ${{ env.get('EXA_API_KEY', '') }}
+    exa_search_type: auto
+    exa_search_category:
+    exa_include_domains: []
+    exa_exclude_domains: []
+    exa_start_published_date:
+    exa_end_published_date:
     web_search_max_results: 5
     web_search_timeout: 30.0
     web_page_max_chars: 6000

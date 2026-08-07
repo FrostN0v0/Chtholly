@@ -499,6 +499,13 @@ class TestComposePrompt:
         assert "只能调用本轮真实存在的 send_text / send_merged_forward schema" in prompt
         assert "send_image 只发送本地反应图、表情包或贴纸，不是图片生成或通用搜索" in prompt
         assert "收到用户图片本身不是调用 send_image 的理由" in prompt
+        assert "send_external_image 只发送用户或其他工具已提供的直接公开图片 URL" in prompt
+        assert "它不负责搜索、生成、识图或收藏" in prompt
+        assert "没有直接图片 URL 时不得把普通网页 URL 当作图片发送" in prompt
+        assert "一个直接图片 URL 明确发送失败后" in prompt
+        assert "才可更换来源重试一次" in prompt
+        assert "当前日期、时间、星期或时区偏移必须调用 get_local_time 获取" in prompt
+        assert "未指定时使用 Bot 宿主机本地时区" in prompt
         assert "最新、上一张或前两张" in prompt
         assert "list_image_resources(limit=2)" in prompt
         assert "image_paths" in prompt

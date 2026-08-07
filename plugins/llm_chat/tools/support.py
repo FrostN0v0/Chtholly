@@ -1,8 +1,4 @@
-"""LLM tool helper functions for llm_chat.
-
-Tool handlers are registered in ``tool_runtime.py``; this module only exposes
-helpers and the truncation utility they share.
-"""
+"""Shared import-safe helpers for llm_chat tool implementations."""
 
 from uuid import uuid4
 from collections.abc import Sequence
@@ -26,7 +22,7 @@ def _sentence_truncate(text: str, limit: int) -> str:
 
 
 def truncate_for_tts(text: str, limit: int) -> str:
-    """Public alias used by the speak tool handler in __init__."""
+    """Truncate synthesized speech input at a natural boundary."""
     return _sentence_truncate(text, limit)
 
 
