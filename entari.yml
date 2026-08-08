@@ -131,7 +131,7 @@ plugins:
       避免只给 动漫 这类宽泛标签；宽泛风格必须搭配具体情绪或场景。
   server:
     direct_adapter: true
-    access_token: ${{ env.ONEBOT_TOKEN }}
+    token: ${{ env.ONEBOT_TOKEN }}
     port: 8120
     path: satori
     options:

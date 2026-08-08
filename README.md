@@ -99,13 +99,15 @@ Exa 默认使用 `auto` 搜索；可通过 `exa_search_type` 切换 `fast`、`de
 
 部署默认使用 `info` 日志级别并关闭 `rich_error`，避免第三方 `debug` 日志或异常局部变量展开密钥、搜索参数和工具实参。
 
+生产服务器的 IAP SSH 连接、systemd 服务、日志查询、LLBot / OneBot 排障、数据库检查与回滚流程见 [生产环境运维与调试手册](./docs/production-operations.md)。
+
 ### 🚀 运行
 
 ```shell
 entari run
 ```
 
-> 运行前需确保 OneBot V11 协议端（如 Lagrange.OneBot）已启动，并在 `.env.local` 中填好 `ONEBOT_TOKEN`；反向 WebSocket 路径需与 `entari.yml` 的适配器配置一致。
+> 运行前需确保 OneBot V11 协议端（生产环境当前使用 LLBot）已启动，并在 `.env.local` 中填好 `ONEBOT_TOKEN`；反向 WebSocket 路径与 Token 必须和 `entari.yml` 的适配器配置一致。
 
 详细的框架使用见 [Entari 文档](https://arclet.top/tutorial/entari/)。
 
