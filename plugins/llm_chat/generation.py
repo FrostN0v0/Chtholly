@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 import litellm
+from agno.media import Image as AgnoImage
 from arclet.letoderea import Contexts
 from entari_plugin_llm import GenericResponse, llm  # entari: plugin
 from agno.models.message import Message as AgnoMessage
@@ -17,6 +18,7 @@ from .web.policy import WebAccessLimits, llm_chat_web_access_scope
 from .agno_compat import agno_tool_call_limit_scope, recommended_tool_call_limit
 from .core.delivery import DeliveryState, llm_chat_delivery_scope, strip_trailing_end_of_response
 from .runtime_context import llm_chat_context_scope
+from .core.native_images import extract_native_images
 from .core.media_delivery import (
     is_media_unavailable_reply,
     latest_user_requests_media,
@@ -63,6 +65,12 @@ def response_content(response: object) -> str:
     message = getattr(choices[0], "message", None)
     content = getattr(message, "content", None)
     return content if isinstance(content, str) else ""
+
+
+def response_images(response: object) -> tuple[AgnoImage, ...]:
+    """Return safely normalized native images from one model response."""
+
+    return extract_native_images(response)
 
 
 def _has_visible_reply(response: object) -> bool:
@@ -163,7 +171,7 @@ async def _recover_requested_media(
         if str(exc) == _TOOL_LOOP_EXHAUSTED:
             raise RuntimeError(_MEDIA_RECOVERY_FAILED) from exc
         raise
-    if delivery_state.confirmed_media_deliveries > 0:
+    if delivery_state.confirmed_media_deliveries > 0 or response_images(response):
         return response
     if is_media_unavailable_reply(response_content(response)):
         return response
@@ -217,6 +225,9 @@ async def generate_chat_response(
                 )
         else:
             transcript = _response_transcript(response, messages)
+            native_images = response_images(response)
+            if native_images:
+                return response
             if media_requested and delivery_state.confirmed_media_deliveries == 0:
                 return await _recover_requested_media(
                     _without_invalid_tail(transcript),
@@ -288,6 +299,9 @@ async def _finalize_without_tools(
     )
     completion = cast(litellm.ModelResponse, response)
     content = response_content(completion)
-    if not content.strip() or (require_visible and not _has_visible_reply(completion)):
+    native_images = response_images(completion)
+    if (not content.strip() and not native_images) or (
+        require_visible and not _has_visible_reply(completion) and not native_images
+    ):
         raise RuntimeError(_FINALIZATION_FAILED)
     return completion

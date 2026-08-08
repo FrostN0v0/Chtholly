@@ -277,18 +277,23 @@ def reserve_forward_messages(messages: object) -> tuple[DeliveryState, tuple[str
     return state, normalized
 
 
-def reserve_media_messages(count: int) -> DeliveryState:
-    """Atomically reserve media deliveries before any text mode begins."""
+def reserve_media_messages_for_state(state: DeliveryState, count: int) -> DeliveryState:
+    """Atomically reserve media deliveries for a completed generation state."""
 
     if type(count) is not int or count < 1:
         raise DeliveryError("Media delivery count must be a positive integer")
-    state = require_llm_chat_delivery()
     if state.mode is not None:
         raise DeliveryError("Media must be sent before text delivery")
     if state.media_messages + count > state.limits.max_media_messages:
         raise DeliveryError("Media delivery budget exhausted")
     state.media_messages += count
     return state
+
+
+def reserve_media_messages(count: int) -> DeliveryState:
+    """Atomically reserve media deliveries before any text mode begins."""
+
+    return reserve_media_messages_for_state(require_llm_chat_delivery(), count)
 
 
 def reserve_media_message() -> DeliveryState:

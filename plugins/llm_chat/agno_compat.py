@@ -16,6 +16,7 @@ from arclet.letoderea.exceptions import ExitState, _ExitException
 from entari_plugin_llm.tools.event import LLMToolEvent, tools, available_functions
 
 from .runtime_context import copy_llm_chat_context
+from .core.native_images import extract_native_images
 
 _MIN_TOOL_CALL_LIMIT = 8
 _MAX_TOOL_CALL_LIMIT = 32
@@ -81,24 +82,74 @@ def build_agno_tools() -> list[Function]:
     return [_build_agno_tool(name) for name in available_functions]
 
 
+setattr(build_agno_tools, "__llm_chat_compat__", True)
+
+
+def _is_compat_wrapper(value: object) -> bool:
+    return bool(getattr(value, "__llm_chat_compat__", False))
+
+
+def _wrap_litellm_model(previous_model: Any) -> Any:
+    if _is_compat_wrapper(previous_model):
+        return previous_model
+
+    class NativeImageLiteLLM(previous_model):
+        __llm_chat_compat__ = True
+        __llm_chat_original__ = previous_model
+
+        def _parse_provider_response(self, response: Any, **kwargs: Any) -> Any:
+            model_response = super()._parse_provider_response(response, **kwargs)
+            images = extract_native_images(response)
+            if images:
+                model_response.images = list(images)
+            return model_response
+
+    NativeImageLiteLLM.__name__ = getattr(previous_model, "__name__", "LiteLLM")
+    NativeImageLiteLLM.__qualname__ = getattr(previous_model, "__qualname__", "LiteLLM")
+    return NativeImageLiteLLM
+
+
 def install_agno_tool_bridge() -> None:
     previous_tools = llm_service_module.get_agno_tools
     previous_agent = llm_service_module.Agent
-    if previous_tools is build_agno_tools and getattr(previous_agent, "__llm_chat_compat__", False):
+    previous_model = llm_service_module.LiteLLM
+    if _is_compat_wrapper(previous_tools) and _is_compat_wrapper(previous_agent) and _is_compat_wrapper(previous_model):
+        original_tools = getattr(previous_tools, "__llm_chat_original__", previous_tools)
+        original_agent = getattr(previous_agent, "__llm_chat_original__", previous_agent)
+        original_model = getattr(previous_model, "__llm_chat_original__", previous_model)
+
+        def restore_existing() -> None:
+            if llm_service_module.get_agno_tools is previous_tools:
+                llm_service_module.get_agno_tools = original_tools
+            if llm_service_module.Agent is previous_agent:
+                setattr(llm_service_module, "Agent", original_agent)
+            if llm_service_module.LiteLLM is previous_model:
+                setattr(llm_service_module, "LiteLLM", original_model)
+
+        plugin.collect_disposes(restore_existing)
         return
+
+    original_agent = getattr(previous_agent, "__llm_chat_original__", previous_agent)
 
     def bounded_agent(*args: Any, **kwargs: Any) -> Any:
         kwargs.setdefault("tool_call_limit", _TOOL_CALL_LIMIT.get())
-        return previous_agent(*args, **kwargs)
+        return original_agent(*args, **kwargs)
 
     setattr(bounded_agent, "__llm_chat_compat__", True)
-    llm_service_module.get_agno_tools = build_agno_tools
+    setattr(build_agno_tools, "__llm_chat_original__", previous_tools)
+    setattr(bounded_agent, "__llm_chat_original__", original_agent)
+    wrapped_model = _wrap_litellm_model(previous_model)
+
+    setattr(llm_service_module, "get_agno_tools", build_agno_tools)
     setattr(llm_service_module, "Agent", bounded_agent)
+    setattr(llm_service_module, "LiteLLM", wrapped_model)
 
     def restore() -> None:
         if llm_service_module.get_agno_tools is build_agno_tools:
             llm_service_module.get_agno_tools = previous_tools
         if llm_service_module.Agent is bounded_agent:
             setattr(llm_service_module, "Agent", previous_agent)
+        if llm_service_module.LiteLLM is wrapped_model:
+            setattr(llm_service_module, "LiteLLM", previous_model)
 
     plugin.collect_disposes(restore)

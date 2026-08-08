@@ -16,6 +16,7 @@ def test_domain_and_tts_core_imports_do_not_load_plugin_entrypoints():
         "plugins.llm_chat.core.forward",
         "plugins.llm_chat.core.types",
         "plugins.llm_chat.core.image_source",
+        "plugins.llm_chat.core.native_images",
         "plugins.llm_chat.core.media_delivery",
         "plugins.llm_chat.web",
         "plugins.llm_chat.web.policy",

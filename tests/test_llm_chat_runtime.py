@@ -2497,7 +2497,8 @@ def test_real_yaml_resolves_optional_exa_key_without_template_residue():
         assert without_key.basic.log.level == with_key.basic.log.level
         assert without_key.basic.log.rich_error is with_key.basic.log.rich_error is False
         server_config = cast(dict[str, Any], without_key.plugin["server"])
-        assert "token" not in server_config
+        assert server_config["token"] == ""
+        assert "access_token" not in server_config
     finally:
         EntariConfig.instance = original_instance
         EntariConfig._inited = original_inited
@@ -2529,3 +2530,61 @@ def test_summarize_exception_redacts_secrets_and_keeps_root_cause():
 )
 def test_is_command_allowed(command_line: str, allowed_commands: list[str], expected: tuple[bool, str]):
     assert is_command_allowed(command_line, allowed_commands) == expected
+
+
+@pytest.mark.asyncio
+async def test_on_chat_delivers_native_images_before_text_and_persists_markers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        session = _ChatSession("native image response")
+        image = SimpleNamespace(content=_PNG_BYTES, filepath=None, url=None)
+
+        async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            return SimpleNamespace(content="final text", images=[image])
+
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
+        assert result is BLOCK
+        assert isinstance(session.sent[0], MessageChain)
+        assert session.sent[1] == "final text"
+        assert assistant_rows == [
+            ("group-B", "", "bot", "assistant", "[发送了图片]"),
+            ("group-B", "", "bot", "assistant", "final text"),
+        ]
+        assert records.evaluations[0]["current_turn"]["assistant"]["content"] == "final text"
+
+
+@pytest.mark.asyncio
+async def test_on_chat_native_image_failure_blocks_without_evaluator_or_leaking_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        warnings: list[str] = []
+        monkeypatch.setattr(module._LOGGER, "warning", warnings.append)
+        session = _FailingChatSession("native image transport failure", fail_attempt=2)
+        image = SimpleNamespace(content=_PNG_BYTES, filepath=None, url=None)
+
+        async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            return SimpleNamespace(content=None, images=[image, image])
+
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
+        assert result is BLOCK
+        assert len(session.sent) == 1
+        assert assistant_rows == [("group-B", "", "bot", "assistant", "[发送了图片]")]
+        assert records.evaluations == []
+        assert warnings == [
+            "native image delivery failed: DeliveryError: native image delivery confirmed 1/2 images before failure; "
+            "do not repeat the confirmed prefix"
+        ]

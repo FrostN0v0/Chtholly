@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import field, dataclass
 from collections.abc import Callable, Awaitable
 
-from arclet.entari import Session
+from arclet.entari import Session, MessageChain
 
 from .core.media import strip_internal_media_records
 from .core.delivery import (
@@ -18,7 +18,10 @@ from .core.delivery import (
     render_delivered_text,
     reserve_final_text_messages,
     strip_trailing_end_of_response,
+    reserve_media_messages_for_state,
 )
+from .tools._delivery import send_with_delivery
+from .core.native_images import to_entari_image, extract_native_images
 from .core.media_delivery import strip_media_unavailable_marker
 
 HistoryAppender = Callable[[str, str, str, str, str], Awaitable[object]]
@@ -72,6 +75,43 @@ class ActiveChatTurn:
 
         await self.persist_delivered_text(preserve_original=True)
         await self.rollback_if_unstarted()
+
+    async def deliver_model_images(self, session: Session, response: object) -> bool:
+        """Deliver safe native model images before any final text."""
+
+        images = extract_native_images(response)
+        if not images:
+            return True
+        try:
+            reserve_media_messages_for_state(self.delivery_state, len(images))
+        except DeliveryError:
+            await self.preserve_and_rollback()
+            raise
+        total = len(images)
+        for index, image in enumerate(images):
+            try:
+                payload = MessageChain([to_entari_image(image)])
+                await send_with_delivery(session, payload, self.delivery_state, media=True)
+            except asyncio.CancelledError:
+                await self.persist_delivered_text(preserve_original=True)
+                raise
+            except Exception:
+                await self.persist_delivered_text(preserve_original=True)
+                if not self.delivery_state.delivery_attempts:
+                    await self.rollback_if_unstarted()
+                if index:
+                    raise DeliveryError(
+                        f"native image delivery confirmed {index}/{total} images before failure; "
+                        "do not repeat the confirmed prefix"
+                    ) from None
+                raise
+            try:
+                await self.append_history(self.channel_id, "", "bot", "assistant", "[发送了图片]")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.warn(f"native image delivery history failed: {type(exc).__name__}")
+        return True
 
     async def deliver_model_reply(self, session: Session, raw_reply: str) -> bool:
         """Sanitize and deliver final model text after any tool-delivered prefix."""

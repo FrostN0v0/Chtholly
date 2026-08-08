@@ -494,7 +494,9 @@ class TestComposePrompt:
     def test_scaffold_uses_active_media_with_a_soft_budget_and_honest_results(self):
         prompt = _prompt()
 
-        assert "媒体只能通过本轮实际提供的工具发送" in prompt
+        assert "媒体通常通过本轮实际提供的工具发送" in prompt
+        assert "模型或服务商真实返回的原生图片输出由系统安全交付" in prompt
+        assert "不得用 Markdown、data URL、base64 或普通文字伪造附件" in prompt
         assert "不得臆造图片生成或看图工具" in prompt
         assert "只能调用本轮真实存在的 send_text / send_merged_forward schema" in prompt
         assert "send_image 只发送本地反应图、表情包或贴纸，不是图片生成或通用搜索" in prompt

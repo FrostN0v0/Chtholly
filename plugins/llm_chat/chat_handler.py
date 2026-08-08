@@ -181,6 +181,14 @@ async def on_chat(session: Session, ctx: Contexts):
         _LOGGER.warning(f"llm generate failed: {summarize_exception(exc)}")
         return BLOCK
 
+    try:
+        if not await turn.deliver_model_images(session, response):
+            return BLOCK
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _LOGGER.warning(f"native image delivery failed: {summarize_exception(exc)}")
+        return BLOCK
     if not await turn.deliver_model_reply(session, response_content(response)):
         return BLOCK
     assistant_reply = await turn.persist_delivered_text()
