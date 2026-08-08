@@ -21,7 +21,7 @@
 - **命令系统**: arclet-alconna（Entari 内建 `command` 模块）
 - **服务管理**: launart（`Service` 基类用于跨插件依赖注入）
 - **协议适配器**: `satori-python-adapter-onebot11`（默认）；`entari-plugin-server` 使用 `direct_adapter: true` 与 Entari 直连，此模式不得再配置 `basic.network`。当前协议栈仍以 Python 3.10 运行，待 Python 3.14 兼容性确认后升级
-- **Satori 服务鉴权**: `server.token` 保护 Satori 根 HTTP / WebSocket 接口；OneBot 适配器的 `access_token` 只保护对应适配器连接，二者不得混用。Entari WebUI 在 loopback 本地模式下跳过内建登录鉴权，因此生产管理面必须保持 `127.0.0.1` 监听并通过 IAP SSH 隧道访问。
+- **Satori 服务鉴权**: `server.token` 只校验 Satori 事件 WebSocket 的 Identify token；当前锁定的 Satori Server HTTP action API 不校验该 token，因此 HTTP API 与 Entari WebUI 都必须保持 `127.0.0.1` 监听并通过 IAP SSH 隧道访问。OneBot 适配器的 `access_token` 只保护对应适配器连接，三者不得混用。
 - **配置模型**: `BasicConfModel`（默认，dataclass 风格）/ Pydantic `BaseModel`（`arclet.entari.config.models.pyd`）/ msgspec `Struct`
 - **HTTP 客户端**: httpx
 - **JSON 序列化**: orjson（LiteLLM 工具 / MCP 请求路径的显式运行时依赖）

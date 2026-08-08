@@ -76,6 +76,8 @@ ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCo
 
 Entari WebUI 在 `127.0.0.1` 本地部署模式下会跳过自身登录鉴权，因此 IAP SSH 隧道就是管理面的安全边界；不得把 `8120` 直接暴露到公网，也不得仅依赖 `WEBUI_PASSWORD` 将该回环地址反向代理到公网。关闭 SSH 会话即可完整回滚，不需要修改或重启服务器服务。
 
+当前锁定的 Satori Server 中，`server.token` 只校验事件 WebSocket 的 Identify token，HTTP action API 不校验该 token；因此即使已配置 `server.token`，`8120` 的 HTTP API 仍必须依赖 loopback 与 IAP SSH 隧道隔离。
+
 ## 一分钟健康检查
 
 登录服务器后按顺序执行：
