@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>{% include "status.css" %}</style>
+</head>
+<body>
+<main class="status-page health-{{ health.code }}">
+    <header class="hero">
+        <div class="hero-copy">
+            <div class="eyebrow">SYSTEM OVERVIEW</div>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+            <div class="health-pill">
+                <span class="health-dot"></span>
+                <strong>{{ health.label }}</strong>
+                <span>{{ health.detail }}</span>
+            </div>
+        </div>
+        <div class="mascot" aria-hidden="true">
+            <div class="orbit orbit-one"></div>
+            <div class="orbit orbit-two"></div>
+            <div class="spark spark-one"></div>
+            <div class="spark spark-two"></div>
+            <div class="spark spark-three"></div>
+            <div class="wing wing-left"></div>
+            <div class="wing wing-right"></div>
+            <div class="mascot-face">
+                <div class="fringe fringe-left"></div>
+                <div class="fringe fringe-right"></div>
+                <div class="eye eye-left"></div>
+                <div class="eye eye-right"></div>
+                <div class="cheek cheek-left"></div>
+                <div class="cheek cheek-right"></div>
+                <div class="smile"></div>
+            </div>
+        </div>
+    </header>
+
+    <section class="gauge-grid">
+        {% for gauge in gauges %}
+        <article class="gauge-card tone-{{ gauge.tone }}">
+            <div class="gauge-ring" style="--value: {{ gauge.percent | round(1) }}%;">
+                <div class="gauge-center">
+                    <strong>{{ "%.1f" | format(gauge.percent) }}</strong>
+                    <span>%</span>
+                </div>
+            </div>
+            <div class="gauge-copy">
+                <h2>{{ gauge.name }}</h2>
+                <p>{{ gauge.detail }}</p>
+            </div>
+        </article>
+        {% endfor %}
+    </section>
+
+    <section class="detail-grid">
+        <article class="detail-card network-card">
+            <div class="card-heading">
+                <div>
+                    <span class="card-kicker">LIVE TRAFFIC</span>
+                    <h2>Network</h2>
+                </div>
+                <div class="mini-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+            </div>
+            <div class="traffic-grid">
+                <div class="traffic-item upload">
+                    <span class="direction">UP</span>
+                    <strong>{{ snapshot.network.upload_bytes_per_second | rate }}</strong>
+                    <small>{{ snapshot.network.total_sent_bytes | bytes }} total</small>
+                </div>
+                <div class="traffic-item download">
+                    <span class="direction">DOWN</span>
+                    <strong>{{ snapshot.network.download_bytes_per_second | rate }}</strong>
+                    <small>{{ snapshot.network.total_received_bytes | bytes }} total</small>
+                </div>
+            </div>
+            <div class="uptime-strip">
+                <div><span>Host uptime</span><strong>{{ snapshot.system_uptime_seconds | duration }}</strong></div>
+                <div><span>Bot uptime</span><strong>{{ snapshot.process.uptime_seconds | duration }}</strong></div>
+            </div>
+        </article>
+
+        <article class="detail-card system-card">
+            <div class="card-heading">
+                <div>
+                    <span class="card-kicker">RUNTIME DETAILS</span>
+                    <h2>System</h2>
+                </div>
+                <div class="stack-mark" aria-hidden="true"><i></i><i></i><i></i></div>
+            </div>
+            <dl class="system-list">
+                <div class="wide-row">
+                    <dt>Processor</dt>
+                    <dd>{{ snapshot.cpu.model }}</dd>
+                </div>
+                <div>
+                    <dt>Cores</dt>
+                    <dd>{{ snapshot.cpu.physical_cores or "?" }}C / {{ snapshot.cpu.logical_cores or "?" }}T</dd>
+                </div>
+                <div>
+                    <dt>Operating system</dt>
+                    <dd>{{ snapshot.os_name }} {{ snapshot.os_release }} / {{ snapshot.architecture }}</dd>
+                </div>
+                <div>
+                    <dt>Python / Entari</dt>
+                    <dd>{{ snapshot.python_version }} / {{ snapshot.framework_version }}</dd>
+                </div>
+                <div>
+                    <dt>Loaded plugins</dt>
+                    <dd>{{ snapshot.plugin_count }}</dd>
+                </div>
+            </dl>
+        </article>
+    </section>
+
+    <section class="process-bar">
+        <div class="process-title">
+            <span class="pulse-dot"></span>
+            <div><small>BOT PROCESS</small><strong>PID {{ snapshot.process.pid }}</strong></div>
+        </div>
+        <div class="process-stat"><span>CPU</span><strong>{{ "%.1f" | format(snapshot.process.cpu_percent) }}%</strong></div>
+        <div class="process-stat"><span>Memory</span><strong>{{ snapshot.process.memory_bytes | bytes }}</strong></div>
+        <div class="process-stat"><span>Threads</span><strong>{{ snapshot.process.thread_count }}</strong></div>
+        <div class="process-stat"><span>Volume</span><strong>{{ snapshot.disk_mount }}</strong></div>
+    </section>
+
+    <footer>
+        <span>Generated {{ generated_at }}</span>
+        <span class="footer-line"></span>
+        <span>Chtholly runtime monitor</span>
+    </footer>
+</main>
+</body>
+</html>

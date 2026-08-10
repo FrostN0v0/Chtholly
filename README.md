@@ -46,6 +46,20 @@ Welcome To [💬 斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M
 
 ~~功能列表呢？没有的喵，兼容[nonebot2插件](https://nonebot.dev/store/plugins)，想用什么自己装喵，还要写功能列表？没有这样的道理的喵。~~
 
+### 系统状态
+
+启用 `status` 插件后，可通过 `status`、`botstatus`、状态或运行状态指令生成当前系统状态图片。图片包含 CPU、内存、交换分区、磁盘、实时网络速率、系统与 Bot 运行时长、运行时版本及进程占用；渲染失败时自动返回纯文本状态。
+
+可在 `entari.yml` 中调整标题、副标题、磁盘统计路径和 CPU 采样时长：
+
+```yaml
+status:
+  title: "Chtholly Status"
+  subtitle: "A soft little window into the host"
+  disk_path: "."
+  sample_interval: 0.5
+```
+
 ## 🛠️ 部署
 
 **须知：项目与框架均处于开发阶段，不稳定，部署中如遇到问题请通过交流群 [斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO2zj9f5ziuS2ijcDzbjkAfcMHVA&authKey=ilcGvEnqWjHOJKa3f1cpOMQPVAeA0RZyv%2BD9lE9aV1WfwFZ8ig%2BUynUCSM4AXZOB&noverify=0&group_code=326466216) 联系我**

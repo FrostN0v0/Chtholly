@@ -25,7 +25,7 @@ plugins:
 
   $prefix:
     - key: ""
-      plugins: ["poke", "tts_service", "help_menu", "llm_chat"]
+      plugins: ["poke", "tts_service", "help_menu", "llm_chat", "status"]
 
   .record_message:
     record_send: true
@@ -149,4 +149,5 @@ plugins:
         is_sandbox: true
         c2c_group_at_messages: true
   poke: {}
+  status: {}
 

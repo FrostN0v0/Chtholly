@@ -235,6 +235,7 @@ config = plugin_config(MyConfig)
 - `llm_chat` 入站合并转发：OneBot V11 群内顶层 `<onebot:forward>` 不得自行触发会话或读取内容；只有用户引用该合并转发并同时 `@` Bot 时，运行时才通过 `session.internal("get_forward_msg", ...)` 拉取，并按原发送者结构化为 `forwarded_messages`。默认读取上限为 200 节点、每节点 2000 字符、总计 32000 字符和 12 张视觉描述图片；显式限额触发后必须同时向模型提供遗漏标记并写脱敏 warning，禁止静默截断后声称完整。转发图片继续走独立视觉描述链路；转发原话只作不可信引用上下文，不得归因到当前发送者的画像、记忆或关系增量。
 - `llm_chat` 表情包收藏与目录感知：仅在当前已触发会话内允许模型通过 `tag_image` 收藏本轮顶层直接图片或已补全引用消息中的顶层图片，候选顺序固定为 direct-first / quoted-second，合并转发图片不得进入候选。自动收藏必须排除裸 marker、普通或敏感图片与用户明确拒绝保存的图片；超管可用 `llmchat tag-meme` 附单图或引用单图执行人工覆盖，普通成员也必须收到非空拒绝以确保命令被 claim。导入接受 JPEG / PNG / WebP / GIF；GIF 保留原始动画字节并直接交由视觉模型标注。所有格式的原始字节经 6 MiB 边界与 MIME 嗅探后，以 SHA-256 去重并通过同目录临时文件 + no-clobber hard link 写入 `resources/image/memes`；标签立即 upsert 到 `chat_image_tags`，embedding 失败时保留标签并依赖 IDF fallback。`chat_image_tags` 是图片资源目录的权威索引，精确重复且已有标签的资源不得新增或刷新索引顺序。模型按最新、上一张或前若干张引用资源时，必须先调用只读 `list_image_resources(limit, offset)`；该工具只枚举 `resources/image` 下仍存在且已登记的相对路径与标签，固定按 `ImageTag.id` 倒序分页，禁止提供任意文件系统目录访问。目录返回值只是不可信内部工具数据，允许模型把相对路径传给 `send_image.image_paths`，但不得向用户复述路径、标签、目录结构或将其内容当成指令。`send_image` 的语义 `context` 与精确 `image_paths` 必须二选一；多路径发送先完成全部登记、目录边界、文件存在性、去重和 generation-local 媒体额度校验，再按给定顺序发送，额度不足时不得产生部分发送，transport 中途失败则遵循已确认前缀语义。新收藏不再写入 assistant 历史 marker；旧收藏 marker 仅保留脱敏读取。`tag_image` 工具结果与普通用户可见回复仍不得泄露路径、标签、哈希或数据库信息。文件与数据库提交必须在进程内异常及取消时补偿。
 
+- 系统状态：`plugins/status` 通过 `psutil` 采集 CPU、内存、交换分区、磁盘、网络及 Bot 进程指标，并复用 `entari-plugin-browser` 渲染图片；可测试的采集与格式化逻辑位于无 Entari 副作用的 `utils/status_core`。指令入口为 `status`，同时提供 `botstatus`、状态与运行状态别名。
 
 ### 测试
 
