@@ -37,6 +37,8 @@
 
 生产环境同时保留官方 QQ 适配器和 LLBot OneBot V11 反向 WebSocket。LLBot 的完整反向地址必须为 `ws://127.0.0.1:8120/onebot/v11/ws`。
 
+官方 QQ 沙箱群聊与单聊事件依赖 `@qq.websocket` 的嵌套配置 `intent.c2c_group_at_messages: true`。不要把 `c2c_group_at_messages` 写在适配器顶层；该字段会被配置模型忽略，表现为账号在线但完全收不到沙箱群消息。废弃的 `token` 字段不参与当前鉴权，不应保留。
+
 ## 连接生产服务器
 
 本机 SSH 配置已提供 `chtholly-gcp` 别名，并通过 Google Cloud IAP 建立连接：
