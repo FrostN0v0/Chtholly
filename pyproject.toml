@@ -7,17 +7,23 @@ authors = [{ name = "FrostN_0v0", email = "suny25802@gmail.com" }]
 license = { text = "AGPL-3.0" }
 requires-python = ">=3.10, <4.0"
 dependencies = [
-    "arclet-entari[full]>=0.18.1",
-    "entari-plugin-browser>=0.6.1",
+    "arclet-entari[full]>=0.18.3",
+    "entari-plugin-browser[jinja2]>=0.6.1",
     "entari-plugin-database>=0.3.3",
     "entari-plugin-llm>=0.2.1",
     "entari-plugin-permission>=0.1.1",
     "entari-plugin-server>=0.7.1",
     "entari-plugin-webui>=1.0.1",
+    "exa-py>=2.16.2",
     "httpx[http2]>=0.27.2",
+    "orjson>=3.11.9",
     "rich>=13.9.4",
+    "satori-python-adapter-qq>=0.4.2",
+    "tzdata>=2026.3",
 ]
 
+[tool.uv.sources]
+entari-plugin_llm = { git = "https://github.com/ArcletProject/entari-plugin-llm"}
 
 [project.optional-dependencies]
 adapters = [
@@ -43,3 +49,14 @@ extra-standard-library = ["typing_extensions"]
 pythonVersion = "3.10"
 pythonPlatform = "All"
 typeCheckingMode = "standard"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]

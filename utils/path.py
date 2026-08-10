@@ -8,6 +8,9 @@ RES_DIR = Path(__file__).resolve().parent.parent / "resources"
 IMAGE_DIR = RES_DIR / "image"
 """Image resources directory."""
 
+MEME_DIR = IMAGE_DIR / "memes"
+"""Collected reaction images directory."""
+
 AUDIO_DIR = RES_DIR / "audio"
 """Audio resources directory."""
 

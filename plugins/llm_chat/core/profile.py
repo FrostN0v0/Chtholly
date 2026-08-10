@@ -1,0 +1,209 @@
+"""Pure long-term profile and semantic memory helpers."""
+
+from __future__ import annotations
+
+import json
+import math
+from typing import TypeGuard, cast
+from dataclasses import dataclass
+from collections.abc import Mapping
+
+ALLOWED_PROFILE_CATEGORIES = frozenset(
+    {
+        "preference",
+        "interest",
+        "trait",
+        "communication_style",
+        "boundary",
+        "relationship",
+        "background",
+    }
+)
+PROFILE_KEY_MAX_LEN = 24
+PROFILE_VALUE_MAX_LEN = 80
+PROFILE_EVIDENCE_MAX_LEN = 120
+MEMORY_TEXT_MAX_LEN = 160
+PROFILE_PATCH_LIMIT = 5
+MEMORY_ITEM_LIMIT = 1
+REINFORCE_BONUS = 0.05
+CONFLICT_PENALTY = 0.15
+REPLACE_MARGIN = 0.25
+
+
+@dataclass(slots=True, frozen=True)
+class ProfilePatch:
+    category: str
+    key: str
+    value: str
+    confidence: float
+    evidence: str
+
+
+@dataclass(slots=True, frozen=True)
+class MemoryItem:
+    text: str
+    importance: float
+
+
+@dataclass(slots=True, frozen=True)
+class ProfileFactSnapshot:
+    value: str
+    confidence: float
+    evidence_count: int
+
+
+def _is_number(value: object) -> TypeGuard[int | float]:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def normalize_profile_patch(raw: object, *, min_confidence: float) -> ProfilePatch | None:
+    if not isinstance(raw, Mapping):
+        return None
+
+    raw_map = cast(Mapping[str, object], raw)
+    category = raw_map.get("category")
+    key = raw_map.get("key")
+    value = raw_map.get("value")
+    confidence = raw_map.get("confidence")
+    evidence = raw_map.get("evidence", "")
+
+    if not isinstance(category, str) or category not in ALLOWED_PROFILE_CATEGORIES:
+        return None
+    if not isinstance(key, str) or not isinstance(value, str):
+        return None
+    if not _is_number(confidence):
+        return None
+    if not isinstance(evidence, str):
+        evidence = ""
+
+    key = key.strip()
+    value = value.strip()
+    evidence = evidence.strip()
+    if not key or not value:
+        return None
+
+    normalized_confidence = _clamp01(float(confidence))
+    if normalized_confidence < min_confidence:
+        return None
+
+    return ProfilePatch(
+        category=category,
+        key=key[:PROFILE_KEY_MAX_LEN],
+        value=value[:PROFILE_VALUE_MAX_LEN],
+        confidence=normalized_confidence,
+        evidence=evidence[:PROFILE_EVIDENCE_MAX_LEN],
+    )
+
+
+def normalize_memory_item(raw: object, *, min_importance: float = 0.0) -> MemoryItem | None:
+    if not isinstance(raw, Mapping):
+        return None
+
+    raw_map = cast(Mapping[str, object], raw)
+    text = raw_map.get("text")
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    if not text:
+        return None
+
+    importance = raw_map.get("importance")
+    if not _is_number(importance):
+        if min_importance > 0.0:
+            return None
+        importance = 0.5
+
+    normalized_importance = _clamp01(float(importance))
+    if normalized_importance < min_importance:
+        return None
+
+    return MemoryItem(text=text[:MEMORY_TEXT_MAX_LEN], importance=normalized_importance)
+
+
+def merge_profile_snapshot(
+    existing: ProfileFactSnapshot | None,
+    patch: ProfilePatch,
+    *,
+    values_match: bool | None = None,
+) -> ProfileFactSnapshot:
+    """Merge a patch into an existing fact snapshot.
+
+    ``values_match`` overrides the same-value check (e.g. semantic equivalence
+    from embeddings); ``None`` falls back to exact string equality. A match
+    keeps the established value text and reinforces confidence.
+    """
+    if existing is None:
+        return ProfileFactSnapshot(value=patch.value, confidence=patch.confidence, evidence_count=1)
+
+    if values_match is None:
+        values_match = existing.value == patch.value
+
+    evidence_count = existing.evidence_count + 1
+    if values_match:
+        confidence = min(1.0, max(existing.confidence, patch.confidence) + REINFORCE_BONUS)
+        return ProfileFactSnapshot(value=existing.value, confidence=confidence, evidence_count=evidence_count)
+
+    if patch.confidence >= existing.confidence + REPLACE_MARGIN:
+        return ProfileFactSnapshot(value=patch.value, confidence=patch.confidence, evidence_count=evidence_count)
+
+    confidence = max(0.0, existing.confidence - CONFLICT_PENALTY)
+    return ProfileFactSnapshot(value=existing.value, confidence=confidence, evidence_count=evidence_count)
+
+
+def decode_embedding(raw: str) -> list[float] | None:
+    if not raw:
+        return None
+    try:
+        values: object = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(values, list) or not values:
+        return None
+    if not all(_is_number(value) for value in values):
+        return None
+    return [float(value) for value in values]
+
+
+def encode_embedding(values: list[float]) -> str:
+    return json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    left_norm = math.sqrt(math.fsum(value * value for value in left))
+    right_norm = math.sqrt(math.fsum(value * value for value in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    dot = math.fsum(a * b for a, b in zip(left, right, strict=True))
+    return dot / (left_norm * right_norm)
+
+
+def match_duplicate_memory(
+    embedding: list[float] | None,
+    text: str,
+    candidates: list[tuple[int, str, list[float] | None]],
+    *,
+    min_similarity: float,
+) -> int | None:
+    """Return the id of a near-duplicate candidate memory, or None.
+
+    Exact text equality always matches. Semantic match requires both vectors
+    and the best cosine score >= min_similarity; first best wins on ties.
+    """
+    best_id: int | None = None
+    best_score = -1.0
+    for cand_id, cand_text, cand_embedding in candidates:
+        if text == cand_text:
+            return cand_id
+        if embedding is None or cand_embedding is None:
+            continue
+        score = cosine_similarity(embedding, cand_embedding)
+        if score >= min_similarity and score > best_score:
+            best_id = cand_id
+            best_score = score
+    return best_id

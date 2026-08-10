@@ -8,8 +8,8 @@ image, audio, or a poke back depending on configured probabilities.
 from __future__ import annotations
 
 import random
-from typing import Any
 from pathlib import Path
+from collections.abc import Mapping
 
 from satori import EventType
 from satori.model import User, Event, Guild, Channel, ChannelType
@@ -96,7 +96,8 @@ class PokeEvent(NoticeEvent):
 
 
 @register_internal_event
-def _parse_poke(event_type: str, raw_type: str, data: dict[str, Any]) -> type[NoticeEvent] | None:
+def _parse_poke(event_type: str, raw_type: str, data: Mapping[str, object]) -> type[NoticeEvent] | None:
+    _ = data
     if event_type == EventType.INTERNAL.value and raw_type == "notice.notify.poke":
         return PokeEvent
     return None
@@ -118,15 +119,22 @@ _audio_list: list[Path] | None = None
 def _images() -> list[Path]:
     global _img_list
     if _img_list is None:
-        _img_list = [p for p in FOX_DIR.iterdir() if p.is_file()]
+        _img_list = [p for p in FOX_DIR.iterdir() if p.is_file()] if FOX_DIR.exists() else []
     return _img_list
 
 
 def _audios() -> list[Path]:
     global _audio_list
     if _audio_list is None:
-        _audio_list = [p for p in DINGGONG_DIR.iterdir() if p.is_file()]
+        _audio_list = [p for p in DINGGONG_DIR.iterdir() if p.is_file()] if DINGGONG_DIR.exists() else []
     return _audio_list
+
+
+def _int_id(value: str) -> int | None:
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 @plug.dispatch(PokeEvent)
@@ -149,7 +157,12 @@ async def on_poke(session: Session, event: PokeEvent):
         if auds:
             await session.send(MessageChain([Audio.of(path=random.choice(auds))]))
     group_id = event.group_id
+    user_id = _int_id(event.user_id)
+    if user_id is None:
+        return
     if group_id:
-        await session.account.internal("group_poke", group_id=int(group_id), user_id=int(event.user_id))
+        parsed_group_id = _int_id(group_id)
+        if parsed_group_id is not None:
+            await session.account.internal("group_poke", group_id=parsed_group_id, user_id=user_id)
     else:
-        await session.account.internal("friend_poke", user_id=int(event.user_id))
+        await session.account.internal("friend_poke", user_id=user_id)

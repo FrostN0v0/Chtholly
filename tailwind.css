@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+@source "./plugins/help_menu/templates/**/*.jinja";
+
+@theme {
+  --color-cream: #f7f4ef;
+  --color-card: #fbf9f5;
+  --color-line: #e7e1d7;
+  --color-accent: #c4612f;
+  --color-ink: #1f2421;
+  --font-display: "HYWenHei", "Arial", sans-serif;
+}
+
+@font-face {
+  font-family: "HYWenHei";
+  src: url("../../../resources/font/HYWenHei-85W.ttf") format("truetype");
+}

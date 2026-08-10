@@ -78,7 +78,28 @@ uv sync --all-extras
 
 ### ⚙️ 配置
 
-编辑 `entari.yml` 调整网络、日志、插件加载等。敏感值（Token、超管 QQ、适配器端点等）放入 `.env.local`，通过 `${{ env.KEY }}` 插值，不要提交真实凭证。
+编辑 `entari.yml` 调整网络、日志、插件加载等。敏感值（Token、API Key、密码等）放入 `.env.local`，通过 `${{ env.KEY }}` 插值，不要提交真实凭证。
+
+启用 `llm_chat` 的网页搜索与正文提取需在 `.env` 或 `.env.local` 中配置 `EXA_API_KEY`；未配置时两个工具都不会注册，新增或更换密钥后需完整重启 Bot。
+Exa 默认使用 `auto` 搜索；可通过 `exa_search_type` 切换 `fast`、`deep-lite`、`deep`、`deep-reasoning`、`neural` 或 `instant`，并用 `exa_search_category`、`exa_include_domains`、`exa_exclude_domains`、`exa_start_published_date` 与 `exa_end_published_date` 设置类别、域名和发布时间过滤。所有调用仍受本地公开 URL 校验、敏感 query 拦截、结果限幅和 generation-local 预算约束。
+
+`llm_chat` 每轮生成的网页调用预算由 `web_search_max_calls_per_generation`、`web_page_max_calls_per_generation` 与 `web_total_max_calls_per_generation` 配置，默认分别为 `2 / 2 / 4`；预算按生成上下文隔离，实际总额不会超过两个单项之和。若 LLM 工具循环耗尽，插件会基于本轮已积累的工具结果执行一次不携带任何工具的最终化；最终化仍失败时保持静默，不回退到原生自动对话。
+
+`llm_chat` 会在单轮生成内向模型提供 `send_text` 与 `send_merged_forward`。只有一个短而完整的聊天气泡时才直接使用最终普通文本；只要回答自然包含两个以上独立节拍，模型会优先按顺序调用 `send_text`，事实问答和严肃求助也可将结论、理由或限制、后续建议分条表达。若模型未调用工具而在最终普通文本中留下多个自然行，运行时仍会按换行拆成独立气泡并沿用相同安全节拍；代码块以及 Markdown 列表、引用、表格等结构化内容保持单条，不会被机械拆分。单轮最多发送 5 条普通文本；相邻发送由 `delivery_min_interval_seconds`、`delivery_default_interval_seconds`、`delivery_max_interval_seconds` 控制，默认 `1.1 / 1.2 / 5.0` 秒，配置只能收紧安全上限。普通文本单条、合并转发节点、整轮文本与媒体数量分别由对应的 `delivery_max_*` 配置限制；所有成功文本最终聚合为一条 assistant 历史，避免一次回复占用多个历史窗口行。
+
+预计超过普通文本条数或各部分较长时，模型可改用一次合并转发。OneBot V11 使用公开 Satori `Message(forward=True)` 发送；其他平台或 OneBot 发送失败时，插件会按原顺序和同一安全节拍回退为普通文本。媒体必须先于本轮文本或合并转发；生成、最终发送或取消中断时，仅尽力保存已确认送达的文本前缀，不执行关系评估或关系更新。
+
+群聊中的 OneBot V11 合并转发本身不会触发 `llm_chat`，也不会立即调用 `get_forward_msg`。只有用户引用该合并转发消息并同时 `@` Bot 时，插件才读取各节点、保留原发送者归属，并对限额内图片沿用独立视觉描述链路。默认单轮可读取 200 个节点、每节点 2000 字符、总计 32000 字符，并描述最多 12 张转发图片；对应配置为 `merged_forward_max_messages`、`merged_forward_max_chars_per_message`、`merged_forward_max_total_chars` 与 `merged_forward_max_described_images`。达到显式安全限额时会向模型附加遗漏标记并写 warning，不再静默伪装成完整内容。转发内容只作为引用上下文，不写成当前发送者的画像或记忆事实。
+
+主聊天与关系 evaluator 的单次模型请求分别由 `model_request_timeout` 与 `eval_request_timeout` 限时，默认 `90 / 60` 秒。关系 evaluator 只使用严格 JSON 提示与本地解析，不强制供应商 JSON Mode；主模型若在没有任何发送尝试时返回空内容、内部媒体记录或孤立的 `[END_OF_RESPONSE]`，会执行一次无工具纠正重试。纠正仍失败时删除本轮尚未开始交付的 user 记录，不启动 evaluator；历史中的语音只以自然文本提供给模型，纯表情记录不进入提示历史。
+
+`llm_chat` 可在已触发的当前会话中，通过 `tag_image` 主动收藏本轮直接发送或引用的单张可复用表情包；普通群消息、裸图片占位符、合并转发内图片、生活照、截图、文档、二维码、证件、凭证与私人图片不会进入自动收藏。超管可在单图后使用 `llmchat tag-meme`，或引用单图消息后发送该命令进行人工覆盖；普通成员的同名命令会被拒绝并完整拦截，不会继续触发人格聊天。
+
+收藏只接受 JPEG、PNG 与 WebP，文件以无覆盖的纯数字名称写入 `resources/image/memes`，内容哈希用于目录内去重；自动标签立即写入 `chat_image_tags`，因此新图无需重启即可被 `send_image` 检索。收藏成功（含去重命中）会在当前频道留下不暴露路径与标签的确认历史；用户后续要求“发出来”或“再发一次”时，模型可精确重发该频道最近收藏的图片，明确给出已注册相对路径时也会按路径发送。图片文件属于可审阅的仓库静态资源，标签数据库仍是运行期本地数据；该能力不新增配置项，GIF 与其他格式会明确拒绝。
+
+部署默认使用 `info` 日志级别并关闭 `rich_error`，避免第三方 `debug` 日志或异常局部变量展开密钥、搜索参数和工具实参。
+
+生产服务器的 IAP SSH 连接、systemd 服务、日志查询、LLBot / OneBot 排障、数据库检查与回滚流程见 [生产环境运维与调试手册](./docs/production-operations.md)。
 
 ### 🚀 运行
 
@@ -86,7 +107,7 @@ uv sync --all-extras
 entari run
 ```
 
-> 运行前需确保 OneBot V11 协议端（如 Lagrange.OneBot）已启动，并在 `.env.local` 中填好 `ONEBOT11_ENDPOINT` / `ONEBOT11_ACCESS_TOKEN`。
+> 运行前需确保 OneBot V11 协议端（生产环境当前使用 LLBot）已启动，并在 `.env.local` 中填好 `ONEBOT_TOKEN`；反向 WebSocket 路径与 Token 必须和 `entari.yml` 的适配器配置一致。
 
 详细的框架使用见 [Entari 文档](https://arclet.top/tutorial/entari/)。
 

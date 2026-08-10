@@ -193,3 +193,7 @@ entari.yml.local
 .entari
 .entari_cli.toml
 data.db
+.chtholly/
+
+# Node (tailwind build toolchain)
+node_modules/

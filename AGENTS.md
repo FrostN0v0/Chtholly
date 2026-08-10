@@ -14,16 +14,18 @@
 
 ## 技术栈与关键依赖
 
-- **Python**: >= 3.14
+- **Python**: >= 3.10, < 4.0（当前运行时使用 3.10；待协议栈完成 Python 3.14 兼容后再升级）
 - **Bot 框架**: [arclet-entari](https://pypi.org/project/arclet-entari/)（完整安装 `arclet-entari[full]`，含 CLI、YAML、文件监听）
 - **CLI 工具**: [entari-cli](https://pypi.org/project/entari-cli/) —— `entari init / run / new / add / remove / config / gen_main`
 - **事件总线**: arclet-letoderea（Entari 内建依赖）
 - **命令系统**: arclet-alconna（Entari 内建 `command` 模块）
 - **服务管理**: launart（`Service` 基类用于跨插件依赖注入）
-- **协议适配器**: `satori-python-adapter-onebot11`（默认）；`entari-plugin-server` 在 Python 3.14 下有 dataclass 兼容问题，暂用外部 Satori server + `basic.network` 连接，已降级到 Python 3.10，待修复后升回 3.14
+- **协议适配器**: `satori-python-adapter-onebot11`（默认）；`entari-plugin-server` 使用 `direct_adapter: true` 与 Entari 直连，此模式不得再配置 `basic.network`。当前协议栈仍以 Python 3.10 运行，待 Python 3.14 兼容性确认后升级
+- **Satori 服务鉴权**: `server.token` 只校验 Satori 事件 WebSocket 的 Identify token；当前锁定的 Satori Server HTTP action API 不校验该 token，因此 HTTP API 与 Entari WebUI 都必须保持 `127.0.0.1` 监听并通过 IAP SSH 隧道访问。OneBot 适配器的 `access_token` 只保护对应适配器连接，三者不得混用。
 - **配置模型**: `BasicConfModel`（默认，dataclass 风格）/ Pydantic `BaseModel`（`arclet.entari.config.models.pyd`）/ msgspec `Struct`
 - **HTTP 客户端**: httpx
-- **日志与终端**: rich（Entari 内建 log 使用 loguru，可启用 `rich_error`）
+- **JSON 序列化**: orjson（LiteLLM 工具 / MCP 请求路径的显式运行时依赖）
+- **日志与终端**: rich（Entari 内建 log 使用 loguru；凭证化运行环境必须关闭会展开局部变量的 `rich_error`）
 - **包管理**: uv（`uv sync` / `uv add` / `uv remove`）
 - **代码质量**: Ruff、Pyright（`typeCheckingMode = "standard"`）
 
@@ -95,6 +97,7 @@ metadata(
 
 plug = Plugin.current()
 
+
 @plug.dispatch(MessageCreatedEvent)
 async def on_message(session: Session):
     if session.content == "ping":
@@ -120,18 +123,23 @@ Entari 内建 `command` 基于 Alconna：
 ```python
 from arclet.entari import command, MessageChain, Session
 
+
 @command.on("echo {content}")
 def echo_(content: str):
     return content
+
 
 @command.command("add <a> <b>")
 def add(a: int, b: int):
     return f"{a + b = }"
 
+
 # 复杂指令用 Alconna 实例
 from arclet.alconna import Alconna, Args, AllParam
+
 alc = Alconna("echo", Args["content", AllParam])
 disp = command.mount(alc)
+
 
 @disp.handle()
 async def echo_(content: command.Match[MessageChain], session: Session):
@@ -144,6 +152,7 @@ async def echo_(content: command.Match[MessageChain], session: Session):
 
 ```python
 from arclet.entari import filter_, plugin, MessageCreatedEvent
+
 
 @plugin.listen(MessageCreatedEvent)
 @filter_.public & filter_.user("123456789")
@@ -158,9 +167,11 @@ async def on_msg(session: Session):
 ```python
 from arclet.entari import BasicConfModel, plugin_config
 
+
 class MyConfig(BasicConfModel):
     foo: str
     bar: int = 42
+
 
 config = plugin_config(MyConfig)
 ```
@@ -198,12 +209,32 @@ config = plugin_config(MyConfig)
 - Pyright 使用 `typeCheckingMode = "standard"`。
 - 保持现有代码风格：异步函数、配置模型（`BasicConfModel` 优先，跨框架兼容场景用 Pydantic）、短中文注释风格。
 
+### 插件分层与类型边界
+
+- 插件入口文件保持轻量：`plugins/<name>/__init__.py` 只放 `metadata(...)`、`plugin_config(...)`、`Plugin.current()`、注册函数调用和必要日志；复杂业务必须拆到职责明确的子模块。
+- 可被测试、复用或被 Pyright 独立分析的纯逻辑，放到 import-safe 包中，例如 `utils/<domain>_core/`。这些 core 包不得导入 `arclet.entari`、`entari_plugin_llm`、`entari_plugin_database`、`launart`，也不得执行插件注册、服务注册或其他运行时副作用。
+- Entari/LLM/数据库/HTTP 等动态边界应与纯算法分离；小插件可以在同一 runtime 模块内组织相关 handler、command、tool 或轻量 IO，但当一个模块同时承载多个变化方向（如事件注册、外部 API、持久化事务、渲染、复杂算法）或文件明显膨胀时，必须按职责拆分。
+- 外部 JSON、LiteLLM response、SQLAlchemy row、插件 `_extra` 等动态对象必须在边界处用 `Mapping[str, object]`、`dataclass`、`TypedDict`、`Protocol`、`TypeGuard` 或局部 `cast(...)` 收窄；核心算法不得把 `Any` 贯穿到底。
+- 测试直接导入 import-safe core 包，不通过 `sys.path.insert(...)`、synthetic package alias 或文件级 Pyright suppress 绕过插件副作用；pytest 的 import 根通过 `pyproject.toml` 配置。
+- 新增 provider / client 类必须支持显式依赖注入测试 seam（例如可传入 HTTP client/transport），测试不得改写私有属性。
+- 对会被 `::auto_reload` 重复加载的运行时副作用，注册时同步考虑清理：长任务用 `collect_disposes(...)` 取消，跨卸载状态用 `keeping(...)` 或明确的持久化存储。
+- 结构质量门槛：入口文件原则上保持在 120 行以内；本地插件生产文件原则上保持在 250 行以内。超过不是硬错误，但必须能用单一职责解释其存在；否则优先按 `config` / `schemas` / `data_source` / `client` / `render` / `listener` / `command` / `runtime` / `utils` 等自然边界拆分。
+
 ### 基础建设
 
 - 项目引进了 `entari-plugin-browser`、`entari-plugin-llm`、`entari-plugin-database`、`entari-plugin-permission` 作为项目的基础建设工具，当你需要使用 playwright、jinja2 模板渲染，AI会话调用、数据库及ORM、权限管理等方面时，优先考虑现有基建。
 - 当前项目拟构造一个供其它插件或服务调用的 TTS 服务，目前拟兼容 gpt-sovits 的接入，参考 `nonebot-plugin-deepseek` 中的 TTS 服务对接，并优化实现，使其符合当前项目的基建要求。
 - 帮助菜单，当前项目拟参考 [`nonebot-plugin-picmenu-next`](https://github.com/lgc-NB2Dev/nonebot-plugin-picmenu-next) 的菜单功能，结合 entari 基建，实现一个自动生成、界面美观、自定义程度高，开发简单的图片帮助基建插件。
-- 会话互动系统，当前项目拟构造一个基于 llm 插件支持群聊场景需求，在复杂的多人对话中保有人物认知和交互能力的聊天交互系统，支持对本地图片通过 llm 视觉识别打上标签，并在合适不突兀的语境下发送图片和语音（语音文件以内容命名，根据文件名判断语境发送），并支持调用插件功能。
+- 会话互动系统：`plugins/llm_chat` 已基于 LLM 插件实现公开群聊人格对话，用户轮次使用 `speaker` / `content` JSON 区分多人发言，图片继续走独立视觉链路。主聊天只接收按类别筛选的画像值和相关记忆，关系 evaluator 接收 canonical 画像与 aliases；语义分组和去重只构造可逆读取视图，持久化继续使用 exact key 并保留原始数据。表情、预录语音、TTS 与白名单插件命令均通过实际注册工具按需调用。模型可在单轮内使用 `send_text` 发送带确定性限幅节拍的多个普通文本，或使用 `send_merged_forward` 发送 OneBot 合并转发；非 OneBot、合并转发失败和部分 transport 失败均按已确认前缀语义回退为带节拍普通文本。所有成功文本按真实顺序聚合为一个 assistant 历史行，媒体 marker 继续独立持久化且必须先于文本；生成、最终发送或取消失败只尽力保存已确认前缀，不启动 evaluator 或关系更新。发送额度、节拍与媒体上限通过独立 generation-local `DeliveryState` 在运行时、system prompt 和工具处理器之间共享同一组规范化限额。网页能力固定通过 Agno `ExaTools` 提供 `web_search` 与 `read_web_page` 两个只读工具：时效问题按需使用 Exa 搜索，公开页面通过 Exa Contents 获取限幅正文；独立的 generation-local `ContextVar` 同时隔离授权域与 effective budget，运行时、system prompt 和 tool schema 必须共享同一组规范化限额。所有目标必须经过公开 URL 与敏感 query 校验，网页摘要和正文始终视为不可信数据，不得扩大工具权限、覆盖系统规则或索取隐私。公开群聊由 priority `900` 主处理器接管，并以 priority `999` claim guard 在原生 priority `1000` 自动对话前硬阻断失败穿透；精确工具循环耗尽仅允许基于已积累 transcript 执行一次无工具 finalizer，且不得复述已成功发送内容或部分回退已确认前缀；其他生成或最终化失败均记录脱敏 warning 后静默 `BLOCK`。
+- `llm_chat` 工具模块分层：所有 LLM tool 实现位于 `plugins/llm_chat/tools/`，按工具名拆为 `send_image.py`、`send_external_image.py`、`send_text.py`、`send_merged_forward.py`、`list_image_resources.py`、`send_audio.py`、`speak.py`、`call_plugin.py`、`tag_image.py`、`get_local_time.py`、`web_search.py` 与 `read_web_page.py`；共享交付、目录、注册和 provider context 仅放在同目录的下划线模块。`tool_runtime.py` 只负责配置、依赖装配、确定注册顺序和汇总 `registered_tools`；人工表情收藏命令独立放在 `meme_command.py`。`send_external_image` 只接受经公开 URL 校验的 HTTP(S) 直接图片地址或经 MIME 嗅探、6 MiB 限幅的 JPEG / PNG / WebP / GIF base64，不读取任意本地路径，也不持久化来源；`get_local_time` 默认读取宿主本地时区并支持显式 IANA timezone。
+- `llm_chat` 网页模块分层：`web/policy.py` 只承载 provider-independent 的授权、预算、输入规范化与公开 URL 校验；`web/exa.py` 只适配 Agno `ExaTools`；工具实现分别位于 `tools/web_search.py` 与 `tools/read_web_page.py`，配置门控位于 `tools/web.py`；`web/__init__.py` 保持无副作用且不聚合 provider 符号。内部调用导入最窄职责模块，避免 provider 依赖反向渗透到聊天编排层。
+- `llm_chat` 消息处理分层：`chat_handler.py` 只负责入站解析、上下文装配、模型调用与关系评估编排；`turn_lifecycle.py` 统一负责 user turn 回滚、confirmed-delivery 持久化、最终文本发送和控制 marker 清理，禁止在 handler 中重新实现第二套失败生命周期。
+- `llm_chat` 分段文字选择：只有一个短而完整的聊天气泡时才直接使用最终普通文本；回答包含两个以上自然独立的文字节拍时优先调用 `send_text`，事实问答和严肃求助同样可按结论、理由或限制、后续建议分条。若模型未调用工具而最终普通文本包含多个自然行，运行时必须按换行拆成独立消息并复用同一安全节拍；代码块及 Markdown 列表、引用、表格等结构化内容保持单条。不得切碎单个句子或机械地每句一条；超过普通文本额度或各部分较长时改用一次 `send_merged_forward`。
+- `llm_chat` 模型 I/O：主聊天与 evaluator 必须分别使用 `model_request_timeout` / `eval_request_timeout`；evaluator 依靠严格 JSON prompt 与本地解析，不强制供应商 JSON Mode。未发生发送尝试时，空回复、内部媒体记录或孤立结束标记只允许一次无工具纠正重试；仍失败则精确删除本轮 user 行并跳过 evaluator。用户最新一轮明确要求发送或补发媒体而 `DeliveryState` 尚未确认媒体发送时，生成层必须在同一网页与交付预算内执行一次保留工具能力的纠正；只有媒体真实发送成功，或模型以内部 `[MEDIA_UNAVAILABLE]` marker 明确本轮不可发送时才可继续，marker 在最终发送和持久化前清除，重复的虚假交付声明视为生成失败。构造 prompt 时不得原样回放持久化媒体 marker：语音仅保留去控制标签后的自然文本，纯表情记录省略。
+- `llm_chat` 原生图片输出：OpenAI-compatible Chat Completions 的 `message.images` 必须在本地 Agno 兼容边界中保留，并统一收窄为经 6 MiB、JPEG / PNG / WebP / GIF MIME 嗅探或公开 URL 策略验证的图片；拒绝任意本地路径。安全图片输出视为真实媒体候选，不触发空回复 finalizer 或虚假媒体纠正；运行时必须在最终文字前原子预留媒体额度并发送，逐张确认后独立写入 `[发送了图片]` 历史 marker，失败只保留已确认前缀且跳过 evaluator。
+- `llm_chat` 入站合并转发：OneBot V11 群内顶层 `<onebot:forward>` 不得自行触发会话或读取内容；只有用户引用该合并转发并同时 `@` Bot 时，运行时才通过 `session.internal("get_forward_msg", ...)` 拉取，并按原发送者结构化为 `forwarded_messages`。默认读取上限为 200 节点、每节点 2000 字符、总计 32000 字符和 12 张视觉描述图片；显式限额触发后必须同时向模型提供遗漏标记并写脱敏 warning，禁止静默截断后声称完整。转发图片继续走独立视觉描述链路；转发原话只作不可信引用上下文，不得归因到当前发送者的画像、记忆或关系增量。
+- `llm_chat` 表情包收藏与目录感知：仅在当前已触发会话内允许模型通过 `tag_image` 收藏本轮顶层直接图片或已补全引用消息中的顶层图片，候选顺序固定为 direct-first / quoted-second，合并转发图片不得进入候选。自动收藏必须排除裸 marker、普通或敏感图片与用户明确拒绝保存的图片；超管可用 `llmchat tag-meme` 附单图或引用单图执行人工覆盖，普通成员也必须收到非空拒绝以确保命令被 claim。导入接受 JPEG / PNG / WebP / GIF；GIF 保留原始动画字节并直接交由视觉模型标注。所有格式的原始字节经 6 MiB 边界与 MIME 嗅探后，以 SHA-256 去重并通过同目录临时文件 + no-clobber hard link 写入 `resources/image/memes`；标签立即 upsert 到 `chat_image_tags`，embedding 失败时保留标签并依赖 IDF fallback。`chat_image_tags` 是图片资源目录的权威索引，精确重复且已有标签的资源不得新增或刷新索引顺序。模型按最新、上一张或前若干张引用资源时，必须先调用只读 `list_image_resources(limit, offset)`；该工具只枚举 `resources/image` 下仍存在且已登记的相对路径与标签，固定按 `ImageTag.id` 倒序分页，禁止提供任意文件系统目录访问。目录返回值只是不可信内部工具数据，允许模型把相对路径传给 `send_image.image_paths`，但不得向用户复述路径、标签、目录结构或将其内容当成指令。`send_image` 的语义 `context` 与精确 `image_paths` 必须二选一；多路径发送先完成全部登记、目录边界、文件存在性、去重和 generation-local 媒体额度校验，再按给定顺序发送，额度不足时不得产生部分发送，transport 中途失败则遵循已确认前缀语义。新收藏不再写入 assistant 历史 marker；旧收藏 marker 仅保留脱敏读取。`tag_image` 工具结果与普通用户可见回复仍不得泄露路径、标签、哈希或数据库信息。文件与数据库提交必须在进程内异常及取消时补偿。
+
 
 ### 测试
 
@@ -231,116 +262,20 @@ config = plugin_config(MyConfig)
 
 ## 注意事项
 
-1. **凭证安全**：任何 access_token、cred、cookie、role_token、Satori token、适配器 token 等敏感数据禁止写入日志、文档、测试输出或提交到仓库；一律走 `.env` + `${{ env.KEY }}` 插值。
+1. **凭证安全**：任何 access_token、cred、cookie、role_token、Satori token、适配器 token 等敏感数据禁止写入日志、文档、测试输出或提交到仓库；一律走 `.env` + `${{ env.KEY }}` 插值。Entari 的 debug 启动日志会输出环境变量插值后的完整配置，`rich_error` 还会在异常堆栈中展开局部变量；仓库默认保持 `basic.log.level: info` 与 `basic.log.rich_error: false`，不得在凭证化环境启用这两类详细日志。
 2. **API 限流**：外部服务（GitHub、各游戏 Web API、AI 服务、Satori 协议端等）均可能限流或不可用；批量请求应控制并发与错误处理。
 3. **资源缓存**：如有资源调用需求，优先使用本地资源，缺失时再从网络获取；下载失败要有回退或明确报错，不要静默失败。本地缓存路径统一走 `local_data.get_cache_dir()`。
 4. **命令权限**：涉及全局广播、批量下发、资源同步、插件启停等高影响命令，应仅超管可用；`::control` 已按 `PluginRole` 与 `$filter` 提供分层控制，复用之。
 5. **异常类型**：接口层应抛出语义清晰的异常，handler 层再决定用户可见的消息反馈；避免用宽泛 `Exception` 吞错。Entari 事件监听器抛出的异常会按 `skip_req_missing` 等配置处理，不要在 handler 里静默 `except Exception: pass`。
 6. **文档同步**：新增命令、配置、插件、适配器或测试约定时，同步更新 `README.md`、`entari.yml` 或新建 markdown 文档并在主 `README.md` 中引用。
-7. **保持代码干净**：新增代码按项目分层放置，专事专干，不要在专注渲染的模块里做数据处理，也不要在数据层做 IO / 渲染。
-   > 涉及渲染部分时，前置数据处理特化的可以在接收数据时于 `schemas`/数据模型部分完成；通用格式化在过滤器/模板 helper 内完成；渲染模块只做渲染。
+7. **保持代码干净**：新增代码按项目分层放置，专事专干，不要在专注渲染的模块里做数据处理，也不要在数据层做 IO / 渲染；涉及渲染部分时，前置数据处理特化的可以在接收数据时于 `schemas`/数据模型部分完成，通用格式化在过滤器/模板 helper 内完成，渲染模块只做渲染。
 8. **pydantic 兼容**：Entari 默认使用 `BasicConfModel`（dataclass）；如需 Pydantic，从 `arclet.entari.config.models.pyd` 导入并注意 v1/v2 差异，优先使用框架提供的兼容封装。
 9. **用户体验**：命令与交互应贴近直觉，避免繁琐难记的指令、反人类的输入约束与需要多轮猜谜的对话流；指令前缀与 nickname 在 `entari.yml` 中统一配置，不要在插件内重复实现前缀解析。
 10. **热重载安全**：所有本地插件必须可被 `::auto_reload` 安全重载——避免模块级副作用、全局可变状态、未清理的文件句柄/连接；用 `keeping` + `collect_disposes` 兜底。
 11. **注重文档时效性**： Entari 项目是一个正在频繁迭代开发的项目，当做开发参考时，请检查当前依赖是否为最新，官方文档是否有更新，如果依赖过时，请结合官方文档和相关 commit 更新的内容同步开发文档，以避免过时特性和使用新特性。
-12. **内建插件和可发布插件的区分**：当前项目鼓励将于本bot基建无耦合的插件，作为可发布插件进行开发，你构建插件时需要分辨当前插件是否无耦合可能，然后将可发布并支持其它 Entari 项目安装的插件按独立插件标准开发，为其配备完备独立的 git repo 和 docs 等架构。
-  > 比如 [`mirata`](https://github.com/entanex/miraita) 项目的 argot 功能，完全可以拆除作为独立插件发布，供 entari 生态使用。
+12. **内建插件和可发布插件的区分**：当前项目鼓励将于本bot基建无耦合的插件，作为可发布插件进行开发，你构建插件时需要分辨当前插件是否无耦合可能，然后将可发布并支持其它 Entari 项目安装的插件按独立插件标准开发，为其配备完备独立的 git repo 和 docs 等架构；比如 [`mirata`](https://github.com/entanex/miraita) 项目的 argot 功能，完全可以拆除作为独立插件发布，供 entari 生态使用。
 13. **分支纯净性**：所有变更请基于当前 `etr` 分支新建分支，命名结构参考 `etr/feat-xxx`，并在该分支按原子性提交规范落成 `commit` , `commit message` 使用中文，遵循 `gitmoji` 规范，主 `etr` 分支不要随便 commit。
-
-## 工作流：Plan 模式与 Code 模式
-
-你有两种主要工作模式：**Plan** 与 **Code**。
-
-### 何时使用
-
-- 对 **trivial** 任务，可以直接给出答案，不必显式区分 Plan / Code。
-- 对 **moderate / complex** 任务，必须使用 Plan / Code 工作流。
-
-### 公共规则
-
-- **首次进入 Plan 模式时**，需要简要复述：
-  - 当前模式（Plan 或 Code）；
-  - 任务目标；
-  - 关键约束（语言 / 文件范围 / 禁止操作 / 测试范围等）；
-  - 当前已知的任务状态或前置假设。
-- Plan 模式中提出任何设计或结论之前，必须先阅读并理解相关代码或信息，禁止在未阅读代码的情况下提出具体修改建议。
-- 之后仅在 **模式切换** 或 **任务目标/约束发生明显变化** 时，才需要再次复述，不必在每一条回复中重复。
-- 不要擅自引入全新任务（例如只让我修一个 bug，却主动建议重写子系统）。
-- 对于当前任务范围内的局部修复和补全（尤其是你自己引入的错误），不视为扩展任务，可以直接处理。
-- 你**必须**等待我确认你的计划，你才能进入 Code 模式并开始实现。
-- 当我在自然语言中使用 “实现”、“落地”、“按方案执行”、“开始写代码”、“帮我把方案 A 写出来” 等表述时：
-  - 必须视为我在明确请求进入 **Code 模式**；
-  - 在该回复中立即切换到 Code 模式并开始实现。
-  - 禁止再次提出同一选择题或再次询问我是否同意该方案。
-
----
-
-### Plan 模式（分析 / 对齐）
-
-输入：用户的问题或任务描述。
-
-在 Plan 模式中，你需要：
-
-1. 自上而下分析问题，尽量找出根因和核心路径，而不是只对症状打补丁。
-2. 明确列出关键决策点与权衡因素（接口设计、抽象边界、性能 vs 复杂度等）。
-3. 给出 **1–3 个方案**，每个方案需是最为可行且最接近理想状态的，每个方案包含：
-   - 概要思路；
-   - 影响范围（涉及哪些模块 / 组件 / 接口）；
-   - 优点与缺点；
-   - 潜在风险；
-   - 推荐的验证方式（应写哪些测试、跑哪些命令、观察哪些指标）。
-4. 仅在 **缺失信息会阻碍继续推进或改变主要方案选择** 时，才提出澄清问题；
-   - 避免为细节反复追问用户；
-   - 若不得不做假设，需显式说明关键假设。
-5. 避免给出本质相同的 Plan：
-   - 如果新方案与上一版只有细节差异，只说明差异与新增内容即可。
-
-**当以下条件满足时退出 Plan 模式：**
-
-- 我明确选择了其中一个方案，或者
-- 某个方案显然优于其他方案，你可以说明理由并主动选择。（如风险不可接受、明显违反关键约束等）
-
-一旦满足条件：
-
-- 你必须在 **下一条回复中直接进入 Code 模式**，并按选定方案实施；
-- 除非在实施过程中发现新的硬性约束或重大风险，否则禁止继续停留在 Plan 模式上扩写原计划；
-- 如因新约束被迫重新规划，应说明：
-  - 为什么当前方案无法继续；
-  - 需要新增的前提或决策是什么；
-  - 新 Plan 与之前相比有哪些关键变化。
-
----
-
-### Code 模式（按计划实施）
-
-输入：已经确认或你基于权衡选择的方案与约束。
-
-在 Code 模式中，你需要：
-
-1. 进入 Code 模式后，本回复的主要内容必须是具体实现（代码、补丁、配置等），而不是继续长篇讨论计划。
-2. 在给出代码前，简要说明：
-   - 将修改哪些文件 / 模块 / 函数（真实路径或合理假定路径均可）；
-   - 每个修改的大致目的（例如 `fix offset calculation`、`extract retry helper`、`improve error propagation` 等）。
-3. 偏好 **充分最简、可审阅的修改**（Sufficient-Minimal Change）：
-   - **充分性**：变更必须完整解决已证实的根因，而非仅消除表面症状。如果根因跨多个文件，那整组原子变更就是最简 —— 而非只改一处的 symptom patch；
-   - **不可再简化**：在满足充分性的所有方案中，选择引入最少新概念（新类型、新抽象层、新依赖、新约定）的那个。如果去掉某个引入后变更仍然充分，则必须去掉；
-   - **原子自洽**：变更作为一个整体必须将系统从一个自洽状态带到另一个自洽状态，不允许为了 diff 更小而产生中间不自洽的半成品；
-   - 优先展示局部片段或 patch，而不是大段无标注的完整文件；如需展示完整文件，应标明关键变更区域。
-4. 明确指出应该如何验证改动：
-   - 建议运行哪些测试 / 命令；
-   - 如有必要，给出新增 / 修改测试用例的草稿（代码使用 English）。
-5. 如果在实现过程中发现原方案存在重大问题：
-   - 暂停继续扩展该方案；
-   - 切回 Plan 模式，说明原因并给出修订后的 Plan。
-
-**输出应包括：**
-
-- 做了哪些改动、位于哪些文件 / 函数 / 位置；
-  - 不需要额外去检查行列位置，最多就报告符号名称即可。我有 IDE 可以代劳，你做就只是在增加回复延迟。
-- 应该如何验证（测试、命令、人工检查步骤）；
-- 任何已知限制或后续待办事项。
-
----
+14. **优雅可读**：保障出品代码的质量，拥有较高的代码品味，出品代码一定要优雅、可读，利于维护，代码文件层次分明，不拉一坨单文件。
 
 ## 语言与编码风格
 

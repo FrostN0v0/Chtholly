@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<style>
+  {% include "index.css" %}
+</style>
+</head>
+<body class="bg-cream font-display text-ink p-10 w-[900px]">
+  <h1 class="text-3xl font-bold text-accent mb-2">{{ title }}</h1>
+  <p class="text-sm opacity-60 mb-6">共 {{ total }} 个插件</p>
+  <div class="grid gap-4" style="grid-template-columns: repeat({{ columns }}, minmax(0, 1fr));">
+    {% for category, items in grouped.items() %}
+    <section class="bg-card border border-line rounded-2xl p-5 shadow-sm">
+      <h2 class="text-lg font-semibold text-accent mb-3">{{ category }}</h2>
+      {% for p in items %}
+      <div class="mb-3 last:mb-0">
+        <div class="font-medium">{{ p.icon }} {{ p.name }}
+          {% if p.version %}<span class="text-xs opacity-50 ml-1">v{{ p.version }}</span>{% endif %}
+        </div>
+        {% if p.description %}<div class="text-sm opacity-75">{{ p.description }}</div>{% endif %}
+        {% if p.commands %}
+        <ul class="mt-1 text-sm opacity-90 list-disc list-inside">
+          {% for cmd in p.commands %}<li><code>{{ cmd }}</code></li>{% endfor %}
+        </ul>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </section>
+    {% endfor %}
+  </div>
+</body>
+</html>
