@@ -2219,6 +2219,24 @@ async def test_quoted_merged_forward_requires_bot_mention() -> None:
 
 
 @pytest.mark.asyncio
+async def test_addressed_prefixed_command_is_not_claimed_by_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    async with _temporary_chat_handler() as harness:
+        module = harness.module
+        monkeypatch.setattr(
+            module.EntariConfig,
+            "instance",
+            SimpleNamespace(basic=SimpleNamespace(prefix=["/", "."], nickname="Chtholly")),
+        )
+
+        assert module._is_prefixed_command("/status")
+        assert module._is_prefixed_command(".状态")
+        assert module._is_prefixed_command("Chtholly status")
+        assert not module._is_prefixed_command("hello")
+        assert not await module._should_handle_chat(_ChatSession("/status"), is_notice_me=True)
+        assert await module._should_handle_chat(_ChatSession("hello"), is_notice_me=True)
+
+
+@pytest.mark.asyncio
 async def test_on_chat_passes_forwarded_nodes_as_structured_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
