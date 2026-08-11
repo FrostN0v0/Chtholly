@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, cast
 import asyncio
 from datetime import datetime
 
 from arclet.entari import At, Session, MessageCreatedEvent, plugin_config
 from arclet.letoderea import BLOCK, enter_if
+from arclet.entari.config import EntariConfig
 from arclet.entari.logger import log
 from arclet.letoderea.context import Contexts
 from entari_plugin_llm.config import get_model_config
@@ -57,12 +59,31 @@ async def _addressed_to_me(session: Session, is_reply_me: bool = False, is_notic
     return any(at.id == self_id for at in session.elements.select(At) if at.id)
 
 
+def _is_prefixed_command(text: str) -> bool:
+    stripped = text.lstrip()
+    basic = EntariConfig.instance.basic
+    if any(prefix and stripped.startswith(prefix) for prefix in basic.prefix):
+        return True
+    nickname = basic.nickname.strip()
+    return bool(nickname and re.match(rf"^@?{re.escape(nickname)}[，,:\s]+", stripped))
+
+
+async def _should_handle_chat(
+    session: Session,
+    is_reply_me: bool = False,
+    is_notice_me: bool = False,
+) -> bool:
+    if _is_prefixed_command(session.elements.extract_plain_text()):
+        return False
+    return await _addressed_to_me(session, is_reply_me, is_notice_me)
+
+
 config = plugin_config(LLMChatConfig)
 plug = Plugin.current()
 
 
 @plug.dispatch(MessageCreatedEvent).register(priority=900)
-@enter_if(_addressed_to_me)
+@enter_if(_should_handle_chat)
 async def on_chat(session: Session, ctx: Contexts):
     model_text = session.elements.extract_plain_text().strip()
     channel_id = session.channel.id
@@ -241,6 +262,6 @@ async def on_chat(session: Session, ctx: Contexts):
 
 
 @plug.dispatch(MessageCreatedEvent).register(priority=999)
-@enter_if(_addressed_to_me)
+@enter_if(_should_handle_chat)
 async def block_native_llm_fallback():
     return BLOCK
