@@ -25,9 +25,9 @@ from .core.errors import summarize_exception
 from .chat_context import (
     build_image_notes,
     build_chat_messages,
+    collect_quoted_message,
     build_eval_conversation,
     model_supports_image_input,
-    collect_quoted_text_message,
     build_multimodal_user_content,
 )
 from .core.compose import energy_at, compose_persona_prompt
@@ -96,7 +96,7 @@ async def on_chat(session: Session, ctx: Contexts):
         _LOGGER.warning(f"merged forward normalization failed: {type(exc).__name__}")
         forwarded_messages = []
 
-    quoted_message = collect_quoted_text_message(session)
+    quoted_message = collect_quoted_message(session)
     if quoted_message is not None:
         forwarded_messages.insert(0, quoted_message)
 

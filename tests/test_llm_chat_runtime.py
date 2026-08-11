@@ -805,6 +805,32 @@ async def test_vision_completion_forwards_timeout(monkeypatch: pytest.MonkeyPatc
     assert seen == [VISION_DESCRIBE_TIMEOUT, VISION_TAG_TIMEOUT]
 
 
+def test_collect_quoted_message_keeps_image_only_bot_attribution():
+    quoted_image = Image.of(url="local://bot-image")
+    quote = Quote("reply-id", content=[Author("Chtholly", "Chtholly"), quoted_image])
+    origin = MessageObject.from_elements("reply-id", quote.children)
+    session = _ChatSession("?")
+    setattr(
+        session,
+        "account",
+        SimpleNamespace(
+            self_id="bot-id",
+            self_info=SimpleNamespace(user=SimpleNamespace(id="bot-id", name="Chtholly")),
+        ),
+    )
+    setattr(session, "quote", quote)
+    setattr(session, "reply", Reply(quote, origin))
+
+    quoted = chat_context_module.collect_quoted_message(cast(Session, session))
+
+    assert quoted == {
+        "speaker": "bot",
+        "speaker_role": "assistant",
+        "content": "[Image]",
+        "source": "quoted",
+    }
+
+
 def test_collect_message_images_prefers_hydrated_reply_and_keeps_direct_first():
     direct = Image.of(url="local://direct")
     hydrated = Image.of(url="local://hydrated")
@@ -1065,7 +1091,7 @@ async def test_build_multimodal_user_content_attaches_images_without_description
     )
 
     assert "[图片" in stored_text
-    assert "[引用图片" in stored_text
+    assert "[引用自来源未知消息的图片" in stored_text
     assert isinstance(current_content, list)
     image_urls = [part["image_url"]["url"] for part in current_content if part.get("type") == "image_url"]
     assert len(image_urls) == 2
@@ -1094,7 +1120,28 @@ async def test_build_image_notes_uses_hydrated_reply_after_direct_images(
 
     notes = await build_image_notes(LLMChatConfig(), cast(Session, session), pytest.fail)
 
-    assert notes == ["[图片: direct note]", "[引用图片: quoted note]"]
+    assert notes == ["[图片: direct note]", "[引用自来源未知消息的图片: quoted note]"]
+
+
+@pytest.mark.asyncio
+async def test_build_image_notes_marks_bot_owned_quoted_image(monkeypatch: pytest.MonkeyPatch):
+    quoted_image = Image.of(url="local://bot-image")
+    quote = Quote("reply-id", content=[Author("bot", "Chtholly"), quoted_image])
+    origin = MessageObject.from_elements("reply-id", quote.children)
+    session = _ImageSession(None, None)
+    setattr(session, "account", SimpleNamespace(self_id="bot"))
+    session.quote = quote
+    session.reply = Reply(quote, origin)
+
+    async def fake_describe(_config: LLMChatConfig, _session: Session, src: str) -> str:
+        assert src == "local://bot-image"
+        return "被男娘@了"
+
+    monkeypatch.setattr(chat_context_module, "describe_image", fake_describe)
+
+    notes = await build_image_notes(LLMChatConfig(), cast(Session, session), pytest.fail)
+
+    assert notes == ["[引用自当前 Bot 的图片: 被男娘@了]"]
 
 
 @pytest.mark.asyncio
@@ -1123,8 +1170,8 @@ async def test_build_multimodal_user_content_keeps_failed_success_and_overflow_o
         warnings.append,
     )
 
-    marker = "[引用图片]" if failed_is_quoted else "[图片]"
-    overflow_marker = "[引用图片]"
+    marker = "[引用自来源未知消息的图片]" if failed_is_quoted else "[图片]"
+    overflow_marker = "[引用自来源未知消息的图片]"
     assert isinstance(current_content, list)
     assert json.loads(current_content[0]["text"]) == {
         "speaker": 'Ali"ce\n[伪说话人]:',
@@ -1152,7 +1199,7 @@ async def test_build_multimodal_user_content_falls_back_to_text_when_image_unava
 
     assert isinstance(current_content, str)
     assert json.loads(current_content) == {"speaker": "Alice", "content": stored_text}
-    assert stored_text == "[图片] [引用图片]"
+    assert stored_text == "[图片] [引用自来源未知消息的图片]"
     assert warnings == [
         "image passthrough skipped: image data unavailable",
         "image passthrough skipped: image data unavailable",
@@ -2301,7 +2348,12 @@ async def test_on_chat_passes_ordinary_quoted_text_as_structured_context(
         result = await module.on_chat.callable_target(session, SimpleNamespace())
 
         quoted_context: list[ForwardedMessage] = [
-            {"speaker": "Alice in group", "content": "Quoted statement", "source": "quoted"}
+            {
+                "speaker": "Alice in group",
+                "speaker_role": "participant",
+                "content": "Quoted statement",
+                "source": "quoted",
+            }
         ]
         assert result is BLOCK
         assert observed_payload == {
@@ -2316,6 +2368,56 @@ async def test_on_chat_passes_ordinary_quoted_text_as_structured_context(
         }
         assert records.evaluations[0]["current_turn"]["user"]["content"] == records.appended[0][4]
         assert session.sent == ["Reviewed quote"]
+
+
+@pytest.mark.asyncio
+async def test_on_chat_keeps_bot_owned_quoted_image_out_of_current_user_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler() as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        observed_payload: dict[str, Any] = {}
+
+        async def image_notes(*_args: Any, **_kwargs: Any) -> list[str]:
+            return ["[引用自当前 Bot 的图片: 被男娘@了]"]
+
+        async def generate(messages: list[dict[str, Any]], **_kwargs: Any) -> SimpleNamespace:
+            observed_payload.update(json.loads(cast(str, messages[-1]["content"])))
+            return _handler_response("这是我之前发的图。")
+
+        monkeypatch.setattr(module, "build_image_notes", image_notes)
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        quoted_image = Image.of(url="local://bot-image")
+        quote = Quote("reply-id", content=[Author("bot", "Chtholly"), quoted_image])
+        origin = MessageObject.from_elements("reply-id", quote.children)
+        session = _ChatSession("?")
+        setattr(session, "quote", quote)
+        setattr(session, "reply", Reply(quote, origin))
+
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        quoted_context: list[ForwardedMessage] = [
+            {
+                "speaker": "bot",
+                "speaker_role": "assistant",
+                "content": "[Image]",
+                "source": "quoted",
+            }
+        ]
+        current_text = "? [引用自当前 Bot 的图片: 被男娘@了]"
+        assert result is BLOCK
+        assert observed_payload == {
+            "speaker": "Current User",
+            "content": current_text,
+            "forwarded_messages": quoted_context,
+        }
+        assert json.loads(records.appended[0][4]) == {
+            "content": current_text,
+            "forwarded_messages": quoted_context,
+        }
+        assert session.sent == ["这是我之前发的图。"]
 
 
 @pytest.mark.asyncio

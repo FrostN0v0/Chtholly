@@ -6,8 +6,10 @@ import json
 from typing import Literal, TypedDict, cast
 from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
+from typing_extensions import NotRequired
 
 ForwardSource = Literal["direct", "quoted"]
+ForwardedSpeakerRole = Literal["assistant", "participant", "unknown"]
 ForwardPartKind = Literal[
     "text",
     "image",
@@ -26,6 +28,7 @@ class ForwardedMessage(TypedDict):
     speaker: str
     content: str
     source: ForwardSource
+    speaker_role: NotRequired[ForwardedSpeakerRole]
 
 
 @dataclass(frozen=True, slots=True)

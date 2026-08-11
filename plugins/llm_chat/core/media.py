@@ -7,6 +7,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from collections import Counter
 
+from .forward import ForwardedSpeakerRole
+
 AUDIO_MATCH_THRESHOLD = 0.4
 AUDIO_NEAR_WINDOW = 0.05
 
@@ -133,9 +135,23 @@ def normalize_image_description(text: str, *, limit: int = 100) -> str:
     return collapsed
 
 
-def format_image_note(description: str, *, quoted: bool = False) -> str:
+def format_image_note(
+    description: str,
+    *,
+    quoted: bool = False,
+    quoted_role: ForwardedSpeakerRole | None = None,
+) -> str:
     """Render the inline marker injected into chat content."""
-    label = "引用图片" if quoted else "图片"
+    if not quoted:
+        label = "图片"
+    elif quoted_role == "assistant":
+        label = "引用自当前 Bot 的图片"
+    elif quoted_role == "participant":
+        label = "引用自其他成员的图片"
+    elif quoted_role == "unknown":
+        label = "引用自来源未知消息的图片"
+    else:
+        label = "引用图片"
     return f"[{label}: {description}]" if description else f"[{label}]"
 
 
