@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import Protocol
-from pathlib import Path
 from dataclasses import dataclass
 from collections.abc import Callable, Awaitable
 
@@ -19,7 +18,7 @@ from ._registration import register_tool
 from ..core.delivery import reserve_media_message, current_llm_chat_delivery
 
 HistoryAppender = Callable[[str, str, str, str, str], Awaitable[object]]
-TempPathFactory = Callable[[str], str]
+AudioFactory = Callable[[bytes, str], Audio]
 
 
 class TTSServiceLike(Protocol):
@@ -37,7 +36,7 @@ class SpeakToolContext:
 
     config: LLMChatConfig
     get_service: ServiceFactory
-    temp_path: TempPathFactory
+    make_audio: AudioFactory
     append_history: HistoryAppender
 
 
@@ -80,11 +79,9 @@ def register_speak(
             audio = await service.synthesize(speech)
         except Exception:
             return "语音服务暂不可用"
-        output = runtime.temp_path(service.file_extension)
-        Path(output).write_bytes(audio)
         await send_with_delivery(
             session,
-            MessageChain([Audio.of(path=output)]),
+            MessageChain([runtime.make_audio(audio, service.file_extension)]),
             delivery_state,
             media=True,
         )

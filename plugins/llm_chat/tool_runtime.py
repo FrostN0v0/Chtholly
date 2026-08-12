@@ -6,7 +6,7 @@ from typing import cast
 from datetime import datetime
 
 from launart import Launart
-from arclet.entari import Session, plugin, command, plugin_config
+from arclet.entari import Audio, Session, plugin, command, plugin_config
 from entari_plugin_llm import LLMToolEvent  # entari: plugin
 from arclet.entari.logger import log
 from entari_plugin_database import get_session  # entari: plugin
@@ -25,7 +25,7 @@ from .core.delivery import (
     reserve_media_message as reserve_media_message,
 )
 from .persona.store import append_message
-from .tools.support import tts_temp_path
+from .tools.support import audio_mime_type
 from .tools.send_text import register_send_text
 from .tools.tag_image import TagImageToolContext, register_tag_image
 from .tools.send_audio import AudioToolContext, register_send_audio
@@ -89,7 +89,7 @@ def _get_tts_service() -> TTSServiceLike:
 speak_context = SpeakToolContext(
     config=config,
     get_service=_get_tts_service,
-    temp_path=tts_temp_path,
+    make_audio=lambda audio, suffix: Audio.of(raw=audio, mime=audio_mime_type(suffix)),
     append_history=append_message,
 )
 if registered := register_speak(tools, speak_context):
