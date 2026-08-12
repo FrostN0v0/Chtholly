@@ -49,6 +49,8 @@ from plugins.llm_chat.core.media_delivery import (
         "帮我画蓝发少女",
         "用语音说一句安慰人的话",
         "以声音回答我",
+        "不要只根据提示词描述的形象去生成，自己去搜，或者用我给你的这个 [图片]",
+        "参考我给的 [图片] 重新生成一个版本",
         "generate an image of a blue circle",
     ],
 )
@@ -69,6 +71,8 @@ def test_latest_user_media_request_detection_handles_chat_payloads(content: str)
         "用文字说一句安慰人的话",
         "分析这段语音",
         "不要用语音回答",
+        "不要生成图片",
+        "这个形象是怎么生成的",
     ],
 )
 def test_latest_user_media_request_detection_rejects_non_delivery_intent(content: str) -> None:

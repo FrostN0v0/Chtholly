@@ -1833,6 +1833,7 @@ async def test_generation_retries_explicit_media_request_until_delivery_is_confi
         "画一下你的战败cg",
         "那画一下你的战胜cg",
         "用语音说一句安慰人的话",
+        "不要只根据提示词描述的形象去生成，自己去搜，或者用我给你的这个 [图片]",
     ],
 )
 async def test_generation_uses_media_timeout_for_natural_media_requests(
