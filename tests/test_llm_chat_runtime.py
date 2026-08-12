@@ -1827,6 +1827,45 @@ async def test_generation_retries_explicit_media_request_until_delivery_is_confi
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    [
+        "画一下你的战败cg",
+        "那画一下你的战胜cg",
+        "用语音说一句安慰人的话",
+    ],
+)
+async def test_generation_uses_media_timeout_for_natural_media_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+) -> None:
+    state = DeliveryState()
+    requests: list[dict[str, Any]] = []
+
+    async def fake_generate(_messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
+        requests.append(kwargs)
+        mark_delivery_success(state, media=True)
+        return _handler_response("[END_OF_RESPONSE]")
+
+    monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
+
+    response = await generation_module.generate_chat_response(
+        cast(list[Any], [{"role": "user", "content": content}]),
+        system="system",
+        model="deepseek",
+        channel_id="group",
+        ctx=Contexts(),
+        web_limits=generation_module.WebAccessLimits(0, 0, 0),
+        delivery_state=state,
+        request_timeout=90.0,
+        media_request_timeout=180.0,
+    )
+
+    assert generation_module.response_content(response) == "[END_OF_RESPONSE]"
+    assert requests == [{"system": "system", "model": "deepseek", "timeout": 180.0, "max_retries": 0}]
+
+
+@pytest.mark.asyncio
 async def test_generation_rejects_repeated_false_media_delivery_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

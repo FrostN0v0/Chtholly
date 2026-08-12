@@ -12,16 +12,24 @@ MEDIA_UNAVAILABLE_MARKER = "[MEDIA_UNAVAILABLE]"
 
 _MEDIA_TERM = r"(?:图|图片|照片|表情包|贴纸|语音|音频|image|picture|photo|sticker|voice|audio)"
 _NEGATED_MEDIA_REQUEST = re.compile(
-    rf"(?:别|不要|不用|无需|禁止|不是(?:让|要)?).{{0,10}}(?:发|传|贴|补|给|看).{{0,8}}{_MEDIA_TERM}"
-    rf"|(?:do not|don't|dont|no need to|stop).{{0,12}}(?:send|show|share).{{0,8}}{_MEDIA_TERM}",
+    rf"(?:别|不要|不用|无需|禁止|不是(?:让|要)?).{{0,10}}"
+    rf"(?:(?:发|传|贴|补|给|看).{{0,8}}{_MEDIA_TERM}|(?:用|以).{{0,4}}{_MEDIA_TERM})"
+    rf"|(?:do not|don't|dont|no need to|stop).{{0,12}}(?:send|show|share|use).{{0,8}}{_MEDIA_TERM}",
     re.IGNORECASE,
 )
 _MEDIA_REQUEST_PATTERNS = (
     re.compile(
-        r"(?:帮我|给我|请)?\s*(?:画|绘制|生成|创作|生)\s*"
-        r"(?:(?:一|两|几)?(?:张|幅)|(?:一|两|几)?个(?:图|图片|画面|插画|头像|海报|场景)|"
-        r"(?:图|图片|画面|插画|头像|海报|场景))"
+        r"(?:^|[，。！？!?；;]\s*|(?:帮我|给我|请|那)\s*)"
+        r"(?:画(?!画|法|风格|教程)|绘制|创作)\s*(?:一|两|几)?(?:张|幅|个)?\s*.{1,80}"
+        r"|(?:^|[，。！？!?；;]\s*|(?:帮我|给我|请|那)\s*)"
+        r"生成\s*(?!一?(?:个|份)?\s*(?:文字|文本|总结|报告|代码)).{1,80}"
         r"|(?:draw|generate|create)\s+(?:me\s+)?(?:an?\s+)?(?:image|picture|illustration)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:用|以)\s*(?:语音|音频|声音)\s*(?:说|讲|念|读|回复|回答|告诉)"
+        r"|(?:说|讲|念|读)\s*(?:一|两|几)?(?:句|段|下)?\s*(?:语音|音频)"
+        r"|(?:speak|say|read|reply|answer).{0,12}(?:by|in|with|using)\s+(?:voice|audio)",
         re.IGNORECASE,
     ),
     re.compile(

@@ -44,6 +44,11 @@ from plugins.llm_chat.core.media_delivery import (
         '{"speaker":"FrostN0v0","content":"你发的图呢？"}',
         "send me a picture",
         "画一张刚刚的情景",
+        "画一下你的战败cg",
+        "那画一下你的战胜cg",
+        "帮我画蓝发少女",
+        "用语音说一句安慰人的话",
+        "以声音回答我",
         "generate an image of a blue circle",
     ],
 )
@@ -59,9 +64,23 @@ def test_latest_user_media_request_detection_handles_chat_payloads(content: str)
         '{"speaker":"FrostN0v0","content":"普通聊天"}',
         "生成一个文字总结",
         "这个画画的还挺有意思的",
+        "画画教程是什么",
+        "生图模型怎么收费",
+        "用文字说一句安慰人的话",
+        "分析这段语音",
+        "不要用语音回答",
     ],
 )
 def test_latest_user_media_request_detection_rejects_non_delivery_intent(content: str) -> None:
+    assert not latest_user_requests_media([{"role": "user", "content": content}])
+
+
+def test_latest_user_media_request_detection_uses_nested_current_content_only() -> None:
+    content = (
+        '{"speaker":"FrostN0v0","content":"普通文字回答",'
+        '"forwarded_messages":[{"speaker":"Other","content":"用语音说一句话"}]}'
+    )
+
     assert not latest_user_requests_media([{"role": "user", "content": content}])
 
 
