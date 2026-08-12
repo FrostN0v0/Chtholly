@@ -60,16 +60,25 @@ _MEDIA_REQUEST_PATTERNS = (
 
 
 def _user_text(content: object) -> str:
-    if not isinstance(content, str):
-        return ""
-    try:
-        payload = json.loads(content)
-    except (TypeError, ValueError):
-        return content
-    if not isinstance(payload, Mapping):
-        return content
-    nested = payload.get("content")
-    return nested if isinstance(nested, str) else content
+    if isinstance(content, str):
+        try:
+            payload = json.loads(content)
+        except (TypeError, ValueError):
+            return content
+        if not isinstance(payload, Mapping):
+            return content
+        nested = payload.get("content")
+        return nested if isinstance(nested, str) else content
+    if isinstance(content, Sequence):
+        text_parts: list[str] = []
+        for part in content:
+            if not isinstance(part, Mapping) or part.get("type") != "text":
+                continue
+            text = part.get("text")
+            if isinstance(text, str):
+                text_parts.append(_user_text(text))
+        return " ".join(text_parts)
+    return ""
 
 
 def latest_user_requests_media(messages: Sequence[ChatMessage]) -> bool:

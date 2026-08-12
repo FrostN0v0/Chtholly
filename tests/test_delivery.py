@@ -51,6 +51,16 @@ from plugins.llm_chat.core.media_delivery import (
         "以声音回答我",
         "不要只根据提示词描述的形象去生成，自己去搜，或者用我给你的这个 [图片]",
         "参考我给的 [图片] 重新生成一个版本",
+        [
+            {
+                "type": "text",
+                "text": (
+                    '{"speaker":"FrostN0v0","content":"有没有大肥鱼误删用户黄油然后用户把大肥鱼当黄油的本子，画一个"}'
+                ),
+            },
+            {"type": "text", "text": "[图片]"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AA=="}},
+        ],
         "generate an image of a blue circle",
     ],
 )
