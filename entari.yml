@@ -107,6 +107,7 @@ plugins:
     # Model duties: chat images pass directly to vision-capable chat models; eval pinned below; fallback tag/describe uses image_tag_model.
     eval_model: doubao
     model_request_timeout: 90.0
+    media_request_timeout: 180.0
     eval_request_timeout: 60.0
     eval_every_n: 1
     image_tag_model: doubao

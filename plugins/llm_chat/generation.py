@@ -138,14 +138,18 @@ async def _generate_with_tools(
     system: str,
     model: str | None,
     request_timeout: float,
+    max_retries: int | None = None,
 ) -> GenericResponse[None]:
+    request_options: dict[str, Any] = {"timeout": request_timeout}
+    if max_retries is not None:
+        request_options["max_retries"] = max_retries
     return cast(
         GenericResponse[None],
         await llm.generate(
             cast(list[Any], messages),
             system=system,
             model=model,
-            timeout=request_timeout,
+            **request_options,
         ),
     )
 
@@ -157,6 +161,7 @@ async def _recover_requested_media(
     model: str | None,
     delivery_state: DeliveryState,
     request_timeout: float,
+    max_retries: int | None,
 ) -> GenericResponse[None]:
     _LOGGER.warning("requested media was not confirmed; retrying once with tools")
     try:
@@ -166,6 +171,7 @@ async def _recover_requested_media(
                 system=f"{system}\n\n{_MEDIA_RECOVERY_SUFFIX}",
                 model=model,
                 request_timeout=request_timeout,
+                max_retries=max_retries,
             )
     except RuntimeError as exc:
         if str(exc) == _TOOL_LOOP_EXHAUSTED:
@@ -188,8 +194,9 @@ async def generate_chat_response(
     web_limits: WebAccessLimits,
     delivery_state: DeliveryState,
     request_timeout: float = 90.0,
+    media_request_timeout: float = 180.0,
 ) -> GenerationResponse:
-    """Generate normally, recover required media once, then use bounded tool-free recovery."""
+    """Generate with a longer single-attempt timeout for explicit media requests."""
 
     tool_call_limit = recommended_tool_call_limit(
         web_limits.total_limit,
@@ -197,6 +204,8 @@ async def generate_chat_response(
         delivery_state.limits.max_media_messages,
     )
     media_requested = latest_user_requests_media(messages)
+    generation_timeout = media_request_timeout if media_requested else request_timeout
+    generation_max_retries = 0 if media_requested else None
     tool_loop_exhausted = False
     with (
         agno_tool_call_limit_scope(tool_call_limit),
@@ -209,7 +218,8 @@ async def generate_chat_response(
                 messages,
                 system=system,
                 model=model,
-                request_timeout=request_timeout,
+                request_timeout=generation_timeout,
+                max_retries=generation_max_retries,
             )
         except RuntimeError as exc:
             if str(exc) != _TOOL_LOOP_EXHAUSTED:
@@ -221,7 +231,8 @@ async def generate_chat_response(
                     system=system,
                     model=model,
                     delivery_state=delivery_state,
-                    request_timeout=request_timeout,
+                    request_timeout=generation_timeout,
+                    max_retries=generation_max_retries,
                 )
         else:
             transcript = _response_transcript(response, messages)
@@ -234,7 +245,8 @@ async def generate_chat_response(
                     system=system,
                     model=model,
                     delivery_state=delivery_state,
-                    request_timeout=request_timeout,
+                    request_timeout=generation_timeout,
+                    max_retries=generation_max_retries,
                 )
             if _tool_call_limit_hit(response):
                 _LOGGER.warning("Agno tool call limit reached; finalizing once without tools")

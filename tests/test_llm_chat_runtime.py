@@ -1772,6 +1772,7 @@ async def test_generation_retries_invisible_reply_once_without_tools(
     assert generation_module.response_content(response) == "现在直接回复。"
     assert primary_requests[0]["timeout"] == 12.5
     assert "ctx" not in primary_requests[0]
+    assert "max_retries" not in primary_requests[0]
     assert len(final_requests) == 1
     final_request = final_requests[0]
     assert final_request["timeout"] == 12.5
@@ -1814,10 +1815,13 @@ async def test_generation_retries_explicit_media_request_until_delivery_is_confi
         web_limits=generation_module.WebAccessLimits(2, 2, 4),
         delivery_state=state,
         request_timeout=12.5,
+        media_request_timeout=45.0,
     )
 
     assert generation_module.response_content(response) == "[END_OF_RESPONSE]"
     assert len(requests) == 2
+    assert all(request["timeout"] == 45.0 for request in requests)
+    assert all(request["max_retries"] == 0 for request in requests)
     assert "上一条候选回复没有产生任何确认的媒体发送" in requests[1]["system"]
     assert state.confirmed_media_deliveries == 1
 
@@ -2539,6 +2543,7 @@ def test_yaml_and_default_llm_chat_configuration_are_exactly_synchronized():
         assert llm_chat_plugin[key] == expected
     assert defaults.eval_every_n == llm_chat_plugin["eval_every_n"] == 1
     assert defaults.model_request_timeout == llm_chat_plugin["model_request_timeout"] == 90.0
+    assert defaults.media_request_timeout == llm_chat_plugin["media_request_timeout"] == 180.0
     assert defaults.eval_request_timeout == llm_chat_plugin["eval_request_timeout"] == 60.0
     assert defaults.web_search_enabled is False
     assert defaults.exa_api_key is None

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 import base64
-from typing import Any
+from typing import Any, cast
 from pathlib import Path
 
 import pytest
 from agno.media import Image as AgnoImage
+from arclet.entari import Session
 from arclet.entari.config import EntariConfig
 
 if not hasattr(EntariConfig, "instance"):
@@ -109,11 +110,10 @@ async def test_image_only_generation_does_not_run_tool_free_finalizer(monkeypatc
 
 @pytest.mark.asyncio
 async def test_native_image_satisfies_explicit_media_request_without_retry(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = 0
+    requests: list[dict[str, Any]] = []
 
-    async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
-        nonlocal calls
-        calls += 1
+    async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        requests.append(kwargs)
         return SimpleNamespace(content=None, images=[AgnoImage(content=_PNG_BYTES)])
 
     async def unexpected_finalizer(**_kwargs: Any) -> None:
@@ -130,9 +130,13 @@ async def test_native_image_satisfies_explicit_media_request_without_retry(monke
         ctx=None,
         web_limits=generation.WebAccessLimits(0, 0, 0),
         delivery_state=DeliveryState(),
+        request_timeout=12.5,
+        media_request_timeout=45.0,
     )
 
-    assert calls == 1
+    assert len(requests) == 1
+    assert requests[0]["timeout"] == 45.0
+    assert requests[0]["max_retries"] == 0
 
 
 @pytest.mark.asyncio
@@ -150,8 +154,8 @@ async def test_native_images_are_sent_before_text_and_marked_individually() -> N
     )
     response = SimpleNamespace(_run_output=SimpleNamespace(images=[AgnoImage(content=_PNG_BYTES)]))
 
-    assert await turn.deliver_model_images(session, response)
-    assert await turn.deliver_model_reply(session, "final text")
+    assert await turn.deliver_model_images(cast(Session, session), response)
+    assert await turn.deliver_model_reply(cast(Session, session), "final text")
     await turn.persist_delivered_text()
 
     assert len(session.sent) == 2
@@ -179,7 +183,7 @@ async def test_native_image_transport_failure_keeps_confirmed_prefix() -> None:
     )
 
     with pytest.raises(DeliveryError, match="native image delivery confirmed 1/2 images before failure"):
-        await turn.deliver_model_images(session, response)
+        await turn.deliver_model_images(cast(Session, session), response)
 
     assert len(session.sent) == 1
     assert history == ["[发送了图片]"]

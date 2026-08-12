@@ -193,6 +193,7 @@ async def on_chat(session: Session, ctx: Contexts):
             web_limits=web_limits,
             delivery_state=delivery_state,
             request_timeout=config.model_request_timeout,
+            media_request_timeout=config.media_request_timeout,
         )
     except asyncio.CancelledError:
         await turn.preserve_and_rollback()

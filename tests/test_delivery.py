@@ -43,6 +43,8 @@ from plugins.llm_chat.core.media_delivery import (
         "来张图我看看什么样子",
         '{"speaker":"FrostN0v0","content":"你发的图呢？"}',
         "send me a picture",
+        "画一张刚刚的情景",
+        "generate an image of a blue circle",
     ],
 )
 def test_latest_user_media_request_detection_handles_chat_payloads(content: str) -> None:
@@ -55,6 +57,8 @@ def test_latest_user_media_request_detection_handles_chat_payloads(content: str)
         "不要发图，只用文字描述",
         "这张图里面是什么",
         '{"speaker":"FrostN0v0","content":"普通聊天"}',
+        "生成一个文字总结",
+        "这个画画的还挺有意思的",
     ],
 )
 def test_latest_user_media_request_detection_rejects_non_delivery_intent(content: str) -> None:

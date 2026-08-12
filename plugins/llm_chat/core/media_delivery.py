@@ -18,6 +18,13 @@ _NEGATED_MEDIA_REQUEST = re.compile(
 )
 _MEDIA_REQUEST_PATTERNS = (
     re.compile(
+        r"(?:帮我|给我|请)?\s*(?:画|绘制|生成|创作|生)\s*"
+        r"(?:(?:一|两|几)?(?:张|幅)|(?:一|两|几)?个(?:图|图片|画面|插画|头像|海报|场景)|"
+        r"(?:图|图片|画面|插画|头像|海报|场景))"
+        r"|(?:draw|generate|create)\s+(?:me\s+)?(?:an?\s+)?(?:image|picture|illustration)",
+        re.IGNORECASE,
+    ),
+    re.compile(
         rf"(?:来|发|传|贴|补|给我|让我|想看|看看|看下|瞧瞧).{{0,10}}"
         rf"(?:一|两|几)?(?:张|个|段)?\s*{_MEDIA_TERM}",
         re.IGNORECASE,
