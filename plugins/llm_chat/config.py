@@ -34,7 +34,7 @@ class LLMChatConfig(BasicConfModel):
     """Model alias for relationship evaluation; None uses the main model."""
     model_request_timeout: float = 90.0
     """Per-completion timeout for the main chat model."""
-    media_request_timeout: float = 180.0
+    media_request_timeout: float = 300.0
     """Per-completion timeout when the latest user explicitly requests media."""
     eval_request_timeout: float = 60.0
     """Per-completion timeout for the relationship evaluator."""

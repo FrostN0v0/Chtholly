@@ -105,7 +105,7 @@ Exa 默认使用 `auto` 搜索；可通过 `exa_search_type` 切换 `fast`、`de
 
 群聊中的 OneBot V11 合并转发本身不会触发 `llm_chat`，也不会立即调用 `get_forward_msg`。只有用户引用该合并转发消息并同时 `@` Bot 时，插件才读取各节点、保留原发送者归属，并对限额内图片沿用独立视觉描述链路。默认单轮可读取 200 个节点、每节点 2000 字符、总计 32000 字符，并描述最多 12 张转发图片；对应配置为 `merged_forward_max_messages`、`merged_forward_max_chars_per_message`、`merged_forward_max_total_chars` 与 `merged_forward_max_described_images`。达到显式安全限额时会向模型附加遗漏标记并写 warning，不再静默伪装成完整内容。转发内容只作为引用上下文，不写成当前发送者的画像或记忆事实。
 
-`llm_chat` 的普通主聊天、明确媒体请求与关系 evaluator 单次模型请求分别由 `model_request_timeout`、`media_request_timeout` 与 `eval_request_timeout` 限时，默认 `90 / 180 / 60` 秒。明确媒体请求会使用较长超时并关闭 LiteLLM 单次调用的自动重试，避免一次上游卡顿被放大为多轮超时；未确认媒体时仍保留一次受限的工具纠正。关系 evaluator 只使用严格 JSON 提示与本地解析，不强制供应商 JSON Mode；主模型若在没有任何发送尝试时返回空内容、内部媒体记录或孤立的 `[END_OF_RESPONSE]`，会执行一次无工具纠正重试。纠正仍失败时删除本轮尚未开始交付的 user 记录，不启动 evaluator；历史中的语音只以自然文本提供给模型，纯表情记录不进入提示历史。
+`llm_chat` 的普通主聊天、明确媒体请求与关系 evaluator 单次模型请求分别由 `model_request_timeout`、`media_request_timeout` 与 `eval_request_timeout` 限时，默认 `90 / 300 / 60` 秒。明确媒体请求使用最长 5 分钟的单次等待并关闭 LiteLLM 自动重试，给复杂生图与图片编辑保留充足时间，同时避免一次上游卡顿被自动重试放大为十几分钟；未确认媒体时仍保留一次受限的工具纠正。关系 evaluator 只使用严格 JSON 提示与本地解析，不强制供应商 JSON Mode；主模型若在没有任何发送尝试时返回空内容、内部媒体记录或孤立的 `[END_OF_RESPONSE]`，会执行一次无工具纠正重试。纠正仍失败时删除本轮尚未开始交付的 user 记录，不启动 evaluator；历史中的语音只以自然文本提供给模型，纯表情记录不进入提示历史。
 
 `speak` 合成的音频以内联 `data:audio/*;base64` 资源交给 Satori / OneBot，而不是发送 Chtholly 主机上的 `file://` 临时路径；协议端与 Bot 分离部署时因此不需要共享文件系统。只有协议端确认发送成功后才写入语音历史 marker。
 

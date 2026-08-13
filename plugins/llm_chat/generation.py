@@ -194,7 +194,7 @@ async def generate_chat_response(
     web_limits: WebAccessLimits,
     delivery_state: DeliveryState,
     request_timeout: float = 90.0,
-    media_request_timeout: float = 180.0,
+    media_request_timeout: float = 300.0,
 ) -> GenerationResponse:
     """Generate with a longer single-attempt timeout for explicit media requests."""
 

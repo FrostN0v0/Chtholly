@@ -2609,7 +2609,7 @@ def test_yaml_and_default_llm_chat_configuration_are_exactly_synchronized():
         assert llm_chat_plugin[key] == expected
     assert defaults.eval_every_n == llm_chat_plugin["eval_every_n"] == 1
     assert defaults.model_request_timeout == llm_chat_plugin["model_request_timeout"] == 90.0
-    assert defaults.media_request_timeout == llm_chat_plugin["media_request_timeout"] == 180.0
+    assert defaults.media_request_timeout == llm_chat_plugin["media_request_timeout"] == 300.0
     assert defaults.eval_request_timeout == llm_chat_plugin["eval_request_timeout"] == 60.0
     assert defaults.web_search_enabled is False
     assert defaults.exa_api_key is None
