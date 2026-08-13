@@ -1970,7 +1970,7 @@ async def test_message_append_and_exact_delete_round_trip(
 
 
 @pytest.mark.asyncio
-async def test_on_chat_generation_failure_rolls_back_unstarted_user_turn(
+async def test_on_chat_generation_failure_sends_notice_and_keeps_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with _temporary_chat_handler() as harness:
@@ -1989,15 +1989,56 @@ async def test_on_chat_generation_failure_rolls_back_unstarted_user_turn(
         session = _ChatSession("NEW_GROUP_B_SENTINEL")
         result = await module.on_chat.callable_target(session, SimpleNamespace())
 
+        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
         assert result is BLOCK
-        assert session.sent == []
-        assert records.appended == [("group-B", "same-user", "Current User", "user", "NEW_GROUP_B_SENTINEL")]
-        assert records.deleted == [1]
+        assert session.sent == ["这次回复没有成功，请稍后重试。"]
+        assert records.appended[0] == (
+            "group-B",
+            "same-user",
+            "Current User",
+            "user",
+            "NEW_GROUP_B_SENTINEL",
+        )
+        assert assistant_rows == [("group-B", "", "bot", "assistant", "这次回复没有成功，请稍后重试。")]
+        assert records.deleted == []
         assert records.evaluations == []
         assert records.relations == []
         assert warnings == [
             "llm generate failed: RuntimeError: provider failed <- ModuleNotFoundError: No module named 'orjson'"
         ]
+
+
+@pytest.mark.asyncio
+async def test_on_chat_media_generation_failure_requests_original_images_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler() as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+
+        async def fail_generation(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("provider timed out")
+
+        monkeypatch.setattr(module, "generate_chat_response", fail_generation)
+
+        session = _ChatSession("帮我生成一张图片")
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
+        assert result is BLOCK
+        assert session.sent == ["这次图片处理没有成功，请重新发送原图后再试。"]
+        assert assistant_rows == [
+            (
+                "group-B",
+                "",
+                "bot",
+                "assistant",
+                "这次图片处理没有成功，请重新发送原图后再试。",
+            )
+        ]
+        assert records.deleted == []
+        assert records.evaluations == []
+        assert records.relations == []
 
 
 @pytest.mark.asyncio

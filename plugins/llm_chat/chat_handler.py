@@ -45,10 +45,13 @@ from .persona.store import (
 from .persona.runner import run_evaluation
 from .turn_lifecycle import ActiveChatTurn
 from .forward_context import resolve_merged_forward_messages
+from .core.media_delivery import latest_user_requests_media
 from .persona.memory_update import apply_memory_updates
 from .persona.memory_context import load_memory_context
 
 _LOGGER = log.wrapper("[llm_chat]")
+_CHAT_FAILURE_REPLY = "这次回复没有成功，请稍后重试。"
+_MEDIA_FAILURE_REPLY = "这次图片处理没有成功，请重新发送原图后再试。"
 
 
 async def _addressed_to_me(session: Session, is_reply_me: bool = False, is_notice_me: bool = False) -> bool:
@@ -137,6 +140,7 @@ async def on_chat(session: Session, ctx: Contexts):
         current_content,
         forwarded_messages,
     )
+    media_requested = latest_user_requests_media(cast(list[ChatMessage], messages))
     web_limits = normalize_web_access_limits(
         config.web_search_max_calls_per_generation,
         config.web_page_max_calls_per_generation,
@@ -199,8 +203,19 @@ async def on_chat(session: Session, ctx: Contexts):
         await turn.preserve_and_rollback()
         raise
     except Exception as exc:
-        await turn.preserve_and_rollback()
         _LOGGER.warning(f"llm generate failed: {summarize_exception(exc)}")
+        if delivery_state.delivery_attempts:
+            await turn.preserve_and_rollback()
+            return BLOCK
+        failure_reply = _MEDIA_FAILURE_REPLY if media_requested else _CHAT_FAILURE_REPLY
+        try:
+            if await turn.deliver_model_reply(session, failure_reply):
+                await turn.persist_delivered_text()
+        except asyncio.CancelledError:
+            raise
+        except Exception as delivery_exc:
+            await turn.preserve_and_rollback()
+            _LOGGER.warning(f"generation failure notice delivery failed: {summarize_exception(delivery_exc)}")
         return BLOCK
 
     try:
