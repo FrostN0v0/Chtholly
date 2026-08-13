@@ -13,6 +13,7 @@ MEDIA_UNAVAILABLE_MARKER = "[MEDIA_UNAVAILABLE]"
 _MEDIA_TERM = r"(?:图|图片|照片|表情包|贴纸|语音|音频|image|picture|photo|sticker|voice|audio)"
 _IMAGE_OUTPUT_TERM = r"(?:图|图片|照片|形象|画面|插画|头像|海报|场景|\[图片\])"
 _MEDIA_GENERATION_ACTION = r"(?:画(?!画)|绘制|生成|创作)"
+_IMAGE_EDIT_ACTION = r"(?:消除|移除|删除|去掉|抹掉|擦除|替换|换掉|修改|调整|修正|编辑|重绘|重画)"
 _NEGATED_MEDIA_REQUEST = re.compile(
     rf"(?:别|不要|不用|无需|禁止|不是(?:让|要)?).{{0,10}}"
     rf"(?:(?:发|传|贴|补|给|看).{{0,8}}{_MEDIA_TERM}|(?:用|以).{{0,4}}{_MEDIA_TERM})"
@@ -34,6 +35,13 @@ _MEDIA_REQUEST_PATTERNS = (
         r"(?:不要只|别只|不能只|重新|再|继续|改成|参考|根据|按照|按|用我|用这个|自己).{0,160}"
         rf"|{_MEDIA_GENERATION_ACTION}.{{0,100}}"
         rf"(?:重新|再|继续|改成|参考|根据|按照|按|用我|用这个|自己).{{0,100}}{_IMAGE_OUTPUT_TERM}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?=.{{0,160}}{_IMAGE_OUTPUT_TERM})"
+        rf"(?:把|将|帮我|请|给我)?.{{0,100}}{_IMAGE_EDIT_ACTION}.{{0,80}}"
+        rf"|(?:仿照|参照|参考|照着|按照|按).{{0,100}}(?:生成|做|画|绘制|创作).{{0,100}}{_IMAGE_OUTPUT_TERM}"
+        rf"|(?:仿照|参照|参考|照着|按照|按).{{0,100}}{_IMAGE_OUTPUT_TERM}.{{0,100}}(?:生成|做|画|绘制|创作)",
         re.IGNORECASE,
     ),
     re.compile(

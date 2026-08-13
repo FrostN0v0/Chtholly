@@ -1844,6 +1844,22 @@ async def test_generation_retries_explicit_media_request_until_delivery_is_confi
             {"type": "text", "text": "[图片]"},
             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AA=="}},
         ],
+        [
+            {
+                "type": "text",
+                "text": '{"speaker":"FrostN0v0","content":"把图中后面的路人消除"}',
+            },
+            {"type": "text", "text": "[图片]"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AA=="}},
+        ],
+        [
+            {
+                "type": "text",
+                "text": ('{"speaker":"FrostN0v0","content":"仿照彩图，为图1布局生成类似的图，罐的位置大小一定要对"}'),
+            },
+            {"type": "text", "text": "[图片]"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AA=="}},
+        ],
     ],
 )
 async def test_generation_uses_media_timeout_for_natural_media_requests(
