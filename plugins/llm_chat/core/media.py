@@ -18,7 +18,10 @@ _TAG_PREFIX_RE = re.compile(r"^\s*(?:[-*•]+|\d+[.)、])\s*")
 _AUDIO_NORMALIZE_RE = re.compile(r"[\W_\s]+")
 _LOW_SIGNAL_CHARS = frozenset("的了呢啊吗吧呀哦嗯哈我你他她它是不在有和跟给就都也还才又很真这那一个")
 _AUDIO_SYNONYM_GROUPS = (("早上问好", "早安", "早上好", "您早上好", "问早"),)
-_RANDOM_REQUEST_RE = re.compile(r"随便|随意|任意|都行|都可以|random", re.IGNORECASE)
+_RANDOM_REQUEST_RE = re.compile(
+    r"随便|随意|任意|都行|都可以|发点别的|来点别的|别的表情包|别的图|换一张|换张|换一个|另一张|另一个|不同的|random",
+    re.IGNORECASE,
+)
 _TTS_CONTROL_TAG_RE = re.compile(r"\[[^\[\]\r\n]{1,40}\]\s*")
 _STICKER_RECORD_PREFIX = "[发送了表情包:"
 _AUDIO_RECORD_PREFIX = "[发送了语音:"

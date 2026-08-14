@@ -17,6 +17,7 @@ from pathlib import Path
 from datetime import datetime, timezone as datetime_timezone, timedelta
 import importlib
 from contextlib import contextmanager, asynccontextmanager
+from collections import deque
 from dataclasses import field, dataclass
 from importlib.util import module_from_spec, spec_from_file_location
 from collections.abc import Mapping, Callable, Iterator, Sequence, AsyncIterator
@@ -1297,6 +1298,49 @@ async def test_cancelled_delivery_attempts_are_recorded_without_false_confirmati
 
         await harness.dispose()
         _assert_registry_matches(baseline)
+
+    _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_image_picker_excludes_recent_rows_before_semantic_ranking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _registry_snapshot()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        picker = runtime.image_context.pick_image
+        image_tags_module = sys.modules[picker.__module__]
+
+        async def fake_embed_text(_config: object, _context: str) -> list[float]:
+            return [1.0, 0.0]
+
+        monkeypatch.setattr(image_tags_module, "embed_text", fake_embed_text)
+        image_tags_module._image_vectors.clear()
+        rows = [
+            SimpleNamespace(
+                file_path="recent.jpg",
+                tags="害羞",
+                embedding_json=json.dumps([1.0, 0.0]),
+            ),
+            SimpleNamespace(
+                file_path="fresh.jpg",
+                tags="害羞",
+                embedding_json=json.dumps([0.0, 1.0]),
+            ),
+        ]
+
+        selected = await picker(
+            runtime.config,
+            rows,
+            "害羞",
+            deque(["recent.jpg"], maxlen=5),
+        )
+
+        assert selected == "fresh.jpg"
 
     _assert_registry_matches(baseline)
 

@@ -32,14 +32,15 @@ _image_tag_lock = asyncio.Lock()
 
 async def pick_image(config: LLMChatConfig, rows: Sequence[ImageTag], context: str, recent: deque[str]) -> str | None:
     """Select a local image via semantic retrieval, falling back to tag IDF."""
-    paths = [row.file_path for row in rows]
+    fresh_rows = [row for row in rows if row.file_path not in recent]
+    search_rows = fresh_rows or list(rows)
+    paths = [row.file_path for row in search_rows]
     if is_random_request(context):
-        pool = [path for path in paths if path not in recent] or paths
-        return random.choice(pool) if pool else None
+        return random.choice(paths) if paths else None
     query = await embed_text(config, context)
     if query is not None:
         candidates: list[tuple[str, float]] = []
-        for row in rows:
+        for row in search_rows:
             vector = _image_vectors.get(row.file_path)
             if vector is None:
                 vector = decode_embedding(row.embedding_json)
@@ -51,12 +52,10 @@ async def pick_image(config: LLMChatConfig, rows: Sequence[ImageTag], context: s
                 candidates.append((row.file_path, score))
         candidates.sort(key=lambda item: item[1], reverse=True)
         top = [path for path, _score in candidates[: config.image_top_candidates]]
-        pool = [path for path in top if path not in recent] or top
-        if pool:
-            return random.choice(pool)
-    tagged = [(row.file_path, row.tags) for row in rows]
-    fallback = [(path, tags) for path, tags in tagged if path not in recent] or tagged
-    return match_image(context, fallback)
+        if top:
+            return random.choice(top)
+    tagged = [(row.file_path, row.tags) for row in search_rows]
+    return match_image(context, tagged)
 
 
 async def get_image_tag(relative_path: str) -> ImageTag | None:

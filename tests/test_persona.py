@@ -507,6 +507,8 @@ class TestComposePrompt:
         assert "只能调用本轮真实存在的 send_text / send_merged_forward schema" in prompt
         assert "send_image 只发送本地反应图、表情包或贴纸，不是图片生成或通用搜索" in prompt
         assert "收到用户图片本身不是调用 send_image 的理由" in prompt
+        assert "用户要求别的、换一张或不要刚才那张时" in prompt
+        assert "禁止用 image_paths 指回最近发送的图片" in prompt
         assert "send_external_image 只发送用户或其他工具已提供的直接公开图片 URL" in prompt
         assert "它不负责搜索、生成、识图或收藏" in prompt
         assert "没有直接图片 URL 时不得把普通网页 URL 当作图片发送" in prompt
