@@ -43,6 +43,29 @@ from plugins.llm_chat.core.media_delivery import (
         "来张图我看看什么样子",
         '{"speaker":"FrostN0v0","content":"你发的图呢？"}',
         "send me a picture",
+        "画一张刚刚的情景",
+        "画一下你的战败cg",
+        "那画一下你的战胜cg",
+        "帮我画蓝发少女",
+        "用语音说一句安慰人的话",
+        "以声音回答我",
+        "不要只根据提示词描述的形象去生成，自己去搜，或者用我给你的这个 [图片]",
+        "参考我给的 [图片] 重新生成一个版本",
+        "把后面的路人消除 [图片]",
+        "把图中后面的路人消除 [图片]",
+        "仿照图2，为图1布局生成类似的图 [图片] [图片]",
+        "仿照彩图，为图1布局生成类似的图，罐的位置大小一定要对 [图片] [图片]",
+        [
+            {
+                "type": "text",
+                "text": (
+                    '{"speaker":"FrostN0v0","content":"有没有大肥鱼误删用户黄油然后用户把大肥鱼当黄油的本子，画一个"}'
+                ),
+            },
+            {"type": "text", "text": "[图片]"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AA=="}},
+        ],
+        "generate an image of a blue circle",
     ],
 )
 def test_latest_user_media_request_detection_handles_chat_payloads(content: str) -> None:
@@ -55,9 +78,27 @@ def test_latest_user_media_request_detection_handles_chat_payloads(content: str)
         "不要发图，只用文字描述",
         "这张图里面是什么",
         '{"speaker":"FrostN0v0","content":"普通聊天"}',
+        "生成一个文字总结",
+        "这个画画的还挺有意思的",
+        "画画教程是什么",
+        "生图模型怎么收费",
+        "用文字说一句安慰人的话",
+        "分析这段语音",
+        "不要用语音回答",
+        "不要生成图片",
+        "这个形象是怎么生成的",
     ],
 )
 def test_latest_user_media_request_detection_rejects_non_delivery_intent(content: str) -> None:
+    assert not latest_user_requests_media([{"role": "user", "content": content}])
+
+
+def test_latest_user_media_request_detection_uses_nested_current_content_only() -> None:
+    content = (
+        '{"speaker":"FrostN0v0","content":"普通文字回答",'
+        '"forwarded_messages":[{"speaker":"Other","content":"用语音说一句话"}]}'
+    )
+
     assert not latest_user_requests_media([{"role": "user", "content": content}])
 
 

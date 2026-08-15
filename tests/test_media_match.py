@@ -102,6 +102,9 @@ class TestIsRandomRequest:
         assert is_random_request("任意挑一个")
         assert is_random_request("都行")
         assert is_random_request("RANDOM pick")
+        assert is_random_request("发点别的表情包")
+        assert is_random_request("换一张")
+        assert is_random_request("来张不同的")
 
     def test_specific_requests_do_not_match(self):
         assert not is_random_request("生气的图")

@@ -17,6 +17,7 @@ from pathlib import Path
 from datetime import datetime, timezone as datetime_timezone, timedelta
 import importlib
 from contextlib import contextmanager, asynccontextmanager
+from collections import deque
 from dataclasses import field, dataclass
 from importlib.util import module_from_spec, spec_from_file_location
 from collections.abc import Mapping, Callable, Iterator, Sequence, AsyncIterator
@@ -26,7 +27,7 @@ import httpx
 import pytest
 from satori import Text, User, Login, Message as SatoriMessage
 import litellm
-from arclet.entari import Image, Session, MessageChain
+from arclet.entari import Audio, Image, Session, MessageChain
 from litellm.exceptions import APIError
 from arclet.entari.const import ITEM_SESSION
 from arclet.entari.config import EntariConfig
@@ -1302,6 +1303,49 @@ async def test_cancelled_delivery_attempts_are_recorded_without_false_confirmati
 
 
 @pytest.mark.asyncio
+async def test_image_picker_excludes_recent_rows_before_semantic_ranking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _registry_snapshot()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        picker = runtime.image_context.pick_image
+        image_tags_module = sys.modules[picker.__module__]
+
+        async def fake_embed_text(_config: object, _context: str) -> list[float]:
+            return [1.0, 0.0]
+
+        monkeypatch.setattr(image_tags_module, "embed_text", fake_embed_text)
+        image_tags_module._image_vectors.clear()
+        rows = [
+            SimpleNamespace(
+                file_path="recent.jpg",
+                tags="害羞",
+                embedding_json=json.dumps([1.0, 0.0]),
+            ),
+            SimpleNamespace(
+                file_path="fresh.jpg",
+                tags="害羞",
+                embedding_json=json.dumps([0.0, 1.0]),
+            ),
+        ]
+
+        selected = await picker(
+            runtime.config,
+            rows,
+            "害羞",
+            deque(["recent.jpg"], maxlen=5),
+        )
+
+        assert selected == "fresh.jpg"
+
+    _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
 async def test_delivery_scope_blocks_text_outside_generation_but_preserves_media_behavior(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
@@ -1378,6 +1422,69 @@ async def test_delivery_scope_blocks_text_outside_generation_but_preserves_media
         assert state.media_messages == 1
         assert state.delivered_texts == ["after image"]
         assert len(markers) == 2
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_speak_sends_inline_audio_for_remote_onebot_transport(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _registry_snapshot()
+
+    async with _temporary_plugin(
+        config={"tts_enabled": True, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        target = _tool_callable(runtime, "speak")
+        audio_bytes = b"ID3\x04\x00\x00fake-mp3"
+
+        class FakeTTSService:
+            file_extension = ".mp3"
+
+            async def synthesize(self, text: str) -> bytes:
+                assert text == "[softly] Take your time."
+                return audio_bytes
+
+        markers: list[tuple[Any, ...]] = []
+
+        async def fake_append_message(*args: Any) -> None:
+            markers.append(args)
+
+        monkeypatch.setattr(runtime.speak_context, "get_service", FakeTTSService)
+        monkeypatch.setattr(runtime.speak_context, "append_history", fake_append_message)
+
+        state = runtime.DeliveryState()
+        session = _DeliveryToolSession()
+        with llm_chat_delivery_scope(state):
+            result = await target(session=session, text="[softly] Take your time.")
+
+        assert result == "已用语音说出：[softly] Take your time."
+        assert len(session.sent) == 1
+        chain = cast(MessageChain, session.sent[0])
+        sent_audio = chain.get(Audio)[0]
+        assert sent_audio.src.startswith("data:audio/mpeg;base64,")
+        assert "file://" not in sent_audio.src
+        assert state.confirmed_media_deliveries == 1
+        assert markers[-1][-1] == "[用语音说: [softly] Take your time.]"
+
+        network = _FakeOneBotNetwork()
+        encoder = OneBot11MessageEncoder(
+            Login(platform="onebot", user=User(id="10001", name="Bot")),
+            cast(Any, network),
+            "12345",
+        )
+        await encoder.send(str(chain))
+
+        assert len(network.calls) == 1
+        action, params = network.calls[0]
+        assert action == "send_group_msg"
+        segment = params["message"][0]
+        assert segment["type"] == "record"
+        assert segment["data"]["file"].startswith("base64://")
 
         await harness.dispose()
         _assert_registry_matches(baseline)

@@ -1,6 +1,5 @@
 """Shared import-safe helpers for llm_chat tool implementations."""
 
-from uuid import uuid4
 from collections.abc import Sequence
 
 
@@ -26,15 +25,17 @@ def truncate_for_tts(text: str, limit: int) -> str:
     return _sentence_truncate(text, limit)
 
 
-def tts_temp_path(suffix: str = ".wav") -> str:
-    """Return a unique temp path for a synthesized clip under local_data."""
-    from arclet.entari import local_data
+def audio_mime_type(suffix: str) -> str:
+    """Return the MIME type used for an inline synthesized audio payload."""
+    normalized = suffix.lower().lstrip(".")
+    return {
+        "wav": "audio/wav",
+        "mp3": "audio/mpeg",
+        "pcm": "audio/L16",
+        "opus": "audio/ogg",
+        "ogg": "audio/ogg",
+        "aac": "audio/aac",
+    }.get(normalized, "application/octet-stream")
 
-    if not suffix.startswith("."):
-        suffix = f".{suffix}"
-    if suffix not in {".wav", ".mp3", ".pcm", ".opus", ".ogg", ".aac"}:
-        suffix = ".wav"
-    return str(local_data.get_temp_file(f"tts_{uuid4().hex}{suffix}"))
 
-
-__all__ = ["truncate_for_tts", "tts_temp_path", "is_command_allowed"]
+__all__ = ["audio_mime_type", "truncate_for_tts", "is_command_allowed"]
