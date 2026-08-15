@@ -78,6 +78,11 @@ class TestFormatImageNote:
     def test_quoted_empty_description(self):
         assert format_image_note("", quoted=True) == "[引用图片]"
 
+    def test_quoted_source_role_is_explicit(self):
+        assert format_image_note("一只猫", quoted=True, quoted_role="assistant") == "[引用自当前 Bot 的图片: 一只猫]"
+        assert format_image_note("", quoted=True, quoted_role="participant") == "[引用自其他成员的图片]"
+        assert format_image_note("", quoted=True, quoted_role="unknown") == "[引用自来源未知消息的图片]"
+
 
 class TestInternalMediaRecords:
     def test_strips_false_sticker_record_from_model_reply(self):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 import asyncio
+from dataclasses import dataclass
 from collections.abc import Callable, Sequence
 
 import litellm
@@ -16,7 +17,7 @@ from .vision import describe_image, fetch_image_data_url
 from .core.eval import EvalMessage, EvalConversation
 from .core.media import format_image_note, sanitize_assistant_history
 from .core.errors import summarize_exception
-from .core.forward import ForwardedMessage, render_forwarded_storage
+from .core.forward import ForwardedMessage, ForwardedSpeakerRole, render_forwarded_storage
 
 
 def serialize_user_turn(
@@ -124,8 +125,18 @@ def collect_top_level_images(elements: MessageChain) -> list[Image]:
     return [element for element in elements if isinstance(element, Image)]
 
 
-def collect_quoted_text_message(session: Session) -> ForwardedMessage | None:
-    """Collect one ordinary reply as attribution-safe structured context."""
+@dataclass(frozen=True, slots=True)
+class _QuotedMessageContext:
+    elements: MessageChain
+    speaker: str
+    speaker_role: ForwardedSpeakerRole
+
+
+def _identity_values(*values: object) -> set[str]:
+    return {str(value).strip().casefold() for value in values if value is not None and str(value).strip()}
+
+
+def _quoted_message_context(session: Session) -> _QuotedMessageContext | None:
     reply = getattr(session, "reply", None)
     if reply is not None:
         origin = reply.origin
@@ -133,43 +144,76 @@ def collect_quoted_text_message(session: Session) -> ForwardedMessage | None:
         member = getattr(origin, "member", None)
         user = getattr(origin, "user", None)
         quote = getattr(reply, "quote", None)
-        author = (
-            next((element for element in quote.children if isinstance(element, Author)), None)
-            if quote is not None
-            else None
-        )
-        speaker = (
-            getattr(member, "nick", None)
-            or getattr(user, "nick", None)
-            or getattr(user, "name", None)
-            or getattr(user, "id", None)
-            or (author.name if author else None)
-            or (author.id if author else None)
-            or "Unknown sender"
-        )
     else:
         quote = session.quote
         if quote is None or not quote.children:
             return None
         elements = MessageChain(quote.children)
-        author = next((element for element in quote.children if isinstance(element, Author)), None)
-        speaker = (author.name if author else None) or (author.id if author else None) or "Unknown sender"
+        member = None
+        user = None
 
-    content = elements.extract_plain_text().strip()
-    if not content:
+    author = (
+        next((element for element in quote.children if isinstance(element, Author)), None)
+        if quote is not None
+        else None
+    )
+    account = getattr(session, "account", None)
+    self_info = getattr(account, "self_info", None)
+    self_user = getattr(self_info, "user", None)
+    self_ids = _identity_values(getattr(account, "self_id", None), getattr(self_user, "id", None))
+    self_names = _identity_values(getattr(self_user, "name", None), getattr(self_user, "nick", None))
+    user_id = getattr(user, "id", None)
+    author_id = author.id if author else None
+    if user is not None:
+        is_self = bool(self_ids & _identity_values(user_id))
+    else:
+        author_values = _identity_values(author_id, author.name if author else None)
+        is_self = bool(author_values & (self_ids | self_names))
+    if is_self:
+        speaker = "bot"
+        speaker_role: ForwardedSpeakerRole = "assistant"
+    else:
+        known_speaker = (
+            getattr(member, "nick", None)
+            or getattr(user, "nick", None)
+            or getattr(user, "name", None)
+            or user_id
+            or (author.name if author else None)
+            or author_id
+        )
+        if known_speaker:
+            speaker = str(known_speaker)
+            speaker_role = "participant"
+        else:
+            speaker = "Unknown sender"
+            speaker_role = "unknown"
+    return _QuotedMessageContext(elements, speaker, speaker_role)
+
+
+def collect_quoted_message(session: Session) -> ForwardedMessage | None:
+    """Collect one ordinary reply as attribution-safe structured context."""
+    context = _quoted_message_context(session)
+    if context is None:
         return None
-    return {"speaker": speaker, "content": content, "source": "quoted"}
+    parts: list[str] = []
+    content = context.elements.extract_plain_text().strip()
+    if content:
+        parts.append(content)
+    parts.extend("[Image]" for _image in collect_top_level_images(context.elements))
+    if not parts:
+        return None
+    return {
+        "speaker": context.speaker,
+        "speaker_role": context.speaker_role,
+        "content": " ".join(parts),
+        "source": "quoted",
+    }
 
 
 def collect_quoted_images(session: Session) -> list[Image]:
     """Collect top-level images from the hydrated reply or quote fallback."""
-    reply = getattr(session, "reply", None)
-    if reply is not None:
-        return collect_top_level_images(MessageChain(reply.origin.message))
-    quote = session.quote
-    if quote is None or not quote.children:
-        return []
-    return collect_top_level_images(MessageChain(quote.children))
+    context = _quoted_message_context(session)
+    return collect_top_level_images(context.elements) if context is not None else []
 
 
 def collect_message_images(session: Session) -> list[tuple[Image, bool]]:
@@ -199,6 +243,8 @@ async def build_multimodal_user_content(
 ) -> tuple[list[dict[str, Any]] | str, str]:
     """Build direct image_url content for vision-capable chat models plus safe stored text."""
     ordered = collect_message_images(session) if config.image_understanding_enabled else []
+    quoted_context = _quoted_message_context(session)
+    quoted_role = quoted_context.speaker_role if quoted_context is not None else None
     cap = max(0, config.image_describe_max_per_message)
     attached = ordered[:cap]
     overflow = ordered[cap:]
@@ -209,7 +255,7 @@ async def build_multimodal_user_content(
     has_image_payload = False
 
     for img, quoted in attached:
-        marker = format_image_note("", quoted=quoted)
+        marker = format_image_note("", quoted=quoted, quoted_role=quoted_role if quoted else None)
         stored_parts.append(marker)
         content_parts.append({"type": "text", "text": marker})
         data_url = await fetch_image_data_url(session, img.src)
@@ -220,7 +266,7 @@ async def build_multimodal_user_content(
         has_image_payload = True
 
     for _img, quoted in overflow:
-        marker = format_image_note("", quoted=quoted)
+        marker = format_image_note("", quoted=quoted, quoted_role=quoted_role if quoted else None)
         stored_parts.append(marker)
         content_parts.append({"type": "text", "text": marker})
 
@@ -236,6 +282,8 @@ async def build_image_notes(config: LLMChatConfig, session: Session, warn: Calla
     if not config.image_understanding_enabled:
         return []
     ordered = collect_message_images(session)
+    quoted_context = _quoted_message_context(session)
+    quoted_role = quoted_context.speaker_role if quoted_context is not None else None
     cap = max(0, config.image_describe_max_per_message)
     described = ordered[:cap]
     overflow = ordered[cap:]
@@ -246,8 +294,14 @@ async def build_image_notes(config: LLMChatConfig, session: Session, warn: Calla
         except Exception as exc:
             warn(f"image describe failed: {summarize_exception(exc)}")
             description = ""
-        return format_image_note(description, quoted=is_quoted)
+        return format_image_note(
+            description,
+            quoted=is_quoted,
+            quoted_role=quoted_role if is_quoted else None,
+        )
 
     notes = list(await asyncio.gather(*(note(img, quoted) for img, quoted in described)))
-    notes += [format_image_note("", quoted=quoted) for _img, quoted in overflow]
+    notes += [
+        format_image_note("", quoted=quoted, quoted_role=quoted_role if quoted else None) for _img, quoted in overflow
+    ]
     return notes

@@ -805,6 +805,32 @@ async def test_vision_completion_forwards_timeout(monkeypatch: pytest.MonkeyPatc
     assert seen == [VISION_DESCRIBE_TIMEOUT, VISION_TAG_TIMEOUT]
 
 
+def test_collect_quoted_message_keeps_image_only_bot_attribution():
+    quoted_image = Image.of(url="local://bot-image")
+    quote = Quote("reply-id", content=[Author("Chtholly", "Chtholly"), quoted_image])
+    origin = MessageObject.from_elements("reply-id", quote.children)
+    session = _ChatSession("?")
+    setattr(
+        session,
+        "account",
+        SimpleNamespace(
+            self_id="bot-id",
+            self_info=SimpleNamespace(user=SimpleNamespace(id="bot-id", name="Chtholly")),
+        ),
+    )
+    setattr(session, "quote", quote)
+    setattr(session, "reply", Reply(quote, origin))
+
+    quoted = chat_context_module.collect_quoted_message(cast(Session, session))
+
+    assert quoted == {
+        "speaker": "bot",
+        "speaker_role": "assistant",
+        "content": "[Image]",
+        "source": "quoted",
+    }
+
+
 def test_collect_message_images_prefers_hydrated_reply_and_keeps_direct_first():
     direct = Image.of(url="local://direct")
     hydrated = Image.of(url="local://hydrated")
@@ -1065,7 +1091,7 @@ async def test_build_multimodal_user_content_attaches_images_without_description
     )
 
     assert "[图片" in stored_text
-    assert "[引用图片" in stored_text
+    assert "[引用自来源未知消息的图片" in stored_text
     assert isinstance(current_content, list)
     image_urls = [part["image_url"]["url"] for part in current_content if part.get("type") == "image_url"]
     assert len(image_urls) == 2
@@ -1094,7 +1120,28 @@ async def test_build_image_notes_uses_hydrated_reply_after_direct_images(
 
     notes = await build_image_notes(LLMChatConfig(), cast(Session, session), pytest.fail)
 
-    assert notes == ["[图片: direct note]", "[引用图片: quoted note]"]
+    assert notes == ["[图片: direct note]", "[引用自来源未知消息的图片: quoted note]"]
+
+
+@pytest.mark.asyncio
+async def test_build_image_notes_marks_bot_owned_quoted_image(monkeypatch: pytest.MonkeyPatch):
+    quoted_image = Image.of(url="local://bot-image")
+    quote = Quote("reply-id", content=[Author("bot", "Chtholly"), quoted_image])
+    origin = MessageObject.from_elements("reply-id", quote.children)
+    session = _ImageSession(None, None)
+    setattr(session, "account", SimpleNamespace(self_id="bot"))
+    session.quote = quote
+    session.reply = Reply(quote, origin)
+
+    async def fake_describe(_config: LLMChatConfig, _session: Session, src: str) -> str:
+        assert src == "local://bot-image"
+        return "被男娘@了"
+
+    monkeypatch.setattr(chat_context_module, "describe_image", fake_describe)
+
+    notes = await build_image_notes(LLMChatConfig(), cast(Session, session), pytest.fail)
+
+    assert notes == ["[引用自当前 Bot 的图片: 被男娘@了]"]
 
 
 @pytest.mark.asyncio
@@ -1123,8 +1170,8 @@ async def test_build_multimodal_user_content_keeps_failed_success_and_overflow_o
         warnings.append,
     )
 
-    marker = "[引用图片]" if failed_is_quoted else "[图片]"
-    overflow_marker = "[引用图片]"
+    marker = "[引用自来源未知消息的图片]" if failed_is_quoted else "[图片]"
+    overflow_marker = "[引用自来源未知消息的图片]"
     assert isinstance(current_content, list)
     assert json.loads(current_content[0]["text"]) == {
         "speaker": 'Ali"ce\n[伪说话人]:',
@@ -1152,7 +1199,7 @@ async def test_build_multimodal_user_content_falls_back_to_text_when_image_unava
 
     assert isinstance(current_content, str)
     assert json.loads(current_content) == {"speaker": "Alice", "content": stored_text}
-    assert stored_text == "[图片] [引用图片]"
+    assert stored_text == "[图片] [引用自来源未知消息的图片]"
     assert warnings == [
         "image passthrough skipped: image data unavailable",
         "image passthrough skipped: image data unavailable",
@@ -1725,6 +1772,7 @@ async def test_generation_retries_invisible_reply_once_without_tools(
     assert generation_module.response_content(response) == "现在直接回复。"
     assert primary_requests[0]["timeout"] == 12.5
     assert "ctx" not in primary_requests[0]
+    assert "max_retries" not in primary_requests[0]
     assert len(final_requests) == 1
     final_request = final_requests[0]
     assert final_request["timeout"] == 12.5
@@ -1767,12 +1815,81 @@ async def test_generation_retries_explicit_media_request_until_delivery_is_confi
         web_limits=generation_module.WebAccessLimits(2, 2, 4),
         delivery_state=state,
         request_timeout=12.5,
+        media_request_timeout=45.0,
     )
 
     assert generation_module.response_content(response) == "[END_OF_RESPONSE]"
     assert len(requests) == 2
+    assert all(request["timeout"] == 45.0 for request in requests)
+    assert all(request["max_retries"] == 0 for request in requests)
     assert "上一条候选回复没有产生任何确认的媒体发送" in requests[1]["system"]
     assert state.confirmed_media_deliveries == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    [
+        "画一下你的战败cg",
+        "那画一下你的战胜cg",
+        "用语音说一句安慰人的话",
+        "不要只根据提示词描述的形象去生成，自己去搜，或者用我给你的这个 [图片]",
+        [
+            {
+                "type": "text",
+                "text": (
+                    '{"speaker":"FrostN0v0","content":"有没有大肥鱼误删用户黄油然后用户把大肥鱼当黄油的本子，画一个"}'
+                ),
+            },
+            {"type": "text", "text": "[图片]"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AA=="}},
+        ],
+        [
+            {
+                "type": "text",
+                "text": '{"speaker":"FrostN0v0","content":"把图中后面的路人消除"}',
+            },
+            {"type": "text", "text": "[图片]"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AA=="}},
+        ],
+        [
+            {
+                "type": "text",
+                "text": ('{"speaker":"FrostN0v0","content":"仿照彩图，为图1布局生成类似的图，罐的位置大小一定要对"}'),
+            },
+            {"type": "text", "text": "[图片]"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AA=="}},
+        ],
+    ],
+)
+async def test_generation_uses_media_timeout_for_natural_media_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+) -> None:
+    state = DeliveryState()
+    requests: list[dict[str, Any]] = []
+
+    async def fake_generate(_messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
+        requests.append(kwargs)
+        mark_delivery_success(state, media=True)
+        return _handler_response("[END_OF_RESPONSE]")
+
+    monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
+
+    response = await generation_module.generate_chat_response(
+        cast(list[Any], [{"role": "user", "content": content}]),
+        system="system",
+        model="deepseek",
+        channel_id="group",
+        ctx=Contexts(),
+        web_limits=generation_module.WebAccessLimits(0, 0, 0),
+        delivery_state=state,
+        request_timeout=90.0,
+        media_request_timeout=180.0,
+    )
+
+    assert generation_module.response_content(response) == "[END_OF_RESPONSE]"
+    assert requests == [{"system": "system", "model": "deepseek", "timeout": 180.0, "max_retries": 0}]
 
 
 @pytest.mark.asyncio
@@ -1853,7 +1970,7 @@ async def test_message_append_and_exact_delete_round_trip(
 
 
 @pytest.mark.asyncio
-async def test_on_chat_generation_failure_rolls_back_unstarted_user_turn(
+async def test_on_chat_generation_failure_sends_notice_and_keeps_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with _temporary_chat_handler() as harness:
@@ -1872,15 +1989,56 @@ async def test_on_chat_generation_failure_rolls_back_unstarted_user_turn(
         session = _ChatSession("NEW_GROUP_B_SENTINEL")
         result = await module.on_chat.callable_target(session, SimpleNamespace())
 
+        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
         assert result is BLOCK
-        assert session.sent == []
-        assert records.appended == [("group-B", "same-user", "Current User", "user", "NEW_GROUP_B_SENTINEL")]
-        assert records.deleted == [1]
+        assert session.sent == ["这次回复没有成功，请稍后重试。"]
+        assert records.appended[0] == (
+            "group-B",
+            "same-user",
+            "Current User",
+            "user",
+            "NEW_GROUP_B_SENTINEL",
+        )
+        assert assistant_rows == [("group-B", "", "bot", "assistant", "这次回复没有成功，请稍后重试。")]
+        assert records.deleted == []
         assert records.evaluations == []
         assert records.relations == []
         assert warnings == [
             "llm generate failed: RuntimeError: provider failed <- ModuleNotFoundError: No module named 'orjson'"
         ]
+
+
+@pytest.mark.asyncio
+async def test_on_chat_media_generation_failure_requests_original_images_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler() as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+
+        async def fail_generation(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("provider timed out")
+
+        monkeypatch.setattr(module, "generate_chat_response", fail_generation)
+
+        session = _ChatSession("帮我生成一张图片")
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
+        assert result is BLOCK
+        assert session.sent == ["这次图片处理没有成功，请重新发送原图后再试。"]
+        assert assistant_rows == [
+            (
+                "group-B",
+                "",
+                "bot",
+                "assistant",
+                "这次图片处理没有成功，请重新发送原图后再试。",
+            )
+        ]
+        assert records.deleted == []
+        assert records.evaluations == []
+        assert records.relations == []
 
 
 @pytest.mark.asyncio
@@ -2301,7 +2459,12 @@ async def test_on_chat_passes_ordinary_quoted_text_as_structured_context(
         result = await module.on_chat.callable_target(session, SimpleNamespace())
 
         quoted_context: list[ForwardedMessage] = [
-            {"speaker": "Alice in group", "content": "Quoted statement", "source": "quoted"}
+            {
+                "speaker": "Alice in group",
+                "speaker_role": "participant",
+                "content": "Quoted statement",
+                "source": "quoted",
+            }
         ]
         assert result is BLOCK
         assert observed_payload == {
@@ -2316,6 +2479,56 @@ async def test_on_chat_passes_ordinary_quoted_text_as_structured_context(
         }
         assert records.evaluations[0]["current_turn"]["user"]["content"] == records.appended[0][4]
         assert session.sent == ["Reviewed quote"]
+
+
+@pytest.mark.asyncio
+async def test_on_chat_keeps_bot_owned_quoted_image_out_of_current_user_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler() as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        observed_payload: dict[str, Any] = {}
+
+        async def image_notes(*_args: Any, **_kwargs: Any) -> list[str]:
+            return ["[引用自当前 Bot 的图片: 被男娘@了]"]
+
+        async def generate(messages: list[dict[str, Any]], **_kwargs: Any) -> SimpleNamespace:
+            observed_payload.update(json.loads(cast(str, messages[-1]["content"])))
+            return _handler_response("这是我之前发的图。")
+
+        monkeypatch.setattr(module, "build_image_notes", image_notes)
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        quoted_image = Image.of(url="local://bot-image")
+        quote = Quote("reply-id", content=[Author("bot", "Chtholly"), quoted_image])
+        origin = MessageObject.from_elements("reply-id", quote.children)
+        session = _ChatSession("?")
+        setattr(session, "quote", quote)
+        setattr(session, "reply", Reply(quote, origin))
+
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        quoted_context: list[ForwardedMessage] = [
+            {
+                "speaker": "bot",
+                "speaker_role": "assistant",
+                "content": "[Image]",
+                "source": "quoted",
+            }
+        ]
+        current_text = "? [引用自当前 Bot 的图片: 被男娘@了]"
+        assert result is BLOCK
+        assert observed_payload == {
+            "speaker": "Current User",
+            "content": current_text,
+            "forwarded_messages": quoted_context,
+        }
+        assert json.loads(records.appended[0][4]) == {
+            "content": current_text,
+            "forwarded_messages": quoted_context,
+        }
+        assert session.sent == ["这是我之前发的图。"]
 
 
 @pytest.mark.asyncio
@@ -2437,6 +2650,7 @@ def test_yaml_and_default_llm_chat_configuration_are_exactly_synchronized():
         assert llm_chat_plugin[key] == expected
     assert defaults.eval_every_n == llm_chat_plugin["eval_every_n"] == 1
     assert defaults.model_request_timeout == llm_chat_plugin["model_request_timeout"] == 90.0
+    assert defaults.media_request_timeout == llm_chat_plugin["media_request_timeout"] == 300.0
     assert defaults.eval_request_timeout == llm_chat_plugin["eval_request_timeout"] == 60.0
     assert defaults.web_search_enabled is False
     assert defaults.exa_api_key is None
