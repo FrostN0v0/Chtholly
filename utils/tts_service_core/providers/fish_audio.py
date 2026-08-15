@@ -3,10 +3,14 @@
 import httpx
 
 from .base import TTSSynthesisError
-from .types import JsonValue, JsonObject
+from .types import JsonObject
 from .http_utils import map_request_error, ensure_audio_response
+from ..voice_catalog import TTSVoiceCatalog, TTSSynthesisRequest
 
 _ALLOWED_AUDIO_FORMATS = {"wav", "pcm", "mp3", "opus"}
+_AUDIO_FORMATS = ("wav", "pcm", "mp3", "opus")
+_SPEED_MIN = 0.5
+_SPEED_MAX = 2.0
 
 
 class FishAudioProvider:
@@ -48,20 +52,51 @@ class FishAudioProvider:
             return f".{self.audio_format}"
         return ".mp3"
 
-    async def synthesize(self, text: str, **params: JsonValue) -> bytes:
-        if not text.strip():
+    async def get_voice_catalog(self, *, refresh: bool = False) -> TTSVoiceCatalog:
+        del refresh
+        return TTSVoiceCatalog(
+            provider="fish-audio",
+            voices=(),
+            text_languages=(),
+            audio_formats=_AUDIO_FORMATS,
+            default_selection=None,
+            supports_inline_style_tags=True,
+            speed_min=_SPEED_MIN,
+            speed_max=_SPEED_MAX,
+            speed_default=self.prosody_speed,
+        )
+
+    async def synthesize(self, request: TTSSynthesisRequest) -> bytes:
+        if not request.text.strip():
             return b""
+        if any(
+            (
+                request.version,
+                request.model_name,
+                request.reference_language,
+                request.emotion,
+                request.text_language,
+            )
+        ):
+            raise TTSSynthesisError("Fish Audio does not support GPT-SoVITS voice selectors")
         api_key = self.api_key.strip() if self.api_key is not None else ""
         if not api_key:
             raise TTSSynthesisError("Fish Audio API key is required")
 
+        speed_value = self.prosody_speed if request.speed is None else request.speed
+        if isinstance(speed_value, bool) or not isinstance(speed_value, (int, float)):
+            raise TTSSynthesisError("Fish Audio speed must be numeric")
+        speed = float(speed_value)
+        if not _SPEED_MIN <= speed <= _SPEED_MAX:
+            raise TTSSynthesisError(f"Fish Audio speed must be between {_SPEED_MIN} and {_SPEED_MAX}")
+
         prosody: JsonObject = {
-            "speed": self.prosody_speed,
+            "speed": speed,
             "volume": self.prosody_volume,
             "normalize_loudness": self.prosody_normalize_loudness,
         }
         payload: JsonObject = {
-            "text": text,
+            "text": request.text,
             "format": self.audio_format,
             "latency": self.latency,
             "mp3_bitrate": self.mp3_bitrate,
@@ -72,7 +107,6 @@ class FishAudioProvider:
         if self.sample_rate is not None:
             payload["sample_rate"] = self.sample_rate
         payload.update(self.extra_params)
-        payload.update(params)
 
         try:
             resp = await self._client.post(

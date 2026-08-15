@@ -107,6 +107,10 @@ Exa 默认使用 `auto` 搜索；可通过 `exa_search_type` 切换 `fast`、`de
 
 `llm_chat` 的普通主聊天、明确媒体请求与关系 evaluator 单次模型请求分别由 `model_request_timeout`、`media_request_timeout` 与 `eval_request_timeout` 限时，默认 `90 / 300 / 60` 秒。明确媒体请求使用最长 5 分钟的单次等待并关闭 LiteLLM 自动重试，给复杂生图与图片编辑保留充足时间，同时避免一次上游卡顿被自动重试放大为十几分钟；未确认媒体时仍保留一次受限的工具纠正。关系 evaluator 只使用严格 JSON 提示与本地解析，不强制供应商 JSON Mode；主模型若在没有任何发送尝试时返回空内容、内部媒体记录或孤立的 `[END_OF_RESPONSE]`，会执行一次无工具纠正重试。纠正仍失败时删除本轮尚未开始交付的 user 记录，不启动 evaluator；历史中的语音只以自然文本提供给模型，纯表情记录不进入提示历史。
 
+`tts_service` 默认接入服务器上的 GSVI-compatible GPT-SoVITS 适配层。生产 Bot 与推理服务同机时使用 `http://127.0.0.1:9874`；本地开发通过现有 SSH 隧道访问时，将 `entari.yml` 中的 `gpt_sovits_base_url` 临时覆盖为 `http://127.0.0.1:19880`。认证口令只放在 `.env.local` 或生产环境的 secret 文件中，并通过 `GPT_SOVITS_API_KEY` 注入；不得写入 `entari.yml`、日志或测试。
+
+`llm_chat` 会注册只读 `list_tts_voices` 与发送型 `speak`。前者从服务端实时获取版本、角色模型、参考语言、情绪、合成语言、语速范围和默认选择；后者只接受目录返回的精确选项并在服务端再次校验。用户明确指定角色或情绪时，模型必须先读取目录，不得用其他角色替代不存在的选项；未指定时可使用服务默认或自行选择合适情绪。Fish Audio 仍可通过 `provider: fish-audio` 切换，只有目录明确声明支持时才允许在文本中使用方括号风格标签。
+
 `speak` 合成的音频以内联 `data:audio/*;base64` 资源交给 Satori / OneBot，而不是发送 Chtholly 主机上的 `file://` 临时路径；协议端与 Bot 分离部署时因此不需要共享文件系统。只有协议端确认发送成功后才写入语音历史 marker。
 
 `llm_chat` 可在已触发的当前会话中，通过 `tag_image` 主动收藏本轮直接发送或引用的单张可复用表情包；普通群消息、裸图片占位符、合并转发内图片、生活照、截图、文档、二维码、证件、凭证与私人图片不会进入自动收藏。超管可在单图后使用 `llmchat tag-meme`，或引用单图消息后发送该命令进行人工覆盖；普通成员的同名命令会被拒绝并完整拦截，不会继续触发人格聊天。

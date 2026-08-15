@@ -63,16 +63,23 @@ plugins:
       你是一个准确、直接的通用助手。优先回答用户当前问题；信息不足时只询问完成任务所必需的澄清，不编造事实、工具结果或外部状态。
       默认使用自然纯文本；仅在代码、表格、清单或用户明确要求时使用必要的 Markdown。只调用当前实际提供且与请求直接相关的工具，不承诺或声称执行未成功的操作。
   tts_service:
-    # provider: gpt-sovits
-    # api_url: ${{ env.TTS_API_URL || "http://127.0.0.1:9880/tts" }}
-    # default_speaker: "chtholly"
-    # text_lang: "zh"
+    provider: gpt-sovits
+    gpt_sovits_base_url: "http://127.0.0.1:9874"
+    gpt_sovits_api_key: ${{ env.GPT_SOVITS_API_KEY }}
+    timeout: 300.0
+    gpt_sovits_format: wav
+    gpt_sovits_catalog_ttl: 300.0
+    # Optional exact defaults discovered from list_tts_voices:
+    # gpt_sovits_default_version: "v4"
+    # gpt_sovits_default_model: ""
+    # gpt_sovits_default_reference_language: ""
+    # gpt_sovits_default_emotion: ""
     # Fish Audio switch example:
-    provider: fish-audio
-    fish_api_key: ${{ env.FISH_API_KEY }}
-    fish_reference_id: ${{ env.FISH_REFERENCE_ID }}
-    fish_model: s2.1-pro-free
-    fish_format: mp3
+    # provider: fish-audio
+    # fish_api_key: ${{ env.FISH_API_KEY }}
+    # fish_reference_id: ${{ env.FISH_REFERENCE_ID }}
+    # fish_model: s2.1-pro-free
+    # fish_format: mp3
   help_menu: {}
   llm_chat:
     $filter: channel.type is public
