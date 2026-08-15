@@ -66,9 +66,11 @@ plugins:
     provider: gpt-sovits
     gpt_sovits_base_url: "http://127.0.0.1:9874"
     gpt_sovits_api_key: ${{ env.GPT_SOVITS_API_KEY }}
-    timeout: 300.0
+    timeout: 900.0
     gpt_sovits_format: wav
     gpt_sovits_catalog_ttl: 300.0
+    gpt_sovits_extra_params:
+      text_split_method: "不切"
     # Optional exact defaults discovered from list_tts_voices:
     # gpt_sovits_default_version: "v4"
     # gpt_sovits_default_model: ""

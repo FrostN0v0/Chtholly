@@ -110,6 +110,7 @@ Exa 默认使用 `auto` 搜索；可通过 `exa_search_type` 切换 `fast`、`de
 `tts_service` 默认接入服务器上的 GSVI-compatible GPT-SoVITS 适配层。生产 Bot 与推理服务同机时使用 `http://127.0.0.1:9874`；本地开发通过现有 SSH 隧道访问时，将 `entari.yml` 中的 `gpt_sovits_base_url` 临时覆盖为 `http://127.0.0.1:19880`。认证口令只放在 `.env.local` 或生产环境的 secret 文件中，并通过 `GPT_SOVITS_API_KEY` 注入；不得写入 `entari.yml`、日志或测试。
 
 `llm_chat` 会注册只读 `list_tts_voices` 与发送型 `speak`。前者从服务端实时获取版本、角色模型、参考语言、情绪、合成语言、语速范围和默认选择；后者只接受目录返回的精确选项并在服务端再次校验。用户明确指定角色或情绪时，模型必须先读取目录，不得用其他角色替代不存在的选项；未指定时可使用服务默认或自行选择合适情绪。Fish Audio 仍可通过 `provider: fish-audio` 切换，只有目录明确声明支持时才允许在文本中使用方括号风格标签。
+生产 GPT-SoVITS 运行在串行推理锁后，HTTP 超时同时包含前序任务排队、角色权重切换和实际推理；短语音默认通过 `gpt_sovits_extra_params.text_split_method: "不切"` 合并为一次推理，并将 `tts_service.timeout` 设为 `900` 秒覆盖排队。`media_request_timeout` 只约束模型供应商请求，不替代 TTS HTTP 超时。
 
 `speak` 合成的音频以内联 `data:audio/*;base64` 资源交给 Satori / OneBot，而不是发送 Chtholly 主机上的 `file://` 临时路径；协议端与 Bot 分离部署时因此不需要共享文件系统。只有协议端确认发送成功后才写入语音历史 marker。
 

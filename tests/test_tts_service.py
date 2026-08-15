@@ -24,7 +24,7 @@ _JA = "\u65e5\u8bed"
 _DEFAULT = "\u9ed8\u8ba4"
 _HAPPY = "\u5f00\u5fc3"
 _CALM = "\u5e73\u9759"
-_SPLIT = "\u6309\u6807\u70b9\u7b26\u53f7\u5207"
+_SPLIT = "\u4e0d\u5207"
 
 
 def make_provider(
