@@ -311,8 +311,10 @@ def _load_local_modules() -> Iterator[SimpleNamespace]:
         web_tools = importlib.import_module("plugins.llm_chat.tools.web")
         agno_compat = importlib.import_module("plugins.llm_chat.agno_compat")
         generation = importlib.import_module("plugins.llm_chat.generation")
+        channel_images = importlib.import_module("plugins.llm_chat.channel_images")
         participant_tools = importlib.import_module("plugins.llm_chat.tools.find_channel_participants")
         history_tools = importlib.import_module("plugins.llm_chat.tools.read_channel_messages")
+        channel_image_tools = importlib.import_module("plugins.llm_chat.tools.send_channel_image")
         avatar_tools = importlib.import_module("plugins.llm_chat.tools.describe_channel_participant_avatar")
         yield SimpleNamespace(
             web_access=web_access,
@@ -321,8 +323,10 @@ def _load_local_modules() -> Iterator[SimpleNamespace]:
             web_tools=web_tools,
             agno_compat=agno_compat,
             generation=generation,
+            channel_images=channel_images,
             participant_tools=participant_tools,
             history_tools=history_tools,
+            channel_image_tools=channel_image_tools,
             avatar_tools=avatar_tools,
         )
     finally:
@@ -653,14 +657,16 @@ async def test_actual_tool_runtime_uses_configured_gate_order_and_disposal(
         assert delta_names == runtime.registered_tools
         assert runtime.registered_tools[:3] == ["send_image", "send_text", "send_merged_forward"]
         assert runtime.registered_tools[4:6] == ["send_external_image", "get_local_time"]
-        assert runtime.registered_tools[6:9] == [
+        assert runtime.registered_tools[6:10] == [
             "find_channel_participants",
             "read_channel_messages",
+            "send_channel_image",
             "describe_channel_participant_avatar",
         ]
         schemas = {schema["function"]["name"]: schema["function"] for schema in delta}
-        for name in runtime.registered_tools[6:9]:
+        for name in runtime.registered_tools[6:10]:
             assert "session" not in schemas[name]["parameters"]["properties"]
+        assert schemas["send_channel_image"]["parameters"]["required"] == ["image_ref"]
         assert schemas["describe_channel_participant_avatar"]["parameters"]["required"] == ["participant_ref"]
         assert [
             name for name in runtime.registered_tools if name in {"web_search", "read_web_page"}
@@ -681,14 +687,18 @@ async def test_actual_tool_runtime_uses_configured_gate_order_and_disposal(
 @pytest.mark.asyncio
 async def test_channel_perception_tools_use_current_session_and_hide_transport_identifiers(
     local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[object, ...]] = []
+    history_rows: list[tuple[str, str, str, str, str]] = []
+    warnings: list[str] = []
+    described_sources: list[str] = []
     avatar_hash = sha256(_PNG_BYTES).hexdigest()
     participant = SimpleNamespace(
         display_name="Alice",
         avatar_url="https://example.com/avatar.png",
         avatar_hash=avatar_hash,
-        avatar_description="蓝色短发的卡通头像",
+        avatar_description="blue-haired avatar",
     )
 
     class PerceptionStub:
@@ -705,7 +715,33 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
             participant_ref: str = "",
         ) -> tuple[list[dict[str, object]], str]:
             calls.append(("history", session, limit, before_cursor, participant_ref))
-            return ([{"participant_ref": participant_ref, "content": "hello"}], "next")
+            if before_cursor == "older-page":
+                return (
+                    [
+                        {
+                            "cursor": "41",
+                            "participant_ref": participant_ref,
+                            "content": "older context",
+                            "image_count": 0,
+                        }
+                    ],
+                    "",
+                )
+            return (
+                [
+                    {
+                        "cursor": "42",
+                        "participant_ref": participant_ref,
+                        "content": "look at this",
+                        "image_count": 1,
+                    }
+                ],
+                "older-page",
+            )
+
+        async def message_image_sources(self, session: object, cursor: str) -> list[str]:
+            calls.append(("message_images", session, cursor))
+            return ["https://example.com/channel-image.png"]
 
         async def refresh_participant(self, session: object, participant_ref: str) -> SimpleNamespace:
             calls.append(("avatar", session, participant_ref))
@@ -716,18 +752,35 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
 
     class ToolSession:
         def __init__(self) -> None:
+            self.channel = SimpleNamespace(id="channel-1")
             self.downloads: list[str] = []
+            self.sent: list[object] = []
 
         async def download(self, src: str) -> bytes:
             self.downloads.append(src)
             return _PNG_BYTES
 
+        async def send(self, message: object) -> list[object]:
+            self.sent.append(message)
+            return []
+
+    async def describe_image(_config: object, _session: object, source: str) -> str:
+        described_sources.append(source)
+        return "a blue chart"
+
+    async def append_history(channel_id: str, user_id: str, name: str, role: str, content: str) -> object:
+        history_rows.append((channel_id, user_id, name, role, content))
+        return object()
+
+    monkeypatch.setattr(local_modules.channel_images, "describe_image", describe_image)
     perception = PerceptionStub()
     session = cast(Any, ToolSession())
 
     def provider() -> Any:
         return perception
 
+    config = local_modules.config.LLMChatConfig(channel_message_max_described_images=4)
+    references = local_modules.channel_images.ChannelImageReferences()
     async with _temporary_plugin() as harness:
         find_registered = local_modules.participant_tools.register_find_channel_participants(
             harness.dispatcher,
@@ -736,44 +789,90 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
         history_registered = local_modules.history_tools.register_read_channel_messages(
             harness.dispatcher,
             provider,
+            config,
+            warnings.append,
+        )
+        send_image_registered = local_modules.channel_image_tools.register_send_channel_image(
+            harness.dispatcher,
+            local_modules.channel_image_tools.ChannelImageToolContext(
+                get_perception=provider,
+                append_history=append_history,
+                warn=warnings.append,
+            ),
         )
         avatar_registered = local_modules.avatar_tools.register_describe_channel_participant_avatar(
             harness.dispatcher,
             provider,
-            local_modules.config.LLMChatConfig(),
+            config,
         )
 
-        find_result = json.loads(await find_registered.callable_target(query=" Alice ", limit=99, session=session))
-        history_result = json.loads(
-            await history_registered.callable_target(
-                limit=99,
-                before_cursor=" 10 ",
-                participant_ref=" participant_a ",
+        with local_modules.channel_images.llm_chat_channel_image_scope(references):
+            find_result = json.loads(await find_registered.callable_target(query=" Alice ", limit=99, session=session))
+            history_result = json.loads(
+                await history_registered.callable_target(
+                    limit=99,
+                    participant_ref=" participant_a ",
+                    session=session,
+                )
+            )
+            older_result = json.loads(
+                await history_registered.callable_target(
+                    limit=20,
+                    before_cursor=history_result["next_cursor"],
+                    participant_ref=" participant_a ",
+                    session=session,
+                )
+            )
+            avatar_result = json.loads(
+                await avatar_registered.callable_target(participant_ref=" participant_a ", session=session)
+            )
+            message_image_ref = history_result["messages"][0]["images"][0]["image_ref"]
+            message_send_result = await send_image_registered.callable_target(
+                image_ref=message_image_ref,
                 session=session,
             )
-        )
-        avatar_result = json.loads(
-            await avatar_registered.callable_target(participant_ref=" participant_a ", session=session)
-        )
+            avatar_send_result = await send_image_registered.callable_target(
+                image_ref=avatar_result["image_ref"],
+                session=session,
+            )
 
     assert calls == [
         ("find", session, "Alice", 10),
-        ("history", session, 50, "10", "participant_a"),
+        ("history", session, 50, "", "participant_a"),
+        ("message_images", session, "42"),
+        ("history", session, 20, "older-page", "participant_a"),
         ("avatar", session, "participant_a"),
+        ("message_images", session, "42"),
     ]
     assert find_result == {"participants": [{"participant_ref": "participant_a", "display_name": "Alice"}]}
-    assert history_result == {
-        "messages": [{"participant_ref": "participant_a", "content": "hello"}],
-        "next_cursor": "next",
+    assert history_result["next_cursor"] == "older-page"
+    assert history_result["messages"][0]["image_count"] == 1
+    assert history_result["messages"][0]["images"][0]["description"] == "a blue chart"
+    assert older_result == {
+        "messages": [{"participant_ref": "participant_a", "content": "older context", "image_count": 0}],
+        "next_cursor": "",
     }
-    assert avatar_result == {
-        "display_name": "Alice",
-        "available": True,
-        "description": "蓝色短发的卡通头像",
-    }
-    assert session.downloads == ["https://example.com/avatar.png"]
-    assert "https://" not in json.dumps(avatar_result, ensure_ascii=False)
+    assert avatar_result["display_name"] == "Alice"
+    assert avatar_result["available"] is True
+    assert avatar_result["description"] == "blue-haired avatar"
+    assert cast(str, avatar_result["image_ref"]).startswith("channel_image_")
+    assert described_sources == ["https://example.com/channel-image.png"]
+    assert session.downloads == [
+        "https://example.com/avatar.png",
+        "https://example.com/channel-image.png",
+        "https://example.com/avatar.png",
+    ]
+    assert len(session.sent) == 2
+    assert "已发送 1 张群聊图片" in message_send_result
+    assert "已发送 1 张群聊图片" in avatar_send_result
+    assert history_rows == [
+        ("channel-1", "", "bot", "assistant", "[发送了图片]"),
+        ("channel-1", "", "bot", "assistant", "[发送了图片]"),
+    ]
+    public_payload = json.dumps(history_result, ensure_ascii=False)
+    assert "https://" not in public_payload
     assert avatar_hash not in json.dumps(avatar_result, ensure_ascii=False)
+    assert warnings == []
 
 
 def test_channel_history_tool_keeps_valid_bounded_json(local_modules: SimpleNamespace) -> None:

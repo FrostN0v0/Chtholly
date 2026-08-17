@@ -83,7 +83,7 @@ from plugins.llm_chat.core.forward import (
     render_forwarded_storage,
 )
 from plugins.llm_chat.core.profile import MemoryItem
-from plugins.llm_chat.core.prompts import DEFAULT_PERSONA
+from plugins.llm_chat.core.prompts import DEFAULT_PERSONA, SYSTEM_SCAFFOLD
 from plugins.llm_chat.core.delivery import (
     DeliveryState,
     reserve_text_message,
@@ -273,6 +273,8 @@ def _install_handler_stubs(
         deleted=[],
         ambient_calls=[],
         ambient_context=[],
+        image_source_calls=[],
+        image_sources={},
         history=[],
     )
 
@@ -293,6 +295,10 @@ def _install_handler_stubs(
         async def ambient_context(self, *_args: Any, **kwargs: Any) -> list[dict[str, Any]]:
             records.ambient_calls.append(kwargs)
             return records.ambient_context
+
+        async def message_image_sources(self, session: object, cursor: str) -> list[str]:
+            records.image_source_calls.append((session, cursor))
+            return records.image_sources.get(cursor, [])
 
     perception = PerceptionStub()
 
@@ -570,6 +576,14 @@ def test_build_chat_messages_serializes_each_user_turn_without_speaker_spoofing(
 )
 def test_recent_channel_context_intent_is_narrow(text: str, expected: bool) -> None:
     assert requests_recent_channel_context(text) is expected
+
+
+def test_system_prompt_allows_bounded_history_pagination_and_historical_image_resend() -> None:
+    assert "before_cursor=next_cursor" in SYSTEM_SCAFFOLD
+    assert "不得把默认现场条数当成不可跨越的历史上限" in SYSTEM_SCAFFOLD
+    assert "send_channel_image" in SYSTEM_SCAFFOLD
+    assert "不得谎称只能描述、无法取得图片" in SYSTEM_SCAFFOLD
+    assert "不得把头像 URL 复制给 send_external_image" in SYSTEM_SCAFFOLD
 
 
 def test_build_chat_messages_keeps_forwarded_speakers_structured_and_attribution_safe():
@@ -1765,6 +1779,10 @@ def test_tool_argument_projection_redacts_secrets_and_large_payloads() -> None:
         "read_channel_messages",
         {"limit": 20, "participant_ref": "participant_0123abcdef", "before_cursor": "42"},
     )
+    channel_image = project_tool_arguments(
+        "send_channel_image",
+        {"image_ref": "channel_image_secret"},
+    )
     avatar = project_tool_arguments(
         "describe_channel_participant_avatar",
         {"participant_ref": "participant_0123abcdef"},
@@ -1778,9 +1796,11 @@ def test_tool_argument_projection_redacts_secrets_and_large_payloads() -> None:
     assert external == {"source_type": "inline_data", "source_chars": 28}
     assert image == {"selection_mode": "paths", "path_count": 2, "context": ""}
     assert history == {"limit": 20, "filtered": True, "paged": True}
+    assert channel_image == {"requested": True}
     assert avatar == {"requested": True}
     assert "SECRET" not in repr(external)
     assert "memes/1.png" not in repr(image)
+    assert "channel_image_secret" not in repr(channel_image)
 
 
 def test_channel_perception_tool_trace_keeps_only_bounded_metadata() -> None:
@@ -1798,11 +1818,19 @@ def test_channel_perception_tool_trace_keeps_only_bounded_metadata() -> None:
                         "participant_ref": "participant_0123abcdef",
                         "display_name": "Sensitive Name",
                         "content": "private channel text",
+                        "image_count": 2,
+                        "images": [
+                            {
+                                "image_ref": "channel_image_secret",
+                                "description": "sensitive image description",
+                            }
+                        ],
                     }
                 ],
                 "next_cursor": "41",
                 "truncated": True,
-            }
+            },
+            ensure_ascii=False,
         ),
         before=DeliverySnapshot(),
         after=DeliverySnapshot(),
@@ -1812,10 +1840,12 @@ def test_channel_perception_tool_trace_keeps_only_bounded_metadata() -> None:
     serialized = json.dumps({"arguments": event.arguments, "outcome": event.outcome}, ensure_ascii=False)
     assert (event.status, event.effect) == ("succeeded", "observed")
     assert event.arguments == {"limit": 20, "filtered": True, "paged": True}
-    assert event.outcome == {"returned_count": 1, "has_older": True, "truncated": True}
+    assert event.outcome == {"returned_count": 1, "image_count": 2, "has_older": True, "truncated": True}
     assert "participant_0123abcdef" not in serialized
     assert "Sensitive Name" not in serialized
     assert "private channel text" not in serialized
+    assert "channel_image_secret" not in serialized
+    assert "sensitive image description" not in serialized
 
 
 def test_tool_activity_budget_prefers_newest_records() -> None:
@@ -2048,7 +2078,7 @@ async def test_generation_retries_invisible_reply_once_without_tools(
 
 
 @pytest.mark.asyncio
-async def test_generation_retries_explicit_media_request_until_delivery_is_confirmed(
+async def test_generation_retries_contextual_avatar_send_request_until_delivery_is_confirmed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = DeliveryState()
@@ -2070,7 +2100,10 @@ async def test_generation_retries_explicit_media_request_until_delivery_is_confi
     response = await generation_module.generate_chat_response(
         cast(
             list[Any],
-            [{"role": "user", "content": '{"speaker":"FrostN0v0","content":"你发的图呢？"}'}],
+            [
+                {"role": "assistant", "content": "我已经看到了黄豆粉当前使用的头像。"},
+                {"role": "user", "content": '{"speaker":"FrostN0v0","content":"你能发出来吗"}'},
+            ],
         ),
         system="system",
         model="deepseek",
@@ -2677,26 +2710,37 @@ async def test_on_chat_injects_bounded_ambient_context_without_persisting_it(
         records = _install_handler_stubs(monkeypatch, module)
         records.ambient_context = [
             {
+                "cursor": "7",
                 "participant_ref": "participant_other",
                 "display_name": "Other Member",
-                "content": "AMBIENT_SENTINEL",
+                "content": "AMBIENT_SENTINEL [Image]",
+                "image_count": 1,
                 "minutes_ago": 1,
                 "replies_to_recent_message": False,
             }
         ]
+        records.image_sources = {"7": ["https://example.com/recent.png"]}
         captured: list[list[dict[str, Any]]] = []
         captured_refs: list[str] = []
+        captured_image_references: list[Any] = []
 
         def compose_prompt(*_args: Any, **kwargs: Any) -> str:
             captured.append(kwargs["ambient_channel_context"])
             captured_refs.append(kwargs["current_participant_ref"])
             return "ambient system"
 
-        async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+            captured_image_references.append(kwargs["channel_image_references"])
             return _handler_response("Current reply")
 
         monkeypatch.setattr(module, "compose_persona_prompt", compose_prompt)
         monkeypatch.setattr(module, "generate_chat_response", generate)
+        channel_images_module = sys.modules[module.enrich_channel_message_images.__module__]
+
+        async def describe_image(*_args: Any, **_kwargs: Any) -> str:
+            return "a recent group image"
+
+        monkeypatch.setattr(channel_images_module, "describe_image", describe_image)
         session = _ChatSession("current turn")
 
         result = await module.on_chat.callable_target(session, SimpleNamespace())
@@ -2704,6 +2748,13 @@ async def test_on_chat_injects_bounded_ambient_context_without_persisting_it(
         assert result is BLOCK
         assert captured == [records.ambient_context]
         assert captured_refs == ["participant_current"]
+        assert "cursor" not in captured[0][0]
+        image_view = cast(list[dict[str, object]], captured[0][0]["images"])[0]
+        assert image_view["description"] == "a recent group image"
+        image_ref = cast(str, image_view["image_ref"])
+        target = captured_image_references[0].resolve(image_ref)
+        assert (target.cursor, target.image_index) == ("7", 1)
+        assert records.image_source_calls == [(session, "7")]
         assert records.ambient_calls == [
             {
                 "max_messages": 6,

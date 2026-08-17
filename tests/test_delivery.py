@@ -8,6 +8,7 @@ from dataclasses import field, dataclass
 
 import pytest
 
+from plugins.llm_chat.core.types import ChatMessage
 from plugins.llm_chat.core.delivery import (
     DEFAULT_DELIVERY_LIMITS,
     DeliveryError,
@@ -100,6 +101,24 @@ def test_latest_user_media_request_detection_uses_nested_current_content_only() 
     )
 
     assert not latest_user_requests_media([{"role": "user", "content": content}])
+
+
+def test_latest_user_media_request_detection_uses_recent_avatar_context() -> None:
+    messages: list[ChatMessage] = [
+        {"role": "assistant", "content": "我已经看到了黄豆粉当前使用的头像。"},
+        {"role": "user", "content": '{"speaker":"FrostN0v0","content":"你能发出来吗"}'},
+    ]
+
+    assert latest_user_requests_media(messages)
+
+
+def test_contextual_send_request_requires_recent_media_context() -> None:
+    messages: list[ChatMessage] = [
+        {"role": "assistant", "content": "这段代码已经整理好了。"},
+        {"role": "user", "content": "你能发出来吗"},
+    ]
+
+    assert not latest_user_requests_media(messages)
 
 
 def test_media_unavailable_marker_requires_visible_text_and_never_reaches_delivery() -> None:

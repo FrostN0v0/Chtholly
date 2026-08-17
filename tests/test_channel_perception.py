@@ -9,6 +9,7 @@ import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
 from importlib import import_module
+from unittest.mock import AsyncMock
 from importlib.machinery import ModuleSpec
 
 import pytest
@@ -146,9 +147,70 @@ def test_normalize_message_preserves_safe_structure_and_bounds() -> None:
     assert normalized.image_count == 1
     assert "https://" not in normalized.content
     assert "quoted secret" not in normalized.content
+    assert core_module.collect_image_sources(chain) == ["https://example.com/image.png"]
     assert core_module.display_name("Group Card", "Nickname", "fallback") == "Group Card"
     assert core_module.is_prefixed_command("  /help", ["/"], "Chtholly") is True
     assert core_module.is_prefixed_command("@Chtholly, hello", [], "Chtholly") is True
+
+
+@pytest.mark.asyncio
+async def test_message_image_sources_are_resolved_on_demand_within_current_scope(perception_store) -> None:
+    scope = _scope()
+    observed_at = datetime(2026, 8, 17, 9, 0, 0)
+    config = ChannelPerceptionConfig(retention_days=7, max_messages_per_channel=20)
+    await message_store_module.store_observation(
+        MessageObservation(
+            kind="message",
+            participant=_participant(scope, card="Alice", observed_at=observed_at),
+            message_id="image-message",
+            message=NormalizedMessage(content="[Image]", reply_to_message_id="", image_count=1),
+            display_name="Alice",
+            directed_to_bot=False,
+            is_command=False,
+            is_bot=False,
+            observed_at=observed_at,
+        ),
+        config,
+    )
+    messages, _ = await queries_module.get_recent_messages(scope, limit=5)
+    assert messages[0]["image_count"] == 1
+
+    message_get = AsyncMock(
+        return_value=SimpleNamespace(
+            message=MessageChain(
+                [
+                    Image(src="https://example.com/direct.png"),
+                    Quote(id="quoted", content=[Image(src="https://example.com/quoted.png")]),
+                ]
+            )
+        )
+    )
+    session = cast(
+        Session,
+        SimpleNamespace(
+            account=SimpleNamespace(platform="onebot", self_id="bot-1"),
+            guild=SimpleNamespace(id="group-1"),
+            channel=SimpleNamespace(id="group-1"),
+            message_get=message_get,
+        ),
+    )
+    service = service_module.ChannelPerceptionService(config)
+
+    sources = await service.message_image_sources(session, messages[0]["cursor"])
+
+    assert sources == ["https://example.com/direct.png"]
+    message_get.assert_awaited_once_with("image-message")
+
+    other_session = cast(
+        Session,
+        SimpleNamespace(
+            account=SimpleNamespace(platform="onebot", self_id="bot-2"),
+            guild=SimpleNamespace(id="group-1"),
+            channel=SimpleNamespace(id="group-1"),
+            message_get=AsyncMock(),
+        ),
+    )
+    assert await service.message_image_sources(other_session, messages[0]["cursor"]) == []
 
 
 @pytest.mark.asyncio
