@@ -31,6 +31,7 @@ from .chat_context import (
     build_eval_conversation,
     model_supports_image_input,
     build_multimodal_user_content,
+    requests_recent_channel_context,
 )
 from .core.compose import energy_at, compose_persona_prompt
 from .core.forward import render_forwarded_storage
@@ -165,8 +166,9 @@ async def on_chat(session: Session, ctx: Contexts):
     except Exception as exc:
         _LOGGER.warning(f"tool history load failed: {summarize_exception(exc)}")
         recent_tool_activity = []
+    generation_history = [] if requests_recent_channel_context(model_text) else history
     messages = build_chat_messages(
-        history,
+        generation_history,
         user_name,
         model_text,
         current_content,
