@@ -86,9 +86,10 @@ async def _new_public_ref(session) -> str:
 
 
 async def upsert_participant(observation: ParticipantObservation) -> ParticipantSnapshot:
+    identity_name = observation.platform_nickname or observation.group_card or observation.platform_user_id
     platform_user = User(
         id=observation.platform_user_id,
-        name=observation.platform_nickname or None,
+        name=identity_name,
         avatar=observation.avatar_url or None,
     )
     unified_user = await get_user(observation.scope.platform, platform_user)

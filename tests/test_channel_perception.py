@@ -248,6 +248,31 @@ async def test_identity_name_change_and_message_lifecycle_are_consistent(percept
 
 
 @pytest.mark.asyncio
+async def test_participant_identity_uses_group_card_when_platform_nickname_is_missing(
+    perception_store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured_names: list[str | None] = []
+
+    async def capture_get_user(_platform: str, platform_user: object) -> SimpleNamespace:
+        name = getattr(platform_user, "name", None)
+        captured_names.append(name if isinstance(name, str) else None)
+        return SimpleNamespace(id=perception_store.identity_id["value"])
+
+    monkeypatch.setattr(participant_store_module, "get_user", capture_get_user)
+    participant = await participant_store_module.upsert_participant(
+        _participant(
+            _scope(),
+            card="Group Card",
+            nickname="",
+            observed_at=datetime(2026, 8, 17, 10, 25, 0),
+        )
+    )
+
+    assert captured_names == ["Group Card"]
+    assert participant.display_name == "Group Card"
+
+
+@pytest.mark.asyncio
 async def test_concurrent_participant_upserts_are_idempotent(perception_store) -> None:
     scope = _scope()
     observed_at = datetime(2026, 8, 17, 10, 30, 0)
