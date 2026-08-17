@@ -36,9 +36,12 @@ _DELIVERY_TOOLS = {
     "speak",
 }
 _OBSERVATION_TOOLS = {
+    "describe_channel_participant_avatar",
+    "find_channel_participants",
     "get_local_time",
     "list_image_resources",
     "list_tts_voices",
+    "read_channel_messages",
     "read_web_page",
     "web_search",
 }
@@ -67,6 +70,19 @@ def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> d
         return selected_arguments(arguments, "limit", "offset")
     if tool_name == "list_tts_voices":
         return selected_arguments(arguments, "refresh")
+    if tool_name == "find_channel_participants":
+        return {
+            "query_chars": text_length(arguments.get("query")),
+            **selected_arguments(arguments, "limit"),
+        }
+    if tool_name == "read_channel_messages":
+        return {
+            **selected_arguments(arguments, "limit"),
+            "filtered": bool(arguments.get("participant_ref")),
+            "paged": bool(arguments.get("before_cursor")),
+        }
+    if tool_name == "describe_channel_participant_avatar":
+        return {"requested": bool(arguments.get("participant_ref"))}
     if tool_name == "send_text":
         return {
             "text_chars": text_length(arguments.get("text")),
@@ -253,6 +269,29 @@ def _project_tool_result(
         }
     if tool_name == "list_tts_voices" and parsed is not None:
         return _project_tts_catalog(parsed)
+    if tool_name == "find_channel_participants" and parsed is not None:
+        participants = parsed.get("participants")
+        return {
+            "returned_count": (
+                len(participants)
+                if isinstance(participants, Sequence) and not isinstance(participants, (str, bytes))
+                else 0
+            )
+        }
+    if tool_name == "read_channel_messages" and parsed is not None:
+        messages = parsed.get("messages")
+        return {
+            "returned_count": (
+                len(messages) if isinstance(messages, Sequence) and not isinstance(messages, (str, bytes)) else 0
+            ),
+            "has_older": bool(parsed.get("next_cursor")),
+            "truncated": parsed.get("truncated") is True,
+        }
+    if tool_name == "describe_channel_participant_avatar" and parsed is not None:
+        return {
+            "available": parsed.get("available") is True,
+            "reason": compact_text(parsed.get("reason"), MAX_ARGUMENT_TEXT),
+        }
     if tool_name in _DELIVERY_TOOLS:
         return {
             "confirmed_deliveries": max(0, after.confirmed - before.confirmed),

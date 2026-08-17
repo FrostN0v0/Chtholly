@@ -458,6 +458,14 @@ def test_trailing_end_marker_is_removed_from_visible_delivery_text(value: str, e
     assert normalized == expected
 
 
+def test_internal_participant_references_are_redacted_before_delivery() -> None:
+    state = DeliveryState()
+    with llm_chat_delivery_scope(state):
+        _, normalized = reserve_text_message("请看 participant_0123abcdef 的头像")
+
+    assert normalized == "请看 该成员 的头像"
+
+
 def test_media_records_and_internal_sentinel_are_removed_or_rejected_atomically() -> None:
     state = DeliveryState()
     with llm_chat_delivery_scope(state):

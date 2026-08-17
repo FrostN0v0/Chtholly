@@ -177,12 +177,13 @@ def _quoted_message_context(session: Session) -> _QuotedMessageContext | None:
             getattr(member, "nick", None)
             or getattr(user, "nick", None)
             or getattr(user, "name", None)
-            or user_id
             or (author.name if author else None)
-            or author_id
         )
         if known_speaker:
             speaker = str(known_speaker)
+            speaker_role = "participant"
+        elif user is not None or author is not None:
+            speaker = "Unknown sender"
             speaker_role = "participant"
         else:
             speaker = "Unknown sender"

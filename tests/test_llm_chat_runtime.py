@@ -46,6 +46,7 @@ from entari_plugin_database import Base
 
 from plugins.llm_chat import (
     vision as vision_module,
+    identity as identity_module,
     generation as generation_module,
     agno_compat as agno_compat_module,
     chat_context as chat_context_module,
@@ -55,7 +56,7 @@ from plugins.llm_chat import (
 from plugins.llm_chat.core import image_source as image_source_module
 from plugins.llm_chat.tools import is_command_allowed
 from plugins.llm_chat.config import LLMChatConfig
-from plugins.llm_chat.models import UserMemory, Conversation, ToolExecution, UserProfileFact
+from plugins.llm_chat.models import UserMemory, Conversation, UserRelation, ToolExecution, UserProfileFact
 from plugins.llm_chat.vision import VISION_TAG_TIMEOUT, VISION_DESCRIBE_TIMEOUT, vision_completion
 from plugins.llm_chat.persona import (
     store as store_module,
@@ -204,6 +205,7 @@ class _ChatSession:
         self.elements = _ChatElements(text)
         self.quote = None
         self.sent: list[str] = []
+        self.event = SimpleNamespace(message=SimpleNamespace(id="current-message"))
 
     async def send(self, content: str) -> None:
         self.sent.append(content)
@@ -268,6 +270,8 @@ def _install_handler_stubs(
         tool_events=[],
         relations=[],
         deleted=[],
+        ambient_calls=[],
+        ambient_context=[],
     )
 
     async def no_image_notes(*_args: Any, **_kwargs: Any) -> list[str]:
@@ -275,6 +279,20 @@ def _install_handler_stubs(
 
     async def no_forward_messages(*_args: Any, **_kwargs: Any) -> list[ForwardedMessage]:
         return []
+
+    async def resolve_identity(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            user_id="same-user",
+            display_name="Current User",
+            participant_ref="participant_current",
+        )
+
+    class PerceptionStub:
+        async def ambient_context(self, *_args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            records.ambient_calls.append(kwargs)
+            return records.ambient_context
+
+    perception = PerceptionStub()
 
     async def get_relation(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
         return _relation_state()
@@ -317,6 +335,8 @@ def _install_handler_stubs(
     monkeypatch.setattr(module, "model_supports_image_input", lambda _model: False)
     monkeypatch.setattr(module, "build_image_notes", no_image_notes)
     monkeypatch.setattr(module, "resolve_merged_forward_messages", no_forward_messages)
+    monkeypatch.setattr(module, "resolve_chat_identity", resolve_identity)
+    monkeypatch.setattr(module, "get_channel_perception", lambda: perception)
     monkeypatch.setattr(module, "get_relation", get_relation)
     monkeypatch.setattr(module, "get_mood", get_mood)
     monkeypatch.setattr(module, "load_memory_context", load_memory)
@@ -844,6 +864,42 @@ def test_collect_quoted_message_keeps_image_only_bot_attribution():
     }
 
 
+def test_collect_quoted_message_does_not_expose_author_id_as_speaker() -> None:
+    quote = Quote("reply-id", content=[Author("raw-user-id", ""), Text("quoted text")])
+    origin = MessageObject.from_elements("reply-id", quote.children)
+    session = _ChatSession("?")
+    setattr(session, "quote", quote)
+    setattr(session, "reply", Reply(quote, origin))
+
+    quoted = chat_context_module.collect_quoted_message(cast(Session, session))
+
+    assert quoted == {
+        "speaker": "Unknown sender",
+        "speaker_role": "participant",
+        "content": "quoted text",
+        "source": "quoted",
+    }
+    assert "raw-user-id" not in repr(quoted)
+
+
+def test_parse_forward_payload_does_not_expose_sender_id_as_name() -> None:
+    nodes = parse_forward_payload(
+        {
+            "messages": [
+                {
+                    "sender": {"uin": "raw-account-id", "user_id": "other-raw-id"},
+                    "message": [{"type": "text", "data": {"text": "hello"}}],
+                }
+            ]
+        }
+    )
+
+    assert len(nodes) == 1
+    assert nodes[0].speaker == "Unknown sender"
+    assert "raw-account-id" not in repr(nodes)
+    assert "other-raw-id" not in repr(nodes)
+
+
 def test_collect_message_images_prefers_hydrated_reply_and_keeps_direct_first():
     direct = Image.of(url="local://direct")
     hydrated = Image.of(url="local://hydrated")
@@ -907,7 +963,7 @@ def test_parse_forward_payload_supports_event_and_standard_node_shapes():
 
     assert [node.speaker for node in nodes] == ["Alice", "Bob"]
     assert [part.kind for part in nodes[0].parts] == ["text", "image", "text"]
-    assert nodes[0].parts[2].text == "@42"
+    assert nodes[0].parts[2].text == "@member"
     assert [part.kind for part in nodes[1].parts] == ["audio", "forward"]
     assert nodes[1].parts[1].source == "nested-forward"
 
@@ -1690,6 +1746,14 @@ def test_tool_argument_projection_redacts_secrets_and_large_payloads() -> None:
     )
     external = project_tool_arguments("send_external_image", {"source": "data:image/png;base64,SECRET"})
     image = project_tool_arguments("send_image", {"image_paths": ["memes/1.png", "memes/2.png"]})
+    history = project_tool_arguments(
+        "read_channel_messages",
+        {"limit": 20, "participant_ref": "participant_0123abcdef", "before_cursor": "42"},
+    )
+    avatar = project_tool_arguments(
+        "describe_channel_participant_avatar",
+        {"participant_ref": "participant_0123abcdef"},
+    )
 
     assert generic == {
         "api_key": "[REDACTED]",
@@ -1698,8 +1762,45 @@ def test_tool_argument_projection_redacts_secrets_and_large_payloads() -> None:
     }
     assert external == {"source_type": "inline_data", "source_chars": 28}
     assert image == {"selection_mode": "paths", "path_count": 2, "context": ""}
+    assert history == {"limit": 20, "filtered": True, "paged": True}
+    assert avatar == {"requested": True}
     assert "SECRET" not in repr(external)
     assert "memes/1.png" not in repr(image)
+
+
+def test_channel_perception_tool_trace_keeps_only_bounded_metadata() -> None:
+    recorder = ToolTraceRecorder()
+    call = recorder.start(
+        "read_channel_messages",
+        {"limit": 20, "participant_ref": "participant_0123abcdef", "before_cursor": "42"},
+    )
+    recorder.finish_success(
+        call,
+        json.dumps(
+            {
+                "messages": [
+                    {
+                        "participant_ref": "participant_0123abcdef",
+                        "display_name": "Sensitive Name",
+                        "content": "private channel text",
+                    }
+                ],
+                "next_cursor": "41",
+                "truncated": True,
+            }
+        ),
+        before=DeliverySnapshot(),
+        after=DeliverySnapshot(),
+    )
+
+    event = recorder.events[0]
+    serialized = json.dumps({"arguments": event.arguments, "outcome": event.outcome}, ensure_ascii=False)
+    assert (event.status, event.effect) == ("succeeded", "observed")
+    assert event.arguments == {"limit": 20, "filtered": True, "paged": True}
+    assert event.outcome == {"returned_count": 1, "has_older": True, "truncated": True}
+    assert "participant_0123abcdef" not in serialized
+    assert "Sensitive Name" not in serialized
+    assert "private channel text" not in serialized
 
 
 def test_tool_activity_budget_prefers_newest_records() -> None:
@@ -1837,20 +1938,25 @@ async def test_agno_tool_bridge_merges_arguments_and_inherits_context(monkeypatc
     ):
         result = json.loads(await tool.entrypoint(value="tool-argument"))
         failed = json.loads(await tool.entrypoint(value="fail"))
+        blocked = json.loads(await tool.entrypoint(value="participant_0123abcdef"))
 
     assert result == {"ok": True, "data": {"value": "tool-argument", "sentinel": "event-context"}}
     assert failed == {"ok": False, "error": "RuntimeError: token=[REDACTED]"}
+    assert blocked == {"ok": False, "error": "ValueError: Invalid internal participant reference for this tool"}
     assert handled[0][1] is True
     assert handled[0][0]["value"] == "tool-argument"
+    assert len(handled) == 2
     assert [(event.status, event.effect) for event in recorder.events] == [
         ("succeeded", "unknown"),
         ("failed", "none"),
+        ("rejected", "none"),
     ]
     assert recorder.events[0].arguments == {"value": "tool-argument"}
     assert recorder.events[1].outcome == {
         "error_code": "execution_failed",
         "error": "RuntimeError: token=[REDACTED]",
     }
+    assert recorder.events[2].arguments == {}
     assert DeliverySnapshot().active is False
 
 
@@ -2295,6 +2401,124 @@ async def test_message_append_and_exact_delete_round_trip(
 
 
 @pytest.mark.asyncio
+async def test_unified_identity_migrates_explicit_previous_user_state(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_memory_store: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(identity_module, "get_session", isolated_memory_store.session_factory)
+    older = datetime(2026, 8, 16, 10, 0, 0)
+    newer = older + timedelta(hours=1)
+    async with isolated_memory_store.session_factory() as session:
+        session.add_all(
+            [
+                UserRelation(
+                    user_id="20",
+                    channel_id="group",
+                    affection=20.0,
+                    trust=20.0,
+                    impression="target-old",
+                    eval_counter=4,
+                    last_interaction=older,
+                ),
+                UserRelation(
+                    user_id="10",
+                    channel_id="group",
+                    affection=80.0,
+                    trust=70.0,
+                    impression="source-new",
+                    eval_counter=2,
+                    last_interaction=newer,
+                ),
+                UserRelation(user_id="10", channel_id="other", impression="untouched"),
+                UserProfileFact(
+                    user_id="20",
+                    channel_id="group",
+                    category="preference",
+                    key="drink",
+                    value="tea",
+                    confidence=0.6,
+                    evidence_count=1,
+                    updated_at=older,
+                ),
+                UserProfileFact(
+                    user_id="10",
+                    channel_id="group",
+                    category="preference",
+                    key="drink",
+                    value="coffee",
+                    confidence=0.9,
+                    evidence_count=3,
+                    updated_at=newer,
+                ),
+                UserProfileFact(
+                    user_id="10",
+                    channel_id="group",
+                    category="interest",
+                    key="topic",
+                    value="music",
+                    confidence=0.8,
+                    evidence_count=2,
+                    updated_at=newer,
+                ),
+                UserMemory(user_id="10", channel_id="group", text="shared memory"),
+                Conversation(
+                    channel_id="group",
+                    user_id="10",
+                    user_name="Alice",
+                    role="user",
+                    content="hello",
+                ),
+                Conversation(
+                    channel_id="group",
+                    user_id="10",
+                    user_name="bot",
+                    role="assistant",
+                    content="reply",
+                ),
+            ]
+        )
+        await session.commit()
+
+    await identity_module.migrate_legacy_user_state("group", ["10"], "20")
+
+    async with isolated_memory_store.session_factory() as session:
+        relations = list(
+            (await session.execute(select(UserRelation).where(UserRelation.channel_id.in_(["group", "other"]))))
+            .scalars()
+            .all()
+        )
+        group_relation = next(row for row in relations if row.channel_id == "group")
+        assert group_relation.user_id == "20"
+        assert (group_relation.affection, group_relation.trust, group_relation.impression) == (
+            80.0,
+            70.0,
+            "source-new",
+        )
+        assert group_relation.eval_counter == 4
+        assert any(row.user_id == "10" and row.channel_id == "other" for row in relations)
+
+        facts = list(
+            (
+                await session.execute(
+                    select(UserProfileFact)
+                    .where(UserProfileFact.channel_id == "group")
+                    .order_by(UserProfileFact.category, UserProfileFact.key)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert {(row.user_id, row.category, row.key, row.value) for row in facts} == {
+            ("20", "interest", "topic", "music"),
+            ("20", "preference", "drink", "coffee"),
+        }
+        assert all(row.user_id == "20" for row in (await session.execute(select(UserMemory))).scalars())
+        conversations = list((await session.execute(select(Conversation).order_by(Conversation.id))).scalars().all())
+        assert conversations[0].user_id == "20"
+        assert conversations[1].user_id == "10"
+
+
+@pytest.mark.asyncio
 async def test_on_chat_generation_failure_sends_notice_and_keeps_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2421,6 +2645,59 @@ async def test_on_chat_injects_recent_tool_activity_and_persists_current_trace(
             "succeeded",
             "observed",
         )
+
+
+@pytest.mark.asyncio
+async def test_on_chat_injects_bounded_ambient_context_without_persisting_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler(
+        {
+            "eval_every_n": 1,
+            "ambient_context_max_messages": 6,
+            "ambient_context_max_chars": 1234,
+        }
+    ) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        records.ambient_context = [
+            {
+                "participant_ref": "participant_other",
+                "display_name": "Other Member",
+                "content": "AMBIENT_SENTINEL",
+                "minutes_ago": 1,
+                "replies_to_recent_message": False,
+            }
+        ]
+        captured: list[list[dict[str, Any]]] = []
+        captured_refs: list[str] = []
+
+        def compose_prompt(*_args: Any, **kwargs: Any) -> str:
+            captured.append(kwargs["ambient_channel_context"])
+            captured_refs.append(kwargs["current_participant_ref"])
+            return "ambient system"
+
+        async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            return _handler_response("Current reply")
+
+        monkeypatch.setattr(module, "compose_persona_prompt", compose_prompt)
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+        session = _ChatSession("current turn")
+
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        assert result is BLOCK
+        assert captured == [records.ambient_context]
+        assert captured_refs == ["participant_current"]
+        assert records.ambient_calls == [
+            {
+                "max_messages": 6,
+                "max_chars": 1234,
+                "exclude_message_id": "current-message",
+            }
+        ]
+        assert records.appended[0][-1] == "current turn"
+        assert "AMBIENT_SENTINEL" not in json.dumps(records.evaluations, ensure_ascii=False)
 
 
 @pytest.mark.asyncio

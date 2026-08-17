@@ -1,6 +1,7 @@
 """Interactive group chat plugin runtime entrypoint."""
 # ruff: noqa: I001
 
+import sys
 import litellm
 from arclet.entari import metadata
 from arclet.entari import plugin
@@ -26,7 +27,9 @@ def _configure_litellm_logging() -> None:
     plugin.collect_disposes(restore)
 
 
-if plug is not None:
+if plug is not None and plug.module is sys.modules.get(__name__):
+    import channel_perception as channel_perception  # entari: plugin
+
     _configure_litellm_logging()
     from .agno_compat import install_agno_tool_bridge  # entari: package
 

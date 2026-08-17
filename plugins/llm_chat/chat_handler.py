@@ -17,9 +17,11 @@ from arclet.entari.plugin.model import Plugin
 from entari_plugin_llm.exception import ModelNotFoundError
 
 from .config import LLMChatConfig
+from .identity import resolve_chat_identity
 from .core.eval import apply_deltas
 from .core.types import ChatMessage
 from .generation import response_content, generate_chat_response
+from .perception import get_channel_perception
 from .web.policy import normalize_web_access_limits
 from .core.errors import summarize_exception
 from .chat_context import (
@@ -91,8 +93,7 @@ plug = Plugin.current()
 async def on_chat(session: Session, ctx: Contexts):
     model_text = session.elements.extract_plain_text().strip()
     channel_id = session.channel.id
-    user_id = session.user.id
-    user_name = (session.member.nick if session.member else None) or session.user.name or user_id
+    user_name = str((session.member.nick if session.member else None) or session.user.name or session.user.id).strip()
 
     try:
         forwarded_messages = await resolve_merged_forward_messages(config, session, _LOGGER.warning)
@@ -128,6 +129,26 @@ async def on_chat(session: Session, ctx: Contexts):
 
     if not content:
         return BLOCK
+    try:
+        identity = await resolve_chat_identity(session)
+    except Exception as exc:
+        _LOGGER.warning(f"user identity resolve failed: {summarize_exception(exc)}")
+        await session.send(_CHAT_FAILURE_REPLY)
+        return BLOCK
+    user_id = identity.user_id
+    user_name = identity.display_name
+    current_message = session.event.message
+    current_message_id = current_message.id if current_message is not None else ""
+    try:
+        ambient_channel_context = await get_channel_perception().ambient_context(
+            session,
+            max_messages=config.ambient_context_max_messages,
+            max_chars=config.ambient_context_max_chars,
+            exclude_message_id=current_message_id,
+        )
+    except Exception as exc:
+        _LOGGER.warning(f"ambient channel context load failed: {summarize_exception(exc)}")
+        ambient_channel_context = []
 
     rel = await get_relation(user_id, channel_id)
     mood = await get_mood(channel_id)
@@ -182,7 +203,9 @@ async def on_chat(session: Session, ctx: Contexts):
         profile=memory_context.chat_profile,
         relevant_memories=memory_context.relevant_memories,
         recent_tool_activity=recent_tool_activity,
+        ambient_channel_context=ambient_channel_context,
         user_name=user_name,
+        current_participant_ref=identity.participant_ref,
         web_search_limit=web_limits.search_limit,
         web_page_limit=web_limits.read_limit,
         web_total_limit=web_limits.total_limit,

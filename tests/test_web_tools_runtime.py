@@ -13,6 +13,7 @@ from types import ModuleType, SimpleNamespace
 import base64
 from typing import Any, cast
 import asyncio
+from hashlib import sha256
 from pathlib import Path
 from datetime import datetime, timezone as datetime_timezone, timedelta
 import importlib
@@ -310,6 +311,9 @@ def _load_local_modules() -> Iterator[SimpleNamespace]:
         web_tools = importlib.import_module("plugins.llm_chat.tools.web")
         agno_compat = importlib.import_module("plugins.llm_chat.agno_compat")
         generation = importlib.import_module("plugins.llm_chat.generation")
+        participant_tools = importlib.import_module("plugins.llm_chat.tools.find_channel_participants")
+        history_tools = importlib.import_module("plugins.llm_chat.tools.read_channel_messages")
+        avatar_tools = importlib.import_module("plugins.llm_chat.tools.describe_channel_participant_avatar")
         yield SimpleNamespace(
             web_access=web_access,
             delivery=delivery,
@@ -317,6 +321,9 @@ def _load_local_modules() -> Iterator[SimpleNamespace]:
             web_tools=web_tools,
             agno_compat=agno_compat,
             generation=generation,
+            participant_tools=participant_tools,
+            history_tools=history_tools,
+            avatar_tools=avatar_tools,
         )
     finally:
         for name in [name for name in sys.modules if name == prefix or name.startswith(f"{prefix}.")]:
@@ -646,13 +653,21 @@ async def test_actual_tool_runtime_uses_configured_gate_order_and_disposal(
         assert delta_names == runtime.registered_tools
         assert runtime.registered_tools[:3] == ["send_image", "send_text", "send_merged_forward"]
         assert runtime.registered_tools[4:6] == ["send_external_image", "get_local_time"]
+        assert runtime.registered_tools[6:9] == [
+            "find_channel_participants",
+            "read_channel_messages",
+            "describe_channel_participant_avatar",
+        ]
+        schemas = {schema["function"]["name"]: schema["function"] for schema in delta}
+        for name in runtime.registered_tools[6:9]:
+            assert "session" not in schemas[name]["parameters"]["properties"]
+        assert schemas["describe_channel_participant_avatar"]["parameters"]["required"] == ["participant_ref"]
         assert [
             name for name in runtime.registered_tools if name in {"web_search", "read_web_page"}
         ] == expected_web_names
         assert runtime.registered_tools[-1] == "tag_image"
         if expected_web_names:
             assert runtime.registered_tools[-3:-1] == expected_web_names
-            schemas = {schema["function"]["name"]: schema["function"] for schema in delta}
             assert schemas["web_search"]["description"] == _search_description(1, 2, 2)
             assert schemas["read_web_page"]["description"] == _read_description(1, 2, 2)
         assert warnings == expected_warning
@@ -661,6 +676,125 @@ async def test_actual_tool_runtime_uses_configured_gate_order_and_disposal(
         _assert_registry_matches(baseline)
 
     _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_channel_perception_tools_use_current_session_and_hide_transport_identifiers(
+    local_modules: SimpleNamespace,
+) -> None:
+    calls: list[tuple[object, ...]] = []
+    avatar_hash = sha256(_PNG_BYTES).hexdigest()
+    participant = SimpleNamespace(
+        display_name="Alice",
+        avatar_url="https://example.com/avatar.png",
+        avatar_hash=avatar_hash,
+        avatar_description="蓝色短发的卡通头像",
+    )
+
+    class PerceptionStub:
+        async def find_participants(self, session: object, query: str, *, limit: int) -> list[dict[str, object]]:
+            calls.append(("find", session, query, limit))
+            return [{"participant_ref": "participant_a", "display_name": "Alice"}]
+
+        async def recent_messages(
+            self,
+            session: object,
+            *,
+            limit: int,
+            before_cursor: str = "",
+            participant_ref: str = "",
+        ) -> tuple[list[dict[str, object]], str]:
+            calls.append(("history", session, limit, before_cursor, participant_ref))
+            return ([{"participant_ref": participant_ref, "content": "hello"}], "next")
+
+        async def refresh_participant(self, session: object, participant_ref: str) -> SimpleNamespace:
+            calls.append(("avatar", session, participant_ref))
+            return participant
+
+        async def update_avatar(self, *_args: object, **_kwargs: object) -> None:
+            calls.append(("avatar_update",))
+
+    class ToolSession:
+        def __init__(self) -> None:
+            self.downloads: list[str] = []
+
+        async def download(self, src: str) -> bytes:
+            self.downloads.append(src)
+            return _PNG_BYTES
+
+    perception = PerceptionStub()
+    session = cast(Any, ToolSession())
+
+    def provider() -> Any:
+        return perception
+
+    async with _temporary_plugin() as harness:
+        find_registered = local_modules.participant_tools.register_find_channel_participants(
+            harness.dispatcher,
+            provider,
+        )
+        history_registered = local_modules.history_tools.register_read_channel_messages(
+            harness.dispatcher,
+            provider,
+        )
+        avatar_registered = local_modules.avatar_tools.register_describe_channel_participant_avatar(
+            harness.dispatcher,
+            provider,
+            local_modules.config.LLMChatConfig(),
+        )
+
+        find_result = json.loads(await find_registered.callable_target(query=" Alice ", limit=99, session=session))
+        history_result = json.loads(
+            await history_registered.callable_target(
+                limit=99,
+                before_cursor=" 10 ",
+                participant_ref=" participant_a ",
+                session=session,
+            )
+        )
+        avatar_result = json.loads(
+            await avatar_registered.callable_target(participant_ref=" participant_a ", session=session)
+        )
+
+    assert calls == [
+        ("find", session, "Alice", 10),
+        ("history", session, 50, "10", "participant_a"),
+        ("avatar", session, "participant_a"),
+    ]
+    assert find_result == {"participants": [{"participant_ref": "participant_a", "display_name": "Alice"}]}
+    assert history_result == {
+        "messages": [{"participant_ref": "participant_a", "content": "hello"}],
+        "next_cursor": "next",
+    }
+    assert avatar_result == {
+        "display_name": "Alice",
+        "available": True,
+        "description": "蓝色短发的卡通头像",
+    }
+    assert session.downloads == ["https://example.com/avatar.png"]
+    assert "https://" not in json.dumps(avatar_result, ensure_ascii=False)
+    assert avatar_hash not in json.dumps(avatar_result, ensure_ascii=False)
+
+
+def test_channel_history_tool_keeps_valid_bounded_json(local_modules: SimpleNamespace) -> None:
+    messages = [
+        {
+            "cursor": str(index),
+            "message_id": f"message-{index}",
+            "participant_ref": "participant_a",
+            "content": "x" * 2000,
+        }
+        for index in range(20)
+    ]
+
+    serialized = local_modules.history_tools._serialize_history_page(messages, "older")
+    payload = json.loads(serialized)
+
+    assert len(serialized) <= local_modules.history_tools.MAX_HISTORY_OUTPUT_CHARS
+    assert payload["truncated"] is True
+    assert all("cursor" not in message for message in payload["messages"])
+    first_index = payload["messages"][0]["message_id"].removeprefix("message-")
+    assert payload["next_cursor"] == first_index
 
 
 @pytest.mark.asyncio

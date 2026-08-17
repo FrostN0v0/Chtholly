@@ -17,7 +17,7 @@ from arclet.letoderea.exceptions import ExitState, _ExitException
 from entari_plugin_llm.tools.event import LLMToolEvent, tools, available_functions
 
 from .core.errors import summarize_exception
-from .core.delivery import current_llm_chat_delivery
+from .core.delivery import current_llm_chat_delivery, contains_internal_participant_reference
 from .core.tool_trace import current_tool_trace
 from .runtime_context import copy_llm_chat_context
 from .core.native_images import extract_native_images
@@ -30,6 +30,13 @@ _TOOL_CALL_LIMIT: ContextVar[int] = ContextVar(
     "llm_chat_agno_tool_call_limit",
     default=_MIN_TOOL_CALL_LIMIT,
 )
+_INTERNAL_REFERENCE_TOOLS = {
+    "describe_channel_participant_avatar",
+    "find_channel_participants",
+    "read_channel_messages",
+    "send_merged_forward",
+    "send_text",
+}
 
 
 def recommended_tool_call_limit(web_calls: int, text_messages: int, media_messages: int) -> int:
@@ -80,9 +87,12 @@ def _build_agno_tool(name: str) -> Function:
 
     async def wrapper(**kwargs: Any) -> str:
         recorder = current_tool_trace()
-        call = recorder.start(name, kwargs) if recorder is not None else None
+        unsafe_reference = name not in _INTERNAL_REFERENCE_TOOLS and contains_internal_participant_reference(kwargs)
+        call = recorder.start(name, {} if unsafe_reference else kwargs) if recorder is not None else None
         before = _delivery_snapshot()
         try:
+            if unsafe_reference:
+                raise ValueError("Invalid internal participant reference for this tool")
             tool_context = await generate_contexts(LLMToolEvent(), inherit_ctx=copy_llm_chat_context())
             tool_context.update(kwargs)
             response = await subscriber.handle(tool_context, inner=True)

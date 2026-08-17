@@ -18,6 +18,10 @@ class LLMChatConfig(BasicConfModel):
     """Character text ONLY; framework rules live in SYSTEM_SCAFFOLD."""
     context_window: int = 20
     """Number of history messages loaded per reply."""
+    ambient_context_max_messages: int = 8
+    """Maximum recent non-addressed participant messages injected per reply."""
+    ambient_context_max_chars: int = 4000
+    """Maximum serialized characters for ambient public-channel context."""
     tool_context_max_events: int = 8
     """Maximum recent tool events injected into one chat prompt."""
     tool_context_max_chars: int = 3500

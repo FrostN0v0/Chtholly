@@ -10,7 +10,7 @@ import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import field, dataclass
-from collections.abc import Callable, Iterator, Sequence, Awaitable
+from collections.abc import Mapping, Callable, Iterator, Sequence, Awaitable
 
 from .media import strip_internal_media_records
 from .media_delivery import strip_media_unavailable_marker
@@ -21,6 +21,7 @@ _MIN_INTERVAL_HARD_FLOOR = 1.1
 _MAX_INTERVAL_HARD_CEILING = 5.0
 _STRUCTURED_FINAL_LINE = re.compile(r"^(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|\|)")
 _TRAILING_END_OF_RESPONSE = re.compile(rf"(?:\s*{re.escape(_END_OF_RESPONSE)})+\s*$")
+_INTERNAL_PARTICIPANT_REF = re.compile(r"(?<!\w)participant_[0-9a-f]{10}(?!\w)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -173,6 +174,21 @@ def strip_trailing_end_of_response(text: str) -> str:
     return _TRAILING_END_OF_RESPONSE.sub("", text).rstrip()
 
 
+def contains_internal_participant_reference(value: object) -> bool:
+    """Detect opaque participant references inside model-authored tool arguments."""
+
+    if isinstance(value, str):
+        return _INTERNAL_PARTICIPANT_REF.search(value) is not None
+    if isinstance(value, Mapping):
+        return any(
+            contains_internal_participant_reference(key) or contains_internal_participant_reference(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(contains_internal_participant_reference(item) for item in value)
+    return False
+
+
 def normalize_delivery_text(text: object, *, field: str) -> str:
     """Return model-authored delivery text without internal control records."""
 
@@ -181,6 +197,7 @@ def normalize_delivery_text(text: object, *, field: str) -> str:
     normalized = strip_trailing_end_of_response(
         strip_media_unavailable_marker(strip_internal_media_records(text).strip())
     )
+    normalized = _INTERNAL_PARTICIPANT_REF.sub("该成员", normalized)
     if not normalized:
         raise DeliveryError("Delivery text is empty or reserved for internal control")
     return normalized

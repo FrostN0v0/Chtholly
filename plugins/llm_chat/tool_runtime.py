@@ -17,6 +17,7 @@ from .config import LLMChatConfig
 from .tools.web import register_web_access_tools
 from .image_tags import pick_image
 from .meme_store import import_meme_image
+from .perception import get_channel_perception
 from .tools._tts import TTSServiceLike
 from .tools.speak import SpeakToolContext, register_speak
 from .chat_context import collect_message_images
@@ -38,6 +39,9 @@ from .tools.list_tts_voices import TTSVoiceToolContext, register_list_tts_voices
 from .tools.send_external_image import ExternalImageToolContext, register_send_external_image
 from .tools.send_merged_forward import MergedForwardToolContext, register_send_merged_forward
 from .tools.list_image_resources import register_list_image_resources
+from .tools.read_channel_messages import register_read_channel_messages
+from .tools.find_channel_participants import register_find_channel_participants
+from .tools.describe_channel_participant_avatar import register_describe_channel_participant_avatar
 
 DINGGONG_DIR = AUDIO_DIR / "dinggong"
 _LOGGER = log.wrapper("[llm_chat]")
@@ -77,6 +81,19 @@ registered_tools.append("send_external_image")
 local_time_context = LocalTimeToolContext(now=datetime.now)
 get_local_time = register_get_local_time(tools, local_time_context)
 registered_tools.append("get_local_time")
+
+find_channel_participants = register_find_channel_participants(tools, get_channel_perception)
+registered_tools.append("find_channel_participants")
+
+read_channel_messages = register_read_channel_messages(tools, get_channel_perception)
+registered_tools.append("read_channel_messages")
+
+describe_channel_participant_avatar = register_describe_channel_participant_avatar(
+    tools,
+    get_channel_perception,
+    config,
+)
+registered_tools.append("describe_channel_participant_avatar")
 
 audio_context = AudioToolContext(audio_dir=DINGGONG_DIR, append_history=append_message)
 if registered := register_send_audio(tools, audio_context):

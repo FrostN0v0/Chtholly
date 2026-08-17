@@ -25,7 +25,7 @@ plugins:
 
   $prefix:
     - key: ""
-      plugins: ["poke", "tts_service", "help_menu", "llm_chat", "status"]
+      plugins: ["poke", "tts_service", "help_menu", "channel_perception", "llm_chat", "status"]
 
   .record_message:
     record_send: true
@@ -38,6 +38,8 @@ plugins:
   database:
     type: sqlite
     name: "data/chtholly.db"
+    create_table_at: preparing
+  user: {}
   ::auto_reload:
     watch_dirs: ["./plugins", "./utils"]
     watch_config: true
@@ -83,6 +85,13 @@ plugins:
     # fish_model: s2.1-pro-free
     # fish_format: mp3
   help_menu: {}
+  channel_perception:
+    retention_days: 7
+    max_messages_per_channel: 500
+    participant_retention_days: 90
+    max_participants_per_channel: 1000
+    max_content_chars: 2000
+    queue_size: 1024
   llm_chat:
     $filter: channel.type is public
     persona: |
@@ -91,6 +100,8 @@ plugins:
       保持鲜明情绪和角色口吻，不使用客服腔、模板化客套或刻意堆叠语气词。遇到知识、代码和实际问题时仍给出准确、有用的回答，让人格影响表达方式而不是事实。
     allowed_commands: ["echo", "help"]
     context_window: 20
+    ambient_context_max_messages: 8
+    ambient_context_max_chars: 4000
     # Recent tool activity is channel-scoped, bounded, and excluded from persona evaluation.
     tool_context_max_events: 8
     tool_context_max_chars: 3500
