@@ -23,6 +23,7 @@ HistoryAppender = Callable[[str, str, str, str, str], Awaitable[object]]
 AudioFactory = Callable[[bytes, str], Audio]
 
 
+
 @dataclass
 class SpeakToolContext:
     """Mutable dependencies for synthesized voice delivery."""
