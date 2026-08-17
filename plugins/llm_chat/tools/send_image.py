@@ -25,6 +25,7 @@ from ._image_catalog import (
     find_explicit_image_row,
     normalize_image_reference,
 )
+from ..core.image_source import image_file_to_data_url
 
 ImagePicker = Callable[[LLMChatConfig, Sequence[ImageTag], str, deque[str]], Awaitable[str | None]]
 HistoryAppender = Callable[[str, str, str, str, str], Awaitable[object]]
@@ -119,17 +120,23 @@ def register_send_image(
             if full is None or not full.is_file():
                 return "图片文件已丢失"
             selected.append((row, full))
+        prepared: list[tuple[ImageTag, Image]] = []
+        for row, full in selected:
+            data_url = image_file_to_data_url(full)
+            if data_url is None:
+                raise DeliveryError("Registered image file is unreadable, invalid, or too large")
+            prepared.append((row, Image.of(url=data_url)))
 
         delivery_state = current_llm_chat_delivery()
         if delivery_state is not None:
-            delivery_state = reserve_media_messages(len(selected))
+            delivery_state = reserve_media_messages(len(prepared))
 
-        total = len(selected)
-        for index, (row, full) in enumerate(selected):
+        total = len(prepared)
+        for index, (row, image) in enumerate(prepared):
             try:
                 await send_with_delivery(
                     session,
-                    MessageChain([Image.of(path=full)]),
+                    MessageChain([image]),
                     delivery_state,
                     media=True,
                 )

@@ -1013,14 +1013,16 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
                 send_result = await send_image(session=session, image_paths=catalog_paths)
             assert send_result.startswith("已发送 2 张图片")
             sent_chains = [cast(MessageChain, value) for value in session.sent[-2:]]
-            assert sent_chains[0].get(Image)[0].src.replace("\\", "/").endswith("/2.png")
-            assert sent_chains[1].get(Image)[0].src.replace("\\", "/").endswith("/1.png")
+            distractor_source = f"data:image/png;base64,{base64.b64encode(_PNG_BYTES + b'distractor').decode('ascii')}"
+            collected_source = f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
+            assert [chain.get(Image)[0].src for chain in sent_chains] == [distractor_source, collected_source]
+            assert all("file://" not in chain.get(Image)[0].src for chain in sent_chains)
 
             with llm_chat_delivery_scope(DeliveryState()):
                 explicit_result = await send_image(session, r"please send memes\2.png")
             assert explicit_result.startswith("已发送图片")
             explicit_chain = cast(MessageChain, session.sent[-1])
-            assert explicit_chain.get(Image)[0].src.replace("\\", "/").endswith("/2.png")
+            assert explicit_chain.get(Image)[0].src == distractor_source
 
             async with meme_env.session_factory() as database:
                 sent_history = list(

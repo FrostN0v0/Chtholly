@@ -1630,7 +1630,7 @@ async def test_delivery_scope_blocks_text_outside_generation_but_preserves_media
         meme_dir = tmp_path / "memes"
         meme_dir.mkdir()
         image_path = meme_dir / "reaction.png"
-        image_path.write_bytes(b"image")
+        image_path.write_bytes(_PNG_BYTES)
         relative_path = str(Path("memes") / image_path.name)
         row = SimpleNamespace(file_path=relative_path, tags="happy，smile")
 
@@ -1832,8 +1832,8 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
         meme_dir.mkdir()
         first_path = meme_dir / "first.png"
         second_path = meme_dir / "second.png"
-        first_path.write_bytes(b"first")
-        second_path.write_bytes(b"second")
+        first_path.write_bytes(_PNG_BYTES + b"first")
+        second_path.write_bytes(_PNG_BYTES + b"second")
         first_relative_path = str(Path("memes") / first_path.name)
         second_relative_path = str(Path("memes") / second_path.name)
         rows = [
@@ -1875,9 +1875,27 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
             )
 
         assert result.startswith("已发送 2 张图片")
-        sent_images = [cast(MessageChain, chain).get(Image)[0].src.replace("\\", "/") for chain in session.sent]
-        assert sent_images[0].endswith("/second.png")
-        assert sent_images[1].endswith("/first.png")
+        sent_chains = [cast(MessageChain, chain) for chain in session.sent]
+        sent_images = [chain.get(Image)[0].src for chain in sent_chains]
+        assert sent_images == [
+            f"data:image/png;base64,{base64.b64encode(_PNG_BYTES + b'second').decode('ascii')}",
+            f"data:image/png;base64,{base64.b64encode(_PNG_BYTES + b'first').decode('ascii')}",
+        ]
+        assert all("file://" not in source for source in sent_images)
+
+        network = _FakeOneBotNetwork()
+        encoder = OneBot11MessageEncoder(
+            Login(platform="onebot", user=User(id="10001", name="Bot")),
+            cast(Any, network),
+            "12345",
+        )
+        await encoder.send(str(sent_chains[0]))
+        assert len(network.calls) == 1
+        action, params = network.calls[0]
+        assert action == "send_group_msg"
+        segment = params["message"][0]
+        assert segment["type"] == "image"
+        assert segment["data"]["file"].startswith("base64://")
         assert clock.sleeps == [1.2]
         assert state.media_messages == 2
         assert [marker[-1] for marker in markers] == [
@@ -1895,6 +1913,19 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
                 )
         assert invalid_session.sent == []
         assert invalid_state.media_messages == 0
+        broken_path = meme_dir / "broken.png"
+        broken_path.write_bytes(b"not-an-image")
+        rows.append(SimpleNamespace(id=3, file_path="memes/broken.png", tags="broken-tag"))
+        broken_session = _DeliveryToolSession()
+        broken_state = runtime.DeliveryState()
+        with llm_chat_delivery_scope(broken_state):
+            with pytest.raises(
+                runtime.DeliveryError,
+                match="^Registered image file is unreadable, invalid, or too large$",
+            ):
+                await target(session=broken_session, image_paths=[first_relative_path, "memes/broken.png"])
+        assert broken_session.sent == []
+        assert broken_state.media_messages == 0
 
         exhausted_session = _DeliveryToolSession()
         exhausted_state = runtime.DeliveryState()
