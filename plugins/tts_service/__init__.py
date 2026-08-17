@@ -1,7 +1,7 @@
 """TTS service plugin.
 
-Exposes a launart Service (`tts.service`) that any plugin can inject to
-synthesize speech. Currently backed by the gpt-sovits v2 HTTP API.
+Exposes a launart Service (`tts.service`) that any plugin can inject for
+GPT-SoVITS GSVI or Fish Audio speech synthesis.
 """
 
 from launart import Launart, Service
@@ -10,15 +10,15 @@ from launart.status import Phase
 from arclet.entari.plugin import PluginRole
 
 from utils.tts_service_core.providers import TTSProvider, TTSSynthesisError, build_provider
-from utils.tts_service_core.providers.types import JsonValue
+from utils.tts_service_core.voice_catalog import TTSVoiceCatalog, TTSSynthesisRequest
 
 from .config import TTSConfig
 
 metadata(
     name="tts_service",
     author=[{"name": "FrostN0v0"}],
-    version="0.1.0",
-    description="TTS synthesis service (gpt-sovits backend) for other plugins",
+    version="0.2.0",
+    description="TTS synthesis service with dynamic GPT-SoVITS voices and Fish Audio",
     role=PluginRole.UTILITY,
     config=TTSConfig,
 )
@@ -52,15 +52,36 @@ class TTSService(Service):
     def file_extension(self) -> str:
         return self._provider.file_extension if self._provider is not None else ".wav"
 
-    async def synthesize(self, text: str, **params: JsonValue) -> bytes:
-        """Synthesize `text` into audio bytes.
-
-        Raises:
-            TTSSynthesisError: when the service is not ready or the provider fails.
-        """
+    async def get_voice_catalog(self, *, refresh: bool = False) -> TTSVoiceCatalog:
+        """Return the active provider's current voice catalog."""
         if self._provider is None:
             raise TTSSynthesisError("TTS service is not ready")
-        return await self._provider.synthesize(text, **params)
+        return await self._provider.get_voice_catalog(refresh=refresh)
+
+    async def synthesize(
+        self,
+        text: str,
+        *,
+        version: str = "",
+        model_name: str = "",
+        reference_language: str = "",
+        emotion: str = "",
+        text_language: str = "",
+        speed: float | None = None,
+    ) -> bytes:
+        """Synthesize text with an optional provider-specific voice selection."""
+        if self._provider is None:
+            raise TTSSynthesisError("TTS service is not ready")
+        request = TTSSynthesisRequest(
+            text=text,
+            version=version.strip() or None,
+            model_name=model_name.strip() or None,
+            reference_language=reference_language.strip() or None,
+            emotion=emotion.strip() or None,
+            text_language=text_language.strip() or None,
+            speed=speed,
+        )
+        return await self._provider.synthesize(request)
 
     async def launch(self, manager: Launart):
         async with self.stage("preparing"):

@@ -17,7 +17,8 @@ from .config import LLMChatConfig
 from .tools.web import register_web_access_tools
 from .image_tags import pick_image
 from .meme_store import import_meme_image
-from .tools.speak import TTSServiceLike, SpeakToolContext, register_speak
+from .tools._tts import TTSServiceLike
+from .tools.speak import SpeakToolContext, register_speak
 from .chat_context import collect_message_images
 from .core.delivery import (
     DeliveryError as DeliveryError,
@@ -33,6 +34,7 @@ from .tools.send_image import ImageToolContext, register_send_image
 from .tools.call_plugin import CommandToolContext, register_call_plugin
 from .tools._image_catalog import ImageCatalog
 from .tools.get_local_time import LocalTimeToolContext, register_get_local_time
+from .tools.list_tts_voices import TTSVoiceToolContext, register_list_tts_voices
 from .tools.send_external_image import ExternalImageToolContext, register_send_external_image
 from .tools.send_merged_forward import MergedForwardToolContext, register_send_merged_forward
 from .tools.list_image_resources import register_list_image_resources
@@ -85,6 +87,14 @@ if registered := register_send_audio(tools, audio_context):
 def _get_tts_service() -> TTSServiceLike:
     return cast(TTSServiceLike, Launart.current().get_component("tts.service"))
 
+
+voice_catalog_context = TTSVoiceToolContext(
+    enabled=config.tts_enabled,
+    get_service=_get_tts_service,
+)
+if registered := register_list_tts_voices(tools, voice_catalog_context):
+    list_tts_voices = registered
+    registered_tools.append("list_tts_voices")
 
 speak_context = SpeakToolContext(
     config=config,

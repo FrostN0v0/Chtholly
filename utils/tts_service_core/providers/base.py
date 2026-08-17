@@ -2,7 +2,7 @@
 
 from typing import Protocol
 
-from .types import JsonValue
+from ..voice_catalog import TTSVoiceCatalog, TTSSynthesisRequest
 
 
 class TTSError(Exception):
@@ -19,8 +19,12 @@ class TTSProvider(Protocol):
         """Preferred local file suffix for returned audio bytes, including the leading dot."""
         ...
 
-    async def synthesize(self, text: str, **params: JsonValue) -> bytes:
-        """Synthesize `text` into audio bytes. Raises TTSSynthesisError on failure."""
+    async def get_voice_catalog(self, *, refresh: bool = False) -> TTSVoiceCatalog:
+        """Return the current provider voice catalog."""
+        ...
+
+    async def synthesize(self, request: TTSSynthesisRequest) -> bytes:
+        """Synthesize one request. Raises TTSSynthesisError on failure."""
         ...
 
     async def close(self) -> None:

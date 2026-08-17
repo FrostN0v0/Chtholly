@@ -12,11 +12,18 @@ from .gpt_sovits import GptSovitsProvider
 
 class TTSConfigLike(Protocol):
     provider: Literal["gpt-sovits", "fish-audio"]
-    api_url: str
-    default_speaker: str
     timeout: float
-    text_lang: str
-    extra_params: JsonObject
+    gpt_sovits_base_url: str
+    gpt_sovits_api_key: str | None
+    gpt_sovits_default_version: str
+    gpt_sovits_default_model: str
+    gpt_sovits_default_reference_language: str
+    gpt_sovits_default_emotion: str
+    gpt_sovits_text_language: str
+    gpt_sovits_speed: float
+    gpt_sovits_format: Literal["wav", "ogg", "mp3", "aac"]
+    gpt_sovits_catalog_ttl: float
+    gpt_sovits_extra_params: JsonObject
     fish_api_url: str
     fish_api_key: str | None
     fish_model: str
@@ -34,11 +41,18 @@ class TTSConfigLike(Protocol):
 def build_provider(config: TTSConfigLike) -> TTSProvider:
     if config.provider == "gpt-sovits":
         return GptSovitsProvider(
-            config.api_url,
+            config.gpt_sovits_base_url,
+            config.gpt_sovits_api_key,
             timeout=config.timeout,
-            text_lang=config.text_lang,
-            default_speaker=config.default_speaker,
-            extra_params=config.extra_params,
+            default_version=config.gpt_sovits_default_version,
+            default_model=config.gpt_sovits_default_model,
+            default_reference_language=config.gpt_sovits_default_reference_language,
+            default_emotion=config.gpt_sovits_default_emotion,
+            default_text_language=config.gpt_sovits_text_language,
+            default_speed=config.gpt_sovits_speed,
+            audio_format=config.gpt_sovits_format,
+            catalog_ttl=config.gpt_sovits_catalog_ttl,
+            inference_params=config.gpt_sovits_extra_params,
         )
     if config.provider == "fish-audio":
         return FishAudioProvider(

@@ -35,6 +35,12 @@ from arclet.letoderea.context import Contexts
 from satori.adapters.onebot11.message import OneBot11MessageEncoder
 
 from plugins.llm_chat.core.delivery import llm_chat_delivery_scope
+from utils.tts_service_core.voice_catalog import (
+    TTSVoiceOption,
+    TTSVoiceCatalog,
+    TTSReferenceOption,
+    TTSSynthesisSelection,
+)
 
 _ROOT = Path(__file__).resolve().parents[1]
 if not hasattr(EntariConfig, "instance"):
@@ -674,6 +680,7 @@ async def test_actual_media_tool_schemas_encourage_proactive_expression(
         schemas = {schema["function"]["name"]: schema["function"] for schema in _schema_delta(baseline)}
         image_schema = schemas["send_image"]
         speak_schema = schemas["speak"]
+        voice_catalog_schema = schemas["list_tts_voices"]
 
         assert "Use proactively for explicit requests and natural emotional reactions" in image_schema["description"]
         assert "greetings, teasing, embarrassment, affection, comfort, celebration" in image_schema["description"]
@@ -681,13 +688,29 @@ async def test_actual_media_tool_schemas_encourage_proactive_expression(
         assert "Use only for an explicit local reaction" not in image_schema["description"]
         assert image_schema["parameters"]["required"] == []
 
+        assert voice_catalog_schema["parameters"]["required"] == []
+        assert set(voice_catalog_schema["parameters"]["properties"]) == {"refresh"}
+        assert voice_catalog_schema["parameters"]["properties"]["refresh"]["type"] == "boolean"
+        assert "authoritative and may change at runtime" in voice_catalog_schema["description"]
+
         assert "Use proactively when vocal delivery adds warmth" in speak_schema["description"]
         assert "intimacy, playfulness, comfort, celebration, surprise" in speak_schema["description"]
         assert (
             "Prefer it over another plain-text sentence when tone itself carries the response"
             in speak_schema["description"]
         )
+        assert set(speak_schema["parameters"]["properties"]) == {
+            "text",
+            "version",
+            "model_name",
+            "reference_language",
+            "emotion",
+            "text_language",
+            "speed",
+        }
         assert speak_schema["parameters"]["required"] == ["text"]
+        assert "call list_tts_voices before choosing a character" in speak_schema["description"]
+        assert "never substitute another character" in speak_schema["description"]
 
         await harness.dispose()
         _assert_registry_matches(baseline)
@@ -706,6 +729,8 @@ async def test_delivery_tool_schemas_expose_only_supported_arguments(local_modul
         delta = _schema_delta(baseline)
         assert _schema_names(delta)[:3] == ["send_image", "send_text", "send_merged_forward"]
         schemas = {schema["function"]["name"]: schema["function"] for schema in delta}
+        assert "list_tts_voices" not in schemas
+        assert "speak" not in schemas
 
         image_parameters = schemas["send_image"]["parameters"]
         assert set(image_parameters["properties"]) == {"context", "image_paths"}
@@ -1428,7 +1453,7 @@ async def test_delivery_scope_blocks_text_outside_generation_but_preserves_media
 
 
 @pytest.mark.asyncio
-async def test_speak_sends_inline_audio_for_remote_onebot_transport(
+async def test_tts_catalog_selection_sends_inline_audio_for_remote_onebot_transport(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1439,14 +1464,62 @@ async def test_speak_sends_inline_audio_for_remote_onebot_transport(
         module_path=_TOOL_RUNTIME_PATH,
     ) as harness:
         runtime = harness.module
-        target = _tool_callable(runtime, "speak")
+        catalog_target = _tool_callable(runtime, "list_tts_voices")
+        speak_target = _tool_callable(runtime, "speak")
         audio_bytes = b"ID3\x04\x00\x00fake-mp3"
+        selection = TTSSynthesisSelection(
+            version="v4",
+            model_name="Chtholly",
+            reference_language="Chinese",
+            emotion="gentle",
+            text_language="Chinese",
+            speed=1.1,
+        )
+        catalog = TTSVoiceCatalog(
+            provider="gpt-sovits",
+            voices=(
+                TTSVoiceOption(
+                    version="v4",
+                    model_name="Chtholly",
+                    references=(TTSReferenceOption(language="Chinese", emotions=("gentle", "happy")),),
+                ),
+            ),
+            text_languages=("Chinese",),
+            audio_formats=("mp3",),
+            default_selection=selection,
+            supports_inline_style_tags=False,
+            speed_min=0.5,
+            speed_max=2.0,
+            speed_default=1.0,
+        )
 
         class FakeTTSService:
             file_extension = ".mp3"
 
-            async def synthesize(self, text: str) -> bytes:
-                assert text == "[softly] Take your time."
+            async def get_voice_catalog(self, *, refresh: bool = False) -> TTSVoiceCatalog:
+                assert refresh is True
+                return catalog
+
+            async def synthesize(
+                self,
+                text: str,
+                *,
+                version: str = "",
+                model_name: str = "",
+                reference_language: str = "",
+                emotion: str = "",
+                text_language: str = "",
+                speed: float | None = None,
+            ) -> bytes:
+                assert text == "Take your time."
+                assert (version, model_name, reference_language, emotion, text_language, speed) == (
+                    "v4",
+                    "Chtholly",
+                    "Chinese",
+                    "gentle",
+                    "Chinese",
+                    1.1,
+                )
                 return audio_bytes
 
         markers: list[tuple[Any, ...]] = []
@@ -1454,22 +1527,37 @@ async def test_speak_sends_inline_audio_for_remote_onebot_transport(
         async def fake_append_message(*args: Any) -> None:
             markers.append(args)
 
+        monkeypatch.setattr(runtime.voice_catalog_context, "get_service", FakeTTSService)
         monkeypatch.setattr(runtime.speak_context, "get_service", FakeTTSService)
         monkeypatch.setattr(runtime.speak_context, "append_history", fake_append_message)
+
+        catalog_payload = json.loads(await catalog_target(refresh=True))
+        assert catalog_payload["provider"] == "gpt-sovits"
+        assert catalog_payload["voices"][0]["model_name"] == "Chtholly"
+        assert catalog_payload["voices"][0]["references"][0]["emotions"] == ["gentle", "happy"]
 
         state = runtime.DeliveryState()
         session = _DeliveryToolSession()
         with llm_chat_delivery_scope(state):
-            result = await target(session=session, text="[softly] Take your time.")
+            result = await speak_target(
+                session=session,
+                text="Take your time.",
+                version="v4",
+                model_name="Chtholly",
+                reference_language="Chinese",
+                emotion="gentle",
+                text_language="Chinese",
+                speed=1.1,
+            )
 
-        assert result == "已用语音说出：[softly] Take your time."
+        assert result == "Speech sent: Take your time."
         assert len(session.sent) == 1
         chain = cast(MessageChain, session.sent[0])
         sent_audio = chain.get(Audio)[0]
         assert sent_audio.src.startswith("data:audio/mpeg;base64,")
         assert "file://" not in sent_audio.src
         assert state.confirmed_media_deliveries == 1
-        assert markers[-1][-1] == "[用语音说: [softly] Take your time.]"
+        assert markers[-1][-1] == "[用语音说: Take your time.]"
 
         network = _FakeOneBotNetwork()
         encoder = OneBot11MessageEncoder(

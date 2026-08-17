@@ -532,6 +532,11 @@ class TestComposePrompt:
         assert "标签始终由 image_tag_model 自动生成" in prompt
         assert "send_audio 只选择工具 schema 中已有的预录台词" in prompt
         assert "本轮新短句使用 speak 合成，禁止二者重复表达同一句话" in prompt
+        assert "用户明确指定语音角色、版本、参考语言或情绪时，必须先调用 list_tts_voices" in prompt
+        assert "目录中不存在该角色时不得替换、猜测或声称已发送" in prompt
+        assert "GPT-SoVITS 的情绪通过 speak 的 emotion 参数选择" in prompt
+        assert "supports_inline_style_tags=true" in prompt
+
         assert "call_plugin 只在用户明确要求执行白名单命令时使用" in prompt
         assert "只移除这一个前缀" in prompt
         assert "不自行发明、扩展、试探或连续执行命令" in prompt

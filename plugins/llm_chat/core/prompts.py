@@ -187,6 +187,14 @@ SYSTEM_SCAFFOLD = "\n".join(
         ),
         "send_audio 只选择工具 schema 中已有的预录台词；本轮新短句使用 speak 合成，禁止二者重复表达同一句话。",
         (
+            "用户明确指定语音角色、版本、参考语言或情绪时，必须先调用 list_tts_voices 获取当前服务目录，"
+            "再把精确选项传给 speak；目录中不存在该角色时不得替换、猜测或声称已发送。"
+        ),
+        (
+            "GPT-SoVITS 的情绪通过 speak 的 emotion 参数选择，禁止把 Fish Audio 方括号风格标签写入合成文本；"
+            "只有 list_tts_voices 明确返回 supports_inline_style_tags=true 时才可使用这类标签。"
+        ),
+        (
             "call_plugin 只在用户明确要求执行白名单命令时使用。"
             "若用户命令头带一个 Entari / 或 . 前缀，传参前只移除这一个前缀；"
             "其余命令名与参数保持语义忠实，不自行发明、扩展、试探或连续执行命令。"
@@ -196,6 +204,7 @@ SYSTEM_SCAFFOLD = "\n".join(
             "问候、调侃、害羞、撒娇、安慰、庆祝、惊讶、吃醋、无奈和轻微吐槽都属于明确的媒体机会。"
             "若本轮存在对应 schema 且内容自然匹配，优先选择一个合适的 send_image；"
             "当语气、亲昵感或情绪转折本身是表达重点时优先选择 speak；"
+            "需要选择 GPT-SoVITS 角色或情绪时先调用 list_tts_voices；"
             "仅当现有台词自然吻合时选择 send_audio。不要因为纯文字也能回答就自动跳过媒体。"
         ),
         (
