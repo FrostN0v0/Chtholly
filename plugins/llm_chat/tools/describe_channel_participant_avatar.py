@@ -16,6 +16,7 @@ from ..core.media import normalize_image_description
 from ..core.types import JSONType
 from ..perception import PerceptionProvider
 from ._registration import register_tool
+from ..channel_images import current_channel_image_references
 from ..core.image_source import fetch_image_bytes, raw_to_image_data_url
 
 _AVATAR_PROMPT = (
@@ -43,12 +44,13 @@ def register_describe_channel_participant_avatar(
         Call find_channel_participants first when the user refers to someone by name. Pass only its exact
         participant_ref. The result describes the current avatar pixels, not the person's identity or stable traits.
         Avatar data is refreshed from the protocol when possible and cached only while image bytes remain unchanged.
-        Never reveal participant_ref, avatar URLs, hashes, platform IDs, or cache details to the user.
+        When image_ref is present, pass it only to send_channel_image if the user asks for the original avatar.
+        Never reveal participant_ref, image_ref, avatar URLs, hashes, platform IDs, or cache details to the user.
 
         Args:
             participant_ref (str): Exact opaque current-channel participant reference.
         Returns:
-            str: Compact JSON with display_name, availability, and a bounded visual description.
+            str: Compact JSON with display_name, availability, description, and an optional image_ref.
         """
 
         normalized_ref = participant_ref.strip() if isinstance(participant_ref, str) else ""
@@ -85,21 +87,36 @@ def register_describe_channel_participant_avatar(
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
+        data_url = raw_to_image_data_url(image_bytes)
+        if data_url is None:
+            return json.dumps(
+                {
+                    "display_name": participant.display_name,
+                    "available": False,
+                    "reason": "unsupported_avatar_format",
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        references = current_channel_image_references()
+        image_ref = (
+            references.register_avatar(normalized_ref, participant.avatar_url) if references is not None else None
+        )
+
+        def unavailable_result(reason: str) -> str:
+            result: dict[str, object] = {
+                "display_name": participant.display_name,
+                "available": False,
+                "reason": reason,
+            }
+            if image_ref is not None:
+                result["image_ref"] = image_ref
+            return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
         avatar_hash = sha256(image_bytes).hexdigest()
         if participant.avatar_hash == avatar_hash and participant.avatar_description:
             description = participant.avatar_description
         else:
-            data_url = raw_to_image_data_url(image_bytes)
-            if data_url is None:
-                return json.dumps(
-                    {
-                        "display_name": participant.display_name,
-                        "available": False,
-                        "reason": "unsupported_avatar_format",
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
             try:
                 raw = await vision_completion(
                     config,
@@ -109,26 +126,10 @@ def register_describe_channel_participant_avatar(
                     timeout=VISION_DESCRIBE_TIMEOUT,
                 )
             except Exception:
-                return json.dumps(
-                    {
-                        "display_name": participant.display_name,
-                        "available": False,
-                        "reason": "avatar_vision_failed",
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
+                return unavailable_result("avatar_vision_failed")
             description = normalize_image_description(raw)
             if not description:
-                return json.dumps(
-                    {
-                        "display_name": participant.display_name,
-                        "available": False,
-                        "reason": "avatar_description_empty",
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
+                return unavailable_result("avatar_description_empty")
             await perception.update_avatar(
                 session,
                 normalized_ref,
@@ -137,14 +138,13 @@ def register_describe_channel_participant_avatar(
                 avatar_description=description,
                 observed_at=datetime.utcnow(),
             )
-        return json.dumps(
-            {
-                "display_name": participant.display_name,
-                "available": True,
-                "description": description,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+        result: dict[str, object] = {
+            "display_name": participant.display_name,
+            "available": True,
+            "description": description,
+        }
+        if image_ref is not None:
+            result["image_ref"] = image_ref
+        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
     return register_tool(dispatcher, describe_channel_participant_avatar)

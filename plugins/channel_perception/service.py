@@ -10,9 +10,15 @@ from arclet.entari import Session
 from launart.status import Phase
 from arclet.entari.logger import log
 
-from .core import clean_text
+from .core import clean_text, collect_image_sources
 from .config import ChannelPerceptionConfig
-from .queries import get_participant, find_participants, get_ambient_context, get_recent_messages
+from .queries import (
+    get_participant,
+    find_participants,
+    get_ambient_context,
+    get_recent_messages,
+    get_message_image_target,
+)
 from .schemas import (
     MessageView,
     FlushBarrier,
@@ -153,6 +159,17 @@ class ChannelPerceptionService(Service):
             before_cursor=before_cursor,
             participant_ref=participant_ref,
         )
+
+    async def message_image_sources(self, session: Session, cursor: str) -> list[str]:
+        await self.flush()
+        target = await get_message_image_target(scope_from_session(session), cursor)
+        if target is None:
+            return []
+        message_id, image_count = target
+        if image_count == 0:
+            return []
+        message = await session.message_get(message_id)
+        return collect_image_sources(message.message)[:image_count]
 
     async def ambient_context(
         self,

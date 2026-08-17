@@ -30,6 +30,7 @@ ToolEffect = Literal["observed", "confirmed", "partial", "none", "unknown"]
 _DELIVERY_TOOLS = {
     "send_audio",
     "send_external_image",
+    "send_channel_image",
     "send_image",
     "send_merged_forward",
     "send_text",
@@ -107,6 +108,8 @@ def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> d
     if tool_name == "send_external_image":
         source = arguments.get("source")
         return {"source_type": external_source_type(source), "source_chars": text_length(source)}
+    if tool_name == "send_channel_image":
+        return {"requested": bool(arguments.get("image_ref"))}
     if tool_name == "send_audio":
         return selected_arguments(arguments, "context")
     if tool_name == "speak":
@@ -280,10 +283,15 @@ def _project_tool_result(
         }
     if tool_name == "read_channel_messages" and parsed is not None:
         messages = parsed.get("messages")
+        normalized_messages = (
+            messages if isinstance(messages, Sequence) and not isinstance(messages, (str, bytes)) else ()
+        )
+        image_count = sum(
+            safe_int(message.get("image_count")) for message in normalized_messages if isinstance(message, Mapping)
+        )
         return {
-            "returned_count": (
-                len(messages) if isinstance(messages, Sequence) and not isinstance(messages, (str, bytes)) else 0
-            ),
+            "returned_count": len(normalized_messages),
+            "image_count": image_count,
             "has_older": bool(parsed.get("next_cursor")),
             "truncated": parsed.get("truncated") is True,
         }

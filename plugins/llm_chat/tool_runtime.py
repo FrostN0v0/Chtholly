@@ -36,6 +36,7 @@ from .tools.call_plugin import CommandToolContext, register_call_plugin
 from .tools._image_catalog import ImageCatalog
 from .tools.get_local_time import LocalTimeToolContext, register_get_local_time
 from .tools.list_tts_voices import TTSVoiceToolContext, register_list_tts_voices
+from .tools.send_channel_image import ChannelImageToolContext, register_send_channel_image
 from .tools.send_external_image import ExternalImageToolContext, register_send_external_image
 from .tools.send_merged_forward import MergedForwardToolContext, register_send_merged_forward
 from .tools.list_image_resources import register_list_image_resources
@@ -85,8 +86,21 @@ registered_tools.append("get_local_time")
 find_channel_participants = register_find_channel_participants(tools, get_channel_perception)
 registered_tools.append("find_channel_participants")
 
-read_channel_messages = register_read_channel_messages(tools, get_channel_perception)
+read_channel_messages = register_read_channel_messages(
+    tools,
+    get_channel_perception,
+    config,
+    _LOGGER.warning,
+)
 registered_tools.append("read_channel_messages")
+
+channel_image_context = ChannelImageToolContext(
+    get_perception=get_channel_perception,
+    append_history=append_message,
+    warn=_LOGGER.warning,
+)
+send_channel_image = register_send_channel_image(tools, channel_image_context)
+registered_tools.append("send_channel_image")
 
 describe_channel_participant_avatar = register_describe_channel_participant_avatar(
     tools,

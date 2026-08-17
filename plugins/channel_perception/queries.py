@@ -57,6 +57,26 @@ async def get_participant(scope: PerceptionScope, public_ref: str) -> Participan
         return participant_snapshot(row) if row is not None else None
 
 
+async def get_message_image_target(scope: PerceptionScope, cursor: str) -> tuple[str, int] | None:
+    try:
+        message_row_id = int(cursor)
+    except ValueError:
+        return None
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                select(AmbientMessage.message_id, AmbientMessage.image_count).where(
+                    *_scope_filters(AmbientMessage, scope),
+                    AmbientMessage.id == message_row_id,
+                    AmbientMessage.deleted_at.is_(None),
+                )
+            )
+        ).one_or_none()
+    if row is None:
+        return None
+    return str(row.message_id), max(0, int(row.image_count))
+
+
 async def find_participants(
     scope: PerceptionScope,
     query: str,
@@ -142,6 +162,7 @@ async def get_recent_messages(
             "participant_ref": "bot" if row.is_bot else row.participant_ref,
             "display_name": "bot" if row.is_bot else row.display_name,
             "content": row.content or "[Message unavailable]",
+            "image_count": row.image_count,
             "created_at": _utc_iso(row.created_at),
             "minutes_ago": _minutes_ago(row.created_at, now),
             "directed_to_bot": row.directed_to_bot,
@@ -192,6 +213,8 @@ async def get_ambient_context(
             "participant_ref": row.participant_ref,
             "display_name": row.display_name,
             "content": row.content or "[Message unavailable]",
+            "cursor": str(row.id),
+            "image_count": row.image_count,
             "minutes_ago": _minutes_ago(row.created_at, now),
             "replies_to_recent_message": bool(row.reply_to_message_id),
         }

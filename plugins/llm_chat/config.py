@@ -38,6 +38,8 @@ class LLMChatConfig(BasicConfModel):
     """Maximum combined forwarded-node characters exposed per generation."""
     merged_forward_max_described_images: int = 12
     """Maximum forwarded images described through the vision model."""
+    channel_message_max_described_images: int = 12
+    """Maximum recent channel-message images resolved and described per context load."""
     model: str | None = None
     """Model alias for conversation; None uses the llm plugin default."""
     eval_model: str | None = None

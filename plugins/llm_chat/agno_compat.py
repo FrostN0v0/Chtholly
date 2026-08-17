@@ -34,6 +34,7 @@ _INTERNAL_REFERENCE_TOOLS = {
     "describe_channel_participant_avatar",
     "find_channel_participants",
     "read_channel_messages",
+    "send_channel_image",
     "send_merged_forward",
     "send_text",
 }

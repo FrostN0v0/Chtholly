@@ -66,6 +66,13 @@ _MEDIA_REQUEST_PATTERNS = (
     ),
 )
 
+_CONTEXTUAL_MEDIA_DELIVERY = re.compile(
+    r"^(?:那|所以|这个|那个|它|他|她|你)?\s*(?:能|可以|可不可以|能不能)?\s*(?:直接)?\s*"
+    r"(?:把(?:它|这个|那个|原图|头像))?\s*(?:发|传|贴|补)(?:出|过|来|给我)*(?:一下)?(?:吗|么|吧)?[？?]?$",
+    re.IGNORECASE,
+)
+_RECENT_MEDIA_CONTEXT = re.compile(rf"(?:{_MEDIA_TERM}|头像|原图|画面|插画|海报)", re.IGNORECASE)
+
 
 def _user_text(content: object) -> str:
     if isinstance(content, str):
@@ -90,15 +97,21 @@ def _user_text(content: object) -> str:
 
 
 def latest_user_requests_media(messages: Sequence[ChatMessage]) -> bool:
-    """Return whether the latest user turn explicitly requests media delivery."""
+    """Return whether the latest user turn requests media directly or by recent reference."""
 
-    for message in reversed(messages):
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
         if message.get("role") != "user":
             continue
         text = _user_text(message.get("content")).strip()
         if not text or _NEGATED_MEDIA_REQUEST.search(text):
             return False
-        return any(pattern.search(text) for pattern in _MEDIA_REQUEST_PATTERNS)
+        if any(pattern.search(text) for pattern in _MEDIA_REQUEST_PATTERNS):
+            return True
+        if not _CONTEXTUAL_MEDIA_DELIVERY.search(text):
+            return False
+        recent_context = messages[max(0, index - 4) : index]
+        return any(_RECENT_MEDIA_CONTEXT.search(_user_text(item.get("content"))) for item in recent_context)
     return False
 
 

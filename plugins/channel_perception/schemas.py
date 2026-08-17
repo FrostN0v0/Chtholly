@@ -88,6 +88,7 @@ class MessageView(TypedDict):
     participant_ref: str
     display_name: str
     content: str
+    image_count: int
     created_at: str
     minutes_ago: int
     directed_to_bot: bool

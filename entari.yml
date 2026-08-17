@@ -102,6 +102,7 @@ plugins:
     context_window: 20
     ambient_context_max_messages: 8
     ambient_context_max_chars: 4000
+    channel_message_max_described_images: 12
     # Recent tool activity is channel-scoped, bounded, and excluded from persona evaluation.
     tool_context_max_events: 8
     tool_context_max_chars: 3500

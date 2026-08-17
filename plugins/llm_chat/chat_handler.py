@@ -46,6 +46,7 @@ from .persona.store import (
     append_message,
     delete_message,
 )
+from .channel_images import ChannelImageReferences, enrich_channel_message_images
 from .persona.runner import run_evaluation
 from .turn_lifecycle import ActiveChatTurn
 from .forward_context import resolve_merged_forward_messages
@@ -140,8 +141,10 @@ async def on_chat(session: Session, ctx: Contexts):
     user_name = identity.display_name
     current_message = session.event.message
     current_message_id = current_message.id if current_message is not None else ""
+    channel_image_references = ChannelImageReferences()
     try:
-        ambient_channel_context = await get_channel_perception().ambient_context(
+        perception = get_channel_perception()
+        ambient_channel_context = await perception.ambient_context(
             session,
             max_messages=config.ambient_context_max_messages,
             max_chars=config.ambient_context_max_chars,
@@ -150,6 +153,20 @@ async def on_chat(session: Session, ctx: Contexts):
     except Exception as exc:
         _LOGGER.warning(f"ambient channel context load failed: {summarize_exception(exc)}")
         ambient_channel_context = []
+    else:
+        try:
+            await enrich_channel_message_images(
+                config,
+                session,
+                perception,
+                ambient_channel_context,
+                channel_image_references,
+                _LOGGER.warning,
+            )
+        except Exception as exc:
+            _LOGGER.warning(f"ambient channel image enrichment failed: {summarize_exception(exc)}")
+    for ambient_message in ambient_channel_context:
+        ambient_message.pop("cursor", None)
 
     rel = await get_relation(user_id, channel_id)
     mood = await get_mood(channel_id)
@@ -236,6 +253,7 @@ async def on_chat(session: Session, ctx: Contexts):
                 ctx=ctx,
                 web_limits=web_limits,
                 delivery_state=delivery_state,
+                channel_image_references=channel_image_references,
                 request_timeout=config.model_request_timeout,
                 media_request_timeout=config.media_request_timeout,
                 tool_trace=turn.tool_trace,

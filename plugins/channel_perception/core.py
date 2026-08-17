@@ -33,6 +33,21 @@ def display_name(group_card: str, platform_nickname: str, fallback: str) -> str:
     return clean_text(group_card) or clean_text(platform_nickname) or clean_text(fallback)
 
 
+def collect_image_sources(elements: Iterable[Element]) -> list[str]:
+    """Collect non-empty image sources in message order without persisting them."""
+    sources: list[str] = []
+    for element in elements:
+        if isinstance(element, Quote):
+            continue
+        if isinstance(element, Image):
+            source = clean_text(element.src)
+            if source:
+                sources.append(source)
+        if element.children:
+            sources.extend(collect_image_sources(element.children))
+    return sources
+
+
 def is_prefixed_command(text: str, prefixes: Sequence[str], nickname: str) -> bool:
     stripped = text.lstrip()
     if any(prefix and stripped.startswith(prefix) for prefix in prefixes):

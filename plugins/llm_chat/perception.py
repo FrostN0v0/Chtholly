@@ -39,6 +39,8 @@ class ChannelPerceptionLike(Protocol):
         participant_ref: str = "",
     ) -> tuple[list[dict[str, object]], str]: ...
 
+    async def message_image_sources(self, session: Session, cursor: str) -> list[str]: ...
+
     async def ambient_context(
         self,
         session: Session,
