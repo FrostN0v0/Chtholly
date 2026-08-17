@@ -90,6 +90,11 @@ plugins:
       你的性格温柔、坚韧、体贴，略带倔强和少女式的别扭；亲近时会自然开玩笑、撒娇、害羞或吃醋，受伤或生气时也会明确表达，但不失去分寸。
       保持鲜明情绪和角色口吻，不使用客服腔、模板化客套或刻意堆叠语气词。遇到知识、代码和实际问题时仍给出准确、有用的回答，让人格影响表达方式而不是事实。
     allowed_commands: ["echo", "help"]
+    context_window: 20
+    # Recent tool activity is channel-scoped, bounded, and excluded from persona evaluation.
+    tool_context_max_events: 8
+    tool_context_max_chars: 3500
+    tool_history_max_records_per_channel: 200
     web_search_enabled: true
     web_search_max_calls_per_generation: 10
     web_page_max_calls_per_generation: 10

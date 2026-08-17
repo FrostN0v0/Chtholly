@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import delete, update
 from entari_plugin_database import select, get_session
 
-from ..models import BotState, Conversation, UserRelation, UserProfileFact
+from ..models import BotState, Conversation, UserRelation, ToolExecution, UserProfileFact
 
 AFFECTION_BASELINE = 30.0
 TRUST_BASELINE = 30.0
@@ -110,6 +110,7 @@ async def delete_message(message_id: int | None) -> None:
     if message_id is None:
         return
     async with get_session() as session:
+        await session.execute(delete(ToolExecution).where(ToolExecution.turn_id == message_id))
         await session.execute(delete(Conversation).where(Conversation.id == message_id))
         await session.commit()
 

@@ -32,6 +32,7 @@ from .chat_context import (
 )
 from .core.compose import energy_at, compose_persona_prompt
 from .core.forward import render_forwarded_storage
+from .tool_history import persist_tool_events, load_recent_tool_activity
 from .core.delivery import DeliveryState, normalize_delivery_limits
 from .persona.store import (
     get_mood,
@@ -133,6 +134,16 @@ async def on_chat(session: Session, ctx: Contexts):
     energy = energy_at(datetime.now().hour)
     memory_context = await load_memory_context(config, user_id, channel_id, content)
     history = await load_history(channel_id, config.context_window)
+    try:
+        recent_tool_activity = await load_recent_tool_activity(
+            channel_id,
+            history,
+            max_events=config.tool_context_max_events,
+            max_chars=config.tool_context_max_chars,
+        )
+    except Exception as exc:
+        _LOGGER.warning(f"tool history load failed: {summarize_exception(exc)}")
+        recent_tool_activity = []
     messages = build_chat_messages(
         history,
         user_name,
@@ -170,6 +181,7 @@ async def on_chat(session: Session, ctx: Contexts):
         impression=rel.impression,
         profile=memory_context.chat_profile,
         relevant_memories=memory_context.relevant_memories,
+        recent_tool_activity=recent_tool_activity,
         user_name=user_name,
         web_search_limit=web_limits.search_limit,
         web_page_limit=web_limits.read_limit,
@@ -186,19 +198,25 @@ async def on_chat(session: Session, ctx: Contexts):
         append_history=append_message,
         delete_history=delete_message,
         warn=lambda message: _LOGGER.warning(message),
+        persist_tool_events=persist_tool_events,
+        tool_history_retention=config.tool_history_max_records_per_channel,
     )
     try:
-        response = await generate_chat_response(
-            cast(list[ChatMessage], messages),
-            system=system,
-            model=model_name,
-            channel_id=channel_id,
-            ctx=ctx,
-            web_limits=web_limits,
-            delivery_state=delivery_state,
-            request_timeout=config.model_request_timeout,
-            media_request_timeout=config.media_request_timeout,
-        )
+        try:
+            response = await generate_chat_response(
+                cast(list[ChatMessage], messages),
+                system=system,
+                model=model_name,
+                channel_id=channel_id,
+                ctx=ctx,
+                web_limits=web_limits,
+                delivery_state=delivery_state,
+                request_timeout=config.model_request_timeout,
+                media_request_timeout=config.media_request_timeout,
+                tool_trace=turn.tool_trace,
+            )
+        finally:
+            await turn.persist_tool_trace()
     except asyncio.CancelledError:
         await turn.preserve_and_rollback()
         raise

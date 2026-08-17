@@ -18,6 +18,12 @@ class LLMChatConfig(BasicConfModel):
     """Character text ONLY; framework rules live in SYSTEM_SCAFFOLD."""
     context_window: int = 20
     """Number of history messages loaded per reply."""
+    tool_context_max_events: int = 8
+    """Maximum recent tool events injected into one chat prompt."""
+    tool_context_max_chars: int = 3500
+    """Maximum serialized characters used by recent tool activity."""
+    tool_history_max_records_per_channel: int = 200
+    """Maximum persisted tool execution rows retained per channel."""
     merged_forward_fetch_timeout: float = 15.0
     """Timeout for one OneBot get_forward_msg request."""
     merged_forward_max_messages: int = 200
