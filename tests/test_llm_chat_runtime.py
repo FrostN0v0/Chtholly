@@ -49,12 +49,13 @@ from plugins.llm_chat import (
     generation as generation_module,
     agno_compat as agno_compat_module,
     chat_context as chat_context_module,
+    tool_history as tool_history_module,
     forward_context as forward_context_module,
 )
 from plugins.llm_chat.core import image_source as image_source_module
 from plugins.llm_chat.tools import is_command_allowed
 from plugins.llm_chat.config import LLMChatConfig
-from plugins.llm_chat.models import UserMemory, Conversation, UserProfileFact
+from plugins.llm_chat.models import UserMemory, Conversation, ToolExecution, UserProfileFact
 from plugins.llm_chat.vision import VISION_TAG_TIMEOUT, VISION_DESCRIBE_TIMEOUT, vision_completion
 from plugins.llm_chat.persona import (
     store as store_module,
@@ -88,6 +89,7 @@ from plugins.llm_chat.core.delivery import (
     llm_chat_delivery_scope,
 )
 from plugins.llm_chat.persona.runner import run_evaluation
+from plugins.llm_chat.core.tool_trace import ToolTraceRecorder, llm_chat_tool_trace_scope
 from plugins.llm_chat.runtime_context import copy_llm_chat_context, llm_chat_context_scope
 from plugins.llm_chat.core.image_source import (
     IMAGE_FETCH_MAX_BYTES,
@@ -98,6 +100,8 @@ from plugins.llm_chat.core.image_source import (
 )
 from plugins.llm_chat.persona.embedding import embed_text
 from plugins.llm_chat.persona.memory_update import apply_memory_updates, resolve_fact_embedding_update
+from plugins.llm_chat.core.tool_trace_policy import DeliverySnapshot, project_tool_arguments
+from plugins.llm_chat.core.tool_trace_safety import compact_tool_activity
 from plugins.llm_chat.persona.memory_context import load_memory_context
 
 if _PREVIOUS_GENERATION_MODULE is None:
@@ -261,6 +265,7 @@ def _install_handler_stubs(
         evaluations=[],
         memory_updates=[],
         moods=[],
+        tool_events=[],
         relations=[],
         deleted=[],
     )
@@ -279,6 +284,12 @@ def _install_handler_stubs(
 
     async def load_memory(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
         return _memory_context()
+
+    async def load_tool_activity(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return []
+
+    async def persist_events(*args: Any) -> None:
+        records.tool_events.append(args)
 
     async def load_history(*_args: Any, **_kwargs: Any) -> list[Any]:
         return []
@@ -310,6 +321,8 @@ def _install_handler_stubs(
     monkeypatch.setattr(module, "get_mood", get_mood)
     monkeypatch.setattr(module, "load_memory_context", load_memory)
     monkeypatch.setattr(module, "load_history", load_history)
+    monkeypatch.setattr(module, "load_recent_tool_activity", load_tool_activity)
+    monkeypatch.setattr(module, "persist_tool_events", persist_events)
     monkeypatch.setattr(module, "append_message", append_message)
     monkeypatch.setattr(module, "delete_message", delete_message)
     monkeypatch.setattr(module, "run_evaluation", run_evaluation)
@@ -1666,6 +1679,118 @@ async def test_generation_context_scope_propagates_to_tool_tasks() -> None:
     assert copy_llm_chat_context() is None
 
 
+def test_tool_argument_projection_redacts_secrets_and_large_payloads() -> None:
+    generic = project_tool_arguments(
+        "probe",
+        {
+            "api_key": "secret-value",
+            "nested": {"authorization": "Bearer secret", "value": "safe"},
+            "payload": b"binary-data",
+        },
+    )
+    external = project_tool_arguments("send_external_image", {"source": "data:image/png;base64,SECRET"})
+    image = project_tool_arguments("send_image", {"image_paths": ["memes/1.png", "memes/2.png"]})
+
+    assert generic == {
+        "api_key": "[REDACTED]",
+        "nested": {"authorization": "[REDACTED]", "value": "safe"},
+        "payload": {"type": "bytes", "size": 11},
+    }
+    assert external == {"source_type": "inline_data", "source_chars": 28}
+    assert image == {"selection_mode": "paths", "path_count": 2, "context": ""}
+    assert "SECRET" not in repr(external)
+    assert "memes/1.png" not in repr(image)
+
+
+def test_tool_activity_budget_prefers_newest_records() -> None:
+    activity = compact_tool_activity(
+        [
+            {"tool": "web_search", "outcome": {"summary": "older " + "x" * 300}},
+            {"tool": "read_web_page", "outcome": {"summary": "newer"}},
+        ],
+        max_chars=120,
+    )
+
+    assert activity == [{"tool": "read_web_page", "outcome": {"summary": "newer"}}]
+
+
+def test_tool_trace_distinguishes_observation_rejection_and_partial_effect() -> None:
+    recorder = ToolTraceRecorder()
+    search_call = recorder.start("web_search", {"query": "current release"})
+    recorder.finish_success(
+        search_call,
+        {
+            "query": "current release",
+            "results": [
+                {
+                    "title": "Release notes",
+                    "url": "https://example.com/releases",
+                    "snippet": "Version details",
+                }
+            ],
+        },
+        before=DeliverySnapshot(),
+        after=DeliverySnapshot(),
+    )
+    rejected_call = recorder.start("web_search", {"query": "retry"})
+    recorder.finish_error(
+        rejected_call,
+        RuntimeError("web_search budget exhausted; answer from collected evidence"),
+        before=DeliverySnapshot(),
+        after=DeliverySnapshot(),
+    )
+    partial_call = recorder.start("send_merged_forward", {"messages": ["one", "two"]})
+    recorder.finish_error(
+        partial_call,
+        RuntimeError("transport failed"),
+        before=DeliverySnapshot(active=True),
+        after=DeliverySnapshot(active=True, attempts=1, confirmed=1),
+    )
+
+    observed, rejected, partial = recorder.events
+    assert (observed.status, observed.effect, observed.outcome["result_count"]) == ("succeeded", "observed", 1)
+    assert (rejected.status, rejected.effect, rejected.outcome["error_code"]) == (
+        "rejected",
+        "none",
+        "budget_exhausted",
+    )
+    assert (partial.status, partial.effect, partial.outcome["error_code"]) == (
+        "failed",
+        "partial",
+        "delivery_failed",
+    )
+
+
+def test_tool_trace_hashes_full_web_content_and_rejects_string_result_lists() -> None:
+    recorder = ToolTraceRecorder()
+    first = recorder.start("read_web_page", {"url": "https://example.com/a"})
+    recorder.finish_success(
+        first,
+        {"url": "https://example.com/a", "content": "x" * 5000 + "a"},
+        before=DeliverySnapshot(),
+        after=DeliverySnapshot(),
+    )
+    second = recorder.start("read_web_page", {"url": "https://example.com/b"})
+    recorder.finish_success(
+        second,
+        {"url": "https://example.com/b", "content": "x" * 5000 + "b"},
+        before=DeliverySnapshot(),
+        after=DeliverySnapshot(),
+    )
+    malformed = recorder.start("web_search", {"query": "release"})
+    recorder.finish_success(
+        malformed,
+        {"query": "release", "results": "not-a-result-list"},
+        before=DeliverySnapshot(),
+        after=DeliverySnapshot(),
+    )
+
+    first_page, second_page, search = recorder.events
+    assert first_page.outcome["excerpt"] == second_page.outcome["excerpt"]
+    assert first_page.outcome["content_hash"] != second_page.outcome["content_hash"]
+    assert search.outcome["result_count"] == 0
+
+
 @pytest.mark.asyncio
 async def test_agno_tool_bridge_merges_arguments_and_inherits_context(monkeypatch: pytest.MonkeyPatch) -> None:
     handled: list[tuple[dict[str, Any], bool]] = []
@@ -1678,6 +1803,8 @@ async def test_agno_tool_bridge_merges_arguments_and_inherits_context(monkeypatc
 
         async def handle(self, context: Contexts, inner: bool = False) -> dict[str, str]:
             handled.append((dict(context), inner))
+            if context["value"] == "fail":
+                raise RuntimeError("token=secret-value")
             return {"value": context["value"], "sentinel": context["sentinel"]}
 
     monkeypatch.setattr(agno_compat_module, "available_functions", {"probe": FakeSubscriber()})
@@ -1703,12 +1830,28 @@ async def test_agno_tool_bridge_merges_arguments_and_inherits_context(monkeypatc
     tool = agno_compat_module.build_agno_tools()[0]
     assert tool.entrypoint is not None
 
-    with llm_chat_context_scope(Contexts({"sentinel": "event-context"})):
+    recorder = ToolTraceRecorder()
+    with (
+        llm_chat_context_scope(Contexts({"sentinel": "event-context"})),
+        llm_chat_tool_trace_scope(recorder),
+    ):
         result = json.loads(await tool.entrypoint(value="tool-argument"))
+        failed = json.loads(await tool.entrypoint(value="fail"))
 
     assert result == {"ok": True, "data": {"value": "tool-argument", "sentinel": "event-context"}}
+    assert failed == {"ok": False, "error": "RuntimeError: token=[REDACTED]"}
     assert handled[0][1] is True
     assert handled[0][0]["value"] == "tool-argument"
+    assert [(event.status, event.effect) for event in recorder.events] == [
+        ("succeeded", "unknown"),
+        ("failed", "none"),
+    ]
+    assert recorder.events[0].arguments == {"value": "tool-argument"}
+    assert recorder.events[1].outcome == {
+        "error_code": "execution_failed",
+        "error": "RuntimeError: token=[REDACTED]",
+    }
+    assert DeliverySnapshot().active is False
 
 
 @pytest.mark.asyncio
@@ -1953,6 +2096,171 @@ async def test_generation_accepts_end_marker_after_confirmed_media_without_retry
 
 
 @pytest.mark.asyncio
+async def test_tool_history_is_scoped_to_loaded_channel_turns(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_memory_store: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(tool_history_module, "get_session", isolated_memory_store.session_factory)
+    async with isolated_memory_store.session_factory() as session:
+        previous_user = Conversation(
+            channel_id="group",
+            user_id="alice",
+            user_name="Alice",
+            role="user",
+            content="Search the release notes",
+        )
+        previous_assistant = Conversation(
+            channel_id="group",
+            user_id="",
+            user_name="bot",
+            role="assistant",
+            content="I found the release notes.",
+        )
+        omitted_user = Conversation(
+            channel_id="group",
+            user_id="bob",
+            user_name="Bob",
+            role="user",
+            content="Older unrelated turn",
+        )
+        session.add_all([omitted_user, previous_user, previous_assistant])
+        await session.flush()
+        omitted_turn_id = omitted_user.id
+        previous_turn_id = previous_user.id
+        await session.commit()
+
+    retained = ToolTraceRecorder()
+    retained_call = retained.start("web_search", {"query": "current release"})
+    retained.finish_success(
+        retained_call,
+        {"query": "current release", "results": []},
+        before=DeliverySnapshot(),
+        after=DeliverySnapshot(),
+    )
+    omitted = ToolTraceRecorder()
+    omitted_call = omitted.start("get_local_time", {"timezone": "UTC"})
+    omitted.finish_success(
+        omitted_call,
+        '{"timezone":"UTC","datetime":"2026-08-17T01:00:00+00:00"}',
+        before=DeliverySnapshot(),
+        after=DeliverySnapshot(),
+    )
+    await tool_history_module.persist_tool_events("group", previous_turn_id, retained.events, 20)
+    await tool_history_module.persist_tool_events("group", omitted_turn_id, omitted.events, 20)
+
+    activity = await tool_history_module.load_recent_tool_activity(
+        "group",
+        [previous_user, previous_assistant],
+        max_events=8,
+        max_chars=3500,
+    )
+
+    assert len(activity) == 1
+    assert activity[0]["turn_offset"] == -1
+    assert activity[0]["speaker"] == "Alice"
+    assert activity[0]["tool"] == "web_search"
+    assert activity[0]["status"] == "succeeded"
+    assert activity[0]["effect"] == "observed"
+
+
+@pytest.mark.asyncio
+async def test_tool_history_applies_hard_event_and_character_caps(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_memory_store: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(tool_history_module, "get_session", isolated_memory_store.session_factory)
+    async with isolated_memory_store.session_factory() as session:
+        event_turn = Conversation(
+            channel_id="event-cap",
+            user_id="alice",
+            user_name="Alice",
+            role="user",
+            content="Check many observations",
+        )
+        char_turn = Conversation(
+            channel_id="char-cap",
+            user_id="alice",
+            user_name="Alice",
+            role="user",
+            content="Check verbose observations",
+        )
+        session.add_all([event_turn, char_turn])
+        await session.flush()
+        event_turn_id = event_turn.id
+        char_turn_id = char_turn.id
+        await session.commit()
+
+    event_recorder = ToolTraceRecorder()
+    for index in range(40):
+        call = event_recorder.start("get_local_time", {"timezone": "UTC"})
+        event_recorder.finish_success(
+            call,
+            json.dumps({"timezone": "UTC", "time": f"00:{index:02d}"}),
+            before=DeliverySnapshot(),
+            after=DeliverySnapshot(),
+        )
+    await tool_history_module.persist_tool_events("event-cap", event_turn_id, event_recorder.events, 100)
+    event_activity = await tool_history_module.load_recent_tool_activity(
+        "event-cap",
+        [event_turn],
+        max_events=100,
+        max_chars=100000,
+    )
+
+    char_recorder = ToolTraceRecorder()
+    for index in range(20):
+        call = char_recorder.start("probe", {"index": index})
+        char_recorder.finish_success(
+            call,
+            "x" * 1100 + str(index),
+            before=DeliverySnapshot(),
+            after=DeliverySnapshot(),
+        )
+    await tool_history_module.persist_tool_events("char-cap", char_turn_id, char_recorder.events, 100)
+    char_activity = await tool_history_module.load_recent_tool_activity(
+        "char-cap",
+        [char_turn],
+        max_events=100,
+        max_chars=100000,
+    )
+
+    assert len(event_activity) == 32
+    assert len(char_activity) < 20
+    assert len(json.dumps(char_activity, ensure_ascii=False, separators=(",", ":"))) <= 12000
+
+
+@pytest.mark.asyncio
+async def test_tool_history_prunes_old_channel_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_memory_store: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(tool_history_module, "get_session", isolated_memory_store.session_factory)
+    recorder = ToolTraceRecorder()
+    for query in ("first", "second", "third"):
+        call = recorder.start("web_search", {"query": query})
+        recorder.finish_success(
+            call,
+            {"query": query, "results": []},
+            before=DeliverySnapshot(),
+            after=DeliverySnapshot(),
+        )
+
+    await tool_history_module.persist_tool_events("group", 1, recorder.events, 2)
+
+    async with isolated_memory_store.session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ToolExecution).where(ToolExecution.channel_id == "group").order_by(ToolExecution.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert [row.sequence for row in rows] == [2, 3]
+
+
+@pytest.mark.asyncio
 async def test_message_append_and_exact_delete_round_trip(
     monkeypatch: pytest.MonkeyPatch,
     isolated_memory_store: SimpleNamespace,
@@ -1961,11 +2269,28 @@ async def test_message_append_and_exact_delete_round_trip(
 
     message_id = await store_module.append_message("channel", "user", "Alice", "user", "hello")
     async with isolated_memory_store.session_factory() as session:
+        session.add(
+            ToolExecution(
+                channel_id="channel",
+                turn_id=message_id,
+                sequence=1,
+                tool_name="web_search",
+                status="failed",
+                effect="none",
+            )
+        )
+        await session.commit()
+        assert (
+            await session.execute(select(ToolExecution).where(ToolExecution.turn_id == message_id))
+        ).scalar_one_or_none() is not None
         assert await session.get(Conversation, message_id) is not None
 
     await store_module.delete_message(message_id)
 
     async with isolated_memory_store.session_factory() as session:
+        assert (
+            await session.execute(select(ToolExecution).where(ToolExecution.turn_id == message_id))
+        ).scalar_one_or_none() is None
         assert await session.get(Conversation, message_id) is None
 
 
@@ -2039,6 +2364,63 @@ async def test_on_chat_media_generation_failure_requests_original_images_again(
         assert records.deleted == []
         assert records.evaluations == []
         assert records.relations == []
+
+
+@pytest.mark.asyncio
+async def test_on_chat_injects_recent_tool_activity_and_persists_current_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        captured_activity: list[list[dict[str, Any]]] = []
+        prior_activity = [
+            {
+                "turn_offset": -1,
+                "speaker": "Current User",
+                "tool": "web_search",
+                "status": "failed",
+                "effect": "none",
+                "arguments": {"query": "previous query"},
+                "outcome": {"error_code": "timeout"},
+            }
+        ]
+
+        async def load_tool_activity(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+            return prior_activity
+
+        def compose_prompt(*_args: Any, **kwargs: Any) -> str:
+            captured_activity.append(kwargs["recent_tool_activity"])
+            return "tool memory system"
+
+        async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+            trace = cast(ToolTraceRecorder, kwargs["tool_trace"])
+            call = trace.start("web_search", {"query": "current query"})
+            trace.finish_success(
+                call,
+                {"query": "current query", "results": []},
+                before=DeliverySnapshot(),
+                after=DeliverySnapshot(),
+            )
+            return _handler_response("Search completed.")
+
+        monkeypatch.setattr(module, "load_recent_tool_activity", load_tool_activity)
+        monkeypatch.setattr(module, "compose_persona_prompt", compose_prompt)
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        result = await module.on_chat.callable_target(_ChatSession("continue the search"), SimpleNamespace())
+
+        assert result is BLOCK
+        assert captured_activity == [prior_activity]
+        assert len(records.tool_events) == 1
+        channel_id, turn_id, events, retention = records.tool_events[0]
+        assert (channel_id, turn_id, retention) == ("group-B", 1, 200)
+        assert len(events) == 1
+        assert (events[0].tool_name, events[0].status, events[0].effect) == (
+            "web_search",
+            "succeeded",
+            "observed",
+        )
 
 
 @pytest.mark.asyncio

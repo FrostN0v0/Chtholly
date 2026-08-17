@@ -2088,6 +2088,7 @@ async def test_real_llm_service_runs_search_extract_final_and_carries_tool_messa
 
     monkeypatch.setattr(local_modules.generation, "get_model_config", unexpected_finalizer)
     messages = [{"role": "user", "content": "answer with current evidence"}]
+    trace = local_modules.generation.ToolTraceRecorder()
 
     try:
         async with _registered_web_tools(local_modules, factory):
@@ -2099,10 +2100,27 @@ async def test_real_llm_service_runs_search_extract_final_and_carries_tool_messa
                 ctx=None,
                 web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
                 delivery_state=local_modules.delivery.DeliveryState(),
+                tool_trace=trace,
             )
 
             assert local_modules.generation.response_content(response) == "verified final answer"
             assert http_paths == ["/search", "/contents"]
+            assert [(event.tool_name, event.status, event.effect) for event in trace.events] == [
+                ("web_search", "succeeded", "observed"),
+                ("read_web_page", "succeeded", "observed"),
+            ]
+            assert trace.events[0].outcome["sources"] == [
+                {
+                    "title": "Verified source",
+                    "url": "https://example.com/article",
+                    "snippet": "SEARCH_SNIPPET_SENTINEL",
+                }
+            ]
+            assert trace.events[1].arguments == {
+                "focus": "the requested fact",
+                "url": "https://example.com/article",
+            }
+            assert trace.events[1].outcome["excerpt"] == "# Heading PAGE_CONTENT_SENTINEL"
             assert len(factory.calls) == 1
             factory_key, factory_options = factory.calls[0]
             assert factory_key == "fake-exa-key"
@@ -2274,8 +2292,9 @@ async def test_generate_chat_response_caps_web_calls_and_returns_final_answer(
         tool_results = [json.loads(message["content"]) for message in final_tool_messages]
         assert all(result["ok"] is True for result in tool_results[:4])
         expected_budget_error = (
-            "InnerHandlerException(WebAccessError('Web access budget exhausted; "
-            "answer from collected evidence without more web tools'))"
+            "InnerHandlerException: Web access budget exhausted; answer from collected evidence without more web "
+            "tools <- WebAccessError: Web access budget exhausted; answer from collected evidence without more web "
+            "tools"
         )
         assert tool_results[4:] == [
             {"ok": False, "error": expected_budget_error},
