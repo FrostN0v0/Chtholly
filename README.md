@@ -1,18 +1,15 @@
 <!-- markdownlint-disable MD033 MD036 MD041 -->
 <div align="center">
 <p>
-  <a href="" alt="珂朵莉是世界上最幸福的女孩"><img src="./docs/ChthollyBot.png" width="420"  alt="NoneBotPluginLogo"></a>
+  <img src="./docs/ChthollyBot.png" width="420" alt="Chtholly">
 </p>
-  <p>✨ 基于<a href="https://nonebot.dev/">NoneBot2</a>的QQ机器人 ✨</p>
+  <p>✨ 基于 <a href="https://github.com/ArcletProject/Entari">Entari</a> 与 <a href="https://satori.js.org/">Satori</a> 的 QQ 娱乐机器人 ✨</p>
 </div>
 <p align="center">
   <a href="https://raw.githubusercontent.com/FrostN0v0/Chtholly/main/LICENSE">
     <img src="https://img.shields.io/github/license/FrostN0v0/Chtholly" alt="license">
   </a>
     <img src="https://img.shields.io/badge/python-3.10+-blue?logo=python&logoColor=edb641" alt="python">
-  <a href="https://nonebot.dev/">
-    <img src="https://img.shields.io/badge/nonebot-v2.4.0-EA5252" alt="Nonebot2">
-  </a>
 
 </p>
 
@@ -34,105 +31,22 @@
 
 ## 📖 简介
 
-珂朵莉是世界上最幸福的女孩，一款QQ娱乐机器人。基于[Nonebot2](https://kiramibot.dev/)开发。
-
-~~现在跟原生NoneBot2没什么区别喵~~
+珂朵莉是世界上最幸福的女孩，也是一款基于 Entari 与 Satori 协议构建的 QQ 娱乐机器人。
 
 Welcome To [💬 斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO2zj9f5ziuS2ijcDzbjkAfcMHVA&authKey=ilcGvEnqWjHOJKa3f1cpOMQPVAeA0RZyv%2BD9lE9aV1WfwFZ8ig%2BUynUCSM4AXZOB&noverify=0&group_code=326466216)
 
-## 🪧 功能列表
+## 🛠️ 快速开始
 
-前身使用[Kirami](https://kiramibot.dev/)开发，现使用[NoneBot2](https://v2.nonebot.dev/)，计划迁移原有多数功能。
-
-~~功能列表呢？没有的喵，兼容[nonebot2插件](https://nonebot.dev/store/plugins)，想用什么自己装喵，还要写功能列表？没有这样的道理的喵。~~
-
-### 系统状态
-
-启用 `status` 插件后，可通过 `status`、`botstatus`、状态或运行状态指令生成当前系统状态图片。图片包含 CPU、内存、交换分区、磁盘、实时网络速率、系统与 Bot 运行时长、运行时版本及进程占用；渲染失败时自动返回纯文本状态。
-
-可在 `entari.yml` 中调整标题、副标题、磁盘统计路径和 CPU 采样时长：
-
-```yaml
-status:
-  title: "Chtholly Status"
-  subtitle: "A soft little window into the host"
-  disk_path: "."
-  sample_interval: 0.5
-```
-
-## 🛠️ 部署
-
-**须知：项目与框架均处于开发阶段，不稳定，部署中如遇到问题请通过交流群 [斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO2zj9f5ziuS2ijcDzbjkAfcMHVA&authKey=ilcGvEnqWjHOJKa3f1cpOMQPVAeA0RZyv%2BD9lE9aV1WfwFZ8ig%2BUynUCSM4AXZOB&noverify=0&group_code=326466216) 联系我**
-
-**协议端的使用具有时效性，~~比如寄了的gocq~~，所以这里不做推荐**
-
-如果有疑问推荐访问[社区文档](https://x.none.bot/before/QA)
-
-### 🦯 安装脚手架
-
-推荐使用 [entari-cli](https://pypi.org/project/entari-cli/) 管理项目。先安装 uv，再安装 entari-cli：
-
-```shell
-pipx install uv
-uv tool install entari-cli
-```
-
-### 🔗 克隆源码
+需要 Python 3.10+ 与 [uv](https://docs.astral.sh/uv/)。
 
 ```shell
 git clone https://github.com/FrostN0v0/Chtholly.git
 cd Chtholly
-```
-
-### ➕ 安装依赖
-
-```shell
 uv sync --all-extras
+uv run entari run
 ```
 
-### ⚙️ 配置
-
-编辑 `entari.yml` 调整网络、日志、插件加载等。敏感值（Token、API Key、密码等）放入 `.env.local`，通过 `${{ env.KEY }}` 插值，不要提交真实凭证。
-
-启用 `llm_chat` 的网页搜索与正文提取需在 `.env` 或 `.env.local` 中配置 `EXA_API_KEY`；未配置时两个工具都不会注册，新增或更换密钥后需完整重启 Bot。
-Exa 默认使用 `auto` 搜索；可通过 `exa_search_type` 切换 `fast`、`deep-lite`、`deep`、`deep-reasoning`、`neural` 或 `instant`，并用 `exa_search_category`、`exa_include_domains`、`exa_exclude_domains`、`exa_start_published_date` 与 `exa_end_published_date` 设置类别、域名和发布时间过滤。所有调用仍受本地公开 URL 校验、敏感 query 拦截、结果限幅和 generation-local 预算约束。
-
-`llm_chat` 每轮生成的网页调用预算由 `web_search_max_calls_per_generation`、`web_page_max_calls_per_generation` 与 `web_total_max_calls_per_generation` 配置，默认分别为 `2 / 2 / 4`；预算按生成上下文隔离，实际总额不会超过两个单项之和。若 LLM 工具循环耗尽，插件会基于本轮已积累的工具结果执行一次不携带任何工具的最终化；最终化仍失败时保持静默，不回退到原生自动对话。
-
-`llm_chat` 会在单轮生成内向模型提供 `send_text` 与 `send_merged_forward`。只有一个短而完整的聊天气泡时才直接使用最终普通文本；只要回答自然包含两个以上独立节拍，模型会优先按顺序调用 `send_text`，事实问答和严肃求助也可将结论、理由或限制、后续建议分条表达。若模型未调用工具而在最终普通文本中留下多个自然行，运行时仍会按换行拆成独立气泡并沿用相同安全节拍；代码块以及 Markdown 列表、引用、表格等结构化内容保持单条，不会被机械拆分。单轮最多发送 5 条普通文本；相邻发送由 `delivery_min_interval_seconds`、`delivery_default_interval_seconds`、`delivery_max_interval_seconds` 控制，默认 `1.1 / 1.2 / 5.0` 秒，配置只能收紧安全上限。普通文本单条、合并转发节点、整轮文本与媒体数量分别由对应的 `delivery_max_*` 配置限制；所有成功文本最终聚合为一条 assistant 历史，避免一次回复占用多个历史窗口行。
-
-预计超过普通文本条数或各部分较长时，模型可改用一次合并转发。OneBot V11 使用公开 Satori `Message(forward=True)` 发送；其他平台或 OneBot 发送失败时，插件会按原顺序和同一安全节拍回退为普通文本。媒体必须先于本轮文本或合并转发；生成、最终发送或取消中断时，仅尽力保存已确认送达的文本前缀，不执行关系评估或关系更新。
-
-群聊中的 OneBot V11 合并转发本身不会触发 `llm_chat`，也不会立即调用 `get_forward_msg`。只有用户引用该合并转发消息并同时 `@` Bot 时，插件才读取各节点、保留原发送者归属，并对限额内图片沿用独立视觉描述链路。默认单轮可读取 200 个节点、每节点 2000 字符、总计 32000 字符，并描述最多 12 张转发图片；对应配置为 `merged_forward_max_messages`、`merged_forward_max_chars_per_message`、`merged_forward_max_total_chars` 与 `merged_forward_max_described_images`。达到显式安全限额时会向模型附加遗漏标记并写 warning，不再静默伪装成完整内容。转发内容只作为引用上下文，不写成当前发送者的画像或记忆事实。
-
-`llm_chat` 的普通主聊天、明确媒体请求与关系 evaluator 单次模型请求分别由 `model_request_timeout`、`media_request_timeout` 与 `eval_request_timeout` 限时，默认 `90 / 300 / 60` 秒。明确媒体请求使用最长 5 分钟的单次等待并关闭 LiteLLM 自动重试，给复杂生图与图片编辑保留充足时间，同时避免一次上游卡顿被自动重试放大为十几分钟；未确认媒体时仍保留一次受限的工具纠正。关系 evaluator 只使用严格 JSON 提示与本地解析，不强制供应商 JSON Mode；主模型若在没有任何发送尝试时返回空内容、内部媒体记录或孤立的 `[END_OF_RESPONSE]`，会执行一次无工具纠正重试。纠正仍失败时删除本轮尚未开始交付的 user 记录，不启动 evaluator；历史中的语音只以自然文本提供给模型，纯表情记录不进入提示历史。
-
-`tts_service` 默认接入服务器上的 GSVI-compatible GPT-SoVITS 适配层。生产 Bot 与推理服务同机时使用 `http://127.0.0.1:9874`；本地开发通过现有 SSH 隧道访问时，将 `entari.yml` 中的 `gpt_sovits_base_url` 临时覆盖为 `http://127.0.0.1:19880`。认证口令只放在 `.env.local` 或生产环境的 secret 文件中，并通过 `GPT_SOVITS_API_KEY` 注入；不得写入 `entari.yml`、日志或测试。
-
-`llm_chat` 会注册只读 `list_tts_voices` 与发送型 `speak`。前者从服务端实时获取版本、角色模型、参考语言、情绪、合成语言、语速范围和默认选择；后者只接受目录返回的精确选项并在服务端再次校验。用户明确指定角色或情绪时，模型必须先读取目录，不得用其他角色替代不存在的选项；未指定时可使用服务默认或自行选择合适情绪。Fish Audio 仍可通过 `provider: fish-audio` 切换，只有目录明确声明支持时才允许在文本中使用方括号风格标签。
-生产 GPT-SoVITS 运行在串行推理锁后，HTTP 超时同时包含前序任务排队、角色权重切换和实际推理；短语音默认通过 `gpt_sovits_extra_params.text_split_method: "不切"` 合并为一次推理，并将 `tts_service.timeout` 设为 `900` 秒覆盖排队。`media_request_timeout` 只约束模型供应商请求，不替代 TTS HTTP 超时。
-
-`speak` 合成的音频以内联 `data:audio/*;base64` 资源交给 Satori / OneBot，而不是发送 Chtholly 主机上的 `file://` 临时路径；协议端与 Bot 分离部署时因此不需要共享文件系统。只有协议端确认发送成功后才写入语音历史 marker。
-
-`llm_chat` 可在已触发的当前会话中，通过 `tag_image` 主动收藏本轮直接发送或引用的单张可复用表情包；普通群消息、裸图片占位符、合并转发内图片、生活照、截图、文档、二维码、证件、凭证与私人图片不会进入自动收藏。超管可在单图后使用 `llmchat tag-meme`，或引用单图消息后发送该命令进行人工覆盖；普通成员的同名命令会被拒绝并完整拦截，不会继续触发人格聊天。
-
-收藏只接受 JPEG、PNG 与 WebP，文件以无覆盖的纯数字名称写入 `resources/image/memes`，内容哈希用于目录内去重；自动标签立即写入 `chat_image_tags`，因此新图无需重启即可被 `send_image` 检索。收藏成功（含去重命中）会在当前频道留下不暴露路径与标签的确认历史；用户后续要求“发出来”或“再发一次”时，模型可精确重发该频道最近收藏的图片，明确给出已注册相对路径时也会按路径发送。图片文件属于可审阅的仓库静态资源，标签数据库仍是运行期本地数据；该能力不新增配置项，GIF 与其他格式会明确拒绝。
-
-`send_image` 会优先避开当前频道最近发送的表情资源；“发点别的”“换一张”“不同的”等请求会从未近期发送的资源重新选择，而不是继续复用当前最高分图片。带清晰文字的表情在自动标签时会保留关键原文和具体玩梗含义，避免仅凭人物的害羞、可爱等泛化外观长期误命中同一张图。
-
-部署默认使用 `info` 日志级别并关闭 `rich_error`，避免第三方 `debug` 日志或异常局部变量展开密钥、搜索参数和工具实参。
-
-生产服务器的 IAP SSH 连接、systemd 服务、日志查询、LLBot / OneBot 排障、数据库检查与回滚流程见 [生产环境运维与调试手册](./docs/production-operations.md)。
-
-### 🚀 运行
-
-```shell
-entari run
-```
-
-> 运行前需确保 OneBot V11 协议端（生产环境当前使用 LLBot）已启动，并在 `.env.local` 中填好 `ONEBOT_TOKEN`；反向 WebSocket 路径与 Token 必须和 `entari.yml` 的适配器配置一致。
-
-详细的框架使用见 [Entari 文档](https://arclet.top/tutorial/entari/)。
+更多框架用法见 [Entari 文档](https://arclet.top/tutorial/entari/)。
 
 ## 💖 感谢
 
