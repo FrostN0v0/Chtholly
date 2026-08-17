@@ -61,6 +61,7 @@ from plugins.llm_chat.meme_store import MemeImportError, MemeImportResult, impor
 from plugins.llm_chat.web.policy import DEFAULT_WEB_ACCESS_LIMITS
 from plugins.llm_chat.core.delivery import DeliveryState, llm_chat_delivery_scope
 from plugins.llm_chat.core.image_source import IMAGE_FETCH_MAX_BYTES
+from plugins.llm_chat.tools._image_catalog import ImageCatalog
 
 sys.modules.pop("plugins.llm_chat", None)
 if getattr(_PLUGINS, "llm_chat", None) is _PACKAGE:
@@ -216,12 +217,30 @@ async def test_animated_gif_import_preserves_original_bytes_and_deduplicates(mem
 
 
 @pytest.mark.asyncio
+async def test_image_catalog_allows_only_memes_directory(meme_env: Any) -> None:
+    allowed = meme_env.meme_dir / "allowed.png"
+    allowed.write_bytes(_PNG_BYTES)
+    blocked_dir = meme_env.image_dir / "fox_img"
+    blocked_dir.mkdir()
+    blocked = blocked_dir / "blocked.png"
+    blocked.write_bytes(_PNG_BYTES)
+    catalog = ImageCatalog(meme_env.image_dir, meme_env.session_factory)
+
+    assert catalog.resolve("memes/allowed.png") == allowed.resolve()
+    assert catalog.resolve("fox_img/blocked.png") is None
+    assert catalog.resolve("memes/../fox_img/blocked.png") is None
+
+
+@pytest.mark.asyncio
 async def test_batch_tagging_discovers_existing_gif(
     meme_env: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gif_path = meme_env.meme_dir / "existing.gif"
     gif_path.write_bytes(_GIF_BYTES)
+    blocked_dir = meme_env.image_dir / "fox_img"
+    blocked_dir.mkdir()
+    (blocked_dir / "blocked.png").write_bytes(_PNG_BYTES)
     data_urls: list[str] = []
 
     async def generate_tags(_config: LLMChatConfig, data_url: str) -> str:
@@ -240,6 +259,7 @@ async def test_batch_tagging_discovers_existing_gif(
     assert [(row.file_path, row.tags) for row in rows] == [
         (str(Path("memes") / "existing.gif"), meme_env.state.tag_result)
     ]
+    assert all(not row.file_path.startswith("fox_img/") for row in rows)
 
 
 @pytest.mark.asyncio

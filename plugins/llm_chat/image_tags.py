@@ -17,7 +17,7 @@ from utils.path import IMAGE_DIR
 from .config import LLMChatConfig
 from .models import ImageTag
 from .vision import generate_image_tags
-from .core.media import match_image, is_random_request
+from .core.media import match_image, is_random_request, is_allowed_image_resource_path
 from .core.errors import summarize_exception
 from .core.profile import decode_embedding, encode_embedding, cosine_similarity
 from .core.image_source import image_file_to_data_url
@@ -96,12 +96,16 @@ async def tag_images(
     try:
         async with get_session() as db:
             known = {row.file_path for row in (await db.execute(select(ImageTag))).scalars().all()}
-        candidates = [
-            path
-            for path in sorted(IMAGE_DIR.rglob("*"))
-            if path.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".gif")
-            and (retag or str(path.relative_to(IMAGE_DIR)) not in known)
-        ]
+        candidates: list[Path] = []
+        for path in sorted(IMAGE_DIR.rglob("*")):
+            if path.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+                continue
+            relative_path = str(path.relative_to(IMAGE_DIR))
+            if not is_allowed_image_resource_path(relative_path):
+                continue
+            if not retag and relative_path in known:
+                continue
+            candidates.append(path)
         batch = candidates if limit is None else candidates[: max(0, limit)]
         remaining = max(0, len(candidates) - len(batch))
         total = len(batch)

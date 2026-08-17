@@ -4,7 +4,7 @@ import re
 import math
 import random
 from difflib import SequenceMatcher
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from collections import Counter
 
 from .forward import ForwardedSpeakerRole
@@ -36,6 +36,19 @@ _INTERNAL_MEDIA_RECORD_PREFIXES = (
     _NATIVE_IMAGE_RECORD_PREFIX,
     MEME_COLLECTION_RECORD_PREFIX,
 )
+
+ALLOWED_IMAGE_RESOURCE_ROOTS = frozenset({"memes"})
+
+
+def is_allowed_image_resource_path(value: str | Path) -> bool:
+    """Allow registered images only below explicitly approved resource roots."""
+
+    parts = PurePosixPath(str(value).replace("\\", "/")).parts
+    return (
+        len(parts) >= 2
+        and parts[0].casefold() in ALLOWED_IMAGE_RESOURCE_ROOTS
+        and all(part not in {"..", ""} for part in parts)
+    )
 
 
 _DEFAULT_RNG = random.Random()

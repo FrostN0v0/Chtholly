@@ -1627,9 +1627,12 @@ async def test_delivery_scope_blocks_text_outside_generation_but_preserves_media
             await send_text_target(session, "outside", None)
         assert session.sent == []
 
-        image_path = tmp_path / "reaction.png"
+        meme_dir = tmp_path / "memes"
+        meme_dir.mkdir()
+        image_path = meme_dir / "reaction.png"
         image_path.write_bytes(b"image")
-        row = SimpleNamespace(file_path=image_path.name, tags="happy，smile")
+        relative_path = str(Path("memes") / image_path.name)
+        row = SimpleNamespace(file_path=relative_path, tags="happy，smile")
 
         class FakeResult:
             def scalars(self) -> FakeResult:
@@ -1647,7 +1650,7 @@ async def test_delivery_scope_blocks_text_outside_generation_but_preserves_media
             yield FakeDatabase()
 
         async def fake_pick_image(*_args: Any, **_kwargs: Any) -> str:
-            return image_path.name
+            return relative_path
 
         markers: list[tuple[Any, ...]] = []
 
@@ -1825,13 +1828,17 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
     ) as harness:
         runtime = harness.module
         target = _tool_callable(runtime, "send_image")
-        first_path = tmp_path / "first.png"
-        second_path = tmp_path / "second.png"
+        meme_dir = tmp_path / "memes"
+        meme_dir.mkdir()
+        first_path = meme_dir / "first.png"
+        second_path = meme_dir / "second.png"
         first_path.write_bytes(b"first")
         second_path.write_bytes(b"second")
+        first_relative_path = str(Path("memes") / first_path.name)
+        second_relative_path = str(Path("memes") / second_path.name)
         rows = [
-            SimpleNamespace(id=1, file_path=first_path.name, tags="first-tag"),
-            SimpleNamespace(id=2, file_path=second_path.name, tags="second-tag"),
+            SimpleNamespace(id=1, file_path=first_relative_path, tags="first-tag"),
+            SimpleNamespace(id=2, file_path=second_relative_path, tags="second-tag"),
         ]
 
         class FakeResult:
@@ -1862,7 +1869,10 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
         state = runtime.DeliveryState(sleep=clock.sleep, clock=clock.monotonic)
         session = _DeliveryToolSession()
         with llm_chat_delivery_scope(state):
-            result = await target(image_paths=["second.png", "first.png", "second.png"], session=session)
+            result = await target(
+                image_paths=[second_relative_path, first_relative_path, second_relative_path],
+                session=session,
+            )
 
         assert result.startswith("已发送 2 张图片")
         sent_images = [cast(MessageChain, chain).get(Image)[0].src.replace("\\", "/") for chain in session.sent]
@@ -1879,7 +1889,10 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
         invalid_state = runtime.DeliveryState()
         with llm_chat_delivery_scope(invalid_state):
             with pytest.raises(runtime.DeliveryError, match="^Registered image path is unavailable$"):
-                await target(session=invalid_session, image_paths=["first.png", "missing.png"])
+                await target(
+                    session=invalid_session,
+                    image_paths=[first_relative_path, "memes/missing.png"],
+                )
         assert invalid_session.sent == []
         assert invalid_state.media_messages == 0
 
@@ -1888,7 +1901,7 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
         with llm_chat_delivery_scope(exhausted_state):
             runtime.reserve_media_message()
             with pytest.raises(runtime.DeliveryError, match="^Media delivery budget exhausted$"):
-                await target(session=exhausted_session, image_paths=["first.png", "second.png"])
+                await target(session=exhausted_session, image_paths=[first_relative_path, second_relative_path])
         assert exhausted_session.sent == []
         assert exhausted_state.media_messages == 1
 
@@ -1899,7 +1912,7 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
                 runtime.DeliveryError,
                 match="^Provide exactly one of context or image_paths$",
             ):
-                await target(session=ambiguous_session, context="happy", image_paths=["first.png"])
+                await target(session=ambiguous_session, context="happy", image_paths=[first_relative_path])
         assert ambiguous_session.sent == []
         assert ambiguous_state.media_messages == 0
 
@@ -1910,7 +1923,7 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
                 runtime.DeliveryError,
                 match=("^image delivery confirmed 1/2 images before failure; do not repeat the confirmed prefix$"),
             ):
-                await target(session=partial_session, image_paths=["first.png", "second.png"])
+                await target(session=partial_session, image_paths=[first_relative_path, second_relative_path])
         assert len(partial_session.sent) == 1
         assert partial_state.confirmed_deliveries == 1
         assert partial_state.delivery_attempts == 2
@@ -1931,7 +1944,7 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
         with llm_chat_delivery_scope(marker_failure_state):
             marker_failure_result = await target(
                 session=marker_failure_session,
-                image_paths=["first.png", "second.png"],
+                image_paths=[first_relative_path, second_relative_path],
             )
         assert marker_failure_result.startswith("已发送 2 张图片")
         assert len(marker_failure_session.sent) == 2
