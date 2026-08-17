@@ -29,6 +29,7 @@ from .participant_store import upsert_participant, update_avatar_observation
 _LOGGER = log.wrapper("[channel_perception]")
 Observation = MessageObservation | MessageMutation | ParticipantObservation
 MAX_QUEUE_SIZE = 10_000
+MAX_PROTOCOL_MEMBER_SCAN = 5_000
 
 
 def scope_from_session(session: Session) -> PerceptionScope:
@@ -169,6 +170,48 @@ class ChannelPerceptionService(Service):
             exclude_message_id=exclude_message_id,
         )
 
+    async def _refresh_matching_participants(
+        self,
+        session: Session,
+        query: str,
+        *,
+        limit: int,
+    ) -> None:
+        normalized_query = query.strip().casefold()
+        if not normalized_query:
+            return
+        scope = scope_from_session(session)
+        observed_at = datetime.utcnow()
+        matched = 0
+        scanned = 0
+        match_limit = min(10, max(1, int(limit)))
+        async for member in session.guild_member_list():
+            scanned += 1
+            if scanned > MAX_PROTOCOL_MEMBER_SCAN:
+                break
+            user = member.user
+            if user is None:
+                continue
+            platform_user_id = clean_text(user.id)
+            platform_nickname = clean_text(user.name)
+            group_card = clean_text(member.nick)
+            names = (platform_user_id, platform_nickname, group_card)
+            if not platform_user_id or not any(normalized_query in name.casefold() for name in names if name):
+                continue
+            await upsert_participant(
+                ParticipantObservation(
+                    scope=scope,
+                    platform_user_id=platform_user_id,
+                    platform_nickname=platform_nickname,
+                    group_card=group_card,
+                    avatar_url=clean_text(member.avatar or user.avatar),
+                    observed_at=observed_at,
+                )
+            )
+            matched += 1
+            if matched >= match_limit:
+                break
+
     async def find_participants(
         self,
         session: Session,
@@ -177,7 +220,19 @@ class ChannelPerceptionService(Service):
         limit: int,
     ) -> list[ParticipantView]:
         await self.flush()
-        return await find_participants(scope_from_session(session), query, limit=limit)
+        bounded_limit = min(10, max(1, int(limit)))
+        scope = scope_from_session(session)
+        rows = await find_participants(scope, query, limit=bounded_limit)
+        if not query.strip() or len(rows) >= bounded_limit:
+            return rows
+        try:
+            await self._refresh_matching_participants(session, query, limit=bounded_limit)
+        except Exception:
+            fallback = await find_participants(scope, query, limit=bounded_limit)
+            if fallback:
+                return fallback
+            raise
+        return await find_participants(scope, query, limit=bounded_limit)
 
     async def update_avatar(
         self,
