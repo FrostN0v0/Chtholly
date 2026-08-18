@@ -24,10 +24,7 @@ from plugins.llm_chat.models import ImageTag
 from plugins.llm_chat.meme_admin import MemeAdminError, MemeAdminService
 from plugins.llm_chat.meme_store import MemeImportError, MemeDeleteResult, MemeImportResult
 from plugins.llm_chat.meme_webui_api import create_meme_admin_router
-from plugins.llm_chat.core.image_tag_metadata import (
-    image_tag_catalog_summary,
-    normalize_generated_image_tags,
-)
+from plugins.llm_chat.core.image_tag_metadata import normalize_generated_image_tags
 
 _PNG_BYTES = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000001000000010804000000b51c0c020000000b4944415478da63fcff1f0003030200efbfa7db0000000049454e44ae426082"
@@ -130,8 +127,9 @@ async def _add_row(admin_env: SimpleNamespace, file_path: str, tags: str, embedd
 async def test_catalog_unions_stored_unindexed_and_missing_entries(admin_env: SimpleNamespace) -> None:
     (admin_env.meme_dir / "1.png").write_bytes(_PNG_BYTES)
     (admin_env.meme_dir / "2.gif").write_bytes(_GIF_BYTES)
-    await _add_row(admin_env, "memes/1.png", "reaction，quoted text")
-    await _add_row(admin_env, "memes/3.png", "missing file")
+    structured = normalize_generated_image_tags("reaction，quoted text")
+    await _add_row(admin_env, "memes/1.png", structured)
+    await _add_row(admin_env, "memes/3.png", normalize_generated_image_tags("missing file"))
 
     page = await admin_env.service.list_memes(sort="name", page_size=10)
 
@@ -142,8 +140,6 @@ async def test_catalog_unions_stored_unindexed_and_missing_entries(admin_env: Si
         "indexed": 1,
         "unindexed": 1,
         "missing": 1,
-        "structured": 0,
-        "legacy": 2,
     }
     assert page.items[0].to_dict()["tag_count"] == 2
     assert admin_env.service.resolve_file("../private.png") is None
@@ -156,7 +152,7 @@ async def test_catalog_unions_stored_unindexed_and_missing_entries(admin_env: Si
 
 
 @pytest.mark.asyncio
-async def test_catalog_prefers_structured_row_over_newer_legacy_path_variant(
+async def test_catalog_prefers_valid_row_over_newer_invalid_path_variant(
     admin_env: SimpleNamespace,
 ) -> None:
     (admin_env.meme_dir / "1.png").write_bytes(_PNG_BYTES)
@@ -168,8 +164,8 @@ async def test_catalog_prefers_structured_row_over_newer_legacy_path_variant(
 
     assert len(page.items) == 1
     assert page.items[0].tags == structured
-    assert page.stats["structured"] == 1
-    assert page.stats["legacy"] == 0
+    assert page.stats["indexed"] == 1
+    assert page.stats["unindexed"] == 0
 
 
 @pytest.mark.asyncio
@@ -193,11 +189,10 @@ async def test_catalog_exposes_structured_metadata_without_matching_avoid_terms(
     await _add_row(admin_env, "memes/1.png", structured)
     await _add_row(admin_env, "memes/2.png", "旧标签，开心")
 
-    page = await admin_env.service.list_memes(status="structured", page_size=10)
+    page = await admin_env.service.list_memes(status="indexed", page_size=10)
 
     assert [item.file_name for item in page.items] == ["1.png"]
     payload = page.items[0].to_dict()
-    assert payload["tag_format"] == "structured"
     assert payload["metadata"] == {
         "text": "你怎么这么坏",
         "meaning": "惊讶又嗔怪地吐槽对方使坏",
@@ -205,10 +200,9 @@ async def test_catalog_exposes_structured_metadata_without_matching_avoid_terms(
         "avoid_when": ["普通问候"],
         "tags": ["文字表情包", "惊讶", "嗔怪"],
     }
-    assert payload["tag_summary"] == image_tag_catalog_summary(structured)
     assert [item.file_name for item in (await admin_env.service.list_memes(query="恶作剧")).items] == ["1.png"]
     assert not (await admin_env.service.list_memes(query="普通问候")).items
-    assert [item.file_name for item in (await admin_env.service.list_memes(status="legacy")).items] == ["2.png"]
+    assert [item.file_name for item in (await admin_env.service.list_memes(status="unindexed")).items] == ["2.png"]
 
 
 @pytest.mark.asyncio
@@ -330,11 +324,22 @@ async def test_webui_router_serves_assets_and_mutation_contracts(admin_env: Simp
     assert 'id="edit-tags"' not in page.text
     assert "结构化标签 JSON" not in page.text
     assert "使用新版 JSON 元数据" not in page.text
+    assert 'id="stat-indexed"' in page.text
+    assert 'data-status="indexed"' in page.text
+    assert 'id="stat-structured"' not in page.text
+    assert 'id="stat-legacy"' not in page.text
+    assert 'data-status="structured"' not in page.text
+    assert 'data-status="legacy"' not in page.text
+    assert "旧格式" not in page.text
+    assert "结构化" not in page.text
     assert "default-src 'self'" in page.headers["content-security-policy"]
     assert "blob:" in page.headers["content-security-policy"]
     first_item = catalog.json()["items"][0]
     assert first_item["image_url"].endswith("/files/1.png?v=" + str(first_item["version"]))
     assert "embedding_json" not in first_item
+    assert "tag_format" not in first_item
+    assert "tag_summary" not in first_item
+    assert set(catalog.json()["stats"]) == {"stored", "indexed", "unindexed", "missing"}
     assert str(admin_env.meme_dir) not in catalog.text
     assert image.content == _PNG_BYTES
     assert updated.json()["item"]["tags"] == normalize_generated_image_tags("edited，visible text")

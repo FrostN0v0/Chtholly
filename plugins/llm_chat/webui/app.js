@@ -6,11 +6,6 @@ const STATUS_LABELS = {
   unindexed: "待标注",
   missing: "文件缺失",
 };
-const TAG_FORMAT_LABELS = {
-  structured: "结构化",
-  legacy: "旧格式",
-  empty: "无标签",
-};
 const EMPTY_METADATA = {
   text: "",
   meaning: "",
@@ -68,7 +63,7 @@ const METADATA_FIELDS = [
 const ERROR_MESSAGES = {
   catalog_unavailable: "表情库暂时无法读取",
   meme_not_found: "没有找到对应的表情记录",
-  invalid_tags: "结构化标签内容无效",
+  invalid_tags: "标签内容无效",
   invalid_json: "请求中的 JSON 无效",
   request_too_large: "标签内容超过大小限制",
   upload_rejected: "图片格式、大小或标签不符合要求",
@@ -383,15 +378,10 @@ function renderCard(item) {
     createElement("span", "", `${formatBytes(item.size_bytes)} · ${item.tag_count} 个标签`),
   );
   const statusLine = createElement("div", "card-status-line");
-  statusLine.append(
-    statusBadge(item),
-    createElement(
-      "span",
-      `index-state format-${item.tag_format}`,
-      TAG_FORMAT_LABELS[item.tag_format] || item.tag_format,
-    ),
-    createElement("span", "index-state", item.embedding_ready ? "向量可用" : "关键词检索"),
-  );
+  statusLine.append(statusBadge(item));
+  if (item.status === "indexed") {
+    statusLine.append(createElement("span", "index-state", item.embedding_ready ? "语义检索可用" : "关键词检索"));
+  }
 
   const actions = createElement("div", "meme-actions");
   actions.append(
@@ -414,7 +404,7 @@ function renderCatalog() {
 }
 
 function renderStats(stats) {
-  ["stored", "structured", "legacy", "unindexed", "missing"].forEach((key) => {
+  ["stored", "indexed", "unindexed", "missing"].forEach((key) => {
     const node = document.querySelector(`#stat-${key}`);
     if (node) node.textContent = String(stats?.[key] || 0);
   });
@@ -456,7 +446,7 @@ function openEdit(item) {
   state.selected = item;
   elements.editFileName.textContent = item.file_name;
   renderMetadataEditor(elements.editMetadata, item.metadata);
-  elements.editStatus.textContent = `${STATUS_LABELS[item.status] || item.status} · ${TAG_FORMAT_LABELS[item.tag_format] || item.tag_format}`;
+  elements.editStatus.textContent = STATUS_LABELS[item.status] || item.status;
   elements.editStatus.className = `status-badge status-${item.status}`;
   elements.retagCurrent.disabled = item.status === "missing";
   if (item.image_url) {
@@ -496,7 +486,7 @@ async function retagItem(item, button) {
   setBusy(button, true, "生成中");
   try {
     const payload = await request(`/${encodeURIComponent(item.file_name)}/retag`, { method: "POST" });
-    showToast("结构化标签已生成", item.file_name);
+    showToast("标签已生成", item.file_name);
     if (state.selected?.file_name === item.file_name) {
       state.selected = payload.item;
       renderMetadataEditor(elements.editMetadata, payload.item.metadata);

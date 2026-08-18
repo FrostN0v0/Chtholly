@@ -14,7 +14,7 @@
       <div class="hero-copy">
         <p class="eyebrow">LLM CHAT 资源管理</p>
         <h1>表情库管理</h1>
-        <p class="hero-description">浏览表情资源、检查结构化检索信息，并维护文件与索引的一致性。</p>
+        <p class="hero-description">浏览表情资源、检查标签信息，并维护文件与索引的一致性。</p>
       </div>
       <button class="button button-primary" id="open-upload" type="button">
         <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>
@@ -28,14 +28,10 @@
         <strong id="stat-stored">0</strong>
         <span class="stat-note">当前可用图片资源</span>
       </article>
-      <article class="stat-card stat-structured">
-        <span class="stat-label">结构化标签</span>
-        <strong id="stat-structured">0</strong>
-      </article>
-      <article class="stat-card stat-legacy">
-        <span class="stat-label">旧格式标签</span>
-        <strong id="stat-legacy">0</strong>
-        <span class="stat-note">需要重新生成标签</span>
+      <article class="stat-card stat-indexed">
+        <span class="stat-label">已标注</span>
+        <strong id="stat-indexed">0</strong>
+        <span class="stat-note">可用于检索</span>
       </article>
       <article class="stat-card stat-unindexed">
         <span class="stat-label">待标注</span>
@@ -57,8 +53,7 @@
         </label>
         <div class="filter-group" role="group" aria-label="表情库状态">
           <button class="filter-chip is-active" data-status="all" type="button">全部</button>
-          <button class="filter-chip" data-status="structured" type="button">结构化</button>
-          <button class="filter-chip" data-status="legacy" type="button">旧格式</button>
+          <button class="filter-chip" data-status="indexed" type="button">已标注</button>
           <button class="filter-chip" data-status="unindexed" type="button">待标注</button>
           <button class="filter-chip" data-status="missing" type="button">缺失</button>
         </div>
@@ -103,7 +98,7 @@
     <form class="modal-card" id="edit-form">
       <div class="modal-heading">
         <div>
-          <p class="eyebrow">结构化检索信息</p>
+          <p class="eyebrow">标签信息</p>
           <h2>编辑图片标签</h2>
         </div>
         <button class="icon-button" data-close-dialog="edit-dialog" type="button" aria-label="关闭">×</button>
@@ -115,7 +110,7 @@
           <span id="edit-status" class="status-badge"></span>
         </div>
       </div>
-      <div class="metadata-editor" id="edit-metadata" aria-label="结构化检索字段"></div>
+      <div class="metadata-editor" id="edit-metadata" aria-label="标签字段"></div>
       <div class="modal-actions">
         <button class="button button-secondary" id="retag-current" type="button">重新生成</button>
         <span class="action-spacer"></span>
@@ -149,7 +144,7 @@
       <label class="switch-row">
         <input id="auto-tag" type="checkbox" checked>
         <span class="switch" aria-hidden="true"></span>
-        <span><strong>未填写时自动生成结构化标签</strong><small>使用当前配置的图片标注模型。</small></span>
+        <span><strong>未填写时自动生成标签</strong><small>使用当前配置的图片标注模型。</small></span>
       </label>
       <div class="modal-actions">
         <button class="button button-quiet" data-close-dialog="upload-dialog" type="button">取消</button>
