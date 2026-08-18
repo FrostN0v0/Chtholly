@@ -271,10 +271,6 @@ def _install_handler_stubs(
         tool_events=[],
         relations=[],
         deleted=[],
-        ambient_calls=[],
-        ambient_context=[],
-        image_source_calls=[],
-        image_sources={},
         history=[],
     )
 
@@ -290,17 +286,6 @@ def _install_handler_stubs(
             display_name="Current User",
             participant_ref="participant_current",
         )
-
-    class PerceptionStub:
-        async def ambient_context(self, *_args: Any, **kwargs: Any) -> list[dict[str, Any]]:
-            records.ambient_calls.append(kwargs)
-            return records.ambient_context
-
-        async def message_image_sources(self, session: object, cursor: str) -> list[str]:
-            records.image_source_calls.append((session, cursor))
-            return records.image_sources.get(cursor, [])
-
-    perception = PerceptionStub()
 
     async def get_relation(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
         return _relation_state()
@@ -344,7 +329,6 @@ def _install_handler_stubs(
     monkeypatch.setattr(module, "build_image_notes", no_image_notes)
     monkeypatch.setattr(module, "resolve_merged_forward_messages", no_forward_messages)
     monkeypatch.setattr(module, "resolve_chat_identity", resolve_identity)
-    monkeypatch.setattr(module, "get_channel_perception", lambda: perception)
     monkeypatch.setattr(module, "get_relation", get_relation)
     monkeypatch.setattr(module, "get_mood", get_mood)
     monkeypatch.setattr(module, "load_memory_context", load_memory)
@@ -578,9 +562,11 @@ def test_recent_channel_context_intent_is_narrow(text: str, expected: bool) -> N
     assert requests_recent_channel_context(text) is expected
 
 
-def test_system_prompt_allows_bounded_history_pagination_and_historical_image_resend() -> None:
-    assert "before_cursor=next_cursor" in SYSTEM_SCAFFOLD
-    assert "不得把默认现场条数当成不可跨越的历史上限" in SYSTEM_SCAFFOLD
+def test_system_prompt_delegates_channel_history_and_image_recognition_to_tools() -> None:
+    assert "同频道群聊历史不会自动注入" in SYSTEM_SCAFFOLD
+    assert "当前消息和普通会话历史已经足够时不得调用 read_channel_messages" in SYSTEM_SCAFFOLD
+    assert "describe_channel_image" in SYSTEM_SCAFFOLD
+    assert "不会自动识别图片" in SYSTEM_SCAFFOLD
     assert "send_channel_image" in SYSTEM_SCAFFOLD
     assert "不得谎称只能描述、无法取得图片" in SYSTEM_SCAFFOLD
     assert "不得把头像 URL 复制给 send_external_image" in SYSTEM_SCAFFOLD
@@ -845,17 +831,22 @@ def test_resolve_fact_embedding_update_backfills_missing_existing_embedding():
 
 
 @pytest.mark.asyncio
-async def test_vision_completion_forwards_timeout(monkeypatch: pytest.MonkeyPatch):
-    seen: list[float] = []
+async def test_vision_completion_forwards_timeout_without_retry_amplification(monkeypatch: pytest.MonkeyPatch):
+    seen: list[tuple[float, int]] = []
 
     async def fake_acompletion(*args: object, **kwargs: object) -> object:
-        seen.append(cast(float, kwargs["timeout"]))
+        seen.append((cast(float, kwargs["timeout"]), cast(int, kwargs["max_retries"])))
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
 
     monkeypatch.setattr(
         vision_module,
         "get_model_config",
-        lambda name: SimpleNamespace(name="vision-model", base_url="https://example.test", api_key="key", extra={}),
+        lambda name: SimpleNamespace(
+            name="vision-model",
+            base_url="https://example.test",
+            api_key="key",
+            extra={"max_retries": 9},
+        ),
     )
     monkeypatch.setattr(vision_module.litellm, "acompletion", fake_acompletion)
     config = LLMChatConfig()
@@ -864,7 +855,7 @@ async def test_vision_completion_forwards_timeout(monkeypatch: pytest.MonkeyPatc
     await vision_completion(config, "data:image/png;base64,AA==", "system", "describe", timeout=VISION_DESCRIBE_TIMEOUT)
     await vision_completion(config, "data:image/png;base64,AA==", "system", "tag", timeout=VISION_TAG_TIMEOUT)
 
-    assert seen == [VISION_DESCRIBE_TIMEOUT, VISION_TAG_TIMEOUT]
+    assert seen == [(VISION_DESCRIBE_TIMEOUT, 0), (VISION_TAG_TIMEOUT, 0)]
 
 
 def test_collect_quoted_message_keeps_image_only_bot_attribution():
@@ -1779,6 +1770,10 @@ def test_tool_argument_projection_redacts_secrets_and_large_payloads() -> None:
         "read_channel_messages",
         {"limit": 20, "participant_ref": "participant_0123abcdef", "before_cursor": "42"},
     )
+    description = project_tool_arguments(
+        "describe_channel_image",
+        {"image_ref": "channel_image_secret"},
+    )
     channel_image = project_tool_arguments(
         "send_channel_image",
         {"image_ref": "channel_image_secret"},
@@ -1796,6 +1791,7 @@ def test_tool_argument_projection_redacts_secrets_and_large_payloads() -> None:
     assert external == {"source_type": "inline_data", "source_chars": 28}
     assert image == {"selection_mode": "paths", "path_count": 2, "context": ""}
     assert history == {"limit": 20, "filtered": True, "paged": True}
+    assert description == {"requested": True}
     assert channel_image == {"requested": True}
     assert avatar == {"requested": True}
     assert "SECRET" not in repr(external)
@@ -1846,6 +1842,23 @@ def test_channel_perception_tool_trace_keeps_only_bounded_metadata() -> None:
     assert "private channel text" not in serialized
     assert "channel_image_secret" not in serialized
     assert "sensitive image description" not in serialized
+
+    description_recorder = ToolTraceRecorder()
+    description_call = description_recorder.start(
+        "describe_channel_image",
+        {"image_ref": "channel_image_secret"},
+    )
+    description_recorder.finish_success(
+        description_call,
+        json.dumps({"available": True, "description": "sensitive image description"}, ensure_ascii=False),
+        before=DeliverySnapshot(),
+        after=DeliverySnapshot(),
+    )
+    description_event = description_recorder.events[0]
+    assert description_event.arguments == {"requested": True}
+    assert description_event.outcome == {"available": True, "reason": "", "description_chars": 27}
+    assert "channel_image_secret" not in repr(description_event)
+    assert "sensitive image description" not in repr(description_event)
 
 
 def test_tool_activity_budget_prefers_newest_records() -> None:
@@ -2696,38 +2709,19 @@ async def test_on_chat_injects_recent_tool_activity_and_persists_current_trace(
 
 
 @pytest.mark.asyncio
-async def test_on_chat_injects_bounded_ambient_context_without_persisting_it(
+async def test_on_chat_leaves_channel_history_to_model_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _temporary_chat_handler(
-        {
-            "eval_every_n": 1,
-            "ambient_context_max_messages": 6,
-            "ambient_context_max_chars": 1234,
-        }
-    ) as harness:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
         module = harness.module
         records = _install_handler_stubs(monkeypatch, module)
-        records.ambient_context = [
-            {
-                "cursor": "7",
-                "participant_ref": "participant_other",
-                "display_name": "Other Member",
-                "content": "AMBIENT_SENTINEL [Image]",
-                "image_count": 1,
-                "minutes_ago": 1,
-                "replies_to_recent_message": False,
-            }
-        ]
-        records.image_sources = {"7": ["https://example.com/recent.png"]}
-        captured: list[list[dict[str, Any]]] = []
         captured_refs: list[str] = []
         captured_image_references: list[Any] = []
 
         def compose_prompt(*_args: Any, **kwargs: Any) -> str:
-            captured.append(kwargs["ambient_channel_context"])
+            assert "ambient_channel_context" not in kwargs
             captured_refs.append(kwargs["current_participant_ref"])
-            return "ambient system"
+            return "on-demand context system"
 
         async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
             captured_image_references.append(kwargs["channel_image_references"])
@@ -2735,35 +2729,14 @@ async def test_on_chat_injects_bounded_ambient_context_without_persisting_it(
 
         monkeypatch.setattr(module, "compose_persona_prompt", compose_prompt)
         monkeypatch.setattr(module, "generate_chat_response", generate)
-        channel_images_module = sys.modules[module.enrich_channel_message_images.__module__]
-
-        async def describe_image(*_args: Any, **_kwargs: Any) -> str:
-            return "a recent group image"
-
-        monkeypatch.setattr(channel_images_module, "describe_image", describe_image)
         session = _ChatSession("current turn")
 
         result = await module.on_chat.callable_target(session, SimpleNamespace())
 
         assert result is BLOCK
-        assert captured == [records.ambient_context]
         assert captured_refs == ["participant_current"]
-        assert "cursor" not in captured[0][0]
-        image_view = cast(list[dict[str, object]], captured[0][0]["images"])[0]
-        assert image_view["description"] == "a recent group image"
-        image_ref = cast(str, image_view["image_ref"])
-        target = captured_image_references[0].resolve(image_ref)
-        assert (target.cursor, target.image_index) == ("7", 1)
-        assert records.image_source_calls == [(session, "7")]
-        assert records.ambient_calls == [
-            {
-                "max_messages": 6,
-                "max_chars": 1234,
-                "exclude_message_id": "current-message",
-            }
-        ]
+        assert len(captured_image_references) == 1
         assert records.appended[0][-1] == "current turn"
-        assert "AMBIENT_SENTINEL" not in json.dumps(records.evaluations, ensure_ascii=False)
 
 
 @pytest.mark.asyncio
@@ -2788,15 +2761,6 @@ async def test_on_chat_excludes_addressed_history_for_explicit_recent_channel_su
                 offset=1,
             ),
         ]
-        records.ambient_context = [
-            {
-                "participant_ref": "participant_other",
-                "display_name": "Other Member",
-                "content": "CURRENT_AMBIENT_SENTINEL",
-                "minutes_ago": 1,
-                "replies_to_recent_message": False,
-            }
-        ]
         captured_history: list[list[Any]] = []
         original_build_chat_messages = module.build_chat_messages
 
@@ -2817,6 +2781,39 @@ async def test_on_chat_excludes_addressed_history_for_explicit_recent_channel_su
 
         assert result is BLOCK
         assert captured_history == [[]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("initial_counter", "expected_evaluations", "saved_counter"),
+    [(3, 0, 4), (4, 1, 0)],
+)
+async def test_on_chat_runs_relationship_evaluation_every_five_replies(
+    monkeypatch: pytest.MonkeyPatch,
+    initial_counter: int,
+    expected_evaluations: int,
+    saved_counter: int,
+) -> None:
+    async with _temporary_chat_handler({"eval_every_n": 5}) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+        relation = _relation_state()
+        relation.eval_counter = initial_counter
+
+        async def get_relation(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            return relation
+
+        async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            return _handler_response("Current reply")
+
+        monkeypatch.setattr(module, "get_relation", get_relation)
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        result = await module.on_chat.callable_target(_ChatSession("current turn"), SimpleNamespace())
+
+        assert result is BLOCK
+        assert len(records.evaluations) == expected_evaluations
+        assert records.relations[0][1]["eval_counter"] == saved_counter
 
 
 @pytest.mark.asyncio
@@ -3176,7 +3173,7 @@ async def test_addressed_prefixed_command_is_not_claimed_by_chat(monkeypatch: py
 async def test_on_chat_passes_forwarded_nodes_as_structured_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _temporary_chat_handler() as harness:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
         module = harness.module
         records = _install_handler_stubs(monkeypatch, module)
         forwarded: list[ForwardedMessage] = [
@@ -3214,7 +3211,7 @@ async def test_on_chat_passes_forwarded_nodes_as_structured_context(
 async def test_on_chat_passes_ordinary_quoted_text_as_structured_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _temporary_chat_handler() as harness:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
         module = harness.module
         records = _install_handler_stubs(monkeypatch, module)
         observed_payload: dict[str, Any] = {}
@@ -3426,10 +3423,13 @@ def test_yaml_and_default_llm_chat_configuration_are_exactly_synchronized():
     for key, expected in expected_memory_values.items():
         assert getattr(defaults, key) == expected
         assert llm_chat_plugin[key] == expected
-    assert defaults.eval_every_n == llm_chat_plugin["eval_every_n"] == 1
+    assert defaults.eval_every_n == llm_chat_plugin["eval_every_n"] == 5
     assert defaults.model_request_timeout == llm_chat_plugin["model_request_timeout"] == 90.0
     assert defaults.media_request_timeout == llm_chat_plugin["media_request_timeout"] == 300.0
     assert defaults.eval_request_timeout == llm_chat_plugin["eval_request_timeout"] == 60.0
+    assert defaults.channel_message_max_images == llm_chat_plugin["channel_message_max_images"] == 12
+    assert "ambient_context_max_messages" not in llm_chat_plugin
+    assert "ambient_context_max_chars" not in llm_chat_plugin
     assert defaults.web_search_enabled is False
     assert defaults.exa_api_key is None
     assert defaults.exa_search_type == llm_chat_plugin["exa_search_type"] == "auto"

@@ -18,10 +18,6 @@ class LLMChatConfig(BasicConfModel):
     """Character text ONLY; framework rules live in SYSTEM_SCAFFOLD."""
     context_window: int = 20
     """Number of history messages loaded per reply."""
-    ambient_context_max_messages: int = 8
-    """Maximum recent non-addressed participant messages injected per reply."""
-    ambient_context_max_chars: int = 4000
-    """Maximum serialized characters for ambient public-channel context."""
     tool_context_max_events: int = 8
     """Maximum recent tool events injected into one chat prompt."""
     tool_context_max_chars: int = 3500
@@ -38,8 +34,8 @@ class LLMChatConfig(BasicConfModel):
     """Maximum combined forwarded-node characters exposed per generation."""
     merged_forward_max_described_images: int = 12
     """Maximum forwarded images described through the vision model."""
-    channel_message_max_described_images: int = 12
-    """Maximum recent channel-message images resolved and described per context load."""
+    channel_message_max_images: int = 12
+    """Maximum channel-message images exposed as generation-local references per history page."""
     model: str | None = None
     """Model alias for conversation; None uses the llm plugin default."""
     eval_model: str | None = None
@@ -50,7 +46,7 @@ class LLMChatConfig(BasicConfModel):
     """Per-completion timeout when the latest user explicitly requests media."""
     eval_request_timeout: float = 60.0
     """Per-completion timeout for the relationship evaluator."""
-    eval_every_n: int = 1
+    eval_every_n: int = 5
     """Run the relationship evaluator every N bot replies (per user)."""
     eval_context_window: int = 8
     """Recent history lines included as evaluator context."""

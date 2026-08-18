@@ -32,6 +32,7 @@ _TOOL_CALL_LIMIT: ContextVar[int] = ContextVar(
 )
 _INTERNAL_REFERENCE_TOOLS = {
     "describe_channel_participant_avatar",
+    "describe_channel_image",
     "find_channel_participants",
     "read_channel_messages",
     "send_channel_image",

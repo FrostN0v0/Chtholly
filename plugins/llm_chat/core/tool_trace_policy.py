@@ -38,6 +38,7 @@ _DELIVERY_TOOLS = {
 }
 _OBSERVATION_TOOLS = {
     "describe_channel_participant_avatar",
+    "describe_channel_image",
     "find_channel_participants",
     "get_local_time",
     "list_image_resources",
@@ -82,6 +83,8 @@ def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> d
             "filtered": bool(arguments.get("participant_ref")),
             "paged": bool(arguments.get("before_cursor")),
         }
+    if tool_name == "describe_channel_image":
+        return {"requested": bool(arguments.get("image_ref"))}
     if tool_name == "describe_channel_participant_avatar":
         return {"requested": bool(arguments.get("participant_ref"))}
     if tool_name == "send_text":
@@ -294,6 +297,12 @@ def _project_tool_result(
             "image_count": image_count,
             "has_older": bool(parsed.get("next_cursor")),
             "truncated": parsed.get("truncated") is True,
+        }
+    if tool_name == "describe_channel_image" and parsed is not None:
+        return {
+            "available": parsed.get("available") is True,
+            "reason": compact_text(parsed.get("reason"), MAX_ARGUMENT_TEXT),
+            "description_chars": text_length(parsed.get("description")),
         }
     if tool_name == "describe_channel_participant_avatar" and parsed is not None:
         return {

@@ -315,6 +315,7 @@ def _load_local_modules() -> Iterator[SimpleNamespace]:
         participant_tools = importlib.import_module("plugins.llm_chat.tools.find_channel_participants")
         history_tools = importlib.import_module("plugins.llm_chat.tools.read_channel_messages")
         channel_image_tools = importlib.import_module("plugins.llm_chat.tools.send_channel_image")
+        description_tools = importlib.import_module("plugins.llm_chat.tools.describe_channel_image")
         avatar_tools = importlib.import_module("plugins.llm_chat.tools.describe_channel_participant_avatar")
         yield SimpleNamespace(
             web_access=web_access,
@@ -327,6 +328,7 @@ def _load_local_modules() -> Iterator[SimpleNamespace]:
             participant_tools=participant_tools,
             history_tools=history_tools,
             channel_image_tools=channel_image_tools,
+            description_tools=description_tools,
             avatar_tools=avatar_tools,
         )
     finally:
@@ -657,15 +659,17 @@ async def test_actual_tool_runtime_uses_configured_gate_order_and_disposal(
         assert delta_names == runtime.registered_tools
         assert runtime.registered_tools[:3] == ["send_image", "send_text", "send_merged_forward"]
         assert runtime.registered_tools[4:6] == ["send_external_image", "get_local_time"]
-        assert runtime.registered_tools[6:10] == [
+        assert runtime.registered_tools[6:11] == [
             "find_channel_participants",
             "read_channel_messages",
+            "describe_channel_image",
             "send_channel_image",
             "describe_channel_participant_avatar",
         ]
         schemas = {schema["function"]["name"]: schema["function"] for schema in delta}
-        for name in runtime.registered_tools[6:10]:
+        for name in runtime.registered_tools[6:11]:
             assert "session" not in schemas[name]["parameters"]["properties"]
+        assert schemas["describe_channel_image"]["parameters"]["required"] == ["image_ref"]
         assert schemas["send_channel_image"]["parameters"]["required"] == ["image_ref"]
         assert schemas["describe_channel_participant_avatar"]["parameters"]["required"] == ["participant_ref"]
         assert [
@@ -772,14 +776,14 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
         history_rows.append((channel_id, user_id, name, role, content))
         return object()
 
-    monkeypatch.setattr(local_modules.channel_images, "describe_image", describe_image)
+    monkeypatch.setattr(local_modules.description_tools, "describe_image", describe_image)
     perception = PerceptionStub()
     session = cast(Any, ToolSession())
 
     def provider() -> Any:
         return perception
 
-    config = local_modules.config.LLMChatConfig(channel_message_max_described_images=4)
+    config = local_modules.config.LLMChatConfig(channel_message_max_images=4)
     references = local_modules.channel_images.ChannelImageReferences()
     async with _temporary_plugin() as harness:
         find_registered = local_modules.participant_tools.register_find_channel_participants(
@@ -790,7 +794,13 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
             harness.dispatcher,
             provider,
             config,
-            warnings.append,
+        )
+        describe_registered = local_modules.description_tools.register_describe_channel_image(
+            harness.dispatcher,
+            local_modules.description_tools.ChannelImageDescriptionContext(
+                config=config,
+                get_perception=provider,
+            ),
         )
         send_image_registered = local_modules.channel_image_tools.register_send_channel_image(
             harness.dispatcher,
@@ -827,6 +837,9 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
                 await avatar_registered.callable_target(participant_ref=" participant_a ", session=session)
             )
             message_image_ref = history_result["messages"][0]["images"][0]["image_ref"]
+            message_description = json.loads(
+                await describe_registered.callable_target(image_ref=message_image_ref, session=session)
+            )
             message_send_result = await send_image_registered.callable_target(
                 image_ref=message_image_ref,
                 session=session,
@@ -839,15 +852,16 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
     assert calls == [
         ("find", session, "Alice", 10),
         ("history", session, 50, "", "participant_a"),
-        ("message_images", session, "42"),
         ("history", session, 20, "older-page", "participant_a"),
         ("avatar", session, "participant_a"),
+        ("message_images", session, "42"),
         ("message_images", session, "42"),
     ]
     assert find_result == {"participants": [{"participant_ref": "participant_a", "display_name": "Alice"}]}
     assert history_result["next_cursor"] == "older-page"
     assert history_result["messages"][0]["image_count"] == 1
-    assert history_result["messages"][0]["images"][0]["description"] == "a blue chart"
+    assert "description" not in history_result["messages"][0]["images"][0]
+    assert message_description == {"available": True, "description": "a blue chart"}
     assert older_result == {
         "messages": [{"participant_ref": "participant_a", "content": "older context", "image_count": 0}],
         "next_cursor": "",

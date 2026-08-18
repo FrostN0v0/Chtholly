@@ -41,6 +41,7 @@ async def vision_completion(
 ) -> str:
     """Call the configured vision model and return stripped text content."""
     model = get_model_config(config.image_tag_model)
+    extra = {key: value for key, value in model.extra.items() if key not in {"timeout", "max_retries"}}
     response = await litellm.acompletion(
         model=model.name,
         messages=[
@@ -56,7 +57,8 @@ async def vision_completion(
         base_url=model.base_url,
         api_key=model.api_key,
         timeout=timeout,
-        **model.extra,
+        max_retries=0,
+        **extra,
     )
     completion = cast(_CompletionLike, response)
     content = completion.choices[0].message.content

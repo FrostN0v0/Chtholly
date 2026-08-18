@@ -21,7 +21,6 @@ from .identity import resolve_chat_identity
 from .core.eval import apply_deltas
 from .core.types import ChatMessage
 from .generation import response_content, generate_chat_response
-from .perception import get_channel_perception
 from .web.policy import normalize_web_access_limits
 from .core.errors import summarize_exception
 from .chat_context import (
@@ -46,7 +45,7 @@ from .persona.store import (
     append_message,
     delete_message,
 )
-from .channel_images import ChannelImageReferences, enrich_channel_message_images
+from .channel_images import ChannelImageReferences
 from .persona.runner import run_evaluation
 from .turn_lifecycle import ActiveChatTurn
 from .forward_context import resolve_merged_forward_messages
@@ -139,34 +138,7 @@ async def on_chat(session: Session, ctx: Contexts):
         return BLOCK
     user_id = identity.user_id
     user_name = identity.display_name
-    current_message = session.event.message
-    current_message_id = current_message.id if current_message is not None else ""
     channel_image_references = ChannelImageReferences()
-    try:
-        perception = get_channel_perception()
-        ambient_channel_context = await perception.ambient_context(
-            session,
-            max_messages=config.ambient_context_max_messages,
-            max_chars=config.ambient_context_max_chars,
-            exclude_message_id=current_message_id,
-        )
-    except Exception as exc:
-        _LOGGER.warning(f"ambient channel context load failed: {summarize_exception(exc)}")
-        ambient_channel_context = []
-    else:
-        try:
-            await enrich_channel_message_images(
-                config,
-                session,
-                perception,
-                ambient_channel_context,
-                channel_image_references,
-                _LOGGER.warning,
-            )
-        except Exception as exc:
-            _LOGGER.warning(f"ambient channel image enrichment failed: {summarize_exception(exc)}")
-    for ambient_message in ambient_channel_context:
-        ambient_message.pop("cursor", None)
 
     rel = await get_relation(user_id, channel_id)
     mood = await get_mood(channel_id)
@@ -222,7 +194,6 @@ async def on_chat(session: Session, ctx: Contexts):
         profile=memory_context.chat_profile,
         relevant_memories=memory_context.relevant_memories,
         recent_tool_activity=recent_tool_activity,
-        ambient_channel_context=ambient_channel_context,
         user_name=user_name,
         current_participant_ref=identity.participant_ref,
         web_search_limit=web_limits.search_limit,

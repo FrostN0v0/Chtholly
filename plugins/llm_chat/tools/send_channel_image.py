@@ -15,11 +15,7 @@ from ..core.types import JSONType
 from ..perception import PerceptionProvider
 from ._registration import register_tool
 from ..core.delivery import DeliveryError, reserve_media_message, current_llm_chat_delivery
-from ..channel_images import (
-    MessageImageTarget,
-    ParticipantAvatarTarget,
-    current_channel_image_references,
-)
+from ..channel_images import ChannelImageReferenceError, resolve_channel_image_source
 from ..core.image_source import fetch_image_bytes, raw_to_image_data_url
 
 HistoryAppender = Callable[[str, str, str, str, str], Awaitable[object]]
@@ -41,21 +37,10 @@ async def _resolve_source(
     image_ref: str,
     runtime: ChannelImageToolContext,
 ) -> str:
-    references = current_channel_image_references()
-    target = references.resolve(image_ref.strip()) if references is not None else None
-    if isinstance(target, ParticipantAvatarTarget):
-        return target.source
-    if not isinstance(target, MessageImageTarget):
-        raise DeliveryError("A valid image_ref from current channel context is required")
     try:
-        sources = await runtime.get_perception().message_image_sources(session, target.cursor)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        raise DeliveryError("The channel image is no longer available") from exc
-    if target.image_index > len(sources):
-        raise DeliveryError("The channel image is no longer available")
-    return sources[target.image_index - 1]
+        return await resolve_channel_image_source(session, image_ref, runtime.get_perception())
+    except ChannelImageReferenceError as exc:
+        raise DeliveryError(str(exc)) from exc
 
 
 async def _build_channel_image(
@@ -83,13 +68,13 @@ def register_send_channel_image(
     """Register delivery for generation-authorized channel images."""
 
     async def send_channel_image(session: Session, image_ref: str) -> str:
-        """Send one image already exposed in the current channel context.
+        """Send one image exposed by an on-demand channel lookup.
 
-        Use only an exact opaque image_ref returned in ambient_channel_context,
-        by read_channel_messages, or by describe_channel_participant_avatar. The
-        reference is generation-local, cannot be guessed or reused later, and
-        must never be shown to the user. The original image is downloaded and
-        sent as inline bytes without exposing its source URL.
+        Use only an exact opaque image_ref returned by read_channel_messages or
+        describe_channel_participant_avatar. Visual recognition is not required
+        before sending. The reference is generation-local, cannot be guessed or
+        reused later, and must never be shown to the user. The original image is
+        downloaded and sent as inline bytes without exposing its source URL.
 
         Args:
             image_ref: Exact opaque image_ref from current channel context.

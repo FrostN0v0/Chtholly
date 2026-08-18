@@ -41,6 +41,7 @@ from .tools.send_external_image import ExternalImageToolContext, register_send_e
 from .tools.send_merged_forward import MergedForwardToolContext, register_send_merged_forward
 from .tools.list_image_resources import register_list_image_resources
 from .tools.read_channel_messages import register_read_channel_messages
+from .tools.describe_channel_image import ChannelImageDescriptionContext, register_describe_channel_image
 from .tools.find_channel_participants import register_find_channel_participants
 from .tools.describe_channel_participant_avatar import register_describe_channel_participant_avatar
 
@@ -85,14 +86,19 @@ registered_tools.append("get_local_time")
 
 find_channel_participants = register_find_channel_participants(tools, get_channel_perception)
 registered_tools.append("find_channel_participants")
-
 read_channel_messages = register_read_channel_messages(
     tools,
     get_channel_perception,
     config,
-    _LOGGER.warning,
 )
 registered_tools.append("read_channel_messages")
+channel_image_description_context = ChannelImageDescriptionContext(
+    config=config,
+    get_perception=get_channel_perception,
+)
+describe_channel_image = register_describe_channel_image(tools, channel_image_description_context)
+registered_tools.append("describe_channel_image")
+
 
 channel_image_context = ChannelImageToolContext(
     get_perception=get_channel_perception,

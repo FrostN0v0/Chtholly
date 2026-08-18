@@ -100,9 +100,7 @@ plugins:
       保持鲜明情绪和角色口吻，不使用客服腔、模板化客套或刻意堆叠语气词。遇到知识、代码和实际问题时仍给出准确、有用的回答，让人格影响表达方式而不是事实。
     allowed_commands: ["echo", "help"]
     context_window: 20
-    ambient_context_max_messages: 8
-    ambient_context_max_chars: 4000
-    channel_message_max_described_images: 12
+    channel_message_max_images: 12
     # Recent tool activity is channel-scoped, bounded, and excluded from persona evaluation.
     tool_context_max_events: 8
     tool_context_max_chars: 3500
@@ -135,7 +133,7 @@ plugins:
     model_request_timeout: 90.0
     media_request_timeout: 300.0
     eval_request_timeout: 60.0
-    eval_every_n: 1
+    eval_every_n: 5
     image_tag_model: doubao
     tag_batch_size: 50
     # Memory policy: compact chat retrieval, complete evaluator facts, conservative writes.
