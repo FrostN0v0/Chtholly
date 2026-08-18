@@ -700,18 +700,24 @@ h2 {
   letter-spacing: 0.025em;
 }
 
-textarea {
+textarea,
+.metadata-entry input {
   width: 100%;
-  resize: vertical;
   border: 1px solid var(--line);
   border-radius: 12px;
   outline: 0;
   background: var(--surface-soft);
   color: var(--text);
+  font: inherit;
   padding: 12px 14px;
 }
 
-textarea:focus {
+textarea {
+  resize: vertical;
+}
+
+textarea:focus,
+.metadata-entry input:focus {
   border-color: var(--accent);
 }
 
@@ -719,6 +725,133 @@ textarea:focus {
   margin: -10px 0 0;
   color: var(--text-soft);
   font-size: 11px;
+}
+
+.metadata-editor {
+  display: grid;
+  gap: 14px;
+}
+
+.metadata-field {
+  display: grid;
+  gap: 7px;
+}
+
+.metadata-field-label {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.metadata-field-hint,
+.metadata-panel > p {
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.metadata-list-field {
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-soft);
+}
+
+.metadata-field-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.metadata-entry-count {
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.metadata-entry-list {
+  display: grid;
+  gap: 8px;
+}
+
+.metadata-entry-list:empty::before {
+  color: var(--text-soft);
+  content: "暂无条目";
+  font-size: 12px;
+}
+
+.metadata-entry-list[data-metadata-list="tags"] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.metadata-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.metadata-entry input {
+  min-width: 0;
+  padding: 9px 11px;
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.metadata-entry-remove,
+.metadata-entry-add {
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.metadata-entry-remove {
+  padding: 0 10px;
+}
+
+.metadata-entry-remove:hover {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+  color: var(--danger);
+}
+
+.metadata-entry-add {
+  justify-self: start;
+  padding: 0 12px;
+  border-style: dashed;
+}
+
+.metadata-entry-add:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.metadata-entry-add:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.metadata-panel {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-soft);
+}
+
+.metadata-panel summary {
+  cursor: pointer;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.metadata-panel[open] summary {
+  margin-bottom: 2px;
 }
 
 .drop-zone {
@@ -994,6 +1127,14 @@ textarea:focus {
 
   .meme-grid {
     grid-template-columns: 1fr;
+  }
+
+  .metadata-entry-list[data-metadata-list="tags"] {
+    grid-template-columns: 1fr;
+  }
+
+  .metadata-entry-remove {
+    min-height: 42px;
   }
 
   .modal-card {

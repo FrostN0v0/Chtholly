@@ -18,6 +18,53 @@ const EMPTY_METADATA = {
   avoid_when: [],
   tags: [],
 };
+const METADATA_FIELDS = [
+  {
+    key: "text",
+    label: "图片原文",
+    kind: "textarea",
+    rows: 2,
+    maxLength: 120,
+    placeholder: "没有清晰文字可留空",
+    hint: "按图片内容填写，保留原有标点。",
+  },
+  {
+    key: "meaning",
+    label: "表达含义",
+    kind: "textarea",
+    rows: 3,
+    maxLength: 160,
+    placeholder: "这张表情实际表达什么语气和意思",
+    hint: "描述整张图的实际含义，不要只写人物外观。",
+  },
+  {
+    key: "use_when",
+    label: "适用场景",
+    kind: "list",
+    maxItems: 4,
+    maxLength: 90,
+    placeholder: "例如：朋友恶作剧后吐槽",
+    addLabel: "添加适用场景",
+  },
+  {
+    key: "avoid_when",
+    label: "避免使用",
+    kind: "list",
+    maxItems: 4,
+    maxLength: 90,
+    placeholder: "例如：早上好",
+    addLabel: "添加避用短句",
+  },
+  {
+    key: "tags",
+    label: "检索标签",
+    kind: "list",
+    maxItems: 12,
+    maxLength: 40,
+    placeholder: "例如：嗔怪",
+    addLabel: "添加标签",
+  },
+];
 const ERROR_MESSAGES = {
   catalog_unavailable: "表情库暂时无法读取",
   meme_not_found: "没有找到对应的表情记录",
@@ -64,13 +111,13 @@ const elements = {
   editImage: document.querySelector("#edit-image"),
   editFileName: document.querySelector("#edit-file-name"),
   editStatus: document.querySelector("#edit-status"),
-  editTags: document.querySelector("#edit-tags"),
+  editMetadata: document.querySelector("#edit-metadata"),
   saveTags: document.querySelector("#save-tags"),
   retagCurrent: document.querySelector("#retag-current"),
   uploadDialog: document.querySelector("#upload-dialog"),
   uploadForm: document.querySelector("#upload-form"),
   uploadInput: document.querySelector("#upload-files"),
-  uploadTags: document.querySelector("#upload-tags"),
+  uploadMetadata: document.querySelector("#upload-metadata"),
   autoTag: document.querySelector("#auto-tag"),
   dropZone: document.querySelector("#drop-zone"),
   uploadQueue: document.querySelector("#upload-queue"),
@@ -144,27 +191,130 @@ function displayTags(item) {
     : [];
 }
 
-function metadataEditorValue(item) {
-  return JSON.stringify(item?.metadata || EMPTY_METADATA, null, 2);
+function normalizeMetadata(value) {
+  const payload = value && typeof value === "object" && !Array.isArray(value) ? value : EMPTY_METADATA;
+  return {
+    text: typeof payload.text === "string" ? payload.text : "",
+    meaning: typeof payload.meaning === "string" ? payload.meaning : "",
+    use_when: Array.isArray(payload.use_when) ? payload.use_when.filter((entry) => typeof entry === "string") : [],
+    avoid_when: Array.isArray(payload.avoid_when) ? payload.avoid_when.filter((entry) => typeof entry === "string") : [],
+    tags: Array.isArray(payload.tags) ? payload.tags.filter((entry) => typeof entry === "string") : [],
+  };
 }
 
-function parseMetadataInput(value) {
-  let payload;
-  try {
-    payload = JSON.parse(value);
-  } catch {
-    throw new Error("请输入合法的 JSON 对象");
+function metadataFieldId(container, key) {
+  return `${container.id}-${key.replaceAll("_", "-")}`;
+}
+
+function metadataListEntries(container, key) {
+  return Array.from(container.querySelectorAll(`[data-metadata-entry="${key}"]`));
+}
+
+function updateMetadataListState(container, field) {
+  const entries = metadataListEntries(container, field.key);
+  const count = container.querySelector(`[data-metadata-count="${field.key}"]`);
+  const add = container.querySelector(`[data-metadata-add="${field.key}"]`);
+  if (count) count.textContent = `${entries.length} / ${field.maxItems}`;
+  if (add) add.disabled = entries.length >= field.maxItems;
+}
+
+function appendMetadataEntry(container, field, value = "", focus = false) {
+  const list = container.querySelector(`[data-metadata-list="${field.key}"]`);
+  if (!list) return;
+  const existing = metadataListEntries(container, field.key);
+  const lastInput = existing.at(-1);
+  if (!value && lastInput && !lastInput.value.trim()) {
+    if (focus) lastInput.focus();
+    return;
   }
-  if (!payload || Array.isArray(payload) || typeof payload !== "object") {
-    throw new Error("标签内容必须是 JSON 对象");
-  }
-  if (typeof payload.text !== "string" || typeof payload.meaning !== "string") {
-    throw new Error("text 和 meaning 必须是字符串");
-  }
-  for (const key of ["use_when", "avoid_when", "tags"]) {
-    if (!Array.isArray(payload[key]) || payload[key].some((entry) => typeof entry !== "string")) {
-      throw new Error(`${key} 必须是字符串数组`);
+  if (existing.length >= field.maxItems) return;
+
+  const row = createElement("div", "metadata-entry");
+  const input = document.createElement("input");
+  input.type = "text";
+  input.maxLength = field.maxLength;
+  input.placeholder = field.placeholder;
+  input.value = value;
+  input.dataset.metadataEntry = field.key;
+  input.setAttribute("aria-label", `${field.label}条目`);
+  const remove = createElement("button", "metadata-entry-remove", "移除");
+  remove.type = "button";
+  remove.addEventListener("click", () => {
+    row.remove();
+    updateMetadataListState(container, field);
+  });
+  row.append(input, remove);
+  list.append(row);
+  updateMetadataListState(container, field);
+  if (focus) input.focus();
+}
+
+function renderMetadataEditor(container, value = EMPTY_METADATA) {
+  const metadata = normalizeMetadata(value);
+  const fields = METADATA_FIELDS.map((field) => {
+    if (field.kind === "textarea") {
+      const wrapper = createElement("label", "metadata-field");
+      const input = document.createElement("textarea");
+      input.id = metadataFieldId(container, field.key);
+      input.rows = field.rows;
+      input.maxLength = field.maxLength;
+      input.placeholder = field.placeholder;
+      input.value = metadata[field.key];
+      input.dataset.metadataScalar = field.key;
+      wrapper.htmlFor = input.id;
+      wrapper.append(
+        createElement("span", "metadata-field-label", field.label),
+        input,
+        createElement("small", "metadata-field-hint", field.hint),
+      );
+      return wrapper;
     }
+
+    const wrapper = createElement("section", "metadata-field metadata-list-field");
+    wrapper.setAttribute("aria-label", field.label);
+    const heading = createElement("div", "metadata-field-heading");
+    heading.append(
+      createElement("strong", "metadata-field-label", field.label),
+      createElement("span", "metadata-entry-count", `0 / ${field.maxItems}`),
+    );
+    const list = createElement("div", "metadata-entry-list");
+    list.dataset.metadataList = field.key;
+    const add = createElement("button", "metadata-entry-add", `＋ ${field.addLabel}`);
+    add.type = "button";
+    add.dataset.metadataAdd = field.key;
+    add.addEventListener("click", () => appendMetadataEntry(container, field, "", true));
+    wrapper.append(heading, list, add);
+    return wrapper;
+  });
+  container.replaceChildren(...fields);
+  for (const field of METADATA_FIELDS.filter((candidate) => candidate.kind === "list")) {
+    metadata[field.key].forEach((entry) => appendMetadataEntry(container, field, entry));
+    updateMetadataListState(container, field);
+  }
+}
+
+function readMetadataEditor(container, { optional = false } = {}) {
+  const payload = { text: "", meaning: "", use_when: [], avoid_when: [], tags: [] };
+  container.querySelectorAll("[data-metadata-scalar]").forEach((input) => {
+    payload[input.dataset.metadataScalar] = input.value.trim();
+  });
+  for (const field of METADATA_FIELDS.filter((candidate) => candidate.kind === "list")) {
+    const seen = new Set();
+    payload[field.key] = metadataListEntries(container, field.key)
+      .map((entry) => entry.value.trim())
+      .filter((entry) => {
+        if (!entry || seen.has(entry)) return false;
+        seen.add(entry);
+        return true;
+      });
+  }
+  const hasPositiveContent = Boolean(
+    payload.text || payload.meaning || payload.use_when.length || payload.tags.length,
+  );
+  const hasAnyContent = hasPositiveContent || payload.avoid_when.length;
+  if (!hasPositiveContent) {
+    if (optional && !hasAnyContent) return "";
+    throw new Error("至少填写图片原文、表达含义、适用场景或检索标签中的一项");
   }
   return JSON.stringify(payload);
 }
@@ -306,7 +456,7 @@ async function loadCatalog({ resetPage = false } = {}) {
 function openEdit(item) {
   state.selected = item;
   elements.editFileName.textContent = item.file_name;
-  elements.editTags.value = metadataEditorValue(item);
+  renderMetadataEditor(elements.editMetadata, item.metadata);
   elements.editStatus.textContent = `${STATUS_LABELS[item.status] || item.status} · ${TAG_FORMAT_LABELS[item.tag_format] || item.tag_format}`;
   elements.editStatus.className = `status-badge status-${item.status}`;
   elements.retagCurrent.disabled = item.status === "missing";
@@ -318,7 +468,7 @@ function openEdit(item) {
     elements.editImage.removeAttribute("src");
   }
   elements.editDialog.showModal();
-  window.setTimeout(() => elements.editTags.focus(), 0);
+  window.setTimeout(() => elements.editMetadata.querySelector("textarea")?.focus(), 0);
 }
 
 async function saveTags(event) {
@@ -326,7 +476,7 @@ async function saveTags(event) {
   if (!state.selected) return;
   setBusy(elements.saveTags, true, "保存中");
   try {
-    const tags = parseMetadataInput(elements.editTags.value);
+    const tags = readMetadataEditor(elements.editMetadata);
     await request(`/${encodeURIComponent(state.selected.file_name)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -350,7 +500,7 @@ async function retagItem(item, button) {
     showToast("结构化标签已生成", item.file_name);
     if (state.selected?.file_name === item.file_name) {
       state.selected = payload.item;
-      elements.editTags.value = metadataEditorValue(payload.item);
+      renderMetadataEditor(elements.editMetadata, payload.item.metadata);
     }
     await loadCatalog();
   } catch (error) {
@@ -450,16 +600,15 @@ async function uploadSelected(event) {
     showToast("请至少选择一张图片", "当前没有待上传文件。", true);
     return;
   }
-  let sharedTags = elements.uploadTags.value.trim();
-  if (sharedTags) {
-    try {
-      sharedTags = parseMetadataInput(sharedTags);
-    } catch (error) {
-      showToast("共享标签格式错误", error.message, true);
-      return;
-    }
-  } else if (!elements.autoTag.checked) {
-    showToast("缺少结构化标签", "请填写 JSON 标签，或启用自动标注。", true);
+  let sharedTags;
+  try {
+    sharedTags = readMetadataEditor(elements.uploadMetadata, { optional: true });
+  } catch (error) {
+    showToast("共享标签填写有误", error.message, true);
+    return;
+  }
+  if (!sharedTags && !elements.autoTag.checked) {
+    showToast("缺少共享标签", "请填写共享标签，或启用自动标注。", true);
     return;
   }
   setBusy(elements.startUpload, true, "上传中");
@@ -492,7 +641,7 @@ async function uploadSelected(event) {
     window.setTimeout(() => {
       elements.uploadDialog.close();
       clearUploads();
-      elements.uploadTags.value = "";
+      renderMetadataEditor(elements.uploadMetadata);
     }, 450);
   }
 }
@@ -563,5 +712,6 @@ function bindEvents() {
   });
 }
 
+renderMetadataEditor(elements.uploadMetadata);
 bindEvents();
 loadCatalog();

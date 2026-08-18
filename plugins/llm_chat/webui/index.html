@@ -31,7 +31,6 @@
       <article class="stat-card stat-structured">
         <span class="stat-label">结构化标签</span>
         <strong id="stat-structured">0</strong>
-        <span class="stat-note">使用新版 JSON 元数据</span>
       </article>
       <article class="stat-card stat-legacy">
         <span class="stat-label">旧格式标签</span>
@@ -116,9 +115,7 @@
           <span id="edit-status" class="status-badge"></span>
         </div>
       </div>
-      <label class="field-label" for="edit-tags">结构化标签 JSON</label>
-      <textarea id="edit-tags" rows="12" maxlength="4000" placeholder='{"text":"","meaning":"","use_when":[],"avoid_when":[],"tags":[]}' required></textarea>
-      <p class="field-hint">字段固定为 text、meaning、use_when、avoid_when 和 tags；保存时会校验并规范化。</p>
+      <div class="metadata-editor" id="edit-metadata" aria-label="结构化检索字段"></div>
       <div class="modal-actions">
         <button class="button button-secondary" id="retag-current" type="button">重新生成</button>
         <span class="action-spacer"></span>
@@ -144,8 +141,11 @@
         <span>支持 JPEG、PNG、WebP、GIF，单张不超过 6 MiB。</span>
       </label>
       <div class="upload-queue" id="upload-queue"></div>
-      <label class="field-label" for="upload-tags">共享结构化标签（可选）</label>
-      <textarea id="upload-tags" rows="6" maxlength="4000" placeholder="留空则为每张图片自动生成；也可填写完整 JSON"></textarea>
+      <details class="metadata-panel">
+        <summary>共享标签（可选）</summary>
+        <p>填写后会应用到本批全部图片；全部留空时按下方设置自动生成。</p>
+        <div class="metadata-editor" id="upload-metadata" aria-label="上传图片共享检索字段"></div>
+      </details>
       <label class="switch-row">
         <input id="auto-tag" type="checkbox" checked>
         <span class="switch" aria-hidden="true"></span>

@@ -325,6 +325,11 @@ async def test_webui_router_serves_assets_and_mutation_contracts(admin_env: Simp
 
     assert page.status_code == 200
     assert "表情库管理" in page.text
+    assert 'id="edit-metadata"' in page.text
+    assert 'id="upload-metadata"' in page.text
+    assert 'id="edit-tags"' not in page.text
+    assert "结构化标签 JSON" not in page.text
+    assert "使用新版 JSON 元数据" not in page.text
     assert "default-src 'self'" in page.headers["content-security-policy"]
     assert "blob:" in page.headers["content-security-policy"]
     first_item = catalog.json()["items"][0]
