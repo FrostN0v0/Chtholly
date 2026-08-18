@@ -45,6 +45,7 @@ if plug is not None and plug.module.__name__ == __name__:
     from . import tag_runtime as tag_runtime  # entari: package
     from . import tool_runtime as tool_runtime  # entari: package
     from . import meme_command as meme_command  # entari: package
+    from . import meme_webui as meme_webui  # entari: package
 
     registered_tools = tool_runtime.registered_tools
     _LOGGER.info(f"registered LLM tools: {', '.join(registered_tools) or '(none)'}")

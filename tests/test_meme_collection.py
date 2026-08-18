@@ -57,7 +57,13 @@ from plugins.llm_chat import (
 from plugins.llm_chat.config import LLMChatConfig
 from plugins.llm_chat.models import ImageTag, Conversation
 from plugins.llm_chat.persona import store as persona_store_module
-from plugins.llm_chat.meme_store import MemeImportError, MemeImportResult, import_meme_image
+from plugins.llm_chat.meme_store import (
+    MemeImportError,
+    MemeImportResult,
+    delete_meme,
+    import_meme_bytes,
+    import_meme_image,
+)
 from plugins.llm_chat.web.policy import DEFAULT_WEB_ACCESS_LIMITS
 from plugins.llm_chat.core.delivery import DeliveryState, llm_chat_delivery_scope
 from plugins.llm_chat.core.image_source import IMAGE_FETCH_MAX_BYTES
@@ -196,6 +202,83 @@ async def test_duplicate_bytes_skip_repeated_tagging(meme_env: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_manual_byte_import_normalizes_tags_without_vision(meme_env: Any) -> None:
+    result = await import_meme_bytes(
+        meme_env.config,
+        _PNG_BYTES + b"manual-tags",
+        manual_tags="1. visible quote; reaction，visible quote\nreply scene",
+        auto_tag=False,
+    )
+
+    assert result.tags == "visible quote，reaction，reply scene"
+    assert meme_env.state.visual_calls == 0
+    rows = await _image_rows(meme_env.session_factory)
+    assert [(row.file_path, row.tags) for row in rows] == [(result.relative_path, result.tags)]
+
+
+@pytest.mark.asyncio
+async def test_delete_meme_removes_file_and_index_together(meme_env: Any) -> None:
+    created = await import_meme_bytes(meme_env.config, _PNG_BYTES + b"delete")
+    stored_path = meme_env.image_dir / created.relative_path
+
+    deleted = await delete_meme(created.relative_path)
+
+    assert deleted.file_deleted is True
+    assert deleted.index_deleted is True
+    assert not stored_path.exists()
+    assert await _image_rows(meme_env.session_factory) == []
+
+
+@pytest.mark.asyncio
+async def test_delete_meme_preserves_file_when_index_commit_fails(
+    meme_env: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = await import_meme_bytes(meme_env.config, _PNG_BYTES + b"delete-rollback")
+    stored_path = meme_env.image_dir / created.relative_path
+
+    async def fail_delete(_relative_path: str) -> bool:
+        raise RuntimeError("database delete failed")
+
+    monkeypatch.setattr(meme_store_module, "delete_image_tag", fail_delete)
+
+    with pytest.raises(MemeImportError, match="Meme index deletion failed"):
+        await delete_meme(created.relative_path)
+
+    assert stored_path.read_bytes() == _PNG_BYTES + b"delete-rollback"
+    assert len(await _image_rows(meme_env.session_factory)) == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_meme_file_failure_leaves_recoverable_unindexed_file(
+    meme_env: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = await import_meme_bytes(meme_env.config, _PNG_BYTES + b"delete-file-failure")
+    stored_path = (meme_env.image_dir / created.relative_path).resolve()
+    original_unlink = Path.unlink
+
+    def fail_target_unlink(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path.resolve() == stored_path:
+            raise PermissionError("file is busy")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_target_unlink)
+
+    with pytest.raises(MemeImportError, match="Meme file deletion failed"):
+        await delete_meme(created.relative_path)
+
+    assert stored_path.exists()
+    assert await _image_rows(meme_env.session_factory) == []
+
+
+@pytest.mark.asyncio
+async def test_delete_meme_rejects_paths_outside_managed_directory(meme_env: Any) -> None:
+    with pytest.raises(MemeImportError, match="outside the managed collection"):
+        await delete_meme("../private.png")
+
+
+@pytest.mark.asyncio
 async def test_animated_gif_import_preserves_original_bytes_and_deduplicates(meme_env: Any) -> None:
     session = cast(
         Session,
@@ -286,6 +369,21 @@ async def test_existing_untagged_file_is_repaired_without_replacing_embedding(me
     assert rows[0].embedding_json == "preserved"
     assert len(_stored_images(meme_env.meme_dir)) == 1
     assert meme_env.state.visual_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_tag_replacement_clears_stale_embedding_on_embedding_failure(meme_env: Any) -> None:
+    relative_path = str(Path("memes") / "8.png")
+    async with meme_env.session_factory() as session:
+        session.add(ImageTag(file_path=relative_path, tags="old tags", embedding_json="stale-vector"))
+        await session.commit()
+
+    meme_env.state.embedding_result = None
+    await image_tags_module.replace_image_tags(meme_env.config, relative_path, "new tags")
+
+    rows = await _image_rows(meme_env.session_factory)
+    assert rows[0].tags == "new tags"
+    assert rows[0].embedding_json == ""
 
 
 @pytest.mark.asyncio

@@ -118,6 +118,7 @@ submodules = {
     "tag_runtime": ModuleType(f"{package_name}.tag_runtime"),
     "tool_runtime": tool_runtime,
     "meme_command": ModuleType(f"{package_name}.meme_command"),
+    "meme_webui": ModuleType(f"{package_name}.meme_webui"),
 }
 for suffix, submodule in submodules.items():
     sys.modules[f"{package_name}.{suffix}"] = submodule

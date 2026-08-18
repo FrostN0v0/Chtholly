@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Meme Library</title>
+  <link rel="stylesheet" href="/api/llm-chat/memes/assets/app.css">
+  <script src="/api/llm-chat/memes/assets/app.js" defer></script>
+</head>
+<body>
+  <main class="app-shell">
+    <header class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">LLM CHAT ASSET CONTROL</p>
+        <h1>Meme Library</h1>
+        <p class="hero-description">Browse stored reactions, inspect searchable text, and keep files and index entries consistent.</p>
+      </div>
+      <button class="button button-primary" id="open-upload" type="button">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>
+        Add images
+      </button>
+    </header>
+
+    <section class="stats-grid" aria-label="Library summary">
+      <article class="stat-card stat-stored">
+        <span class="stat-label">Stored files</span>
+        <strong id="stat-stored">0</strong>
+        <span class="stat-note">Available media assets</span>
+      </article>
+      <article class="stat-card stat-indexed">
+        <span class="stat-label">Indexed</span>
+        <strong id="stat-indexed">0</strong>
+        <span class="stat-note">Ready for semantic retrieval</span>
+      </article>
+      <article class="stat-card stat-unindexed">
+        <span class="stat-label">Needs tags</span>
+        <strong id="stat-unindexed">0</strong>
+        <span class="stat-note">Files without searchable text</span>
+      </article>
+      <article class="stat-card stat-missing">
+        <span class="stat-label">Missing files</span>
+        <strong id="stat-missing">0</strong>
+        <span class="stat-note">Index rows without media</span>
+      </article>
+    </section>
+
+    <section class="catalog-panel">
+      <div class="toolbar">
+        <label class="search-field" for="search-input">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input id="search-input" type="search" placeholder="Search tags or file names" autocomplete="off">
+        </label>
+        <div class="filter-group" role="group" aria-label="Catalog status">
+          <button class="filter-chip is-active" data-status="all" type="button">All</button>
+          <button class="filter-chip" data-status="indexed" type="button">Indexed</button>
+          <button class="filter-chip" data-status="unindexed" type="button">Needs tags</button>
+          <button class="filter-chip" data-status="missing" type="button">Missing</button>
+        </div>
+        <label class="sort-field" for="sort-select">
+          <span>Sort</span>
+          <select id="sort-select">
+            <option value="newest">Newest</option>
+            <option value="oldest">Oldest</option>
+            <option value="name">File name</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="catalog-meta">
+        <p><strong id="result-count">0</strong> results</p>
+        <button class="button button-quiet" id="refresh-list" type="button">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>
+          Refresh
+        </button>
+      </div>
+
+      <div class="loading-state" id="loading-state" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
+        Loading the library
+      </div>
+      <div class="empty-state" id="empty-state" hidden>
+        <div class="empty-mark" aria-hidden="true"></div>
+        <h2>No matching images</h2>
+        <p>Adjust the filters or add a new image to the managed collection.</p>
+      </div>
+      <section class="meme-grid" id="meme-grid" aria-live="polite"></section>
+
+      <nav class="pagination" aria-label="Catalog pages">
+        <button class="button button-secondary" id="previous-page" type="button">Previous</button>
+        <span id="page-label">Page 1 of 1</span>
+        <button class="button button-secondary" id="next-page" type="button">Next</button>
+      </nav>
+    </section>
+  </main>
+
+  <dialog class="modal" id="edit-dialog">
+    <form class="modal-card" id="edit-form">
+      <div class="modal-heading">
+        <div>
+          <p class="eyebrow">SEARCH INDEX</p>
+          <h2>Edit searchable text</h2>
+        </div>
+        <button class="icon-button" data-close-dialog="edit-dialog" type="button" aria-label="Close">×</button>
+      </div>
+      <div class="edit-preview">
+        <img id="edit-image" alt="Selected meme preview">
+        <div>
+          <strong id="edit-file-name"></strong>
+          <span id="edit-status" class="status-badge"></span>
+        </div>
+      </div>
+      <label class="field-label" for="edit-tags">Tags, visible text, and usage phrases</label>
+      <textarea id="edit-tags" rows="7" maxlength="4000" placeholder="reaction, visible quote, reply context" required></textarea>
+      <p class="field-hint">Use commas or new lines. The saved index is normalized and limited to 20 entries.</p>
+      <div class="modal-actions">
+        <button class="button button-secondary" id="retag-current" type="button">Generate again</button>
+        <span class="action-spacer"></span>
+        <button class="button button-quiet" data-close-dialog="edit-dialog" type="button">Cancel</button>
+        <button class="button button-primary" id="save-tags" type="submit">Save changes</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="modal" id="upload-dialog">
+    <form class="modal-card modal-card-wide" id="upload-form">
+      <div class="modal-heading">
+        <div>
+          <p class="eyebrow">NEW ASSETS</p>
+          <h2>Add images</h2>
+        </div>
+        <button class="icon-button" data-close-dialog="upload-dialog" type="button" aria-label="Close">×</button>
+      </div>
+      <label class="drop-zone" id="drop-zone" for="upload-files">
+        <input id="upload-files" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple hidden>
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V5m0 0L8 9m4-4 4 4M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3"/></svg>
+        <strong>Drop images here or choose files</strong>
+        <span>JPEG, PNG, WebP, or GIF. Up to 6 MiB each.</span>
+      </label>
+      <div class="upload-queue" id="upload-queue"></div>
+      <label class="field-label" for="upload-tags">Shared tags (optional)</label>
+      <textarea id="upload-tags" rows="4" maxlength="4000" placeholder="Leave empty to generate tags for each image"></textarea>
+      <label class="switch-row">
+        <input id="auto-tag" type="checkbox" checked>
+        <span class="switch" aria-hidden="true"></span>
+        <span><strong>Generate tags when shared tags are empty</strong><small>Uses the configured image tagging model.</small></span>
+      </label>
+      <div class="modal-actions">
+        <button class="button button-quiet" data-close-dialog="upload-dialog" type="button">Cancel</button>
+        <button class="button button-primary" id="start-upload" type="submit">Upload selected</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="modal modal-danger" id="delete-dialog">
+    <form class="modal-card" id="delete-form">
+      <div class="danger-mark" aria-hidden="true">!</div>
+      <h2>Delete this meme?</h2>
+      <p>Both the managed file and its searchable index entry will be removed. This cannot be undone.</p>
+      <strong id="delete-file-name"></strong>
+      <div class="modal-actions">
+        <button class="button button-quiet" data-close-dialog="delete-dialog" type="button">Cancel</button>
+        <button class="button button-danger" id="confirm-delete" type="submit">Delete permanently</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

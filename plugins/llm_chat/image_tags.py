@@ -83,6 +83,41 @@ async def upsert_image_tag(config: LLMChatConfig, relative_path: str, tags: str)
         _image_vectors.pop(relative_path, None)
 
 
+async def replace_image_tags(config: LLMChatConfig, relative_path: str, tags: str) -> None:
+    """Replace one tag row and invalidate any embedding derived from older text."""
+
+    vector = await embed_text(config, tags)
+    embedding_json = encode_embedding(vector) if vector is not None else ""
+    async with _image_tag_lock:
+        async with get_session() as db:
+            existing = (
+                await db.execute(select(ImageTag).where(ImageTag.file_path == relative_path))
+            ).scalar_one_or_none()
+            if existing is None:
+                db.add(ImageTag(file_path=relative_path, tags=tags, embedding_json=embedding_json))
+            else:
+                existing.tags = tags
+                existing.embedding_json = embedding_json
+            await db.commit()
+        _image_vectors.pop(relative_path, None)
+
+
+async def delete_image_tag(relative_path: str) -> bool:
+    """Delete one persisted image tag and its process-local vector cache."""
+
+    async with _image_tag_lock:
+        async with get_session() as db:
+            existing = (
+                await db.execute(select(ImageTag).where(ImageTag.file_path == relative_path))
+            ).scalar_one_or_none()
+            if existing is None:
+                return False
+            await db.delete(existing)
+            await db.commit()
+        _image_vectors.pop(relative_path, None)
+    return True
+
+
 async def tag_images(
     config: LLMChatConfig,
     limit: int | None = None,
