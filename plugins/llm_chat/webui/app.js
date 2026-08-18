@@ -273,10 +273,9 @@ function renderMetadataEditor(container, value = EMPTY_METADATA) {
     const wrapper = createElement("section", "metadata-field metadata-list-field");
     wrapper.setAttribute("aria-label", field.label);
     const heading = createElement("div", "metadata-field-heading");
-    heading.append(
-      createElement("strong", "metadata-field-label", field.label),
-      createElement("span", "metadata-entry-count", `0 / ${field.maxItems}`),
-    );
+    const count = createElement("span", "metadata-entry-count", `0 / ${field.maxItems}`);
+    count.dataset.metadataCount = field.key;
+    heading.append(createElement("strong", "metadata-field-label", field.label), count);
     const list = createElement("div", "metadata-entry-list");
     list.dataset.metadataList = field.key;
     const add = createElement("button", "metadata-entry-add", `＋ ${field.addLabel}`);
