@@ -9,6 +9,7 @@ from plugins.llm_chat.core.media import (
     parse_audio_text,
     is_random_request,
     rank_images_by_tags,
+    rank_images_by_exact_tags,
     is_allowed_image_resource_path,
 )
 
@@ -142,6 +143,23 @@ class TestRankImagesByTags:
     def test_zero_hit_images_are_dropped(self):
         ranked = rank_images_by_tags("生气", self.POOL)
         assert [path for path, _score in ranked] == ["136.jpg"]
+
+    def test_exact_terms_ignore_negation_and_directory_noise(self):
+        ranked = rank_images_by_exact_tags(
+            "糖笑，呆傻憨憨抽象笑容表情包，不要fox目录",
+            [
+                ("target.gif", "糖笑，坏笑，布偶"),
+                ("negative-noise.gif", "不要，无奈，滑稽"),
+                ("semantic-noise.png", "呆滞，懵圈，橘猫"),
+            ],
+        )
+
+        assert [path for path, _score in ranked] == ["target.gif"]
+
+    def test_image_suffix_is_removed_for_exact_tag_matching(self):
+        ranked = rank_images_by_exact_tags("糖笑表情包", [("target.gif", "糖笑，布偶")])
+
+        assert [path for path, _score in ranked] == ["target.gif"]
 
 
 class TestMatchImageTies:

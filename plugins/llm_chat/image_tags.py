@@ -17,7 +17,12 @@ from utils.path import IMAGE_DIR
 from .config import LLMChatConfig
 from .models import ImageTag
 from .vision import generate_image_tags
-from .core.media import match_image, is_random_request, is_allowed_image_resource_path
+from .core.media import (
+    match_image,
+    is_random_request,
+    rank_images_by_exact_tags,
+    is_allowed_image_resource_path,
+)
 from .core.errors import summarize_exception
 from .core.profile import decode_embedding, encode_embedding, cosine_similarity
 from .core.image_source import image_file_to_data_url
@@ -43,8 +48,17 @@ _TEXT_IMAGE_MIN_SIMILARITY = 0.40
 async def pick_image(config: LLMChatConfig, rows: Sequence[ImageTag], context: str, recent: deque[str]) -> str | None:
     """Select a local image via semantic retrieval, falling back to tag IDF."""
     eligible_rows = [row for row in rows if not image_tag_avoids_context(row.tags, context)]
-    fresh_rows = [row for row in eligible_rows if row.file_path not in recent]
-    search_rows = fresh_rows or eligible_rows
+    exact_ranked = rank_images_by_exact_tags(
+        context,
+        [(row.file_path, image_tag_search_text(row.tags)) for row in eligible_rows],
+    )
+    candidate_rows = eligible_rows
+    if exact_ranked:
+        best_exact_score = exact_ranked[0][1]
+        exact_paths = {path for path, score in exact_ranked if score >= best_exact_score - 1e-9}
+        candidate_rows = [row for row in eligible_rows if row.file_path in exact_paths]
+    fresh_rows = [row for row in candidate_rows if row.file_path not in recent]
+    search_rows = fresh_rows or candidate_rows
     if not search_rows:
         return None
     paths = [row.file_path for row in search_rows]

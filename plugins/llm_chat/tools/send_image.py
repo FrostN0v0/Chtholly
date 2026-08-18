@@ -58,10 +58,11 @@ def register_send_image(
     ) -> str:
         """Send registered local reaction images or stickers.
 
-        Provide compact emotion, scenario, and subject keywords in context for one semantic match. When
-        list_image_resources returns exact registered relative paths, provide them through image_paths to send one or
-        multiple images in order. Exact paths are internal tool data and must never be revealed to the user. Provide
-        exactly one selection mode: non-empty context or non-empty image_paths. Duplicate paths are sent once.
+        Provide compact positive emotion, scenario, and subject keywords in context for one semantic match. Never add
+        negations, exclusions, directory names, or internal paths to context. When list_image_resources returns
+        registered resources, provide exact registered relative paths through image_paths.
+        Send multiple images in order. Exact paths are internal tool data and must never be revealed to the user.
+        Provide exactly one selection mode: non-empty context or non-empty image_paths. Duplicate paths are sent once.
         Use proactively for explicit requests and natural emotional reactions in casual conversation. Examples
         include greetings, teasing, embarrassment, affection, comfort, celebration, surprise, jealousy,
         exasperation, or light complaints. Do not wait for an explicit sticker request when a fitting image would

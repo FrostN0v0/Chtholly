@@ -1618,6 +1618,70 @@ async def test_image_picker_excludes_recent_rows_before_semantic_ranking(
 
 
 @pytest.mark.asyncio
+async def test_image_picker_prioritizes_exact_tag_over_broader_semantic_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _registry_snapshot()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        picker = runtime.image_context.pick_image
+        image_tags_module = sys.modules[picker.__module__]
+
+        async def fake_embed_text(_config: object, _context: str) -> list[float]:
+            return [1.0, 0.0]
+
+        monkeypatch.setattr(image_tags_module, "embed_text", fake_embed_text)
+        monkeypatch.setattr(image_tags_module.random, "choice", lambda values: values[0])
+        image_tags_module._image_vectors.clear()
+        broad_match = json.dumps(
+            {
+                "text": "",
+                "meaning": "呆滞懵懂的橘猫",
+                "use_when": ["想表达发呆愣神时"],
+                "avoid_when": [],
+                "tags": ["橘猫", "呆滞", "懵圈", "沙雕"],
+            },
+            ensure_ascii=False,
+        )
+        exact_match = json.dumps(
+            {
+                "text": "",
+                "meaning": "布偶面带糖笑",
+                "use_when": ["想发送糖笑表情时"],
+                "avoid_when": [],
+                "tags": ["糖笑", "憨傻", "抽象笑容"],
+            },
+            ensure_ascii=False,
+        )
+        rows = [
+            SimpleNamespace(
+                file_path="memes/8.png",
+                tags=broad_match,
+                embedding_json=json.dumps([1.0, 0.0]),
+            ),
+            SimpleNamespace(
+                file_path="memes/77.gif",
+                tags=exact_match,
+                embedding_json=json.dumps([0.99, 0.1]),
+            ),
+        ]
+
+        selected = await picker(
+            runtime.config,
+            rows,
+            "糖笑，呆傻憨憨抽象笑容表情包，不要fox目录",
+            deque(maxlen=5),
+        )
+
+        assert selected == "memes/77.gif"
+
+    _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
 async def test_delivery_scope_blocks_text_outside_generation_but_preserves_media_behavior(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
