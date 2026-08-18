@@ -216,7 +216,7 @@ h2 {
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 14px;
   margin-bottom: 20px;
 }
@@ -245,8 +245,9 @@ h2 {
 }
 
 .stat-stored { --stat-color: var(--text-soft); }
-.stat-indexed { --stat-color: var(--accent); }
-.stat-unindexed { --stat-color: var(--warning); }
+.stat-structured { --stat-color: var(--accent); }
+.stat-legacy { --stat-color: var(--warning); }
+.stat-unindexed { --stat-color: var(--line-strong); }
 .stat-missing { --stat-color: var(--missing); }
 
 .stat-label,
@@ -464,12 +465,22 @@ h2 {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .index-state {
   color: var(--text-soft);
   font-size: 12px;
   font-weight: 650;
+}
+
+.format-structured {
+  color: var(--accent);
+}
+
+.format-legacy {
+  color: var(--warning);
+  font-weight: 700;
 }
 
 .file-line {

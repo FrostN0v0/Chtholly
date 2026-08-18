@@ -17,14 +17,21 @@ from entari_plugin_database import select, get_session
 from utils.path import MEME_DIR
 
 from .models import ImageTag
-from .core.media import normalize_image_tags
+from .core.image_tag_metadata import (
+    image_tag_format,
+    image_tag_search_text,
+    image_tag_display_tags,
+    image_tag_catalog_summary,
+    image_tag_metadata_payload,
+)
 
 MemeCatalogStatus = Literal["indexed", "unindexed", "missing"]
-MemeCatalogFilter = Literal["all", "indexed", "unindexed", "missing"]
+MemeCatalogFilter = Literal["all", "indexed", "structured", "legacy", "unindexed", "missing"]
 MemeCatalogSort = Literal["newest", "oldest", "name"]
 SessionFactory: TypeAlias = Callable[[], AbstractAsyncContextManager[Any]]
 
 _SUPPORTED_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif"})
+_TAG_FORMAT_PRIORITY = {"empty": 0, "legacy": 1, "structured": 2}
 _LOGGER = log.wrapper("[llm_chat]")
 
 
@@ -47,13 +54,18 @@ class MemeCatalogItem:
     embedding_ready: bool
 
     def to_dict(self) -> dict[str, object]:
-        normalized_tags = normalize_image_tags(self.tags, limit=100)
+        display_tags = image_tag_display_tags(self.tags)
+        tag_format = image_tag_format(self.tags)
         return {
             "id": self.entry_id,
             "file_name": self.file_name,
             "relative_path": self.relative_path,
             "tags": self.tags,
-            "tag_count": len(normalized_tags.split("，")) if normalized_tags else 0,
+            "metadata": image_tag_metadata_payload(self.tags, coerce_legacy=True),
+            "tag_summary": image_tag_catalog_summary(self.tags),
+            "display_tags": list(display_tags),
+            "tag_count": len(display_tags),
+            "tag_format": tag_format,
             "status": self.status,
             "size_bytes": self.size_bytes,
             "modified_at": self.modified_at,
@@ -152,7 +164,14 @@ class MemeCatalog:
             if file_name is None:
                 continue
             existing = rows_by_name.get(file_name)
-            if existing is None or row.id > existing.id:
+            if existing is None:
+                rows_by_name[file_name] = row
+                continue
+            current_priority = _TAG_FORMAT_PRIORITY[image_tag_format(existing.tags)]
+            candidate_priority = _TAG_FORMAT_PRIORITY[image_tag_format(row.tags)]
+            if candidate_priority > current_priority or (
+                candidate_priority == current_priority and row.id > existing.id
+            ):
                 rows_by_name[file_name] = row
 
         items: list[MemeCatalogItem] = []
@@ -172,7 +191,7 @@ class MemeCatalog:
                 modified_timestamp = float(stat.st_mtime)
                 modified_at = datetime.fromtimestamp(modified_timestamp, timezone.utc).isoformat()
                 version = int(stat.st_mtime_ns)
-            storage_path = row.file_path if row is not None else str(Path("memes") / file_name)
+            storage_path = row.file_path.replace("\\", "/") if row is not None else f"memes/{file_name}"
             items.append(
                 MemeCatalogItem(
                     entry_id=row.id if row is not None else None,
@@ -194,6 +213,8 @@ class MemeCatalog:
             "indexed": sum(item.status == "indexed" for item in items),
             "unindexed": sum(item.status == "unindexed" for item in items),
             "missing": sum(item.status == "missing" for item in items),
+            "structured": sum(image_tag_format(item.tags) == "structured" for item in items),
+            "legacy": sum(image_tag_format(item.tags) == "legacy" for item in items),
         }
         return items, stats
 
@@ -214,9 +235,11 @@ class MemeCatalog:
                 for item in items
                 if normalized_query in item.file_name.casefold()
                 or normalized_query in item.relative_path.casefold()
-                or normalized_query in item.tags.casefold()
+                or normalized_query in image_tag_search_text(item.tags).casefold()
             ]
-        if status != "all":
+        if status in {"structured", "legacy"}:
+            items = [item for item in items if image_tag_format(item.tags) == status]
+        elif status != "all":
             items = [item for item in items if item.status == status]
 
         if sort == "name":

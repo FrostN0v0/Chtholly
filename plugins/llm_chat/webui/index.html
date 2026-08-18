@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Meme Library</title>
+  <title>表情库管理</title>
   <link rel="stylesheet" href="/api/llm-chat/memes/assets/app.css">
   <script src="/api/llm-chat/memes/assets/app.js" defer></script>
 </head>
@@ -12,36 +12,41 @@
   <main class="app-shell">
     <header class="hero">
       <div class="hero-copy">
-        <p class="eyebrow">LLM CHAT ASSET CONTROL</p>
-        <h1>Meme Library</h1>
-        <p class="hero-description">Browse stored reactions, inspect searchable text, and keep files and index entries consistent.</p>
+        <p class="eyebrow">LLM CHAT 资源管理</p>
+        <h1>表情库管理</h1>
+        <p class="hero-description">浏览表情资源、检查结构化检索信息，并维护文件与索引的一致性。</p>
       </div>
       <button class="button button-primary" id="open-upload" type="button">
         <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>
-        Add images
+        添加图片
       </button>
     </header>
 
-    <section class="stats-grid" aria-label="Library summary">
+    <section class="stats-grid" aria-label="表情库概览">
       <article class="stat-card stat-stored">
-        <span class="stat-label">Stored files</span>
+        <span class="stat-label">已存文件</span>
         <strong id="stat-stored">0</strong>
-        <span class="stat-note">Available media assets</span>
+        <span class="stat-note">当前可用图片资源</span>
       </article>
-      <article class="stat-card stat-indexed">
-        <span class="stat-label">Indexed</span>
-        <strong id="stat-indexed">0</strong>
-        <span class="stat-note">Ready for semantic retrieval</span>
+      <article class="stat-card stat-structured">
+        <span class="stat-label">结构化标签</span>
+        <strong id="stat-structured">0</strong>
+        <span class="stat-note">使用新版 JSON 元数据</span>
+      </article>
+      <article class="stat-card stat-legacy">
+        <span class="stat-label">旧格式标签</span>
+        <strong id="stat-legacy">0</strong>
+        <span class="stat-note">需要重新生成标签</span>
       </article>
       <article class="stat-card stat-unindexed">
-        <span class="stat-label">Needs tags</span>
+        <span class="stat-label">待标注</span>
         <strong id="stat-unindexed">0</strong>
-        <span class="stat-note">Files without searchable text</span>
+        <span class="stat-note">尚无可检索标签</span>
       </article>
       <article class="stat-card stat-missing">
-        <span class="stat-label">Missing files</span>
+        <span class="stat-label">文件缺失</span>
         <strong id="stat-missing">0</strong>
-        <span class="stat-note">Index rows without media</span>
+        <span class="stat-note">仅有索引、文件不存在</span>
       </article>
     </section>
 
@@ -49,47 +54,48 @@
       <div class="toolbar">
         <label class="search-field" for="search-input">
           <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-          <input id="search-input" type="search" placeholder="Search tags or file names" autocomplete="off">
+          <input id="search-input" type="search" placeholder="搜索标签、含义、适用场景或文件名" autocomplete="off">
         </label>
-        <div class="filter-group" role="group" aria-label="Catalog status">
-          <button class="filter-chip is-active" data-status="all" type="button">All</button>
-          <button class="filter-chip" data-status="indexed" type="button">Indexed</button>
-          <button class="filter-chip" data-status="unindexed" type="button">Needs tags</button>
-          <button class="filter-chip" data-status="missing" type="button">Missing</button>
+        <div class="filter-group" role="group" aria-label="表情库状态">
+          <button class="filter-chip is-active" data-status="all" type="button">全部</button>
+          <button class="filter-chip" data-status="structured" type="button">结构化</button>
+          <button class="filter-chip" data-status="legacy" type="button">旧格式</button>
+          <button class="filter-chip" data-status="unindexed" type="button">待标注</button>
+          <button class="filter-chip" data-status="missing" type="button">缺失</button>
         </div>
         <label class="sort-field" for="sort-select">
-          <span>Sort</span>
+          <span>排序</span>
           <select id="sort-select">
-            <option value="newest">Newest</option>
-            <option value="oldest">Oldest</option>
-            <option value="name">File name</option>
+            <option value="newest">最新</option>
+            <option value="oldest">最早</option>
+            <option value="name">文件名</option>
           </select>
         </label>
       </div>
 
       <div class="catalog-meta">
-        <p><strong id="result-count">0</strong> results</p>
+        <p>共 <strong id="result-count">0</strong> 条</p>
         <button class="button button-quiet" id="refresh-list" type="button">
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>
-          Refresh
+          刷新
         </button>
       </div>
 
       <div class="loading-state" id="loading-state" aria-live="polite">
         <span class="spinner" aria-hidden="true"></span>
-        Loading the library
+        正在加载表情库
       </div>
       <div class="empty-state" id="empty-state" hidden>
         <div class="empty-mark" aria-hidden="true"></div>
-        <h2>No matching images</h2>
-        <p>Adjust the filters or add a new image to the managed collection.</p>
+        <h2>没有符合条件的图片</h2>
+        <p>请调整筛选条件，或向表情库添加新图片。</p>
       </div>
       <section class="meme-grid" id="meme-grid" aria-live="polite"></section>
 
-      <nav class="pagination" aria-label="Catalog pages">
-        <button class="button button-secondary" id="previous-page" type="button">Previous</button>
-        <span id="page-label">Page 1 of 1</span>
-        <button class="button button-secondary" id="next-page" type="button">Next</button>
+      <nav class="pagination" aria-label="表情库分页">
+        <button class="button button-secondary" id="previous-page" type="button">上一页</button>
+        <span id="page-label">第 1 / 1 页</span>
+        <button class="button button-secondary" id="next-page" type="button">下一页</button>
       </nav>
     </section>
   </main>
@@ -98,26 +104,26 @@
     <form class="modal-card" id="edit-form">
       <div class="modal-heading">
         <div>
-          <p class="eyebrow">SEARCH INDEX</p>
-          <h2>Edit searchable text</h2>
+          <p class="eyebrow">结构化检索信息</p>
+          <h2>编辑图片标签</h2>
         </div>
-        <button class="icon-button" data-close-dialog="edit-dialog" type="button" aria-label="Close">×</button>
+        <button class="icon-button" data-close-dialog="edit-dialog" type="button" aria-label="关闭">×</button>
       </div>
       <div class="edit-preview">
-        <img id="edit-image" alt="Selected meme preview">
+        <img id="edit-image" alt="当前表情预览">
         <div>
           <strong id="edit-file-name"></strong>
           <span id="edit-status" class="status-badge"></span>
         </div>
       </div>
-      <label class="field-label" for="edit-tags">Tags, visible text, and usage phrases</label>
-      <textarea id="edit-tags" rows="7" maxlength="4000" placeholder="reaction, visible quote, reply context" required></textarea>
-      <p class="field-hint">Use commas or new lines. The saved index is normalized and limited to 20 entries.</p>
+      <label class="field-label" for="edit-tags">结构化标签 JSON</label>
+      <textarea id="edit-tags" rows="12" maxlength="4000" placeholder='{"text":"","meaning":"","use_when":[],"avoid_when":[],"tags":[]}' required></textarea>
+      <p class="field-hint">字段固定为 text、meaning、use_when、avoid_when 和 tags；保存时会校验并规范化。</p>
       <div class="modal-actions">
-        <button class="button button-secondary" id="retag-current" type="button">Generate again</button>
+        <button class="button button-secondary" id="retag-current" type="button">重新生成</button>
         <span class="action-spacer"></span>
-        <button class="button button-quiet" data-close-dialog="edit-dialog" type="button">Cancel</button>
-        <button class="button button-primary" id="save-tags" type="submit">Save changes</button>
+        <button class="button button-quiet" data-close-dialog="edit-dialog" type="button">取消</button>
+        <button class="button button-primary" id="save-tags" type="submit">保存修改</button>
       </div>
     </form>
   </dialog>
@@ -126,28 +132,28 @@
     <form class="modal-card modal-card-wide" id="upload-form">
       <div class="modal-heading">
         <div>
-          <p class="eyebrow">NEW ASSETS</p>
-          <h2>Add images</h2>
+          <p class="eyebrow">新增资源</p>
+          <h2>添加图片</h2>
         </div>
-        <button class="icon-button" data-close-dialog="upload-dialog" type="button" aria-label="Close">×</button>
+        <button class="icon-button" data-close-dialog="upload-dialog" type="button" aria-label="关闭">×</button>
       </div>
       <label class="drop-zone" id="drop-zone" for="upload-files">
         <input id="upload-files" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple hidden>
         <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V5m0 0L8 9m4-4 4 4M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3"/></svg>
-        <strong>Drop images here or choose files</strong>
-        <span>JPEG, PNG, WebP, or GIF. Up to 6 MiB each.</span>
+        <strong>拖放图片到这里，或点击选择文件</strong>
+        <span>支持 JPEG、PNG、WebP、GIF，单张不超过 6 MiB。</span>
       </label>
       <div class="upload-queue" id="upload-queue"></div>
-      <label class="field-label" for="upload-tags">Shared tags (optional)</label>
-      <textarea id="upload-tags" rows="4" maxlength="4000" placeholder="Leave empty to generate tags for each image"></textarea>
+      <label class="field-label" for="upload-tags">共享结构化标签（可选）</label>
+      <textarea id="upload-tags" rows="6" maxlength="4000" placeholder="留空则为每张图片自动生成；也可填写完整 JSON"></textarea>
       <label class="switch-row">
         <input id="auto-tag" type="checkbox" checked>
         <span class="switch" aria-hidden="true"></span>
-        <span><strong>Generate tags when shared tags are empty</strong><small>Uses the configured image tagging model.</small></span>
+        <span><strong>未填写时自动生成结构化标签</strong><small>使用当前配置的图片标注模型。</small></span>
       </label>
       <div class="modal-actions">
-        <button class="button button-quiet" data-close-dialog="upload-dialog" type="button">Cancel</button>
-        <button class="button button-primary" id="start-upload" type="submit">Upload selected</button>
+        <button class="button button-quiet" data-close-dialog="upload-dialog" type="button">取消</button>
+        <button class="button button-primary" id="start-upload" type="submit">上传所选图片</button>
       </div>
     </form>
   </dialog>
@@ -155,12 +161,12 @@
   <dialog class="modal modal-danger" id="delete-dialog">
     <form class="modal-card" id="delete-form">
       <div class="danger-mark" aria-hidden="true">!</div>
-      <h2>Delete this meme?</h2>
-      <p>Both the managed file and its searchable index entry will be removed. This cannot be undone.</p>
+      <h2>确定删除这个表情吗？</h2>
+      <p>对应图片文件和检索索引都会被删除，且无法撤销。</p>
       <strong id="delete-file-name"></strong>
       <div class="modal-actions">
-        <button class="button button-quiet" data-close-dialog="delete-dialog" type="button">Cancel</button>
-        <button class="button button-danger" id="confirm-delete" type="submit">Delete permanently</button>
+        <button class="button button-quiet" data-close-dialog="delete-dialog" type="button">取消</button>
+        <button class="button button-danger" id="confirm-delete" type="submit">永久删除</button>
       </div>
     </form>
   </dialog>

@@ -9,8 +9,9 @@ from arclet.entari import Session
 from entari_plugin_llm.config import get_model_config
 
 from .config import LLMChatConfig
-from .core.media import normalize_image_tags, normalize_image_description
+from .core.media import normalize_image_description
 from .core.image_source import fetch_image_data_url
+from .core.image_tag_metadata import normalize_generated_image_tags
 
 
 class _MessageLike(Protocol):
@@ -97,4 +98,4 @@ async def generate_image_tags(config: LLMChatConfig, data_url: str) -> str:
         "Tag this image for chat reaction retrieval.",
         timeout=VISION_TAG_TIMEOUT,
     )
-    return normalize_image_tags(raw)
+    return normalize_generated_image_tags(raw)

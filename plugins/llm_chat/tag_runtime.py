@@ -49,6 +49,7 @@ async def _launch_tag_pass(
     limit: int | None,
     *,
     retag: bool,
+    legacy_only: bool = False,
     session: Session | None = None,
 ) -> str:
     """Start an exclusive tagging pass, cancelling any pass already running."""
@@ -63,7 +64,15 @@ async def _launch_tag_pass(
             pass
     on_progress = await _progress_reporter(config, session, scope) if session is not None else None
     _active_tag_scope = scope
-    _active_tag_pass = asyncio.create_task(tag_images(config, limit, retag=retag, on_progress=on_progress))
+    _active_tag_pass = asyncio.create_task(
+        tag_images(
+            config,
+            limit,
+            retag=retag,
+            legacy_only=legacy_only,
+            on_progress=on_progress,
+        )
+    )
     if cancelled:
         return f"已终止运行中的「{cancelled}」任务，开始{scope}，"
     return f"已开始{scope}，"
@@ -98,6 +107,20 @@ async def tag_images_cmd(session: Session) -> None:
 @superusers()
 async def retag_images_all(session: Session) -> None:
     status = await _launch_tag_pass(config, "全量重标", None, retag=True, session=session)
+    await session.send(status + "进度稍后报告。")
+
+
+@command.on("llmchat retag-images-legacy")
+@superusers()
+async def retag_legacy_images(session: Session) -> None:
+    status = await _launch_tag_pass(
+        config,
+        "旧格式标签重标",
+        None,
+        retag=True,
+        legacy_only=True,
+        session=session,
+    )
     await session.send(status + "进度稍后报告。")
 
 

@@ -17,10 +17,10 @@ from utils.path import MEME_DIR, IMAGE_DIR
 
 from .config import LLMChatConfig
 from .vision import generate_image_tags
-from .core.media import normalize_image_tags
 from .image_tags import get_image_tag, delete_image_tag, upsert_image_tag
 from .core.errors import summarize_exception
 from .core.image_source import IMAGE_FETCH_MAX_BYTES, fetch_image_bytes, raw_to_image_data_url
+from .core.image_tag_metadata import normalize_generated_image_tags
 
 MemeImportStatus = Literal["created", "duplicate", "tagged_existing"]
 
@@ -113,7 +113,7 @@ def _initialize_digest_index() -> None:
 
 
 def _relative_path(path: Path) -> str:
-    return str(path.relative_to(IMAGE_DIR))
+    return path.relative_to(IMAGE_DIR).as_posix()
 
 
 def _next_numeric_stem() -> int:
@@ -144,9 +144,10 @@ async def _generate_tags(config: LLMChatConfig, data_url: str) -> str:
         raise
     except Exception as exc:
         raise _safe_import_error("Automatic image tagging failed", exc) from None
-    if not tags:
+    normalized = normalize_generated_image_tags(tags)
+    if not normalized:
         raise MemeImportError("Image tagging returned no tags")
-    return tags
+    return normalized
 
 
 async def _resolve_tags(
@@ -157,7 +158,7 @@ async def _resolve_tags(
     auto_tag: bool,
 ) -> str:
     if manual_tags is not None:
-        normalized = normalize_image_tags(manual_tags)
+        normalized = normalize_generated_image_tags(manual_tags)
         if not normalized:
             raise MemeImportError("At least one valid tag is required")
         return normalized

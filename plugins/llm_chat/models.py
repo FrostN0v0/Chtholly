@@ -87,5 +87,5 @@ class ImageTag(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     file_path: Mapped[str] = mapped_column(unique=True)
     tags: Mapped[str]
-    """Comma-separated keywords."""
+    """Canonical structured JSON metadata; legacy comma tags remain readable during migration."""
     embedding_json: Mapped[str] = mapped_column(Text, default="")

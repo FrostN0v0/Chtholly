@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from pathlib import Path
 from collections.abc import AsyncIterator
@@ -23,6 +24,10 @@ from plugins.llm_chat.models import ImageTag
 from plugins.llm_chat.meme_admin import MemeAdminError, MemeAdminService
 from plugins.llm_chat.meme_store import MemeImportError, MemeDeleteResult, MemeImportResult
 from plugins.llm_chat.meme_webui_api import create_meme_admin_router
+from plugins.llm_chat.core.image_tag_metadata import (
+    image_tag_catalog_summary,
+    normalize_generated_image_tags,
+)
 
 _PNG_BYTES = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000001000000010804000000b51c0c020000000b4944415478da63fcff1f0003030200efbfa7db0000000049454e44ae426082"
@@ -132,7 +137,14 @@ async def test_catalog_unions_stored_unindexed_and_missing_entries(admin_env: Si
 
     assert [item.file_name for item in page.items] == ["1.png", "2.gif", "3.png"]
     assert [item.status for item in page.items] == ["indexed", "unindexed", "missing"]
-    assert page.stats == {"stored": 2, "indexed": 1, "unindexed": 1, "missing": 1}
+    assert page.stats == {
+        "stored": 2,
+        "indexed": 1,
+        "unindexed": 1,
+        "missing": 1,
+        "structured": 0,
+        "legacy": 2,
+    }
     assert page.items[0].to_dict()["tag_count"] == 2
     assert admin_env.service.resolve_file("../private.png") is None
     assert admin_env.service.resolve_file("\0.jpg") is None
@@ -144,23 +156,92 @@ async def test_catalog_unions_stored_unindexed_and_missing_entries(admin_env: Si
 
 
 @pytest.mark.asyncio
+async def test_catalog_prefers_structured_row_over_newer_legacy_path_variant(
+    admin_env: SimpleNamespace,
+) -> None:
+    (admin_env.meme_dir / "1.png").write_bytes(_PNG_BYTES)
+    structured = normalize_generated_image_tags("文字表情包，惊讶")
+    await _add_row(admin_env, "memes/1.png", structured)
+    await _add_row(admin_env, "memes\\1.png", "旧标签，开心")
+
+    page = await admin_env.service.list_memes(page_size=10)
+
+    assert len(page.items) == 1
+    assert page.items[0].tags == structured
+    assert page.stats["structured"] == 1
+    assert page.stats["legacy"] == 0
+
+
+@pytest.mark.asyncio
+async def test_catalog_exposes_structured_metadata_without_matching_avoid_terms(
+    admin_env: SimpleNamespace,
+) -> None:
+    (admin_env.meme_dir / "1.png").write_bytes(_PNG_BYTES)
+    (admin_env.meme_dir / "2.png").write_bytes(_PNG_BYTES)
+    structured = normalize_generated_image_tags(
+        json.dumps(
+            {
+                "text": "你怎么这么坏",
+                "meaning": "惊讶又嗔怪地吐槽对方使坏",
+                "use_when": ["朋友恶作剧后吐槽"],
+                "avoid_when": ["普通问候"],
+                "tags": ["文字表情包", "惊讶", "嗔怪"],
+            },
+            ensure_ascii=False,
+        )
+    )
+    await _add_row(admin_env, "memes/1.png", structured)
+    await _add_row(admin_env, "memes/2.png", "旧标签，开心")
+
+    page = await admin_env.service.list_memes(status="structured", page_size=10)
+
+    assert [item.file_name for item in page.items] == ["1.png"]
+    payload = page.items[0].to_dict()
+    assert payload["tag_format"] == "structured"
+    assert payload["metadata"] == {
+        "text": "你怎么这么坏",
+        "meaning": "惊讶又嗔怪地吐槽对方使坏",
+        "use_when": ["朋友恶作剧后吐槽"],
+        "avoid_when": ["普通问候"],
+        "tags": ["文字表情包", "惊讶", "嗔怪"],
+    }
+    assert payload["tag_summary"] == image_tag_catalog_summary(structured)
+    assert [item.file_name for item in (await admin_env.service.list_memes(query="恶作剧")).items] == ["1.png"]
+    assert not (await admin_env.service.list_memes(query="普通问候")).items
+    assert [item.file_name for item in (await admin_env.service.list_memes(status="legacy")).items] == ["2.png"]
+
+
+@pytest.mark.asyncio
+async def test_admin_service_rejects_malformed_structured_json(admin_env: SimpleNamespace) -> None:
+    (admin_env.meme_dir / "1.png").write_bytes(_PNG_BYTES)
+    await _add_row(admin_env, "memes/1.png", "old tags")
+
+    with pytest.raises(MemeAdminError) as raised:
+        await admin_env.service.update_tags("1.png", '{"text":"broken"')
+
+    assert raised.value.code == "invalid_tags"
+    assert raised.value.status == 400
+
+
+@pytest.mark.asyncio
 async def test_admin_service_updates_retags_uploads_and_deletes(admin_env: SimpleNamespace) -> None:
     (admin_env.meme_dir / "1.png").write_bytes(_PNG_BYTES)
     await _add_row(admin_env, "memes/1.png", "old tags", embedding="stale")
 
     updated = await admin_env.service.update_tags("1.png", "1. visible text; reaction，visible text")
-    assert updated.tags == "visible text，reaction"
+    expected_update = normalize_generated_image_tags("visible text，reaction")
+    assert updated.tags == expected_update
     assert updated.embedding_ready is False
-    assert admin_env.state.replacements[-1] == ("memes/1.png", "visible text，reaction")
+    assert admin_env.state.replacements[-1] == ("memes/1.png", expected_update)
 
     retagged = await admin_env.service.retag("1.png")
-    assert retagged.tags == "auto，generated，visible text"
+    assert retagged.tags == normalize_generated_image_tags("auto，generated，visible text")
     assert admin_env.state.tag_calls == 1
 
     uploaded = await admin_env.service.upload(_PNG_BYTES, tags="manual，entry", auto_tag=False)
     assert uploaded.status == "created"
     assert uploaded.item.file_name == "10.png"
-    assert uploaded.item.tags == "manual，entry"
+    assert uploaded.item.tags == normalize_generated_image_tags("manual，entry")
 
     deleted = await admin_env.service.delete("10.png")
     assert deleted == MemeDeleteResult(file_deleted=True, index_deleted=True)
@@ -243,7 +324,7 @@ async def test_webui_router_serves_assets_and_mutation_contracts(admin_env: Simp
         missing = await client.get("/api/llm-chat/memes/files/not-found.png")
 
     assert page.status_code == 200
-    assert "Meme Library" in page.text
+    assert "表情库管理" in page.text
     assert "default-src 'self'" in page.headers["content-security-policy"]
     assert "blob:" in page.headers["content-security-policy"]
     first_item = catalog.json()["items"][0]
@@ -251,7 +332,7 @@ async def test_webui_router_serves_assets_and_mutation_contracts(admin_env: Simp
     assert "embedding_json" not in first_item
     assert str(admin_env.meme_dir) not in catalog.text
     assert image.content == _PNG_BYTES
-    assert updated.json()["item"]["tags"] == "edited，visible text"
+    assert updated.json()["item"]["tags"] == normalize_generated_image_tags("edited，visible text")
     assert uploaded.status_code == 201
     assert uploaded.json()["item"]["file_name"] == "10.png"
     assert deleted.json() == {"success": True, "file_deleted": True, "index_deleted": True}

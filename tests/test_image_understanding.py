@@ -1,5 +1,7 @@
 """Unit tests for inbound image description normalization and note formatting."""
 
+import json
+
 from plugins.llm_chat.core.media import (
     RECENT_MEME_HISTORY_NOTE,
     format_image_note,
@@ -8,6 +10,15 @@ from plugins.llm_chat.core.media import (
     sanitize_assistant_history,
     normalize_image_description,
     strip_internal_media_records,
+)
+from plugins.llm_chat.core.image_tag_metadata import (
+    image_tag_format,
+    image_tag_search_text,
+    image_tag_avoids_context,
+    image_tag_embedding_text,
+    parse_image_tag_metadata,
+    image_tag_catalog_summary,
+    normalize_generated_image_tags,
 )
 
 
@@ -63,6 +74,66 @@ class TestNormalizeImageTags:
 
     def test_empty_input_returns_empty(self):
         assert normalize_image_tags(" \n ; ， 、 ") == ""
+
+
+class TestStructuredImageTagMetadata:
+    def test_preserves_visible_text_and_separates_positive_and_avoid_semantics(self):
+        raw = json.dumps(
+            {
+                "text": "握草！你怎么这么坏",
+                "meaning": "惊讶又嗔怪地责怪对方使坏",
+                "use_when": ["朋友恶作剧后吐槽", "被对方调侃时反击"],
+                "avoid_when": ["早上好", "普通问候"],
+                "tags": ["惊讶，嗔怪", "文字表情包", "兔耳少女"],
+            },
+            ensure_ascii=False,
+        )
+
+        normalized = normalize_generated_image_tags(raw)
+        metadata = parse_image_tag_metadata(normalized)
+
+        assert metadata is not None
+        assert metadata.text == "握草！你怎么这么坏"
+        assert metadata.tags == ("惊讶", "嗔怪", "文字表情包", "兔耳少女")
+        assert "早上好" not in image_tag_embedding_text(normalized)
+        assert "普通问候" not in image_tag_search_text(normalized)
+        assert "避用：早上好、普通问候" in image_tag_catalog_summary(normalized)
+        assert image_tag_avoids_context(normalized, "早上好呀")
+        assert not image_tag_avoids_context(normalized, "你怎么这么坏")
+        assert image_tag_format(normalized) == "structured"
+
+    def test_visible_text_keeps_meaningful_quote_characters(self):
+        normalized = normalize_generated_image_tags(
+            json.dumps(
+                {
+                    "text": "“真的吗？”",
+                    "meaning": "质疑",
+                    "use_when": [],
+                    "avoid_when": [],
+                    "tags": ["文字表情包"],
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        metadata = parse_image_tag_metadata(normalized)
+        assert metadata is not None
+        assert metadata.text == "“真的吗？”"
+
+    def test_plain_legacy_tags_are_wrapped_in_canonical_json(self):
+        normalized = normalize_generated_image_tags("爆笑，社死，慌张")
+
+        assert json.loads(normalized) == {
+            "text": "",
+            "meaning": "",
+            "use_when": [],
+            "avoid_when": [],
+            "tags": ["爆笑", "社死", "慌张"],
+        }
+        assert image_tag_format("爆笑，社死，慌张") == "legacy"
+
+    def test_malformed_json_is_rejected_instead_of_fragmented_into_tags(self):
+        assert normalize_generated_image_tags('{"text":"broken"') == ""
 
 
 class TestFormatImageNote:

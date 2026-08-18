@@ -2,9 +2,36 @@
 
 const API_ROOT = "/api/llm-chat/memes";
 const STATUS_LABELS = {
-  indexed: "Indexed",
-  unindexed: "Needs tags",
-  missing: "Missing file",
+  indexed: "已索引",
+  unindexed: "待标注",
+  missing: "文件缺失",
+};
+const TAG_FORMAT_LABELS = {
+  structured: "结构化",
+  legacy: "旧格式",
+  empty: "无标签",
+};
+const EMPTY_METADATA = {
+  text: "",
+  meaning: "",
+  use_when: [],
+  avoid_when: [],
+  tags: [],
+};
+const ERROR_MESSAGES = {
+  catalog_unavailable: "表情库暂时无法读取",
+  meme_not_found: "没有找到对应的表情记录",
+  invalid_tags: "结构化标签内容无效",
+  invalid_json: "请求中的 JSON 无效",
+  request_too_large: "标签内容超过大小限制",
+  upload_rejected: "图片格式、大小或标签不符合要求",
+  upload_failed: "图片上传失败",
+  storage_inconsistent: "图片存储状态不一致",
+  tag_update_failed: "标签保存失败",
+  image_missing: "图片文件已不存在",
+  image_unavailable: "图片无效或超过大小限制",
+  tagging_failed: "自动标注失败",
+  delete_failed: "删除表情失败",
 };
 
 const state = {
@@ -62,7 +89,7 @@ function createElement(tag, className = "", text = "") {
   return element;
 }
 
-function setBusy(button, busy, busyLabel = "Working") {
+function setBusy(button, busy, busyLabel = "处理中") {
   if (!button) return;
   if (busy) {
     button.dataset.originalLabel = button.textContent;
@@ -99,23 +126,47 @@ async function request(path = "", options = {}) {
   const contentType = response.headers.get("content-type") || "";
   const payload = contentType.includes("application/json") ? await response.json() : null;
   if (!response.ok || payload?.success === false) {
-    throw new Error(payload?.message || `Request failed with status ${response.status}`);
+    throw new Error(ERROR_MESSAGES[payload?.code] || payload?.message || `请求失败，状态码 ${response.status}`);
   }
   return payload;
 }
 
 function formatBytes(value) {
-  if (value === null || value === undefined) return "No file";
+  if (value === null || value === undefined) return "文件不存在";
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
   return `${(value / (1024 * 1024)).toFixed(2)} MiB`;
 }
 
-function splitTags(tags) {
-  return String(tags || "")
-    .split(/[，,、;；\n\r]+/)
-    .map((tag) => tag.trim())
-    .filter(Boolean);
+function displayTags(item) {
+  return Array.isArray(item.display_tags)
+    ? item.display_tags.filter((tag) => typeof tag === "string" && tag.trim())
+    : [];
+}
+
+function metadataEditorValue(item) {
+  return JSON.stringify(item?.metadata || EMPTY_METADATA, null, 2);
+}
+
+function parseMetadataInput(value) {
+  let payload;
+  try {
+    payload = JSON.parse(value);
+  } catch {
+    throw new Error("请输入合法的 JSON 对象");
+  }
+  if (!payload || Array.isArray(payload) || typeof payload !== "object") {
+    throw new Error("标签内容必须是 JSON 对象");
+  }
+  if (typeof payload.text !== "string" || typeof payload.meaning !== "string") {
+    throw new Error("text 和 meaning 必须是字符串");
+  }
+  for (const key of ["use_when", "avoid_when", "tags"]) {
+    if (!Array.isArray(payload[key]) || payload[key].some((entry) => typeof entry !== "string")) {
+      throw new Error(`${key} 必须是字符串数组`);
+    }
+  }
+  return JSON.stringify(payload);
 }
 
 function statusBadge(item, overlay = false) {
@@ -135,15 +186,15 @@ function missingPreview() {
   const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
   path.setAttribute("d", "M4 5h16v14H4zM4 16l4-4 3 3 2-2 7 6M9 9h.01");
   icon.append(path);
-  preview.append(icon, createElement("span", "", "The indexed file is no longer present."));
+  preview.append(icon, createElement("span", "", "索引对应的图片文件已不存在。"));
   return preview;
 }
 
 function renderTags(item) {
   const list = createElement("div", "tag-list");
-  const tags = splitTags(item.tags);
+  const tags = displayTags(item);
   if (!tags.length) {
-    list.append(createElement("span", "tag-placeholder", "No searchable text yet"));
+    list.append(createElement("span", "tag-placeholder", "暂无可检索标签"));
     return list;
   }
   tags.slice(0, 6).forEach((tag) => list.append(createElement("span", "tag-pill", tag)));
@@ -165,7 +216,7 @@ function renderCard(item) {
   if (item.image_url) {
     const image = createElement("img");
     image.src = item.image_url;
-    image.alt = `Preview of ${item.file_name}`;
+    image.alt = `${item.file_name} 的预览图`;
     image.loading = "lazy";
     image.addEventListener("error", () => {
       image.remove();
@@ -180,19 +231,24 @@ function renderCard(item) {
   const fileLine = createElement("div", "file-line");
   fileLine.append(
     createElement("strong", "", item.file_name),
-    createElement("span", "", `${formatBytes(item.size_bytes)} · ${item.tag_count} tags`),
+    createElement("span", "", `${formatBytes(item.size_bytes)} · ${item.tag_count} 个标签`),
   );
   const statusLine = createElement("div", "card-status-line");
   statusLine.append(
     statusBadge(item),
-    createElement("span", "index-state", item.embedding_ready ? "Vector ready" : "Keyword fallback"),
+    createElement(
+      "span",
+      `index-state format-${item.tag_format}`,
+      TAG_FORMAT_LABELS[item.tag_format] || item.tag_format,
+    ),
+    createElement("span", "index-state", item.embedding_ready ? "向量可用" : "关键词检索"),
   );
 
   const actions = createElement("div", "meme-actions");
   actions.append(
-    cardButton("Edit", "button-secondary", () => openEdit(item)),
-    cardButton("Retag", "button-quiet", (event) => retagItem(item, event.currentTarget), item.status === "missing"),
-    cardButton("Delete", "delete-button", () => openDelete(item)),
+    cardButton("编辑", "button-secondary", () => openEdit(item)),
+    cardButton("重标", "button-quiet", (event) => retagItem(item, event.currentTarget), item.status === "missing"),
+    cardButton("删除", "delete-button", () => openDelete(item)),
   );
   content.append(statusLine, fileLine, renderTags(item), actions);
   card.append(media, content);
@@ -202,14 +258,14 @@ function renderCard(item) {
 function renderCatalog() {
   elements.grid.replaceChildren(...state.items.map(renderCard));
   elements.resultCount.textContent = String(state.total || 0);
-  elements.pageLabel.textContent = `Page ${state.page} of ${state.pages}`;
+  elements.pageLabel.textContent = `第 ${state.page} / ${state.pages} 页`;
   elements.previousPage.disabled = state.page <= 1;
   elements.nextPage.disabled = state.page >= state.pages;
   elements.empty.hidden = state.items.length !== 0;
 }
 
 function renderStats(stats) {
-  ["stored", "indexed", "unindexed", "missing"].forEach((key) => {
+  ["stored", "structured", "legacy", "unindexed", "missing"].forEach((key) => {
     const node = document.querySelector(`#stat-${key}`);
     if (node) node.textContent = String(stats?.[key] || 0);
   });
@@ -239,7 +295,7 @@ async function loadCatalog({ resetPage = false } = {}) {
     renderCatalog();
   } catch (error) {
     if (error.name !== "AbortError") {
-      showToast("Catalog unavailable", error.message, true);
+      showToast("表情库加载失败", error.message, true);
     }
   } finally {
     elements.loading.hidden = true;
@@ -250,8 +306,8 @@ async function loadCatalog({ resetPage = false } = {}) {
 function openEdit(item) {
   state.selected = item;
   elements.editFileName.textContent = item.file_name;
-  elements.editTags.value = item.tags || "";
-  elements.editStatus.textContent = STATUS_LABELS[item.status] || item.status;
+  elements.editTags.value = metadataEditorValue(item);
+  elements.editStatus.textContent = `${STATUS_LABELS[item.status] || item.status} · ${TAG_FORMAT_LABELS[item.tag_format] || item.tag_format}`;
   elements.editStatus.className = `status-badge status-${item.status}`;
   elements.retagCurrent.disabled = item.status === "missing";
   if (item.image_url) {
@@ -268,18 +324,19 @@ function openEdit(item) {
 async function saveTags(event) {
   event.preventDefault();
   if (!state.selected) return;
-  setBusy(elements.saveTags, true, "Saving");
+  setBusy(elements.saveTags, true, "保存中");
   try {
+    const tags = parseMetadataInput(elements.editTags.value);
     await request(`/${encodeURIComponent(state.selected.file_name)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tags: elements.editTags.value }),
+      body: JSON.stringify({ tags }),
     });
     elements.editDialog.close();
-    showToast("Search index updated", state.selected.file_name);
+    showToast("检索信息已更新", state.selected.file_name);
     await loadCatalog();
   } catch (error) {
-    showToast("Tags were not saved", error.message, true);
+    showToast("标签保存失败", error.message, true);
   } finally {
     setBusy(elements.saveTags, false);
   }
@@ -287,17 +344,17 @@ async function saveTags(event) {
 
 async function retagItem(item, button) {
   if (!item || item.status === "missing") return;
-  setBusy(button, true, "Generating");
+  setBusy(button, true, "生成中");
   try {
     const payload = await request(`/${encodeURIComponent(item.file_name)}/retag`, { method: "POST" });
-    showToast("Tags generated", item.file_name);
+    showToast("结构化标签已生成", item.file_name);
     if (state.selected?.file_name === item.file_name) {
       state.selected = payload.item;
-      elements.editTags.value = payload.item.tags || "";
+      elements.editTags.value = metadataEditorValue(payload.item);
     }
     await loadCatalog();
   } catch (error) {
-    showToast("Automatic tagging failed", error.message, true);
+    showToast("自动标注失败", error.message, true);
   } finally {
     setBusy(button, false);
   }
@@ -312,15 +369,15 @@ function openDelete(item) {
 async function deleteSelected(event) {
   event.preventDefault();
   if (!state.deleteTarget) return;
-  setBusy(elements.confirmDelete, true, "Deleting");
+  setBusy(elements.confirmDelete, true, "删除中");
   try {
     await request(`/${encodeURIComponent(state.deleteTarget.file_name)}`, { method: "DELETE" });
-    showToast("Meme deleted", state.deleteTarget.file_name);
+    showToast("表情已删除", state.deleteTarget.file_name);
     elements.deleteDialog.close();
     state.deleteTarget = null;
     await loadCatalog();
   } catch (error) {
-    showToast("Delete failed", error.message, true);
+    showToast("删除失败", error.message, true);
     await loadCatalog();
   } finally {
     setBusy(elements.confirmDelete, false);
@@ -336,22 +393,24 @@ function clearUploads() {
 
 function addUploadFiles(files) {
   const acceptedTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
-  const existingKeys = new Set(state.uploads.map((entry) => `${entry.file.name}:${entry.file.size}:${entry.file.lastModified}`));
+  const existingKeys = new Set(
+    state.uploads.map((entry) => `${entry.file.name}:${entry.file.size}:${entry.file.lastModified}`),
+  );
   Array.from(files).forEach((file) => {
     const key = `${file.name}:${file.size}:${file.lastModified}`;
     if (existingKeys.has(key)) return;
     if (!acceptedTypes.has(file.type)) {
-      showToast("Unsupported image", file.name, true);
+      showToast("不支持的图片格式", file.name, true);
       return;
     }
     if (file.size > 6 * 1024 * 1024) {
-      showToast("Image is larger than 6 MiB", file.name, true);
+      showToast("图片超过 6 MiB", file.name, true);
       return;
     }
     state.uploads.push({
       file,
       previewUrl: URL.createObjectURL(file),
-      status: "Ready",
+      status: "待上传",
       statusClass: "",
     });
     existingKeys.add(key);
@@ -376,8 +435,8 @@ function renderUploadQueue() {
       createElement("strong", "", entry.file.name),
       createElement("span", "", formatBytes(entry.file.size)),
     );
-    const action = entry.status === "Ready"
-      ? cardButton("Remove", "button-quiet", () => removeUpload(entry))
+    const action = entry.status === "待上传"
+      ? cardButton("移除", "button-quiet", () => removeUpload(entry))
       : createElement("span", `upload-status ${entry.statusClass}`, entry.status);
     row.append(image, copy, action);
     return row;
@@ -388,18 +447,25 @@ function renderUploadQueue() {
 async function uploadSelected(event) {
   event.preventDefault();
   if (!state.uploads.length) {
-    showToast("Choose at least one image", "No files are queued.", true);
+    showToast("请至少选择一张图片", "当前没有待上传文件。", true);
     return;
   }
-  const sharedTags = elements.uploadTags.value.trim();
-  if (!sharedTags && !elements.autoTag.checked) {
-    showToast("Tags are required", "Enter shared tags or enable automatic tagging.", true);
+  let sharedTags = elements.uploadTags.value.trim();
+  if (sharedTags) {
+    try {
+      sharedTags = parseMetadataInput(sharedTags);
+    } catch (error) {
+      showToast("共享标签格式错误", error.message, true);
+      return;
+    }
+  } else if (!elements.autoTag.checked) {
+    showToast("缺少结构化标签", "请填写 JSON 标签，或启用自动标注。", true);
     return;
   }
-  setBusy(elements.startUpload, true, "Uploading");
+  setBusy(elements.startUpload, true, "上传中");
   let failures = 0;
   for (const entry of state.uploads) {
-    entry.status = "Uploading";
+    entry.status = "上传中";
     entry.statusClass = "";
     renderUploadQueue();
     const form = new FormData();
@@ -408,7 +474,7 @@ async function uploadSelected(event) {
     form.append("auto_tag", String(elements.autoTag.checked));
     try {
       const payload = await request("", { method: "POST", body: form });
-      entry.status = payload.status === "duplicate" ? "Already stored" : "Added";
+      entry.status = payload.status === "duplicate" ? "已存在" : "已添加";
       entry.statusClass = "is-success";
     } catch (error) {
       failures += 1;
@@ -420,9 +486,9 @@ async function uploadSelected(event) {
   setBusy(elements.startUpload, false);
   await loadCatalog({ resetPage: true });
   if (failures) {
-    showToast("Upload completed with errors", `${failures} file(s) were rejected.`, true);
+    showToast("上传完成，但有文件失败", `${failures} 个文件未能导入。`, true);
   } else {
-    showToast("Upload complete", `${state.uploads.length} file(s) processed.`);
+    showToast("上传完成", `已处理 ${state.uploads.length} 个文件。`);
     window.setTimeout(() => {
       elements.uploadDialog.close();
       clearUploads();

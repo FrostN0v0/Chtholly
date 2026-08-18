@@ -68,6 +68,10 @@ from plugins.llm_chat.web.policy import DEFAULT_WEB_ACCESS_LIMITS
 from plugins.llm_chat.core.delivery import DeliveryState, llm_chat_delivery_scope
 from plugins.llm_chat.core.image_source import IMAGE_FETCH_MAX_BYTES
 from plugins.llm_chat.tools._image_catalog import ImageCatalog
+from plugins.llm_chat.core.image_tag_metadata import (
+    image_tag_catalog_summary,
+    normalize_generated_image_tags,
+)
 
 sys.modules.pop("plugins.llm_chat", None)
 if getattr(_PLUGINS, "llm_chat", None) is _PACKAGE:
@@ -114,7 +118,7 @@ async def meme_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
         await connection.run_sync(Base.metadata.create_all)
 
     state = SimpleNamespace(
-        tag_result="reaction，sticker，happy",
+        tag_result=normalize_generated_image_tags("reaction，sticker，happy"),
         embedding_result=[1.0, 0.0, 0.0],
         visual_calls=0,
         embedding_calls=[],
@@ -166,7 +170,7 @@ async def test_import_uses_next_numeric_name_and_persists_queryable_tags(meme_en
         Image.of(url="local://new"),
     )
 
-    expected_path = str(Path("memes") / "63.png")
+    expected_path = "memes/63.png"
     assert result.status == "created"
     assert result.relative_path == expected_path
     assert result.tags == meme_env.state.tag_result
@@ -210,7 +214,7 @@ async def test_manual_byte_import_normalizes_tags_without_vision(meme_env: Any) 
         auto_tag=False,
     )
 
-    assert result.tags == "visible quote，reaction，reply scene"
+    assert result.tags == normalize_generated_image_tags("visible quote，reaction，reply scene")
     assert meme_env.state.visual_calls == 0
     rows = await _image_rows(meme_env.session_factory)
     assert [(row.file_path, row.tags) for row in rows] == [(result.relative_path, result.tags)]
@@ -288,7 +292,7 @@ async def test_animated_gif_import_preserves_original_bytes_and_deduplicates(mem
     first = await import_meme_image(meme_env.config, session, Image.of(url="local://animated"))
     second = await import_meme_image(meme_env.config, session, Image.of(url="local://duplicate"))
 
-    expected_path = str(Path("memes") / "1.gif")
+    expected_path = "memes/1.gif"
     assert _GIF_BYTES.count(b"\x2c") == 2
     assert first == MemeImportResult("created", expected_path, meme_env.state.tag_result)
     assert second == MemeImportResult("duplicate", expected_path, meme_env.state.tag_result)
@@ -339,18 +343,51 @@ async def test_batch_tagging_discovers_existing_gif(
     assert len(data_urls) == 1
     assert data_urls[0].startswith("data:image/gif;base64,")
     rows = await _image_rows(meme_env.session_factory)
-    assert [(row.file_path, row.tags) for row in rows] == [
-        (str(Path("memes") / "existing.gif"), meme_env.state.tag_result)
-    ]
+    assert [(row.file_path, row.tags) for row in rows] == [("memes/existing.gif", meme_env.state.tag_result)]
     assert all(not row.file_path.startswith("fox_img/") for row in rows)
 
 
 @pytest.mark.asyncio
-async def test_existing_untagged_file_is_repaired_without_replacing_embedding(meme_env: Any) -> None:
+async def test_legacy_only_tagging_skips_structured_and_unindexed_files(
+    meme_env: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    structured_path = "memes/1.png"
+    legacy_path = "memes/2.png"
+    unindexed_path = "memes/3.png"
+    for name in ("1.png", "2.png", "3.png"):
+        (meme_env.meme_dir / name).write_bytes(_PNG_BYTES + name.encode())
+    async with meme_env.session_factory() as session:
+        session.add(ImageTag(file_path=structured_path, tags=meme_env.state.tag_result, embedding_json="[]"))
+        session.add(ImageTag(file_path=legacy_path.replace("/", "\\"), tags="爆笑，社死，慌张", embedding_json="stale"))
+        await session.commit()
+
+    tagged_paths: list[str] = []
+
+    async def generate_tags(_config: LLMChatConfig, _data_url: str) -> str:
+        tagged_paths.append(legacy_path)
+        return cast(str, meme_env.state.tag_result)
+
+    monkeypatch.setattr(image_tags_module, "IMAGE_DIR", meme_env.image_dir)
+    monkeypatch.setattr(image_tags_module, "generate_image_tags", generate_tags)
+
+    result = await image_tags_module.tag_images(meme_env.config, legacy_only=True)
+
+    assert result == (1, 0, 0)
+    assert tagged_paths == [legacy_path]
+    rows = {row.file_path: row for row in await _image_rows(meme_env.session_factory)}
+    assert rows[structured_path].tags == meme_env.state.tag_result
+    assert rows[legacy_path].tags == meme_env.state.tag_result
+    assert rows[legacy_path].embedding_json == "[1.0,0.0,0.0]"
+    assert unindexed_path not in rows
+
+
+@pytest.mark.asyncio
+async def test_existing_untagged_file_is_repaired_and_stale_embedding_is_cleared(meme_env: Any) -> None:
     repair_data = _PNG_BYTES + b"repair"
     repair_path = meme_env.meme_dir / "7.png"
     repair_path.write_bytes(repair_data)
-    relative_path = str(Path("memes") / "7.png")
+    relative_path = "memes/7.png"
     async with meme_env.session_factory() as session:
         session.add(ImageTag(file_path=relative_path, tags="", embedding_json="preserved"))
         await session.commit()
@@ -366,14 +403,14 @@ async def test_existing_untagged_file_is_repaired_without_replacing_embedding(me
     assert repaired.relative_path == relative_path
     rows = await _image_rows(meme_env.session_factory)
     assert rows[0].tags == meme_env.state.tag_result
-    assert rows[0].embedding_json == "preserved"
+    assert rows[0].embedding_json == ""
     assert len(_stored_images(meme_env.meme_dir)) == 1
     assert meme_env.state.visual_calls == 1
 
 
 @pytest.mark.asyncio
 async def test_manual_tag_replacement_clears_stale_embedding_on_embedding_failure(meme_env: Any) -> None:
-    relative_path = str(Path("memes") / "8.png")
+    relative_path = "memes/8.png"
     async with meme_env.session_factory() as session:
         session.add(ImageTag(file_path=relative_path, tags="old tags", embedding_json="stale-vector"))
         await session.commit()
@@ -382,7 +419,7 @@ async def test_manual_tag_replacement_clears_stale_embedding_on_embedding_failur
     await image_tags_module.replace_image_tags(meme_env.config, relative_path, "new tags")
 
     rows = await _image_rows(meme_env.session_factory)
-    assert rows[0].tags == "new tags"
+    assert rows[0].tags == normalize_generated_image_tags("new tags")
     assert rows[0].embedding_json == ""
 
 
@@ -399,7 +436,7 @@ async def test_concurrent_imports_deduplicate_and_allocate_consecutive_names(mem
     )
 
     assert {result.status for result in shared_results} == {"created", "duplicate"}
-    assert {result.relative_path for result in shared_results} == {str(Path("memes") / "1.png")}
+    assert {result.relative_path for result in shared_results} == {"memes/1.png"}
     assert meme_env.state.visual_calls == 1
 
     first_data = _PNG_BYTES + b"first-distinct"
@@ -414,8 +451,8 @@ async def test_concurrent_imports_deduplicate_and_allocate_consecutive_names(mem
     )
 
     assert {result.relative_path for result in distinct_results} == {
-        str(Path("memes") / "2.png"),
-        str(Path("memes") / "3.png"),
+        "memes/2.png",
+        "memes/3.png",
     }
     assert all(result.status == "created" for result in distinct_results)
     assert meme_env.state.visual_calls == 3
@@ -538,7 +575,7 @@ async def test_hard_link_collision_never_overwrites_external_file(
         Image.of(url="local://collision"),
     )
 
-    assert result.relative_path == str(Path("memes") / "2.png")
+    assert result.relative_path == "memes/2.png"
     assert (meme_env.meme_dir / "1.png").read_bytes() == b"external-writer"
     assert (meme_env.meme_dir / "2.png").read_bytes() == data
 
@@ -1032,7 +1069,7 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
     meme_env: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    meme_env.state.tag_result = "reaction，happy，sticker"
+    meme_env.state.tag_result = normalize_generated_image_tags("reaction，happy，sticker")
     meme_env.state.embedding_result = None
     data = _PNG_BYTES + b"scripted-smoke"
     image = Image.of(url="local://smoke")
@@ -1068,7 +1105,7 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
             await session.send(final_text)
             await persona_store_module.append_message("channel", "", "bot", "assistant", final_text)
 
-            relative_path = str(Path("memes") / "1.png")
+            relative_path = "memes/1.png"
             files = _stored_images(meme_env.meme_dir)
             rows = await _image_rows(meme_env.session_factory)
             assert len(files) == len(rows) == 1
@@ -1088,7 +1125,7 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
                 )
             assert [row.content for row in history] == ["Visible collection reply"]
 
-            distractor_path = str(Path("memes") / "2.png")
+            distractor_path = "memes/2.png"
             (meme_env.meme_dir / "2.png").write_bytes(_PNG_BYTES + b"distractor")
             async with meme_env.session_factory() as database:
                 database.add(ImageTag(file_path=distractor_path, tags="reaction，happy，sticker", embedding_json=""))
@@ -1100,7 +1137,7 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
             assert catalog_paths == [distractor_path, relative_path]
             assert [entry["tags"] for entry in catalog["images"]] == [
                 "reaction，happy，sticker",
-                meme_env.state.tag_result,
+                image_tag_catalog_summary(meme_env.state.tag_result),
             ]
 
             async def no_sleep(_seconds: float) -> None:

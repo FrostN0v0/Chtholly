@@ -60,9 +60,9 @@ if plug is not None:
         _COMPONENT_URL,
         permission="llm_chat.memes.manage",
     )
-    extension.add_i18n("zh-CN", "llm_chat.memes.name", "Meme Library")
+    extension.add_i18n("zh-CN", "llm_chat.memes.name", "表情库管理")
     extension.add_i18n("en-US", "llm_chat.memes.name", "Meme Library")
-    extension.add_i18n("zh-CN", "llm_chat.memes.permission.manage", "Manage meme library")
+    extension.add_i18n("zh-CN", "llm_chat.memes.permission.manage", "管理表情库")
     extension.add_i18n("en-US", "llm_chat.memes.permission.manage", "Manage meme library")
     extension.add_permission("llm_chat.memes.manage", "llm_chat.memes.permission.manage")
     registered_menus = tuple(menu for menu in extension.menus if menu.path == _MENU_PATH)

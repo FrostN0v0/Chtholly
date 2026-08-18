@@ -26,6 +26,7 @@ from ._image_catalog import (
     normalize_image_reference,
 )
 from ..core.image_source import image_file_to_data_url
+from ..core.image_tag_metadata import image_tag_history_hint
 
 ImagePicker = Callable[[LLMChatConfig, Sequence[ImageTag], str, deque[str]], Awaitable[str | None]]
 HistoryAppender = Callable[[str, str, str, str, str], Awaitable[object]]
@@ -150,7 +151,7 @@ def register_send_image(
                     ) from None
                 raise
             recent.append(row.file_path)
-            tag_hint = "，".join(row.tags.split("，")[:5])
+            tag_hint = image_tag_history_hint(row.tags)
             try:
                 await runtime.append_history(
                     session.channel.id,

@@ -15,7 +15,6 @@ from utils.path import MEME_DIR
 
 from .config import LLMChatConfig
 from .vision import generate_image_tags
-from .core.media import normalize_image_tags
 from .image_tags import replace_image_tags
 from .meme_store import (
     MemeImportError,
@@ -34,6 +33,7 @@ from .meme_catalog import (
     MemeCatalogFilter,
 )
 from .core.image_source import image_file_to_data_url
+from .core.image_tag_metadata import normalize_generated_image_tags
 
 _LOGGER = log.wrapper("[llm_chat]")
 
@@ -135,6 +135,11 @@ class MemeAdminService:
         manual_tags = tags.strip() or None
         if manual_tags is not None and len(manual_tags) > 4000:
             raise MemeAdminError("Tag text is too long", code="invalid_tags", status=400)
+        if manual_tags is not None:
+            normalized = normalize_generated_image_tags(manual_tags)
+            if not normalized:
+                raise MemeAdminError("At least one valid tag is required", code="invalid_tags", status=400)
+            manual_tags = normalized
         try:
             result = await self._importer(
                 self._config,
@@ -157,7 +162,7 @@ class MemeAdminService:
     async def update_tags(self, file_name: str, tags: str) -> MemeCatalogItem:
         if len(tags) > 4000:
             raise MemeAdminError("Tag text is too long", code="invalid_tags", status=400)
-        normalized = normalize_image_tags(tags)
+        normalized = normalize_generated_image_tags(tags)
         if not normalized:
             raise MemeAdminError("At least one valid tag is required", code="invalid_tags", status=400)
         item = await self.get_item(file_name)
@@ -179,7 +184,7 @@ class MemeAdminService:
         if data_url is None:
             raise MemeAdminError("Meme image is invalid or too large", code="image_unavailable", status=400)
         try:
-            tags = normalize_image_tags(await self._tagger(self._config, data_url))
+            tags = normalize_generated_image_tags(await self._tagger(self._config, data_url))
             if not tags:
                 raise MemeAdminError("Automatic tagging returned no tags", code="tagging_failed", status=502)
             await self._tag_replacer(self._config, item.storage_path, tags)
