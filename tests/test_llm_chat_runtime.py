@@ -67,6 +67,7 @@ from plugins.llm_chat.persona import (
 )
 from plugins.llm_chat.core.eval import EvalResult
 from plugins.llm_chat.core.media import RECENT_MEME_HISTORY_NOTE
+from plugins.llm_chat.core.types import ChatMessage
 from plugins.llm_chat.core.errors import summarize_exception
 from plugins.llm_chat.chat_context import (
     build_image_notes,
@@ -101,6 +102,11 @@ from plugins.llm_chat.core.image_source import (
     image_file_to_data_url,
 )
 from plugins.llm_chat.persona.embedding import embed_text
+from plugins.llm_chat.core.self_reference import (
+    SELF_REFERENCE_IMAGE_MARKER,
+    append_self_reference_image,
+    resolve_self_reference_image,
+)
 from plugins.llm_chat.persona.memory_update import apply_memory_updates, resolve_fact_embedding_update
 from plugins.llm_chat.core.tool_trace_policy import DeliverySnapshot, project_tool_arguments
 from plugins.llm_chat.core.tool_trace_safety import compact_tool_activity
@@ -757,6 +763,56 @@ def test_image_file_to_data_url_sniffs_webp_without_suffix_guessing(tmp_path):
     assert data_url is not None
     assert data_url.startswith("data:image/webp")
     assert not data_url.startswith("data:image/jpeg")
+
+
+def test_self_reference_image_appends_trusted_multimodal_parts(tmp_path: Path):
+    image_root = tmp_path / "image"
+    image_path = image_root / "persona" / "ChthollyHat.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(_PNG_BYTES)
+    original = '{"speaker":"Alice","content":"画一张你在雪地里的样子"}'
+    messages: list[ChatMessage] = [
+        {"role": "assistant", "content": "previous"},
+        {"role": "user", "content": original},
+    ]
+    warnings: list[str] = []
+
+    assert append_self_reference_image(
+        messages,
+        "persona/ChthollyHat.png",
+        warnings.append,
+        image_root=image_root,
+    )
+
+    assert messages[0] == {"role": "assistant", "content": "previous"}
+    content = messages[1]["content"]
+    assert isinstance(content, list)
+    assert content[0] == {"type": "text", "text": original}
+    assert content[1] == {"type": "text", "text": SELF_REFERENCE_IMAGE_MARKER}
+    assert content[2]["type"] == "image_url"
+    assert content[2]["image_url"]["url"].startswith("data:image/png")
+    assert warnings == []
+
+
+def test_self_reference_image_rejects_paths_outside_resource_root(tmp_path: Path):
+    image_root = tmp_path / "image"
+    image_root.mkdir()
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(_PNG_BYTES)
+    messages: list[ChatMessage] = [{"role": "user", "content": "generate an image"}]
+    original = list(messages)
+    warnings: list[str] = []
+
+    assert resolve_self_reference_image("../outside.png", image_root=image_root) is None
+    assert not append_self_reference_image(
+        messages,
+        "../outside.png",
+        warnings.append,
+        image_root=image_root,
+    )
+
+    assert messages == original
+    assert warnings == ["self reference image skipped: configured file unavailable"]
 
 
 @pytest.mark.asyncio

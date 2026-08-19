@@ -101,6 +101,7 @@ plugins:
     allowed_commands: ["echo", "help"]
     context_window: 20
     channel_message_max_images: 12
+    self_reference_image: "persona/ChthollyHat.png"
     # Recent tool activity is channel-scoped, bounded, and excluded from persona evaluation.
     tool_context_max_events: 8
     tool_context_max_chars: 3500

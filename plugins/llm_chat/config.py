@@ -36,6 +36,8 @@ class LLMChatConfig(BasicConfModel):
     """Maximum forwarded images described through the vision model."""
     channel_message_max_images: int = 12
     """Maximum channel-message images exposed as generation-local references per history page."""
+    self_reference_image: str | None = None
+    """Relative path below resources/image used for self-themed native image generation."""
     model: str | None = None
     """Model alias for conversation; None uses the llm plugin default."""
     eval_model: str | None = None

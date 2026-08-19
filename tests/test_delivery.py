@@ -35,6 +35,7 @@ from plugins.llm_chat.core.media_delivery import (
     is_media_unavailable_reply,
     latest_user_requests_media,
     strip_media_unavailable_marker,
+    latest_user_requests_image_generation,
 )
 
 
@@ -92,6 +93,34 @@ def test_latest_user_media_request_detection_handles_chat_payloads(content: str)
 )
 def test_latest_user_media_request_detection_rejects_non_delivery_intent(content: str) -> None:
     assert not latest_user_requests_media([{"role": "user", "content": content}])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "画一张你在雪地里的样子",
+        "生成一幅夜空插画",
+        "参考我给的 [图片] 重新生成一个版本",
+        "发一张你的照片",
+        "show me a picture of yourself",
+    ],
+)
+def test_latest_user_image_generation_detection_accepts_self_reference_turns(content: str) -> None:
+    assert latest_user_requests_image_generation([{"role": "user", "content": content}])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "用语音说一句话",
+        "来张表情包",
+        "这张图里面是什么",
+        "不要生成图片",
+        "把图中后面的路人删除 [图片]",
+    ],
+)
+def test_latest_user_image_generation_detection_rejects_unrelated_media(content: str) -> None:
+    assert not latest_user_requests_image_generation([{"role": "user", "content": content}])
 
 
 def test_latest_user_media_request_detection_uses_nested_current_content_only() -> None:

@@ -21,7 +21,7 @@ _NEGATED_MEDIA_REQUEST = re.compile(
     rf"|(?:do not|don't|dont|no need to|stop).{{0,12}}(?:send|show|share|use).{{0,8}}{_MEDIA_TERM}",
     re.IGNORECASE,
 )
-_MEDIA_REQUEST_PATTERNS = (
+_IMAGE_GENERATION_PATTERNS = (
     re.compile(
         r"(?:^|[，。！？!?；;]\s*|(?:帮我|给我|请|那)\s*)"
         r"(?:画(?!画|法|风格|教程)|绘制|创作)\s*(?:一|两|几)?(?:张|幅|个)?\s*.{1,80}"
@@ -38,12 +38,24 @@ _MEDIA_REQUEST_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
-        rf"(?=.{{0,160}}{_IMAGE_OUTPUT_TERM})"
-        rf"(?:把|将|帮我|请|给我)?.{{0,100}}{_IMAGE_EDIT_ACTION}.{{0,80}}"
-        rf"|(?:仿照|参照|参考|照着|按照|按).{{0,100}}(?:生成|做|画|绘制|创作).{{0,100}}{_IMAGE_OUTPUT_TERM}"
+        rf"(?:仿照|参照|参考|照着|按照|按).{{0,100}}(?:生成|做|画|绘制|创作).{{0,100}}{_IMAGE_OUTPUT_TERM}"
         rf"|(?:仿照|参照|参考|照着|按照|按).{{0,100}}{_IMAGE_OUTPUT_TERM}.{{0,100}}(?:生成|做|画|绘制|创作)",
         re.IGNORECASE,
     ),
+)
+_IMAGE_EDIT_PATTERN = re.compile(
+    rf"(?=.{{0,160}}{_IMAGE_OUTPUT_TERM})(?:把|将|帮我|请|给我)?.{{0,100}}{_IMAGE_EDIT_ACTION}.{{0,80}}",
+    re.IGNORECASE,
+)
+_SELF_IMAGE_REQUEST_PATTERN = re.compile(
+    rf"(?=.{{0,160}}(?:你(?:自己|的)?|自己|珂朵莉|chtholly))(?=.{{0,160}}{_IMAGE_OUTPUT_TERM})"
+    rf"(?:来|发|传|给我|让我看|想看|看看|看下|瞧瞧|{_IMAGE_EDIT_ACTION}).{{0,160}}"
+    r"|(?:show|send|share).{0,32}(?:image|picture|photo).{0,32}(?:of\s+)?(?:you|yourself)",
+    re.IGNORECASE,
+)
+_MEDIA_REQUEST_PATTERNS = (
+    *_IMAGE_GENERATION_PATTERNS,
+    _IMAGE_EDIT_PATTERN,
     re.compile(
         r"(?:用|以)\s*(?:语音|音频|声音)\s*(?:说|讲|念|读|回复|回答|告诉)"
         r"|(?:说|讲|念|读)\s*(?:一|两|几)?(?:句|段|下)?\s*(?:语音|音频)"
@@ -94,6 +106,21 @@ def _user_text(content: object) -> str:
                 text_parts.append(_user_text(text))
         return " ".join(text_parts)
     return ""
+
+
+def latest_user_requests_image_generation(messages: Sequence[ChatMessage]) -> bool:
+    """Return whether the latest turn may need the trusted self image reference."""
+
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        text = _user_text(message.get("content")).strip()
+        if not text or _NEGATED_MEDIA_REQUEST.search(text):
+            return False
+        return any(pattern.search(text) for pattern in _IMAGE_GENERATION_PATTERNS) or bool(
+            _SELF_IMAGE_REQUEST_PATTERN.search(text)
+        )
+    return False
 
 
 def latest_user_requests_media(messages: Sequence[ChatMessage]) -> bool:

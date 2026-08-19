@@ -49,7 +49,8 @@ from .channel_images import ChannelImageReferences
 from .persona.runner import run_evaluation
 from .turn_lifecycle import ActiveChatTurn
 from .forward_context import resolve_merged_forward_messages
-from .core.media_delivery import latest_user_requests_media
+from .core.media_delivery import latest_user_requests_media, latest_user_requests_image_generation
+from .core.self_reference import append_self_reference_image
 from .persona.memory_update import apply_memory_updates
 from .persona.memory_context import load_memory_context
 
@@ -111,9 +112,10 @@ async def on_chat(session: Session, ctx: Contexts):
     except ModelNotFoundError as exc:
         _LOGGER.warning(f"channel model resolve failed, using global default: {summarize_exception(exc)}")
         model_name = None
+    supports_image_input = model_supports_image_input(model_name)
 
     current_content: str | list[dict[str, Any]] | None = None
-    if model_supports_image_input(model_name):
+    if supports_image_input:
         current_content, content = await build_multimodal_user_content(
             config,
             session,
@@ -163,7 +165,15 @@ async def on_chat(session: Session, ctx: Contexts):
         current_content,
         forwarded_messages,
     )
-    media_requested = latest_user_requests_media(cast(list[ChatMessage], messages))
+    chat_messages = cast(list[ChatMessage], messages)
+    self_reference_attached = False
+    if supports_image_input and latest_user_requests_image_generation(chat_messages):
+        self_reference_attached = append_self_reference_image(
+            chat_messages,
+            config.self_reference_image,
+            _LOGGER.warning,
+        )
+    media_requested = latest_user_requests_media(chat_messages)
     web_limits = normalize_web_access_limits(
         config.web_search_max_calls_per_generation,
         config.web_page_max_calls_per_generation,
@@ -196,6 +206,7 @@ async def on_chat(session: Session, ctx: Contexts):
         recent_tool_activity=recent_tool_activity,
         user_name=user_name,
         current_participant_ref=identity.participant_ref,
+        self_reference_attached=self_reference_attached,
         web_search_limit=web_limits.search_limit,
         web_page_limit=web_limits.read_limit,
         web_total_limit=web_limits.total_limit,
