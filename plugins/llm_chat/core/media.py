@@ -4,7 +4,7 @@ import re
 import math
 import random
 from difflib import SequenceMatcher
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from collections import Counter
 
 from .forward import ForwardedSpeakerRole
@@ -15,6 +15,9 @@ AUDIO_NEAR_WINDOW = 0.05
 _FILENAME_RE = re.compile(r"^\s*\d+\s*_(?P<text>.+?)_?\s*$")
 _TAG_SPLIT_RE = re.compile(r"[，,、;；\n\r]+")
 _TAG_PREFIX_RE = re.compile(r"^\s*(?:[-*•]+|\d+[.)、])\s*")
+_IMAGE_CONTEXT_TERM_SPLIT_RE = re.compile(r"[，,、;；\n\r\s]+")
+_IMAGE_CONTEXT_GENERIC_TERMS = frozenset({"图", "图片", "表情", "表情包", "贴纸", "不要", "排除", "避免"})
+_IMAGE_CONTEXT_SUFFIXES = ("表情包", "表情", "贴纸", "图片")
 _AUDIO_NORMALIZE_RE = re.compile(r"[\W_\s]+")
 _LOW_SIGNAL_CHARS = frozenset("的了呢啊吗吧呀哦嗯哈我你他她它是不在有和跟给就都也还才又很真这那一个")
 _AUDIO_SYNONYM_GROUPS = (("早上问好", "早安", "早上好", "您早上好", "问早"),)
@@ -36,6 +39,19 @@ _INTERNAL_MEDIA_RECORD_PREFIXES = (
     _NATIVE_IMAGE_RECORD_PREFIX,
     MEME_COLLECTION_RECORD_PREFIX,
 )
+
+ALLOWED_IMAGE_RESOURCE_ROOTS = frozenset({"memes"})
+
+
+def is_allowed_image_resource_path(value: str | Path) -> bool:
+    """Allow registered images only below explicitly approved resource roots."""
+
+    parts = PurePosixPath(str(value).replace("\\", "/")).parts
+    return (
+        len(parts) >= 2
+        and parts[0].casefold() in ALLOWED_IMAGE_RESOURCE_ROOTS
+        and all(part not in {"..", ""} for part in parts)
+    )
 
 
 _DEFAULT_RNG = random.Random()
@@ -258,6 +274,44 @@ def rank_images_by_tags(context: str, tagged: list[tuple[str, str]]) -> list[tup
     scored: list[tuple[str, float]] = []
     for path, tags in tag_sets:
         score = sum(math.log((total + 1) / df[tag]) for tag in tags if tag in context)
+        if score > 0.0:
+            scored.append((path, score))
+    scored.sort(key=lambda item: item[1], reverse=True)
+    return scored
+
+
+def _explicit_image_context_terms(context: str) -> set[str]:
+    terms: set[str] = set()
+    for raw in _IMAGE_CONTEXT_TERM_SPLIT_RE.split(context):
+        term = raw.strip().strip("`*_ \t\"'“”‘’。.!！").casefold()
+        if not term or term in _IMAGE_CONTEXT_GENERIC_TERMS:
+            continue
+        terms.add(term)
+        for suffix in _IMAGE_CONTEXT_SUFFIXES:
+            if term.endswith(suffix) and len(term) > len(suffix):
+                stripped = term[: -len(suffix)].strip()
+                if stripped and stripped not in _IMAGE_CONTEXT_GENERIC_TERMS:
+                    terms.add(stripped)
+                break
+    return terms
+
+
+def rank_images_by_exact_tags(context: str, tagged: list[tuple[str, str]]) -> list[tuple[str, float]]:
+    """Rank literal context terms before broader semantic image matching."""
+
+    context_terms = _explicit_image_context_terms(context)
+    if not context_terms or not tagged:
+        return []
+    total = len(tagged)
+    tag_sets: list[tuple[str, set[str]]] = []
+    df: Counter[str] = Counter()
+    for path, tag_str in tagged:
+        tags = {term.strip().casefold() for term in _TAG_SPLIT_RE.split(tag_str) if term.strip()}
+        tag_sets.append((path, tags))
+        df.update(tags)
+    scored: list[tuple[str, float]] = []
+    for path, tags in tag_sets:
+        score = sum(math.log((total + 1) / df[tag]) for tag in tags if tag in context_terms)
         if score > 0.0:
             scored.append((path, score))
     scored.sort(key=lambda item: item[1], reverse=True)

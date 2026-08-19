@@ -79,7 +79,7 @@ def _compact(text: str) -> str:
 def _speaker(data: Mapping[str, object] | None) -> str:
     if data is None:
         return "Unknown sender"
-    value = _first_text(data, "card", "nickname", "name", "uin", "user_id")
+    value = _first_text(data, "card", "nickname", "name")
     return _compact(value)[:80] or "Unknown sender"
 
 
@@ -99,8 +99,8 @@ def _parse_segment(raw: object) -> ForwardPart | None:
         text = _compact(_string(data.get("text")))
         return ForwardPart("text", text=text) if text else None
     if segment_type == "at":
-        target = _first_text(data, "name", "qq", "user_id", "id")
-        return ForwardPart("text", text=f"@{target}" if target else "@unknown")
+        target = _first_text(data, "name")
+        return ForwardPart("text", text=f"@{target}" if target else "@member")
     if segment_type in {"image", "img"}:
         return ForwardPart("image", source=_media_source(data))
     if segment_type in {"record", "audio", "voice"}:

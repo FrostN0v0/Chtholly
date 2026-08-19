@@ -9,6 +9,8 @@ from plugins.llm_chat.core.media import (
     parse_audio_text,
     is_random_request,
     rank_images_by_tags,
+    rank_images_by_exact_tags,
+    is_allowed_image_resource_path,
 )
 
 
@@ -71,22 +73,31 @@ class TestMatchAudio:
         assert match_audio("random", [Path("random.mp3")]) is None
 
 
+class TestImageResourcePolicy:
+    def test_only_memes_directory_is_allowed(self):
+        assert is_allowed_image_resource_path("memes/1.jpg")
+        assert is_allowed_image_resource_path(Path("memes") / "nested" / "1.gif")
+        assert not is_allowed_image_resource_path("fox_img/1.jpg")
+        assert not is_allowed_image_resource_path("memes/../fox_img/1.jpg")
+        assert not is_allowed_image_resource_path("1.jpg")
+
+
 class TestMatchImage:
     TAGGED = [
-        ("fox_img/1.jpg", "狐狸,可爱,橙色,动物,毛茸茸"),
-        ("fox_img/2.jpg", "雪地,狐狸,白色,冬天,安静"),
-        ("cat/3.jpg", "猫,黑色,慵懒,沙发,睡觉"),
+        ("memes/fox-1.jpg", "狐狸,可爱,橙色,动物,毛茸茸"),
+        ("memes/fox-2.jpg", "雪地,狐狸,白色,冬天,安静"),
+        ("memes/cat-3.jpg", "猫,黑色,慵懒,沙发,睡觉"),
     ]
 
     def test_most_tag_hits_wins(self):
-        assert match_image("想看雪地里的白色狐狸", self.TAGGED) == "fox_img/2.jpg"
+        assert match_image("想看雪地里的白色狐狸", self.TAGGED) == "memes/fox-2.jpg"
 
     def test_single_hit(self):
-        assert match_image("来只猫", self.TAGGED) == "cat/3.jpg"
+        assert match_image("来只猫", self.TAGGED) == "memes/cat-3.jpg"
 
     def test_chinese_comma_tags_match(self):
-        tagged = [("morning/1.jpg", "早安，开心，可爱")]
-        assert match_image("发一张开心早安的可爱表情图", tagged) == "morning/1.jpg"
+        tagged = [("memes/morning-1.jpg", "早安，开心，可爱")]
+        assert match_image("发一张开心早安的可爱表情图", tagged) == "memes/morning-1.jpg"
 
     def test_no_hits_returns_none(self):
         assert match_image("汽车飞机大炮", self.TAGGED) is None
@@ -132,6 +143,23 @@ class TestRankImagesByTags:
     def test_zero_hit_images_are_dropped(self):
         ranked = rank_images_by_tags("生气", self.POOL)
         assert [path for path, _score in ranked] == ["136.jpg"]
+
+    def test_exact_terms_ignore_negation_and_directory_noise(self):
+        ranked = rank_images_by_exact_tags(
+            "糖笑，呆傻憨憨抽象笑容表情包，不要fox目录",
+            [
+                ("target.gif", "糖笑，坏笑，布偶"),
+                ("negative-noise.gif", "不要，无奈，滑稽"),
+                ("semantic-noise.png", "呆滞，懵圈，橘猫"),
+            ],
+        )
+
+        assert [path for path, _score in ranked] == ["target.gif"]
+
+    def test_image_suffix_is_removed_for_exact_tag_matching(self):
+        ranked = rank_images_by_exact_tags("糖笑表情包", [("target.gif", "糖笑，布偶")])
+
+        assert [path for path, _score in ranked] == ["target.gif"]
 
 
 class TestMatchImageTies:

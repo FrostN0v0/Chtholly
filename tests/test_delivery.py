@@ -8,6 +8,7 @@ from dataclasses import field, dataclass
 
 import pytest
 
+from plugins.llm_chat.core.types import ChatMessage
 from plugins.llm_chat.core.delivery import (
     DEFAULT_DELIVERY_LIMITS,
     DeliveryError,
@@ -34,6 +35,7 @@ from plugins.llm_chat.core.media_delivery import (
     is_media_unavailable_reply,
     latest_user_requests_media,
     strip_media_unavailable_marker,
+    latest_user_requests_image_generation,
 )
 
 
@@ -93,6 +95,34 @@ def test_latest_user_media_request_detection_rejects_non_delivery_intent(content
     assert not latest_user_requests_media([{"role": "user", "content": content}])
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "画一张你在雪地里的样子",
+        "生成一幅夜空插画",
+        "参考我给的 [图片] 重新生成一个版本",
+        "发一张你的照片",
+        "show me a picture of yourself",
+    ],
+)
+def test_latest_user_image_generation_detection_accepts_self_reference_turns(content: str) -> None:
+    assert latest_user_requests_image_generation([{"role": "user", "content": content}])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "用语音说一句话",
+        "来张表情包",
+        "这张图里面是什么",
+        "不要生成图片",
+        "把图中后面的路人删除 [图片]",
+    ],
+)
+def test_latest_user_image_generation_detection_rejects_unrelated_media(content: str) -> None:
+    assert not latest_user_requests_image_generation([{"role": "user", "content": content}])
+
+
 def test_latest_user_media_request_detection_uses_nested_current_content_only() -> None:
     content = (
         '{"speaker":"FrostN0v0","content":"普通文字回答",'
@@ -100,6 +130,24 @@ def test_latest_user_media_request_detection_uses_nested_current_content_only() 
     )
 
     assert not latest_user_requests_media([{"role": "user", "content": content}])
+
+
+def test_latest_user_media_request_detection_uses_recent_avatar_context() -> None:
+    messages: list[ChatMessage] = [
+        {"role": "assistant", "content": "我已经看到了黄豆粉当前使用的头像。"},
+        {"role": "user", "content": '{"speaker":"FrostN0v0","content":"你能发出来吗"}'},
+    ]
+
+    assert latest_user_requests_media(messages)
+
+
+def test_contextual_send_request_requires_recent_media_context() -> None:
+    messages: list[ChatMessage] = [
+        {"role": "assistant", "content": "这段代码已经整理好了。"},
+        {"role": "user", "content": "你能发出来吗"},
+    ]
+
+    assert not latest_user_requests_media(messages)
 
 
 def test_media_unavailable_marker_requires_visible_text_and_never_reaches_delivery() -> None:
@@ -456,6 +504,14 @@ def test_trailing_end_marker_is_removed_from_visible_delivery_text(value: str, e
 
     assert reserved is state
     assert normalized == expected
+
+
+def test_internal_participant_references_are_redacted_before_delivery() -> None:
+    state = DeliveryState()
+    with llm_chat_delivery_scope(state):
+        _, normalized = reserve_text_message("请看 participant_0123abcdef 的头像")
+
+    assert normalized == "请看 该成员 的头像"
 
 
 def test_media_records_and_internal_sentinel_are_removed_or_rejected_atomically() -> None:

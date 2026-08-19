@@ -13,6 +13,7 @@ from types import ModuleType, SimpleNamespace
 import base64
 from typing import Any, cast
 import asyncio
+from hashlib import sha256
 from pathlib import Path
 from datetime import datetime, timezone as datetime_timezone, timedelta
 import importlib
@@ -310,6 +311,12 @@ def _load_local_modules() -> Iterator[SimpleNamespace]:
         web_tools = importlib.import_module("plugins.llm_chat.tools.web")
         agno_compat = importlib.import_module("plugins.llm_chat.agno_compat")
         generation = importlib.import_module("plugins.llm_chat.generation")
+        channel_images = importlib.import_module("plugins.llm_chat.channel_images")
+        participant_tools = importlib.import_module("plugins.llm_chat.tools.find_channel_participants")
+        history_tools = importlib.import_module("plugins.llm_chat.tools.read_channel_messages")
+        channel_image_tools = importlib.import_module("plugins.llm_chat.tools.send_channel_image")
+        description_tools = importlib.import_module("plugins.llm_chat.tools.describe_channel_image")
+        avatar_tools = importlib.import_module("plugins.llm_chat.tools.describe_channel_participant_avatar")
         yield SimpleNamespace(
             web_access=web_access,
             delivery=delivery,
@@ -317,6 +324,12 @@ def _load_local_modules() -> Iterator[SimpleNamespace]:
             web_tools=web_tools,
             agno_compat=agno_compat,
             generation=generation,
+            channel_images=channel_images,
+            participant_tools=participant_tools,
+            history_tools=history_tools,
+            channel_image_tools=channel_image_tools,
+            description_tools=description_tools,
+            avatar_tools=avatar_tools,
         )
     finally:
         for name in [name for name in sys.modules if name == prefix or name.startswith(f"{prefix}.")]:
@@ -646,13 +659,25 @@ async def test_actual_tool_runtime_uses_configured_gate_order_and_disposal(
         assert delta_names == runtime.registered_tools
         assert runtime.registered_tools[:3] == ["send_image", "send_text", "send_merged_forward"]
         assert runtime.registered_tools[4:6] == ["send_external_image", "get_local_time"]
+        assert runtime.registered_tools[6:11] == [
+            "find_channel_participants",
+            "read_channel_messages",
+            "describe_channel_image",
+            "send_channel_image",
+            "describe_channel_participant_avatar",
+        ]
+        schemas = {schema["function"]["name"]: schema["function"] for schema in delta}
+        for name in runtime.registered_tools[6:11]:
+            assert "session" not in schemas[name]["parameters"]["properties"]
+        assert schemas["describe_channel_image"]["parameters"]["required"] == ["image_ref"]
+        assert schemas["send_channel_image"]["parameters"]["required"] == ["image_ref"]
+        assert schemas["describe_channel_participant_avatar"]["parameters"]["required"] == ["participant_ref"]
         assert [
             name for name in runtime.registered_tools if name in {"web_search", "read_web_page"}
         ] == expected_web_names
         assert runtime.registered_tools[-1] == "tag_image"
         if expected_web_names:
             assert runtime.registered_tools[-3:-1] == expected_web_names
-            schemas = {schema["function"]["name"]: schema["function"] for schema in delta}
             assert schemas["web_search"]["description"] == _search_description(1, 2, 2)
             assert schemas["read_web_page"]["description"] == _read_description(1, 2, 2)
         assert warnings == expected_warning
@@ -661,6 +686,228 @@ async def test_actual_tool_runtime_uses_configured_gate_order_and_disposal(
         _assert_registry_matches(baseline)
 
     _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_channel_perception_tools_use_current_session_and_hide_transport_identifiers(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, ...]] = []
+    history_rows: list[tuple[str, str, str, str, str]] = []
+    warnings: list[str] = []
+    described_sources: list[str] = []
+    avatar_hash = sha256(_PNG_BYTES).hexdigest()
+    participant = SimpleNamespace(
+        display_name="Alice",
+        avatar_url="https://example.com/avatar.png",
+        avatar_hash=avatar_hash,
+        avatar_description="blue-haired avatar",
+    )
+
+    class PerceptionStub:
+        async def find_participants(self, session: object, query: str, *, limit: int) -> list[dict[str, object]]:
+            calls.append(("find", session, query, limit))
+            return [{"participant_ref": "participant_a", "display_name": "Alice"}]
+
+        async def recent_messages(
+            self,
+            session: object,
+            *,
+            limit: int,
+            before_cursor: str = "",
+            participant_ref: str = "",
+        ) -> tuple[list[dict[str, object]], str]:
+            calls.append(("history", session, limit, before_cursor, participant_ref))
+            if before_cursor == "older-page":
+                return (
+                    [
+                        {
+                            "cursor": "41",
+                            "participant_ref": participant_ref,
+                            "content": "older context",
+                            "image_count": 0,
+                        }
+                    ],
+                    "",
+                )
+            return (
+                [
+                    {
+                        "cursor": "42",
+                        "participant_ref": participant_ref,
+                        "content": "look at this",
+                        "image_count": 1,
+                    }
+                ],
+                "older-page",
+            )
+
+        async def message_image_sources(self, session: object, cursor: str) -> list[str]:
+            calls.append(("message_images", session, cursor))
+            return ["https://example.com/channel-image.png"]
+
+        async def refresh_participant(self, session: object, participant_ref: str) -> SimpleNamespace:
+            calls.append(("avatar", session, participant_ref))
+            return participant
+
+        async def update_avatar(self, *_args: object, **_kwargs: object) -> None:
+            calls.append(("avatar_update",))
+
+    class ToolSession:
+        def __init__(self) -> None:
+            self.channel = SimpleNamespace(id="channel-1")
+            self.downloads: list[str] = []
+            self.sent: list[object] = []
+
+        async def download(self, src: str) -> bytes:
+            self.downloads.append(src)
+            return _PNG_BYTES
+
+        async def send(self, message: object) -> list[object]:
+            self.sent.append(message)
+            return []
+
+    async def describe_image(_config: object, _session: object, source: str) -> str:
+        described_sources.append(source)
+        return "a blue chart"
+
+    async def append_history(channel_id: str, user_id: str, name: str, role: str, content: str) -> object:
+        history_rows.append((channel_id, user_id, name, role, content))
+        return object()
+
+    monkeypatch.setattr(local_modules.description_tools, "describe_image", describe_image)
+    perception = PerceptionStub()
+    session = cast(Any, ToolSession())
+
+    def provider() -> Any:
+        return perception
+
+    config = local_modules.config.LLMChatConfig(channel_message_max_images=4)
+    references = local_modules.channel_images.ChannelImageReferences()
+    async with _temporary_plugin() as harness:
+        find_registered = local_modules.participant_tools.register_find_channel_participants(
+            harness.dispatcher,
+            provider,
+        )
+        history_registered = local_modules.history_tools.register_read_channel_messages(
+            harness.dispatcher,
+            provider,
+            config,
+        )
+        describe_registered = local_modules.description_tools.register_describe_channel_image(
+            harness.dispatcher,
+            local_modules.description_tools.ChannelImageDescriptionContext(
+                config=config,
+                get_perception=provider,
+            ),
+        )
+        send_image_registered = local_modules.channel_image_tools.register_send_channel_image(
+            harness.dispatcher,
+            local_modules.channel_image_tools.ChannelImageToolContext(
+                get_perception=provider,
+                append_history=append_history,
+                warn=warnings.append,
+            ),
+        )
+        avatar_registered = local_modules.avatar_tools.register_describe_channel_participant_avatar(
+            harness.dispatcher,
+            provider,
+            config,
+        )
+
+        with local_modules.channel_images.llm_chat_channel_image_scope(references):
+            find_result = json.loads(await find_registered.callable_target(query=" Alice ", limit=99, session=session))
+            history_result = json.loads(
+                await history_registered.callable_target(
+                    limit=99,
+                    participant_ref=" participant_a ",
+                    session=session,
+                )
+            )
+            older_result = json.loads(
+                await history_registered.callable_target(
+                    limit=20,
+                    before_cursor=history_result["next_cursor"],
+                    participant_ref=" participant_a ",
+                    session=session,
+                )
+            )
+            avatar_result = json.loads(
+                await avatar_registered.callable_target(participant_ref=" participant_a ", session=session)
+            )
+            message_image_ref = history_result["messages"][0]["images"][0]["image_ref"]
+            message_description = json.loads(
+                await describe_registered.callable_target(image_ref=message_image_ref, session=session)
+            )
+            message_send_result = await send_image_registered.callable_target(
+                image_ref=message_image_ref,
+                session=session,
+            )
+            avatar_send_result = await send_image_registered.callable_target(
+                image_ref=avatar_result["image_ref"],
+                session=session,
+            )
+
+    assert calls == [
+        ("find", session, "Alice", 10),
+        ("history", session, 50, "", "participant_a"),
+        ("history", session, 20, "older-page", "participant_a"),
+        ("avatar", session, "participant_a"),
+        ("message_images", session, "42"),
+        ("message_images", session, "42"),
+    ]
+    assert find_result == {"participants": [{"participant_ref": "participant_a", "display_name": "Alice"}]}
+    assert history_result["next_cursor"] == "older-page"
+    assert history_result["messages"][0]["image_count"] == 1
+    assert "description" not in history_result["messages"][0]["images"][0]
+    assert message_description == {"available": True, "description": "a blue chart"}
+    assert older_result == {
+        "messages": [{"participant_ref": "participant_a", "content": "older context", "image_count": 0}],
+        "next_cursor": "",
+    }
+    assert avatar_result["display_name"] == "Alice"
+    assert avatar_result["available"] is True
+    assert avatar_result["description"] == "blue-haired avatar"
+    assert cast(str, avatar_result["image_ref"]).startswith("channel_image_")
+    assert described_sources == ["https://example.com/channel-image.png"]
+    assert session.downloads == [
+        "https://example.com/avatar.png",
+        "https://example.com/channel-image.png",
+        "https://example.com/avatar.png",
+    ]
+    assert len(session.sent) == 2
+    assert "已发送 1 张群聊图片" in message_send_result
+    assert "已发送 1 张群聊图片" in avatar_send_result
+    assert history_rows == [
+        ("channel-1", "", "bot", "assistant", "[发送了图片]"),
+        ("channel-1", "", "bot", "assistant", "[发送了图片]"),
+    ]
+    public_payload = json.dumps(history_result, ensure_ascii=False)
+    assert "https://" not in public_payload
+    assert avatar_hash not in json.dumps(avatar_result, ensure_ascii=False)
+    assert warnings == []
+
+
+def test_channel_history_tool_keeps_valid_bounded_json(local_modules: SimpleNamespace) -> None:
+    messages = [
+        {
+            "cursor": str(index),
+            "message_id": f"message-{index}",
+            "participant_ref": "participant_a",
+            "content": "x" * 2000,
+        }
+        for index in range(20)
+    ]
+
+    serialized = local_modules.history_tools._serialize_history_page(messages, "older")
+    payload = json.loads(serialized)
+
+    assert len(serialized) <= local_modules.history_tools.MAX_HISTORY_OUTPUT_CHARS
+    assert payload["truncated"] is True
+    assert all("cursor" not in message for message in payload["messages"])
+    first_index = payload["messages"][0]["message_id"].removeprefix("message-")
+    assert payload["next_cursor"] == first_index
 
 
 @pytest.mark.asyncio
@@ -1371,6 +1618,70 @@ async def test_image_picker_excludes_recent_rows_before_semantic_ranking(
 
 
 @pytest.mark.asyncio
+async def test_image_picker_prioritizes_exact_tag_over_broader_semantic_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _registry_snapshot()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        picker = runtime.image_context.pick_image
+        image_tags_module = sys.modules[picker.__module__]
+
+        async def fake_embed_text(_config: object, _context: str) -> list[float]:
+            return [1.0, 0.0]
+
+        monkeypatch.setattr(image_tags_module, "embed_text", fake_embed_text)
+        monkeypatch.setattr(image_tags_module.random, "choice", lambda values: values[0])
+        image_tags_module._image_vectors.clear()
+        broad_match = json.dumps(
+            {
+                "text": "",
+                "meaning": "呆滞懵懂的橘猫",
+                "use_when": ["想表达发呆愣神时"],
+                "avoid_when": [],
+                "tags": ["橘猫", "呆滞", "懵圈", "沙雕"],
+            },
+            ensure_ascii=False,
+        )
+        exact_match = json.dumps(
+            {
+                "text": "",
+                "meaning": "布偶面带糖笑",
+                "use_when": ["想发送糖笑表情时"],
+                "avoid_when": [],
+                "tags": ["糖笑", "憨傻", "抽象笑容"],
+            },
+            ensure_ascii=False,
+        )
+        rows = [
+            SimpleNamespace(
+                file_path="memes/8.png",
+                tags=broad_match,
+                embedding_json=json.dumps([1.0, 0.0]),
+            ),
+            SimpleNamespace(
+                file_path="memes/77.gif",
+                tags=exact_match,
+                embedding_json=json.dumps([0.99, 0.1]),
+            ),
+        ]
+
+        selected = await picker(
+            runtime.config,
+            rows,
+            "糖笑，呆傻憨憨抽象笑容表情包，不要fox目录",
+            deque(maxlen=5),
+        )
+
+        assert selected == "memes/77.gif"
+
+    _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
 async def test_delivery_scope_blocks_text_outside_generation_but_preserves_media_behavior(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
@@ -1394,9 +1705,12 @@ async def test_delivery_scope_blocks_text_outside_generation_but_preserves_media
             await send_text_target(session, "outside", None)
         assert session.sent == []
 
-        image_path = tmp_path / "reaction.png"
-        image_path.write_bytes(b"image")
-        row = SimpleNamespace(file_path=image_path.name, tags="happy，smile")
+        meme_dir = tmp_path / "memes"
+        meme_dir.mkdir()
+        image_path = meme_dir / "reaction.png"
+        image_path.write_bytes(_PNG_BYTES)
+        relative_path = str(Path("memes") / image_path.name)
+        row = SimpleNamespace(file_path=relative_path, tags="happy，smile")
 
         class FakeResult:
             def scalars(self) -> FakeResult:
@@ -1414,7 +1728,7 @@ async def test_delivery_scope_blocks_text_outside_generation_but_preserves_media
             yield FakeDatabase()
 
         async def fake_pick_image(*_args: Any, **_kwargs: Any) -> str:
-            return image_path.name
+            return relative_path
 
         markers: list[tuple[Any, ...]] = []
 
@@ -1592,13 +1906,17 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
     ) as harness:
         runtime = harness.module
         target = _tool_callable(runtime, "send_image")
-        first_path = tmp_path / "first.png"
-        second_path = tmp_path / "second.png"
-        first_path.write_bytes(b"first")
-        second_path.write_bytes(b"second")
+        meme_dir = tmp_path / "memes"
+        meme_dir.mkdir()
+        first_path = meme_dir / "first.png"
+        second_path = meme_dir / "second.png"
+        first_path.write_bytes(_PNG_BYTES + b"first")
+        second_path.write_bytes(_PNG_BYTES + b"second")
+        first_relative_path = str(Path("memes") / first_path.name)
+        second_relative_path = str(Path("memes") / second_path.name)
         rows = [
-            SimpleNamespace(id=1, file_path=first_path.name, tags="first-tag"),
-            SimpleNamespace(id=2, file_path=second_path.name, tags="second-tag"),
+            SimpleNamespace(id=1, file_path=first_relative_path, tags="first-tag"),
+            SimpleNamespace(id=2, file_path=second_relative_path, tags="second-tag"),
         ]
 
         class FakeResult:
@@ -1629,12 +1947,33 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
         state = runtime.DeliveryState(sleep=clock.sleep, clock=clock.monotonic)
         session = _DeliveryToolSession()
         with llm_chat_delivery_scope(state):
-            result = await target(image_paths=["second.png", "first.png", "second.png"], session=session)
+            result = await target(
+                image_paths=[second_relative_path, first_relative_path, second_relative_path],
+                session=session,
+            )
 
         assert result.startswith("已发送 2 张图片")
-        sent_images = [cast(MessageChain, chain).get(Image)[0].src.replace("\\", "/") for chain in session.sent]
-        assert sent_images[0].endswith("/second.png")
-        assert sent_images[1].endswith("/first.png")
+        sent_chains = [cast(MessageChain, chain) for chain in session.sent]
+        sent_images = [chain.get(Image)[0].src for chain in sent_chains]
+        assert sent_images == [
+            f"data:image/png;base64,{base64.b64encode(_PNG_BYTES + b'second').decode('ascii')}",
+            f"data:image/png;base64,{base64.b64encode(_PNG_BYTES + b'first').decode('ascii')}",
+        ]
+        assert all("file://" not in source for source in sent_images)
+
+        network = _FakeOneBotNetwork()
+        encoder = OneBot11MessageEncoder(
+            Login(platform="onebot", user=User(id="10001", name="Bot")),
+            cast(Any, network),
+            "12345",
+        )
+        await encoder.send(str(sent_chains[0]))
+        assert len(network.calls) == 1
+        action, params = network.calls[0]
+        assert action == "send_group_msg"
+        segment = params["message"][0]
+        assert segment["type"] == "image"
+        assert segment["data"]["file"].startswith("base64://")
         assert clock.sleeps == [1.2]
         assert state.media_messages == 2
         assert [marker[-1] for marker in markers] == [
@@ -1646,16 +1985,32 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
         invalid_state = runtime.DeliveryState()
         with llm_chat_delivery_scope(invalid_state):
             with pytest.raises(runtime.DeliveryError, match="^Registered image path is unavailable$"):
-                await target(session=invalid_session, image_paths=["first.png", "missing.png"])
+                await target(
+                    session=invalid_session,
+                    image_paths=[first_relative_path, "memes/missing.png"],
+                )
         assert invalid_session.sent == []
         assert invalid_state.media_messages == 0
+        broken_path = meme_dir / "broken.png"
+        broken_path.write_bytes(b"not-an-image")
+        rows.append(SimpleNamespace(id=3, file_path="memes/broken.png", tags="broken-tag"))
+        broken_session = _DeliveryToolSession()
+        broken_state = runtime.DeliveryState()
+        with llm_chat_delivery_scope(broken_state):
+            with pytest.raises(
+                runtime.DeliveryError,
+                match="^Registered image file is unreadable, invalid, or too large$",
+            ):
+                await target(session=broken_session, image_paths=[first_relative_path, "memes/broken.png"])
+        assert broken_session.sent == []
+        assert broken_state.media_messages == 0
 
         exhausted_session = _DeliveryToolSession()
         exhausted_state = runtime.DeliveryState()
         with llm_chat_delivery_scope(exhausted_state):
             runtime.reserve_media_message()
             with pytest.raises(runtime.DeliveryError, match="^Media delivery budget exhausted$"):
-                await target(session=exhausted_session, image_paths=["first.png", "second.png"])
+                await target(session=exhausted_session, image_paths=[first_relative_path, second_relative_path])
         assert exhausted_session.sent == []
         assert exhausted_state.media_messages == 1
 
@@ -1666,7 +2021,7 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
                 runtime.DeliveryError,
                 match="^Provide exactly one of context or image_paths$",
             ):
-                await target(session=ambiguous_session, context="happy", image_paths=["first.png"])
+                await target(session=ambiguous_session, context="happy", image_paths=[first_relative_path])
         assert ambiguous_session.sent == []
         assert ambiguous_state.media_messages == 0
 
@@ -1677,7 +2032,7 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
                 runtime.DeliveryError,
                 match=("^image delivery confirmed 1/2 images before failure; do not repeat the confirmed prefix$"),
             ):
-                await target(session=partial_session, image_paths=["first.png", "second.png"])
+                await target(session=partial_session, image_paths=[first_relative_path, second_relative_path])
         assert len(partial_session.sent) == 1
         assert partial_state.confirmed_deliveries == 1
         assert partial_state.delivery_attempts == 2
@@ -1698,7 +2053,7 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
         with llm_chat_delivery_scope(marker_failure_state):
             marker_failure_result = await target(
                 session=marker_failure_session,
-                image_paths=["first.png", "second.png"],
+                image_paths=[first_relative_path, second_relative_path],
             )
         assert marker_failure_result.startswith("已发送 2 张图片")
         assert len(marker_failure_session.sent) == 2
@@ -2088,6 +2443,7 @@ async def test_real_llm_service_runs_search_extract_final_and_carries_tool_messa
 
     monkeypatch.setattr(local_modules.generation, "get_model_config", unexpected_finalizer)
     messages = [{"role": "user", "content": "answer with current evidence"}]
+    trace = local_modules.generation.ToolTraceRecorder()
 
     try:
         async with _registered_web_tools(local_modules, factory):
@@ -2099,10 +2455,27 @@ async def test_real_llm_service_runs_search_extract_final_and_carries_tool_messa
                 ctx=None,
                 web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
                 delivery_state=local_modules.delivery.DeliveryState(),
+                tool_trace=trace,
             )
 
             assert local_modules.generation.response_content(response) == "verified final answer"
             assert http_paths == ["/search", "/contents"]
+            assert [(event.tool_name, event.status, event.effect) for event in trace.events] == [
+                ("web_search", "succeeded", "observed"),
+                ("read_web_page", "succeeded", "observed"),
+            ]
+            assert trace.events[0].outcome["sources"] == [
+                {
+                    "title": "Verified source",
+                    "url": "https://example.com/article",
+                    "snippet": "SEARCH_SNIPPET_SENTINEL",
+                }
+            ]
+            assert trace.events[1].arguments == {
+                "focus": "the requested fact",
+                "url": "https://example.com/article",
+            }
+            assert trace.events[1].outcome["excerpt"] == "# Heading PAGE_CONTENT_SENTINEL"
             assert len(factory.calls) == 1
             factory_key, factory_options = factory.calls[0]
             assert factory_key == "fake-exa-key"
@@ -2274,8 +2647,9 @@ async def test_generate_chat_response_caps_web_calls_and_returns_final_answer(
         tool_results = [json.loads(message["content"]) for message in final_tool_messages]
         assert all(result["ok"] is True for result in tool_results[:4])
         expected_budget_error = (
-            "InnerHandlerException(WebAccessError('Web access budget exhausted; "
-            "answer from collected evidence without more web tools'))"
+            "InnerHandlerException: Web access budget exhausted; answer from collected evidence without more web "
+            "tools <- WebAccessError: Web access budget exhausted; answer from collected evidence without more web "
+            "tools"
         )
         assert tool_results[4:] == [
             {"ok": False, "error": expected_budget_error},

@@ -9,8 +9,9 @@ from arclet.entari import Session
 from entari_plugin_llm.config import get_model_config
 
 from .config import LLMChatConfig
-from .core.media import normalize_image_tags, normalize_image_description
+from .core.media import normalize_image_description
 from .core.image_source import fetch_image_data_url
+from .core.image_tag_metadata import normalize_generated_image_tags
 
 
 class _MessageLike(Protocol):
@@ -41,6 +42,7 @@ async def vision_completion(
 ) -> str:
     """Call the configured vision model and return stripped text content."""
     model = get_model_config(config.image_tag_model)
+    extra = {key: value for key, value in model.extra.items() if key not in {"timeout", "max_retries"}}
     response = await litellm.acompletion(
         model=model.name,
         messages=[
@@ -56,7 +58,8 @@ async def vision_completion(
         base_url=model.base_url,
         api_key=model.api_key,
         timeout=timeout,
-        **model.extra,
+        max_retries=0,
+        **extra,
     )
     completion = cast(_CompletionLike, response)
     content = completion.choices[0].message.content
@@ -95,4 +98,4 @@ async def generate_image_tags(config: LLMChatConfig, data_url: str) -> str:
         "Tag this image for chat reaction retrieval.",
         timeout=VISION_TAG_TIMEOUT,
     )
-    return normalize_image_tags(raw)
+    return normalize_generated_image_tags(raw)

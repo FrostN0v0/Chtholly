@@ -25,6 +25,8 @@ from ._image_catalog import (
     find_explicit_image_row,
     normalize_image_reference,
 )
+from ..core.image_source import image_file_to_data_url
+from ..core.image_tag_metadata import image_tag_history_hint
 
 ImagePicker = Callable[[LLMChatConfig, Sequence[ImageTag], str, deque[str]], Awaitable[str | None]]
 HistoryAppender = Callable[[str, str, str, str, str], Awaitable[object]]
@@ -56,10 +58,11 @@ def register_send_image(
     ) -> str:
         """Send registered local reaction images or stickers.
 
-        Provide compact emotion, scenario, and subject keywords in context for one semantic match. When
-        list_image_resources returns exact registered relative paths, provide them through image_paths to send one or
-        multiple images in order. Exact paths are internal tool data and must never be revealed to the user. Provide
-        exactly one selection mode: non-empty context or non-empty image_paths. Duplicate paths are sent once.
+        Provide compact positive emotion, scenario, and subject keywords in context for one semantic match. Never add
+        negations, exclusions, directory names, or internal paths to context. When list_image_resources returns
+        registered resources, provide exact registered relative paths through image_paths.
+        Send multiple images in order. Exact paths are internal tool data and must never be revealed to the user.
+        Provide exactly one selection mode: non-empty context or non-empty image_paths. Duplicate paths are sent once.
         Use proactively for explicit requests and natural emotional reactions in casual conversation. Examples
         include greetings, teasing, embarrassment, affection, comfort, celebration, surprise, jealousy,
         exasperation, or light complaints. Do not wait for an explicit sticker request when a fitting image would
@@ -119,17 +122,23 @@ def register_send_image(
             if full is None or not full.is_file():
                 return "图片文件已丢失"
             selected.append((row, full))
+        prepared: list[tuple[ImageTag, Image]] = []
+        for row, full in selected:
+            data_url = image_file_to_data_url(full)
+            if data_url is None:
+                raise DeliveryError("Registered image file is unreadable, invalid, or too large")
+            prepared.append((row, Image.of(url=data_url)))
 
         delivery_state = current_llm_chat_delivery()
         if delivery_state is not None:
-            delivery_state = reserve_media_messages(len(selected))
+            delivery_state = reserve_media_messages(len(prepared))
 
-        total = len(selected)
-        for index, (row, full) in enumerate(selected):
+        total = len(prepared)
+        for index, (row, image) in enumerate(prepared):
             try:
                 await send_with_delivery(
                     session,
-                    MessageChain([Image.of(path=full)]),
+                    MessageChain([image]),
                     delivery_state,
                     media=True,
                 )
@@ -143,7 +152,7 @@ def register_send_image(
                     ) from None
                 raise
             recent.append(row.file_path)
-            tag_hint = "，".join(row.tags.split("，")[:5])
+            tag_hint = image_tag_history_hint(row.tags)
             try:
                 await runtime.append_history(
                     session.channel.id,

@@ -17,6 +17,11 @@ from .core.types import ChatMessage
 from .web.policy import WebAccessLimits, llm_chat_web_access_scope
 from .agno_compat import agno_tool_call_limit_scope, recommended_tool_call_limit
 from .core.delivery import DeliveryState, llm_chat_delivery_scope, strip_trailing_end_of_response
+from .channel_images import (
+    ChannelImageReferences,
+    llm_chat_channel_image_scope,
+)
+from .core.tool_trace import ToolTraceRecorder, llm_chat_tool_trace_scope
 from .runtime_context import llm_chat_context_scope
 from .core.native_images import extract_native_images
 from .core.media_delivery import (
@@ -193,8 +198,10 @@ async def generate_chat_response(
     ctx: Contexts | None,
     web_limits: WebAccessLimits,
     delivery_state: DeliveryState,
+    channel_image_references: ChannelImageReferences | None = None,
     request_timeout: float = 90.0,
     media_request_timeout: float = 300.0,
+    tool_trace: ToolTraceRecorder | None = None,
 ) -> GenerationResponse:
     """Generate with a longer single-attempt timeout for explicit media requests."""
 
@@ -207,11 +214,15 @@ async def generate_chat_response(
     generation_timeout = media_request_timeout if media_requested else request_timeout
     generation_max_retries = 0 if media_requested else None
     tool_loop_exhausted = False
+    active_tool_trace = tool_trace or ToolTraceRecorder()
+    active_channel_image_references = channel_image_references or ChannelImageReferences()
     with (
         agno_tool_call_limit_scope(tool_call_limit),
         llm_chat_web_access_scope(web_limits),
         llm_chat_delivery_scope(delivery_state),
+        llm_chat_tool_trace_scope(active_tool_trace),
         llm_chat_context_scope(ctx),
+        llm_chat_channel_image_scope(active_channel_image_references),
     ):
         try:
             response = await _generate_with_tools(

@@ -2,7 +2,7 @@
 
 Listens for OneBot V11 poke notices forwarded by the satori onebot11 adapter
 as INTERNAL events (raw type ``notice.notify.poke``) and replies with text,
-image, audio, or a poke back depending on configured probabilities.
+audio, or a poke back depending on configured probabilities.
 """
 
 from __future__ import annotations
@@ -23,22 +23,21 @@ from arclet.entari import (
     collect_disposes,
     register_internal_event,
 )
-from satori.element import Audio, Image
+from satori.element import Audio
 from arclet.entari.event.base import NoticeEvent
 
-from utils.path import AUDIO_DIR, IMAGE_DIR
+from utils.path import AUDIO_DIR
 
 metadata(
     name="poke",
     author=[{"name": "FrostN0v0"}],
     version="0.1.0",
-    description="Reply to OneBot V11 poke notices with text, image, audio, or poke back.",
+    description="Reply to OneBot V11 poke notices with text, audio, or poke back.",
 )
 
 plug = Plugin.current()
 
 DINGGONG_DIR: Path = AUDIO_DIR / "dinggong"
-FOX_DIR: Path = IMAGE_DIR / "fox_img"
 
 POKE_REPLIES: list[str] = [
     "lsp你再戳？",
@@ -112,15 +111,7 @@ def _remove_parser():
 collect_disposes(_remove_parser)
 
 
-_img_list: list[Path] | None = None
 _audio_list: list[Path] | None = None
-
-
-def _images() -> list[Path]:
-    global _img_list
-    if _img_list is None:
-        _img_list = [p for p in FOX_DIR.iterdir() if p.is_file()] if FOX_DIR.exists() else []
-    return _img_list
 
 
 def _audios() -> list[Path]:
@@ -147,12 +138,7 @@ async def on_poke(session: Session, event: PokeEvent):
         await session.send(prefix + random.choice(POKE_REPLIES), at_sender=True)
         return
 
-    roll = random.random()
-    if roll <= 0.3:
-        imgs = _images()
-        if imgs:
-            await session.send(MessageChain([Image.of(path=random.choice(imgs))]))
-    elif roll < 0.6:
+    if random.random() < 0.3:
         auds = _audios()
         if auds:
             await session.send(MessageChain([Audio.of(path=random.choice(auds))]))

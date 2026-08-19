@@ -7,7 +7,7 @@ from uuid import uuid4
 from typing import Literal
 import asyncio
 import hashlib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from dataclasses import dataclass
 
 from arclet.entari import Image, Session
@@ -17,9 +17,10 @@ from utils.path import MEME_DIR, IMAGE_DIR
 
 from .config import LLMChatConfig
 from .vision import generate_image_tags
-from .image_tags import get_image_tag, upsert_image_tag
+from .image_tags import get_image_tag, delete_image_tag, upsert_image_tag
 from .core.errors import summarize_exception
-from .core.image_source import fetch_image_bytes, raw_to_image_data_url
+from .core.image_source import IMAGE_FETCH_MAX_BYTES, fetch_image_bytes, raw_to_image_data_url
+from .core.image_tag_metadata import normalize_generated_image_tags
 
 MemeImportStatus = Literal["created", "duplicate", "tagged_existing"]
 
@@ -29,6 +30,12 @@ class MemeImportResult:
     status: MemeImportStatus
     relative_path: str
     tags: str
+
+
+@dataclass(frozen=True, slots=True)
+class MemeDeleteResult:
+    file_deleted: bool
+    index_deleted: bool
 
 
 class MemeImportError(RuntimeError):
@@ -89,16 +96,24 @@ def _initialize_digest_index() -> None:
 
     digest_paths: dict[str, Path] = {}
     for path in sorted(MEME_DIR.iterdir()):
-        if not path.is_file() or path.suffix.lower() not in _SUPPORTED_SUFFIXES:
-            continue
-        digest_paths.setdefault(_hash_file(path), path)
-
+        try:
+            resolved = path.resolve()
+            if (
+                path.is_symlink()
+                or resolved.parent != root
+                or not resolved.is_file()
+                or resolved.suffix.lower() not in _SUPPORTED_SUFFIXES
+            ):
+                continue
+            digest_paths.setdefault(_hash_file(resolved), resolved)
+        except OSError as exc:
+            _LOGGER.warning(f"meme digest skipped: {_redacted_exception_summary(exc)}")
     _digest_paths = digest_paths
     _indexed_root = root
 
 
 def _relative_path(path: Path) -> str:
-    return str(path.relative_to(IMAGE_DIR))
+    return path.relative_to(IMAGE_DIR).as_posix()
 
 
 def _next_numeric_stem() -> int:
@@ -129,9 +144,27 @@ async def _generate_tags(config: LLMChatConfig, data_url: str) -> str:
         raise
     except Exception as exc:
         raise _safe_import_error("Automatic image tagging failed", exc) from None
-    if not tags:
+    normalized = normalize_generated_image_tags(tags)
+    if not normalized:
         raise MemeImportError("Image tagging returned no tags")
-    return tags
+    return normalized
+
+
+async def _resolve_tags(
+    config: LLMChatConfig,
+    data_url: str,
+    manual_tags: str | None,
+    *,
+    auto_tag: bool,
+) -> str:
+    if manual_tags is not None:
+        normalized = normalize_generated_image_tags(manual_tags)
+        if not normalized:
+            raise MemeImportError("At least one valid tag is required")
+        return normalized
+    if not auto_tag:
+        raise MemeImportError("Tags are required when automatic tagging is disabled")
+    return await _generate_tags(config, data_url)
 
 
 async def _settle_upsert_after_cancellation(task: asyncio.Task[None]) -> BaseException | None:
@@ -176,16 +209,17 @@ async def _commit_new_tag(
         _digest_paths[digest] = final_path
 
 
-async def import_meme_image(
+async def import_meme_bytes(
     config: LLMChatConfig,
-    session: Session,
-    image: Image,
+    data: bytes,
+    *,
+    manual_tags: str | None = None,
+    auto_tag: bool = True,
 ) -> MemeImportResult:
-    """Download, deduplicate, tag, and atomically publish one reaction image."""
-    data = await fetch_image_bytes(session, image.src)
-    if data is None:
-        raise MemeImportError("Image data is unavailable, invalid, or too large")
+    """Deduplicate, tag, and atomically publish validated reaction-image bytes."""
 
+    if not data or len(data) > IMAGE_FETCH_MAX_BYTES:
+        raise MemeImportError("Image data is unavailable, invalid, or too large")
     data_url = raw_to_image_data_url(data)
     if data_url is None:
         raise MemeImportError("Image format could not be recognized")
@@ -221,7 +255,7 @@ async def import_meme_image(
                 raise _safe_import_error("Image tag lookup failed", exc) from None
             if existing_tag is not None and existing_tag.tags.strip():
                 return MemeImportResult("duplicate", relative_path, existing_tag.tags)
-            tags = await _generate_tags(config, data_url)
+            tags = await _resolve_tags(config, data_url, manual_tags, auto_tag=auto_tag)
             try:
                 await upsert_image_tag(config, relative_path, tags)
             except asyncio.CancelledError:
@@ -230,7 +264,7 @@ async def import_meme_image(
                 raise _safe_import_error("Image tag persistence failed", exc) from None
             return MemeImportResult("tagged_existing", relative_path, tags)
 
-        tags = await _generate_tags(config, data_url)
+        tags = await _resolve_tags(config, data_url, manual_tags, auto_tag=auto_tag)
         temp_path: Path | None = MEME_DIR / f".meme-{uuid4().hex}.tmp"
         final_path: Path | None = None
         try:
@@ -265,3 +299,71 @@ async def import_meme_image(
             raise _safe_import_error("Meme storage failed", exc) from None
         await _commit_new_tag(config, relative_path, tags, digest, final_path)
         return MemeImportResult("created", relative_path, tags)
+
+
+async def import_meme_image(
+    config: LLMChatConfig,
+    session: Session,
+    image: Image,
+) -> MemeImportResult:
+    """Download and atomically import one reaction image."""
+
+    data = await fetch_image_bytes(session, image.src)
+    if data is None:
+        raise MemeImportError("Image data is unavailable, invalid, or too large")
+    return await import_meme_bytes(config, data)
+
+
+def _resolve_managed_path(relative_path: str) -> Path:
+    normalized = PurePosixPath(relative_path.replace("\\", "/"))
+    if (
+        len(normalized.parts) != 2
+        or normalized.parts[0].casefold() != "memes"
+        or normalized.suffix.casefold() not in _SUPPORTED_SUFFIXES
+    ):
+        raise MemeImportError("Meme path is outside the managed collection")
+    path = (MEME_DIR / normalized.name).resolve()
+    if path.parent != MEME_DIR.resolve():
+        raise MemeImportError("Meme path is outside the managed collection")
+    return path
+
+
+def _drop_digest_path(path: Path) -> None:
+    expected = path.resolve()
+    for digest, indexed_path in list(_digest_paths.items()):
+        try:
+            matches = indexed_path.resolve() == expected
+        except OSError:
+            matches = indexed_path == path
+        if matches:
+            _digest_paths.pop(digest, None)
+
+
+async def delete_meme(relative_path: str) -> MemeDeleteResult:
+    """Remove the index first so interrupted deletion leaves a recoverable unindexed file."""
+
+    path = _resolve_managed_path(relative_path)
+    async with _import_lock:
+        try:
+            _initialize_digest_index()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise _safe_import_error("Meme storage failed", exc) from None
+
+        try:
+            index_deleted = await delete_image_tag(relative_path)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise _safe_import_error("Meme index deletion failed", exc) from None
+
+        file_deleted = False
+        if path.is_file():
+            try:
+                path.unlink()
+            except OSError as exc:
+                raise _safe_import_error("Meme file deletion failed", exc) from None
+            _drop_digest_path(path)
+            file_deleted = True
+        return MemeDeleteResult(file_deleted=file_deleted, index_deleted=index_deleted)

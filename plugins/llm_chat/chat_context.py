@@ -19,6 +19,23 @@ from .core.media import format_image_note, sanitize_assistant_history
 from .core.errors import summarize_exception
 from .core.forward import ForwardedMessage, ForwardedSpeakerRole, render_forwarded_storage
 
+_RECENT_MESSAGE_PHRASES = ("前几条消息", "前面几条消息", "最近几条消息")
+_CHANNEL_SCOPE_TERMS = ("大家", "群里", "群内", "群友")
+_CHANNEL_RECENCY_TERMS = ("刚刚", "刚才", "最近", "方才")
+_CHANNEL_ACTIVITY_TERMS = ("聊", "说", "发", "消息", "发生", "干嘛", "做什么")
+
+
+def requests_recent_channel_context(text: str) -> bool:
+    """Return whether the current turn explicitly asks about recent channel activity."""
+    normalized = "".join(text.split()).casefold()
+    if any(phrase in normalized for phrase in _RECENT_MESSAGE_PHRASES):
+        return True
+    return (
+        any(term in normalized for term in _CHANNEL_SCOPE_TERMS)
+        and any(term in normalized for term in _CHANNEL_RECENCY_TERMS)
+        and any(term in normalized for term in _CHANNEL_ACTIVITY_TERMS)
+    )
+
 
 def serialize_user_turn(
     user_name: str,
@@ -177,12 +194,13 @@ def _quoted_message_context(session: Session) -> _QuotedMessageContext | None:
             getattr(member, "nick", None)
             or getattr(user, "nick", None)
             or getattr(user, "name", None)
-            or user_id
             or (author.name if author else None)
-            or author_id
         )
         if known_speaker:
             speaker = str(known_speaker)
+            speaker_role = "participant"
+        elif user is not None or author is not None:
+            speaker = "Unknown sender"
             speaker_role = "participant"
         else:
             speaker = "Unknown sender"

@@ -25,7 +25,7 @@ plugins:
 
   $prefix:
     - key: ""
-      plugins: ["poke", "tts_service", "help_menu", "llm_chat", "status"]
+      plugins: ["poke", "tts_service", "help_menu", "channel_perception", "llm_chat", "status"]
 
   .record_message:
     record_send: true
@@ -38,6 +38,8 @@ plugins:
   database:
     type: sqlite
     name: "data/chtholly.db"
+    create_table_at: preparing
+  user: {}
   ::auto_reload:
     watch_dirs: ["./plugins", "./utils"]
     watch_config: true
@@ -83,6 +85,13 @@ plugins:
     # fish_model: s2.1-pro-free
     # fish_format: mp3
   help_menu: {}
+  channel_perception:
+    retention_days: 7
+    max_messages_per_channel: 500
+    participant_retention_days: 90
+    max_participants_per_channel: 1000
+    max_content_chars: 2000
+    queue_size: 1024
   llm_chat:
     $filter: channel.type is public
     persona: |
@@ -90,6 +99,13 @@ plugins:
       你的性格温柔、坚韧、体贴，略带倔强和少女式的别扭；亲近时会自然开玩笑、撒娇、害羞或吃醋，受伤或生气时也会明确表达，但不失去分寸。
       保持鲜明情绪和角色口吻，不使用客服腔、模板化客套或刻意堆叠语气词。遇到知识、代码和实际问题时仍给出准确、有用的回答，让人格影响表达方式而不是事实。
     allowed_commands: ["echo", "help"]
+    context_window: 20
+    channel_message_max_images: 12
+    self_reference_image: "persona/ChthollyHat.png"
+    # Recent tool activity is channel-scoped, bounded, and excluded from persona evaluation.
+    tool_context_max_events: 8
+    tool_context_max_chars: 3500
+    tool_history_max_records_per_channel: 200
     web_search_enabled: true
     web_search_max_calls_per_generation: 10
     web_page_max_calls_per_generation: 10
@@ -118,7 +134,7 @@ plugins:
     model_request_timeout: 90.0
     media_request_timeout: 300.0
     eval_request_timeout: 60.0
-    eval_every_n: 1
+    eval_every_n: 5
     image_tag_model: doubao
     tag_batch_size: 50
     # Memory policy: compact chat retrieval, complete evaluator facts, conservative writes.
@@ -135,11 +151,14 @@ plugins:
     profile_alias_similarity: 0.88
     memory_eval_profile_fact_limit: 50
     image_tag_prompt: |
-      只输出一行中文标签，用中文逗号分隔；不要编号、解释或 Markdown。
-      给出 12-20 个短标签，优先描述适合聊天选图的情绪、语气、回复场景、主体、动作表情和明显风格。
-      图中有清晰文字时必须包含 文字表情包、关键原文和具体玩梗含义，不能只按人物外观或泛化情绪标注。
-      仅在画面支持时使用如 开心、害羞、生气、吐槽、安慰、早安、晚安、可爱、狐娘 等标签。
-      避免只给 动漫 这类宽泛标签；宽泛风格必须搭配具体情绪或场景。
+      只输出单行 JSON 对象，不要 Markdown、解释或额外文字，字段固定为：
+      {"text":"","meaning":"","use_when":[],"avoid_when":[],"tags":[]}。
+      text 必须逐字保留图中清晰可读的文字及标点；没有或无法确认时填空字符串，禁止猜测。
+      meaning 用一句话说明整张表情包实际表达的含义和语气；文字含义与画面情绪冲突时，以文字为准。
+      use_when 给出 1-4 个适合发送它的具体对话场景；avoid_when 给出 0-4 个容易误用的具体用户短句。
+      训斥、嗔怪、讽刺或攻击性文字表情必须把早上好、早安、你好等普通问候列入 avoid_when，不能只写普通问候这种抽象类别。
+      tags 给出 6-12 个简短的情绪、语气、主体、动作和风格标签。
+      不要仅因角色在微笑、起床或背景明亮就标记早安；是否适合问候必须服从文字本意。
   server:
     direct_adapter: true
     token: ${{ env.ONEBOT_TOKEN }}
