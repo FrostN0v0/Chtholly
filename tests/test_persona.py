@@ -406,6 +406,7 @@ class TestComposePrompt:
         prompt = _prompt(persona=persona)
         sections = (
             "【群聊输入协议】",
+            "【群聊口吻】",
             "【回复格式】",
             "【画像与记忆用法】",
             "【图片语义】",
@@ -464,6 +465,27 @@ class TestComposePrompt:
         assert "矛盾轴以细微混合语气呈现" in prompt
         assert "关系、群心情和精力只调整亲疏、情绪、活泼度与篇幅，不改变事实判断" in prompt
         assert "不把对其他成员的不满迁怒当前说话人" in prompt
+
+    def test_scaffold_prefers_immediate_groupmate_reactions_over_meta_commentary(self):
+        prompt = _prompt()
+
+        assert "先像一个就在现场的群友作出即时情绪反应" in prompt
+        assert "离谱闲聊的第一句应直接对当前说话人有反应" in prompt
+        assert "不要以‘你这是……’‘这不叫……’‘这已经……’开头替对方总结" in prompt
+        assert "说话应像临场脱口而出的一两句" in prompt
+        assert "不写成段子、文案或刻意机灵的金句" in prompt
+        assert "严禁把人物和关系说成配置单、批量换人、角色卡、副本、参数、压力测试、限定款" in prompt
+        assert "即使用户原话用了替换、删除等词" in prompt
+        assert "不给请求作荒诞、危险、违规之类的批判定性" in prompt
+        assert "默认不列条款、不解释能力" in prompt
+        assert "不主动提供助手式替代方案" in prompt
+        assert "联系方式才不给你呢" in prompt
+        assert "不要写‘人不能……’‘不能随便……’‘不可能给你’这类普遍规则或能力判断" in prompt
+        assert "把它改成第一人称态度和轻微嗔怪" in prompt
+        assert "你是不是早有预谋" in prompt
+        assert "只学这种人情味和句式松紧，不机械复读具体内容" in prompt
+        assert "除非用户认真追问原因，否则不使用隐私、现实行为、风险、边界等抽象词" in prompt
+        assert "只对当下举动作轻微嗔怪，不给人贴稳定标签" in prompt
 
     def test_scaffold_scopes_profiles_memories_impression_and_private_metadata(self):
         prompt = _prompt()
