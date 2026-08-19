@@ -10,6 +10,7 @@ from arclet.entari.plugin.model import PluginDispatcher
 from ..core.types import JSONType
 from ._registration import register_tool
 from ._image_catalog import ImageCatalog
+from ..core.image_tag_metadata import image_tag_catalog_summary
 
 _IMAGE_CATALOG_PAGE_LIMIT = 20
 
@@ -45,7 +46,7 @@ def register_list_image_resources(
             {
                 "total": len(rows),
                 "offset": normalized_offset,
-                "images": [{"path": row.file_path, "tags": row.tags} for row in page],
+                "images": [{"path": row.file_path, "tags": image_tag_catalog_summary(row.tags)} for row in page],
             },
             ensure_ascii=False,
             separators=(",", ":"),

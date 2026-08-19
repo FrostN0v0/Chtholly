@@ -17,6 +17,7 @@ from arclet.entari.plugin.model import Plugin
 from entari_plugin_llm.exception import ModelNotFoundError
 
 from .config import LLMChatConfig
+from .identity import resolve_chat_identity
 from .core.eval import apply_deltas
 from .core.types import ChatMessage
 from .generation import response_content, generate_chat_response
@@ -29,9 +30,11 @@ from .chat_context import (
     build_eval_conversation,
     model_supports_image_input,
     build_multimodal_user_content,
+    requests_recent_channel_context,
 )
 from .core.compose import energy_at, compose_persona_prompt
 from .core.forward import render_forwarded_storage
+from .tool_history import persist_tool_events, load_recent_tool_activity
 from .core.delivery import DeliveryState, normalize_delivery_limits
 from .persona.store import (
     get_mood,
@@ -42,10 +45,12 @@ from .persona.store import (
     append_message,
     delete_message,
 )
+from .channel_images import ChannelImageReferences
 from .persona.runner import run_evaluation
 from .turn_lifecycle import ActiveChatTurn
 from .forward_context import resolve_merged_forward_messages
-from .core.media_delivery import latest_user_requests_media
+from .core.media_delivery import latest_user_requests_media, latest_user_requests_image_generation
+from .core.self_reference import append_self_reference_image
 from .persona.memory_update import apply_memory_updates
 from .persona.memory_context import load_memory_context
 
@@ -90,8 +95,7 @@ plug = Plugin.current()
 async def on_chat(session: Session, ctx: Contexts):
     model_text = session.elements.extract_plain_text().strip()
     channel_id = session.channel.id
-    user_id = session.user.id
-    user_name = (session.member.nick if session.member else None) or session.user.name or user_id
+    user_name = str((session.member.nick if session.member else None) or session.user.name or session.user.id).strip()
 
     try:
         forwarded_messages = await resolve_merged_forward_messages(config, session, _LOGGER.warning)
@@ -108,9 +112,10 @@ async def on_chat(session: Session, ctx: Contexts):
     except ModelNotFoundError as exc:
         _LOGGER.warning(f"channel model resolve failed, using global default: {summarize_exception(exc)}")
         model_name = None
+    supports_image_input = model_supports_image_input(model_name)
 
     current_content: str | list[dict[str, Any]] | None = None
-    if model_supports_image_input(model_name):
+    if supports_image_input:
         current_content, content = await build_multimodal_user_content(
             config,
             session,
@@ -127,20 +132,48 @@ async def on_chat(session: Session, ctx: Contexts):
 
     if not content:
         return BLOCK
+    try:
+        identity = await resolve_chat_identity(session)
+    except Exception as exc:
+        _LOGGER.warning(f"user identity resolve failed: {summarize_exception(exc)}")
+        await session.send(_CHAT_FAILURE_REPLY)
+        return BLOCK
+    user_id = identity.user_id
+    user_name = identity.display_name
+    channel_image_references = ChannelImageReferences()
 
     rel = await get_relation(user_id, channel_id)
     mood = await get_mood(channel_id)
     energy = energy_at(datetime.now().hour)
     memory_context = await load_memory_context(config, user_id, channel_id, content)
     history = await load_history(channel_id, config.context_window)
+    try:
+        recent_tool_activity = await load_recent_tool_activity(
+            channel_id,
+            history,
+            max_events=config.tool_context_max_events,
+            max_chars=config.tool_context_max_chars,
+        )
+    except Exception as exc:
+        _LOGGER.warning(f"tool history load failed: {summarize_exception(exc)}")
+        recent_tool_activity = []
+    generation_history = [] if requests_recent_channel_context(model_text) else history
     messages = build_chat_messages(
-        history,
+        generation_history,
         user_name,
         model_text,
         current_content,
         forwarded_messages,
     )
-    media_requested = latest_user_requests_media(cast(list[ChatMessage], messages))
+    chat_messages = cast(list[ChatMessage], messages)
+    self_reference_attached = False
+    if supports_image_input and latest_user_requests_image_generation(chat_messages):
+        self_reference_attached = append_self_reference_image(
+            chat_messages,
+            config.self_reference_image,
+            _LOGGER.warning,
+        )
+    media_requested = latest_user_requests_media(chat_messages)
     web_limits = normalize_web_access_limits(
         config.web_search_max_calls_per_generation,
         config.web_page_max_calls_per_generation,
@@ -170,7 +203,10 @@ async def on_chat(session: Session, ctx: Contexts):
         impression=rel.impression,
         profile=memory_context.chat_profile,
         relevant_memories=memory_context.relevant_memories,
+        recent_tool_activity=recent_tool_activity,
         user_name=user_name,
+        current_participant_ref=identity.participant_ref,
+        self_reference_attached=self_reference_attached,
         web_search_limit=web_limits.search_limit,
         web_page_limit=web_limits.read_limit,
         web_total_limit=web_limits.total_limit,
@@ -186,19 +222,26 @@ async def on_chat(session: Session, ctx: Contexts):
         append_history=append_message,
         delete_history=delete_message,
         warn=lambda message: _LOGGER.warning(message),
+        persist_tool_events=persist_tool_events,
+        tool_history_retention=config.tool_history_max_records_per_channel,
     )
     try:
-        response = await generate_chat_response(
-            cast(list[ChatMessage], messages),
-            system=system,
-            model=model_name,
-            channel_id=channel_id,
-            ctx=ctx,
-            web_limits=web_limits,
-            delivery_state=delivery_state,
-            request_timeout=config.model_request_timeout,
-            media_request_timeout=config.media_request_timeout,
-        )
+        try:
+            response = await generate_chat_response(
+                cast(list[ChatMessage], messages),
+                system=system,
+                model=model_name,
+                channel_id=channel_id,
+                ctx=ctx,
+                web_limits=web_limits,
+                delivery_state=delivery_state,
+                channel_image_references=channel_image_references,
+                request_timeout=config.model_request_timeout,
+                media_request_timeout=config.media_request_timeout,
+                tool_trace=turn.tool_trace,
+            )
+        finally:
+            await turn.persist_tool_trace()
     except asyncio.CancelledError:
         await turn.preserve_and_rollback()
         raise

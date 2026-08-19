@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
 from collections.abc import Iterator
@@ -15,8 +16,12 @@ import entari_plugin_llm.service as llm_service_module
 from arclet.letoderea.exceptions import ExitState, _ExitException
 from entari_plugin_llm.tools.event import LLMToolEvent, tools, available_functions
 
+from .core.errors import summarize_exception
+from .core.delivery import current_llm_chat_delivery, contains_internal_participant_reference
+from .core.tool_trace import current_tool_trace
 from .runtime_context import copy_llm_chat_context
 from .core.native_images import extract_native_images
+from .core.tool_trace_policy import DeliverySnapshot
 
 _MIN_TOOL_CALL_LIMIT = 8
 _MAX_TOOL_CALL_LIMIT = 32
@@ -25,6 +30,15 @@ _TOOL_CALL_LIMIT: ContextVar[int] = ContextVar(
     "llm_chat_agno_tool_call_limit",
     default=_MIN_TOOL_CALL_LIMIT,
 )
+_INTERNAL_REFERENCE_TOOLS = {
+    "describe_channel_participant_avatar",
+    "describe_channel_image",
+    "find_channel_participants",
+    "read_channel_messages",
+    "send_channel_image",
+    "send_merged_forward",
+    "send_text",
+}
 
 
 def recommended_tool_call_limit(web_calls: int, text_messages: int, media_messages: int) -> int:
@@ -48,25 +62,54 @@ def agno_tool_call_limit_scope(limit: int) -> Iterator[None]:
         _TOOL_CALL_LIMIT.reset(token)
 
 
+def _delivery_snapshot() -> DeliverySnapshot:
+    state = current_llm_chat_delivery()
+    if state is None:
+        return DeliverySnapshot()
+    return DeliverySnapshot(
+        active=True,
+        attempts=state.delivery_attempts,
+        confirmed=state.confirmed_deliveries,
+        confirmed_media=state.confirmed_media_deliveries,
+    )
+
+
+def _normalize_tool_data(response: object) -> object:
+    if isinstance(response, ExitState):
+        return "Conversation ended" if response is ExitState.stop else str(response)
+    if isinstance(response, _ExitException):
+        return response.args[0] if response.args else None
+    if isinstance(response, (str, int, float, bool, list, dict, type(None))):
+        return response
+    return str(response)
+
+
 def _build_agno_tool(name: str) -> Function:
     subscriber = available_functions[name]
 
     async def wrapper(**kwargs: Any) -> str:
-        tool_context = await generate_contexts(LLMToolEvent(), inherit_ctx=copy_llm_chat_context())
-        tool_context.update(kwargs)
+        recorder = current_tool_trace()
+        unsafe_reference = name not in _INTERNAL_REFERENCE_TOOLS and contains_internal_participant_reference(kwargs)
+        call = recorder.start(name, {} if unsafe_reference else kwargs) if recorder is not None else None
+        before = _delivery_snapshot()
         try:
+            if unsafe_reference:
+                raise ValueError("Invalid internal participant reference for this tool")
+            tool_context = await generate_contexts(LLMToolEvent(), inherit_ctx=copy_llm_chat_context())
+            tool_context.update(kwargs)
             response = await subscriber.handle(tool_context, inner=True)
-            if isinstance(response, ExitState):
-                data = "Conversation ended" if response is ExitState.stop else str(response)
-                return json.dumps({"ok": True, "data": data}, ensure_ascii=False)
-            if isinstance(response, _ExitException):
-                data = response.args[0] if response.args else None
-                return json.dumps({"ok": True, "data": data}, ensure_ascii=False)
-            if isinstance(response, (str, int, float, bool, list, dict, type(None))):
-                return json.dumps({"ok": True, "data": response}, ensure_ascii=False)
-            return json.dumps({"ok": True, "data": str(response)}, ensure_ascii=False)
+            data = _normalize_tool_data(response)
+            if recorder is not None and call is not None:
+                recorder.finish_success(call, data, before=before, after=_delivery_snapshot())
+            return json.dumps({"ok": True, "data": data}, ensure_ascii=False)
+        except asyncio.CancelledError:
+            if recorder is not None and call is not None:
+                recorder.finish_cancelled(call, before=before, after=_delivery_snapshot())
+            raise
         except Exception as exc:
-            return json.dumps({"ok": False, "error": repr(exc)}, ensure_ascii=False)
+            if recorder is not None and call is not None:
+                recorder.finish_error(call, exc, before=before, after=_delivery_snapshot())
+            return json.dumps({"ok": False, "error": summarize_exception(exc)}, ensure_ascii=False)
 
     schema = next(schema["function"] for schema in tools if schema["function"]["name"] == name)
     return Function(

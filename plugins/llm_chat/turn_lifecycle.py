@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import field, dataclass
-from collections.abc import Callable, Awaitable
+from collections.abc import Callable, Sequence, Awaitable
 
 from arclet.entari import Session, MessageChain
 
@@ -20,12 +20,14 @@ from .core.delivery import (
     strip_trailing_end_of_response,
     reserve_media_messages_for_state,
 )
+from .core.tool_trace import ToolTraceEvent, ToolTraceRecorder
 from .tools._delivery import send_with_delivery
 from .core.native_images import to_entari_image, extract_native_images
 from .core.media_delivery import strip_media_unavailable_marker
 
 HistoryAppender = Callable[[str, str, str, str, str], Awaitable[object]]
 HistoryDeleter = Callable[[int], Awaitable[object]]
+ToolTracePersister = Callable[[str, int, Sequence[ToolTraceEvent], int], Awaitable[object]]
 WarningSink = Callable[[str], object]
 
 
@@ -39,6 +41,10 @@ class ActiveChatTurn:
     append_history: HistoryAppender
     delete_history: HistoryDeleter
     warn: WarningSink
+    tool_trace: ToolTraceRecorder = field(default_factory=ToolTraceRecorder)
+    persist_tool_events: ToolTracePersister | None = None
+    tool_history_retention: int = 200
+    _tool_trace_persist_attempted: bool = field(default=False, init=False)
     _assistant_persist_attempted: bool = field(default=False, init=False)
 
     async def persist_delivered_text(self, *, preserve_original: bool = False) -> str:
@@ -57,6 +63,25 @@ class ActiveChatTurn:
         except Exception as exc:
             self.warn(f"assistant delivery persistence failed: {type(exc).__name__}")
         return delivered_text
+
+    async def persist_tool_trace(self) -> None:
+        """Persist completed tool events at most once without blocking delivery."""
+
+        if self._tool_trace_persist_attempted or not self.tool_trace.events or self.persist_tool_events is None:
+            return
+        self._tool_trace_persist_attempted = True
+        try:
+            await self.persist_tool_events(
+                self.channel_id,
+                self.user_message_id,
+                tuple(sorted(self.tool_trace.events, key=lambda event: event.sequence)),
+                self.tool_history_retention,
+            )
+        except asyncio.CancelledError:
+            self.warn("tool trace persistence cancelled")
+            raise
+        except Exception as exc:
+            self.warn(f"tool trace persistence failed: {type(exc).__name__}")
 
     async def rollback_if_unstarted(self) -> None:
         """Delete the user history row only when no delivery attempt occurred."""

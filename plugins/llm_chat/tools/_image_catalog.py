@@ -11,6 +11,7 @@ from collections.abc import Callable, Sequence
 from entari_plugin_database import select
 
 from ..models import ImageTag
+from ..core.media import is_allowed_image_resource_path
 
 SessionFactory = Callable[[], AbstractAsyncContextManager[Any]]
 
@@ -55,6 +56,8 @@ class ImageCatalog:
 
     def resolve(self, relative_path: str) -> Path | None:
         """Resolve a registered relative path without escaping the image root."""
+        if not is_allowed_image_resource_path(relative_path):
+            return None
 
         try:
             root = self.image_dir.resolve()

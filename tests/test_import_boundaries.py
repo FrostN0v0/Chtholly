@@ -74,6 +74,80 @@ print("ok")
     assert completed.stdout.strip() == "ok"
 
 
+def test_llm_chat_entrypoint_runs_under_entari_module_proxy():
+    root = Path(__file__).resolve().parents[1]
+    script = """
+import sys
+from pathlib import Path
+from types import ModuleType
+from weakref import proxy
+from importlib.util import module_from_spec, spec_from_file_location
+
+import arclet.entari as entari
+import arclet.entari.plugin as entari_plugin
+from arclet.entari.plugin.model import Plugin, current_plugin
+
+root = Path.cwd()
+package_name = "_llm_chat_entrypoint_test"
+package_dir = root / "plugins" / "llm_chat"
+spec = spec_from_file_location(
+    package_name,
+    package_dir / "__init__.py",
+    submodule_search_locations=[str(package_dir)],
+)
+assert spec is not None
+assert spec.loader is not None
+module = module_from_spec(spec)
+plugin = Plugin(package_name, module, config={})
+setattr(module, "__plugin__", plugin)
+sys.modules[package_name] = proxy(module)
+
+litellm = ModuleType("litellm")
+litellm.suppress_debug_info = False
+sys.modules["litellm"] = litellm
+sys.modules["channel_perception"] = ModuleType("channel_perception")
+
+bridge_calls = []
+agno_compat = ModuleType(f"{package_name}.agno_compat")
+agno_compat.install_agno_tool_bridge = lambda: bridge_calls.append("installed")
+tool_runtime = ModuleType(f"{package_name}.tool_runtime")
+tool_runtime.registered_tools = ["sentinel_tool"]
+submodules = {
+    "agno_compat": agno_compat,
+    "chat_handler": ModuleType(f"{package_name}.chat_handler"),
+    "tag_runtime": ModuleType(f"{package_name}.tag_runtime"),
+    "tool_runtime": tool_runtime,
+    "meme_command": ModuleType(f"{package_name}.meme_command"),
+    "meme_webui": ModuleType(f"{package_name}.meme_webui"),
+}
+for suffix, submodule in submodules.items():
+    sys.modules[f"{package_name}.{suffix}"] = submodule
+    setattr(module, suffix, submodule)
+
+entari.metadata = lambda *args, **kwargs: None
+entari_plugin.collect_disposes = lambda callback: None
+token = current_plugin.set(plugin)
+try:
+    spec.loader.exec_module(module)
+finally:
+    current_plugin.reset(token)
+
+assert bridge_calls == ["installed"]
+assert module.registered_tools == ["sentinel_tool"]
+print("ok")
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.strip().endswith("ok")
+
+
 def test_web_policy_import_does_not_load_provider_adapter():
     root = Path(__file__).resolve().parents[1]
     script = """

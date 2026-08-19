@@ -604,6 +604,7 @@ dependencies = [
     { name = "entari-plugin-llm" },
     { name = "entari-plugin-permission" },
     { name = "entari-plugin-server" },
+    { name = "entari-plugin-user" },
     { name = "entari-plugin-webui" },
     { name = "exa-py" },
     { name = "httpx", extra = ["http2"] },
@@ -633,6 +634,7 @@ requires-dist = [
     { name = "entari-plugin-llm", git = "https://github.com/ArcletProject/entari-plugin-llm" },
     { name = "entari-plugin-permission", specifier = ">=0.1.1" },
     { name = "entari-plugin-server", specifier = ">=0.7.1" },
+    { name = "entari-plugin-user", specifier = ">=0.2.0" },
     { name = "entari-plugin-webui", specifier = ">=1.0.1" },
     { name = "exa-py", specifier = ">=2.16.2" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.27.2" },
@@ -882,16 +884,16 @@ wheels = [
 
 [[package]]
 name = "entari-plugin-user"
-version = "0.1.6"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "arclet-entari" },
     { name = "entari-plugin-database" },
     { name = "expiringdictx" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7f/d2/986f4834a81d1383dd34f6b80f9b6d04e810c1f60909136756dee5c0360e/entari_plugin_user-0.1.6.tar.gz", hash = "sha256:84fa4a23988436dbc29f2cad74eed649af411b883095de4701a8b1be66b72bbf", size = 9038, upload-time = "2026-05-30T10:10:35.975Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/99/82/231f6ab9be3791b928a7083954e33150315fc286962086e54b333b031aa2/entari_plugin_user-0.2.0.tar.gz", hash = "sha256:3ad727139beb99ad5d1dec4f6b68529fb9bf93445f6dd0657fe4920a5b52fcf1", size = 9732, upload-time = "2026-08-04T14:28:05.412Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2f/28/7fbffc06cc2296dc9ae4c532d76ced60419d09f3e0c43e2ea3f32aaa9107/entari_plugin_user-0.1.6-py3-none-any.whl", hash = "sha256:56faa6667299eb63c67d4c455002ccc41a75abefc24954022c0ac56a8aff596e", size = 16443, upload-time = "2026-05-30T10:10:34.859Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/48/4c8e57eaeeff25451a30830dd54a7b03ba4b73757a7ce2789f0b2d661aa3/entari_plugin_user-0.2.0-py3-none-any.whl", hash = "sha256:272467eb04ac21d980b0bce3863915bdc39dc9a05980bf99437985a5e5a41973", size = 17615, upload-time = "2026-08-04T14:28:04.569Z" },
 ]
 
 [[package]]

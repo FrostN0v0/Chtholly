@@ -57,10 +57,21 @@ from plugins.llm_chat import (
 from plugins.llm_chat.config import LLMChatConfig
 from plugins.llm_chat.models import ImageTag, Conversation
 from plugins.llm_chat.persona import store as persona_store_module
-from plugins.llm_chat.meme_store import MemeImportError, MemeImportResult, import_meme_image
+from plugins.llm_chat.meme_store import (
+    MemeImportError,
+    MemeImportResult,
+    delete_meme,
+    import_meme_bytes,
+    import_meme_image,
+)
 from plugins.llm_chat.web.policy import DEFAULT_WEB_ACCESS_LIMITS
 from plugins.llm_chat.core.delivery import DeliveryState, llm_chat_delivery_scope
 from plugins.llm_chat.core.image_source import IMAGE_FETCH_MAX_BYTES
+from plugins.llm_chat.tools._image_catalog import ImageCatalog
+from plugins.llm_chat.core.image_tag_metadata import (
+    image_tag_catalog_summary,
+    normalize_generated_image_tags,
+)
 
 sys.modules.pop("plugins.llm_chat", None)
 if getattr(_PLUGINS, "llm_chat", None) is _PACKAGE:
@@ -107,7 +118,7 @@ async def meme_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
         await connection.run_sync(Base.metadata.create_all)
 
     state = SimpleNamespace(
-        tag_result="reaction，sticker，happy",
+        tag_result=normalize_generated_image_tags("reaction，sticker，happy"),
         embedding_result=[1.0, 0.0, 0.0],
         visual_calls=0,
         embedding_calls=[],
@@ -159,7 +170,7 @@ async def test_import_uses_next_numeric_name_and_persists_queryable_tags(meme_en
         Image.of(url="local://new"),
     )
 
-    expected_path = str(Path("memes") / "63.png")
+    expected_path = "memes/63.png"
     assert result.status == "created"
     assert result.relative_path == expected_path
     assert result.tags == meme_env.state.tag_result
@@ -195,6 +206,83 @@ async def test_duplicate_bytes_skip_repeated_tagging(meme_env: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_manual_byte_import_normalizes_tags_without_vision(meme_env: Any) -> None:
+    result = await import_meme_bytes(
+        meme_env.config,
+        _PNG_BYTES + b"manual-tags",
+        manual_tags="1. visible quote; reaction，visible quote\nreply scene",
+        auto_tag=False,
+    )
+
+    assert result.tags == normalize_generated_image_tags("visible quote，reaction，reply scene")
+    assert meme_env.state.visual_calls == 0
+    rows = await _image_rows(meme_env.session_factory)
+    assert [(row.file_path, row.tags) for row in rows] == [(result.relative_path, result.tags)]
+
+
+@pytest.mark.asyncio
+async def test_delete_meme_removes_file_and_index_together(meme_env: Any) -> None:
+    created = await import_meme_bytes(meme_env.config, _PNG_BYTES + b"delete")
+    stored_path = meme_env.image_dir / created.relative_path
+
+    deleted = await delete_meme(created.relative_path)
+
+    assert deleted.file_deleted is True
+    assert deleted.index_deleted is True
+    assert not stored_path.exists()
+    assert await _image_rows(meme_env.session_factory) == []
+
+
+@pytest.mark.asyncio
+async def test_delete_meme_preserves_file_when_index_commit_fails(
+    meme_env: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = await import_meme_bytes(meme_env.config, _PNG_BYTES + b"delete-rollback")
+    stored_path = meme_env.image_dir / created.relative_path
+
+    async def fail_delete(_relative_path: str) -> bool:
+        raise RuntimeError("database delete failed")
+
+    monkeypatch.setattr(meme_store_module, "delete_image_tag", fail_delete)
+
+    with pytest.raises(MemeImportError, match="Meme index deletion failed"):
+        await delete_meme(created.relative_path)
+
+    assert stored_path.read_bytes() == _PNG_BYTES + b"delete-rollback"
+    assert len(await _image_rows(meme_env.session_factory)) == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_meme_file_failure_leaves_recoverable_unindexed_file(
+    meme_env: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = await import_meme_bytes(meme_env.config, _PNG_BYTES + b"delete-file-failure")
+    stored_path = (meme_env.image_dir / created.relative_path).resolve()
+    original_unlink = Path.unlink
+
+    def fail_target_unlink(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path.resolve() == stored_path:
+            raise PermissionError("file is busy")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_target_unlink)
+
+    with pytest.raises(MemeImportError, match="Meme file deletion failed"):
+        await delete_meme(created.relative_path)
+
+    assert stored_path.exists()
+    assert await _image_rows(meme_env.session_factory) == []
+
+
+@pytest.mark.asyncio
+async def test_delete_meme_rejects_paths_outside_managed_directory(meme_env: Any) -> None:
+    with pytest.raises(MemeImportError, match="outside the managed collection"):
+        await delete_meme("../private.png")
+
+
+@pytest.mark.asyncio
 async def test_animated_gif_import_preserves_original_bytes_and_deduplicates(meme_env: Any) -> None:
     session = cast(
         Session,
@@ -204,7 +292,7 @@ async def test_animated_gif_import_preserves_original_bytes_and_deduplicates(mem
     first = await import_meme_image(meme_env.config, session, Image.of(url="local://animated"))
     second = await import_meme_image(meme_env.config, session, Image.of(url="local://duplicate"))
 
-    expected_path = str(Path("memes") / "1.gif")
+    expected_path = "memes/1.gif"
     assert _GIF_BYTES.count(b"\x2c") == 2
     assert first == MemeImportResult("created", expected_path, meme_env.state.tag_result)
     assert second == MemeImportResult("duplicate", expected_path, meme_env.state.tag_result)
@@ -216,12 +304,30 @@ async def test_animated_gif_import_preserves_original_bytes_and_deduplicates(mem
 
 
 @pytest.mark.asyncio
+async def test_image_catalog_allows_only_memes_directory(meme_env: Any) -> None:
+    allowed = meme_env.meme_dir / "allowed.png"
+    allowed.write_bytes(_PNG_BYTES)
+    blocked_dir = meme_env.image_dir / "fox_img"
+    blocked_dir.mkdir()
+    blocked = blocked_dir / "blocked.png"
+    blocked.write_bytes(_PNG_BYTES)
+    catalog = ImageCatalog(meme_env.image_dir, meme_env.session_factory)
+
+    assert catalog.resolve("memes/allowed.png") == allowed.resolve()
+    assert catalog.resolve("fox_img/blocked.png") is None
+    assert catalog.resolve("memes/../fox_img/blocked.png") is None
+
+
+@pytest.mark.asyncio
 async def test_batch_tagging_discovers_existing_gif(
     meme_env: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gif_path = meme_env.meme_dir / "existing.gif"
     gif_path.write_bytes(_GIF_BYTES)
+    blocked_dir = meme_env.image_dir / "fox_img"
+    blocked_dir.mkdir()
+    (blocked_dir / "blocked.png").write_bytes(_PNG_BYTES)
     data_urls: list[str] = []
 
     async def generate_tags(_config: LLMChatConfig, data_url: str) -> str:
@@ -237,17 +343,51 @@ async def test_batch_tagging_discovers_existing_gif(
     assert len(data_urls) == 1
     assert data_urls[0].startswith("data:image/gif;base64,")
     rows = await _image_rows(meme_env.session_factory)
-    assert [(row.file_path, row.tags) for row in rows] == [
-        (str(Path("memes") / "existing.gif"), meme_env.state.tag_result)
-    ]
+    assert [(row.file_path, row.tags) for row in rows] == [("memes/existing.gif", meme_env.state.tag_result)]
+    assert all(not row.file_path.startswith("fox_img/") for row in rows)
 
 
 @pytest.mark.asyncio
-async def test_existing_untagged_file_is_repaired_without_replacing_embedding(meme_env: Any) -> None:
+async def test_legacy_only_tagging_skips_structured_and_unindexed_files(
+    meme_env: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    structured_path = "memes/1.png"
+    legacy_path = "memes/2.png"
+    unindexed_path = "memes/3.png"
+    for name in ("1.png", "2.png", "3.png"):
+        (meme_env.meme_dir / name).write_bytes(_PNG_BYTES + name.encode())
+    async with meme_env.session_factory() as session:
+        session.add(ImageTag(file_path=structured_path, tags=meme_env.state.tag_result, embedding_json="[]"))
+        session.add(ImageTag(file_path=legacy_path.replace("/", "\\"), tags="爆笑，社死，慌张", embedding_json="stale"))
+        await session.commit()
+
+    tagged_paths: list[str] = []
+
+    async def generate_tags(_config: LLMChatConfig, _data_url: str) -> str:
+        tagged_paths.append(legacy_path)
+        return cast(str, meme_env.state.tag_result)
+
+    monkeypatch.setattr(image_tags_module, "IMAGE_DIR", meme_env.image_dir)
+    monkeypatch.setattr(image_tags_module, "generate_image_tags", generate_tags)
+
+    result = await image_tags_module.tag_images(meme_env.config, legacy_only=True)
+
+    assert result == (1, 0, 0)
+    assert tagged_paths == [legacy_path]
+    rows = {row.file_path: row for row in await _image_rows(meme_env.session_factory)}
+    assert rows[structured_path].tags == meme_env.state.tag_result
+    assert rows[legacy_path].tags == meme_env.state.tag_result
+    assert rows[legacy_path].embedding_json == "[1.0,0.0,0.0]"
+    assert unindexed_path not in rows
+
+
+@pytest.mark.asyncio
+async def test_existing_untagged_file_is_repaired_and_stale_embedding_is_cleared(meme_env: Any) -> None:
     repair_data = _PNG_BYTES + b"repair"
     repair_path = meme_env.meme_dir / "7.png"
     repair_path.write_bytes(repair_data)
-    relative_path = str(Path("memes") / "7.png")
+    relative_path = "memes/7.png"
     async with meme_env.session_factory() as session:
         session.add(ImageTag(file_path=relative_path, tags="", embedding_json="preserved"))
         await session.commit()
@@ -263,9 +403,24 @@ async def test_existing_untagged_file_is_repaired_without_replacing_embedding(me
     assert repaired.relative_path == relative_path
     rows = await _image_rows(meme_env.session_factory)
     assert rows[0].tags == meme_env.state.tag_result
-    assert rows[0].embedding_json == "preserved"
+    assert rows[0].embedding_json == ""
     assert len(_stored_images(meme_env.meme_dir)) == 1
     assert meme_env.state.visual_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_tag_replacement_clears_stale_embedding_on_embedding_failure(meme_env: Any) -> None:
+    relative_path = "memes/8.png"
+    async with meme_env.session_factory() as session:
+        session.add(ImageTag(file_path=relative_path, tags="old tags", embedding_json="stale-vector"))
+        await session.commit()
+
+    meme_env.state.embedding_result = None
+    await image_tags_module.replace_image_tags(meme_env.config, relative_path, "new tags")
+
+    rows = await _image_rows(meme_env.session_factory)
+    assert rows[0].tags == normalize_generated_image_tags("new tags")
+    assert rows[0].embedding_json == ""
 
 
 @pytest.mark.asyncio
@@ -281,7 +436,7 @@ async def test_concurrent_imports_deduplicate_and_allocate_consecutive_names(mem
     )
 
     assert {result.status for result in shared_results} == {"created", "duplicate"}
-    assert {result.relative_path for result in shared_results} == {str(Path("memes") / "1.png")}
+    assert {result.relative_path for result in shared_results} == {"memes/1.png"}
     assert meme_env.state.visual_calls == 1
 
     first_data = _PNG_BYTES + b"first-distinct"
@@ -296,8 +451,8 @@ async def test_concurrent_imports_deduplicate_and_allocate_consecutive_names(mem
     )
 
     assert {result.relative_path for result in distinct_results} == {
-        str(Path("memes") / "2.png"),
-        str(Path("memes") / "3.png"),
+        "memes/2.png",
+        "memes/3.png",
     }
     assert all(result.status == "created" for result in distinct_results)
     assert meme_env.state.visual_calls == 3
@@ -420,7 +575,7 @@ async def test_hard_link_collision_never_overwrites_external_file(
         Image.of(url="local://collision"),
     )
 
-    assert result.relative_path == str(Path("memes") / "2.png")
+    assert result.relative_path == "memes/2.png"
     assert (meme_env.meme_dir / "1.png").read_bytes() == b"external-writer"
     assert (meme_env.meme_dir / "2.png").read_bytes() == data
 
@@ -914,7 +1069,7 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
     meme_env: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    meme_env.state.tag_result = "reaction，happy，sticker"
+    meme_env.state.tag_result = normalize_generated_image_tags("reaction，happy，sticker")
     meme_env.state.embedding_result = None
     data = _PNG_BYTES + b"scripted-smoke"
     image = Image.of(url="local://smoke")
@@ -950,7 +1105,7 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
             await session.send(final_text)
             await persona_store_module.append_message("channel", "", "bot", "assistant", final_text)
 
-            relative_path = str(Path("memes") / "1.png")
+            relative_path = "memes/1.png"
             files = _stored_images(meme_env.meme_dir)
             rows = await _image_rows(meme_env.session_factory)
             assert len(files) == len(rows) == 1
@@ -970,7 +1125,7 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
                 )
             assert [row.content for row in history] == ["Visible collection reply"]
 
-            distractor_path = str(Path("memes") / "2.png")
+            distractor_path = "memes/2.png"
             (meme_env.meme_dir / "2.png").write_bytes(_PNG_BYTES + b"distractor")
             async with meme_env.session_factory() as database:
                 database.add(ImageTag(file_path=distractor_path, tags="reaction，happy，sticker", embedding_json=""))
@@ -982,7 +1137,7 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
             assert catalog_paths == [distractor_path, relative_path]
             assert [entry["tags"] for entry in catalog["images"]] == [
                 "reaction，happy，sticker",
-                meme_env.state.tag_result,
+                image_tag_catalog_summary(meme_env.state.tag_result),
             ]
 
             async def no_sleep(_seconds: float) -> None:
@@ -993,14 +1148,16 @@ async def test_scripted_collection_send_and_duplicate_command_smoke(
                 send_result = await send_image(session=session, image_paths=catalog_paths)
             assert send_result.startswith("已发送 2 张图片")
             sent_chains = [cast(MessageChain, value) for value in session.sent[-2:]]
-            assert sent_chains[0].get(Image)[0].src.replace("\\", "/").endswith("/2.png")
-            assert sent_chains[1].get(Image)[0].src.replace("\\", "/").endswith("/1.png")
+            distractor_source = f"data:image/png;base64,{base64.b64encode(_PNG_BYTES + b'distractor').decode('ascii')}"
+            collected_source = f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
+            assert [chain.get(Image)[0].src for chain in sent_chains] == [distractor_source, collected_source]
+            assert all("file://" not in chain.get(Image)[0].src for chain in sent_chains)
 
             with llm_chat_delivery_scope(DeliveryState()):
                 explicit_result = await send_image(session, r"please send memes\2.png")
             assert explicit_result.startswith("已发送图片")
             explicit_chain = cast(MessageChain, session.sent[-1])
-            assert explicit_chain.get(Image)[0].src.replace("\\", "/").endswith("/2.png")
+            assert explicit_chain.get(Image)[0].src == distractor_source
 
             async with meme_env.session_factory() as database:
                 sent_history = list(

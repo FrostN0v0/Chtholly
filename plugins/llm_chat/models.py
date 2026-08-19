@@ -18,6 +18,21 @@ class Conversation(Base):
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
 
+class ToolExecution(Base):
+    __tablename__ = "chat_tool_executions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    channel_id: Mapped[str] = mapped_column(index=True)
+    turn_id: Mapped[int] = mapped_column(index=True)
+    sequence: Mapped[int]
+    tool_name: Mapped[str] = mapped_column(index=True)
+    status: Mapped[str]
+    effect: Mapped[str]
+    arguments_json: Mapped[str] = mapped_column(Text, default="{}")
+    outcome_json: Mapped[str] = mapped_column(Text, default="{}")
+    duration_ms: Mapped[int] = mapped_column(default=0)
+    started_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+
 class UserRelation(Base):
     __tablename__ = "chat_user_relations"
     user_id: Mapped[str] = mapped_column(primary_key=True)
@@ -72,5 +87,5 @@ class ImageTag(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     file_path: Mapped[str] = mapped_column(unique=True)
     tags: Mapped[str]
-    """Comma-separated keywords."""
+    """Canonical structured JSON metadata; legacy comma tags remain readable during migration."""
     embedding_json: Mapped[str] = mapped_column(Text, default="")
