@@ -53,6 +53,7 @@ from plugins.llm_chat import (
     tool_history as tool_history_module,
     forward_context as forward_context_module,
 )
+from plugins.llm_chat.web import policy as web_policy_module
 from plugins.llm_chat.core import image_source as image_source_module
 from plugins.llm_chat.tools import is_command_allowed
 from plugins.llm_chat.config import LLMChatConfig
@@ -1822,6 +1823,14 @@ def test_tool_argument_projection_redacts_secrets_and_large_payloads() -> None:
     )
     external = project_tool_arguments("send_external_image", {"source": "data:image/png;base64,SECRET"})
     image = project_tool_arguments("send_image", {"image_paths": ["memes/1.png", "memes/2.png"]})
+    text = project_tool_arguments(
+        "send_text",
+        {
+            "text": "hello",
+            "delay_seconds": 1.5,
+            "mentions": ["current_user", "participant_0123abcdef"],
+        },
+    )
     history = project_tool_arguments(
         "read_channel_messages",
         {"limit": 20, "participant_ref": "participant_0123abcdef", "before_cursor": "42"},
@@ -1846,6 +1855,7 @@ def test_tool_argument_projection_redacts_secrets_and_large_payloads() -> None:
     }
     assert external == {"source_type": "inline_data", "source_chars": 28}
     assert image == {"selection_mode": "paths", "path_count": 2, "context": ""}
+    assert text == {"text_chars": 5, "mention_count": 2, "delay_seconds": 1.5}
     assert history == {"limit": 20, "filtered": True, "paged": True}
     assert description == {"requested": True}
     assert channel_image == {"requested": True}
@@ -1853,6 +1863,7 @@ def test_tool_argument_projection_redacts_secrets_and_large_payloads() -> None:
     assert "SECRET" not in repr(external)
     assert "memes/1.png" not in repr(image)
     assert "channel_image_secret" not in repr(channel_image)
+    assert "participant_0123abcdef" not in repr(text)
 
 
 def test_channel_perception_tool_trace_keeps_only_bounded_metadata() -> None:
@@ -2080,6 +2091,9 @@ async def test_agno_tool_bridge_merges_arguments_and_inherits_context(monkeypatc
     [
         None,
         "",
+        ".",
+        "。",
+        "……",
         "[END_OF_RESPONSE]",
         "[END_OF_RESPONSE]\n[END_OF_RESPONSE]",
         "[用语音说: [softly] 这不是一次真实发送。]",
@@ -2147,6 +2161,45 @@ async def test_generation_retries_invisible_reply_once_without_tools(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_content", [".", "。", "……"])
+async def test_generation_rejects_punctuation_only_corrective_reply(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_content: str,
+) -> None:
+    async def fake_generate(messages: list[dict[str, Any]], **_kwargs: Any) -> SimpleNamespace:
+        messages.append({"role": "assistant", "content": invalid_content})
+        return _handler_response(invalid_content)
+
+    async def fake_acompletion(**_kwargs: Any) -> SimpleNamespace:
+        return _handler_response(invalid_content)
+
+    monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
+    monkeypatch.setattr(generation_module.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(
+        generation_module,
+        "get_model_config",
+        lambda *_args: SimpleNamespace(
+            name="resolved-model",
+            base_url="https://model.invalid/v1",
+            api_key="test-only-key",
+            extra={},
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="^LLM finalization did not return a response$"):
+        await generation_module.generate_chat_response(
+            cast(list[Any], [{"role": "user", "content": "describe this image"}]),
+            system="system",
+            model="deepseek",
+            channel_id="group",
+            ctx=Contexts(),
+            web_limits=generation_module.WebAccessLimits(0, 0, 0),
+            delivery_state=DeliveryState(),
+            request_timeout=12.5,
+        )
+
+
+@pytest.mark.asyncio
 async def test_generation_retries_contextual_avatar_send_request_until_delivery_is_confirmed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2199,6 +2252,7 @@ async def test_generation_retries_contextual_avatar_send_request_until_delivery_
         "画一下你的战败cg",
         "那画一下你的战胜cg",
         "用语音说一句安慰人的话",
+        "截图一下异格安洁莉娜的技能给我",
         "不要只根据提示词描述的形象去生成，自己去搜，或者用我给你的这个 [图片]",
         [
             {
@@ -2256,6 +2310,52 @@ async def test_generation_uses_media_timeout_for_natural_media_requests(
 
     assert generation_module.response_content(response) == "[END_OF_RESPONSE]"
     assert requests == [{"system": "system", "model": "deepseek", "timeout": 180.0, "max_retries": 0}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "expected_authorized"),
+    [
+        ("请截图这个网页", True),
+        ("截图一下异格安洁莉娜的技能给我", True),
+        ("截", True),
+        ('<at id="2123673121" name="珂朵莉"/> 截', True),
+        ("请找一下陈千语 cosplay 图片", False),
+    ],
+)
+async def test_generation_authorizes_webpage_screenshot_only_for_explicit_current_request(
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+    expected_authorized: bool,
+) -> None:
+    observed: list[bool] = []
+    state = DeliveryState()
+
+    async def fake_generate(_messages: list[dict[str, Any]], **_kwargs: Any) -> SimpleNamespace:
+        try:
+            web_policy_module.consume_llm_chat_web_access("screenshot_web_page")
+        except web_policy_module.WebAccessError:
+            observed.append(False)
+        else:
+            observed.append(True)
+            mark_delivery_success(state, media=True)
+        return _handler_response("done")
+
+    monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
+
+    response = await generation_module.generate_chat_response(
+        cast(list[Any], [{"role": "user", "content": content}]),
+        system="system",
+        model="deepseek",
+        channel_id="group",
+        ctx=Contexts(),
+        web_limits=generation_module.WebAccessLimits(0, 1, 1),
+        delivery_state=state,
+        request_timeout=12.5,
+    )
+
+    assert generation_module.response_content(response) == "done"
+    assert observed == [expected_authorized]
 
 
 @pytest.mark.asyncio
@@ -3453,7 +3553,7 @@ def test_yaml_and_default_delivery_configuration_are_synchronized() -> None:
         "delivery_max_forward_nodes": 20,
         "delivery_max_forward_chars_per_node": 2000,
         "delivery_max_total_text_chars_per_generation": 12000,
-        "delivery_max_media_messages_per_generation": 2,
+        "delivery_max_media_messages_per_generation": 6,
     }
 
     for key, value in expected.items():
@@ -3494,9 +3594,9 @@ def test_yaml_and_default_llm_chat_configuration_are_exactly_synchronized():
     assert defaults.exa_exclude_domains == llm_chat_plugin["exa_exclude_domains"] == []
     assert defaults.exa_start_published_date is llm_chat_plugin["exa_start_published_date"] is None
     assert defaults.exa_end_published_date is llm_chat_plugin["exa_end_published_date"] is None
-    assert defaults.web_search_max_calls_per_generation == 2
-    assert defaults.web_page_max_calls_per_generation == 2
-    assert defaults.web_total_max_calls_per_generation == 4
+    assert defaults.web_search_max_calls_per_generation == llm_chat_plugin["web_search_max_calls_per_generation"] == 16
+    assert defaults.web_page_max_calls_per_generation == llm_chat_plugin["web_page_max_calls_per_generation"] == 24
+    assert defaults.web_total_max_calls_per_generation == llm_chat_plugin["web_total_max_calls_per_generation"] == 32
     configured_web_limits = (
         llm_chat_plugin["web_search_max_calls_per_generation"],
         llm_chat_plugin["web_page_max_calls_per_generation"],
@@ -3506,7 +3606,7 @@ def test_yaml_and_default_llm_chat_configuration_are_exactly_synchronized():
     assert configured_web_limits[2] <= configured_web_limits[0] + configured_web_limits[1]
     assert defaults.web_search_max_results == llm_chat_plugin["web_search_max_results"] == 5
     assert defaults.web_search_timeout == llm_chat_plugin["web_search_timeout"] == 30.0
-    assert defaults.web_page_max_chars == llm_chat_plugin["web_page_max_chars"] == 6000
+    assert defaults.web_page_max_chars == llm_chat_plugin["web_page_max_chars"] == 16000
     assert llm_chat_plugin["web_search_enabled"] is True
 
     expected_persona = "\n".join(

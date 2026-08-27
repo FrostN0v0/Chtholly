@@ -84,6 +84,44 @@ _CONTEXTUAL_MEDIA_DELIVERY = re.compile(
     re.IGNORECASE,
 )
 _RECENT_MEDIA_CONTEXT = re.compile(rf"(?:{_MEDIA_TERM}|头像|原图|画面|插画|海报)", re.IGNORECASE)
+_WEBPAGE_SCREENSHOT_ACTION = r"(?:截图|截屏|截(?:个|一张|一下)(?:图|屏)?|截)"
+_WEBPAGE_SCREENSHOT_NEGATION = re.compile(
+    rf"(?:别|不要|不用|无需|禁止|不是(?:让|要)?).{{0,24}}(?:{_WEBPAGE_SCREENSHOT_ACTION}"
+    r"|(?:(?:网页|页面|网站|网址|链接).{0,16}(?:截图|截屏)"
+    r"|(?:截图|截屏).{0,16}(?:网页|页面|网站|网址|链接)))"
+    r"|(?:do not|don't|dont|no need to|without).{0,24}(?:screenshot|screen shot|capture).{0,24}"
+    r"(?:webpage|web page|page|site|website|url|link)",
+    re.IGNORECASE,
+)
+_WEBPAGE_SCREENSHOT_REFERENCE = re.compile(
+    rf"{_WEBPAGE_SCREENSHOT_ACTION}\s*(?:一下\s*)?"
+    r"(?:里|中|上|内|内容|是什么|有什么|怎么|如何|工具|软件|方法|教程|识别|分析)",
+    re.IGNORECASE,
+)
+_WEBPAGE_SCREENSHOT_PREFIX = (
+    r"^\s*(?:<at\b[^>]*?/?>\s*)*"
+    r"(?:(?:帮我|请(?:你)?|给我|把|将|麻烦(?:你)?|能否|可以|可不可以|能不能)\s*)?"
+)
+_WEBPAGE_SCREENSHOT_REQUEST = re.compile(
+    r"(?:帮我|请(?:你)?|给我|把|将|麻烦(?:你)?|能否|可以|可不可以|能不能).{0,20}"
+    r"(?:(?:这个|该|当前|上面)?(?:网页|页面|网站|网址|链接).{0,20}"
+    r"(?:截图|截屏|截(?:个|一张|一下)?(?:图|屏)?)"
+    r"|(?:截图|截屏|截(?:个|一张|一下)?(?:图|屏)?).{0,20}"
+    r"(?:这个|该|当前|上面)?(?:网页|页面|网站|网址|链接))"
+    r"|^\s*(?:截图|截屏|截(?:个|一张|一下)?(?:图|屏)?).{0,20}"
+    r"(?:这个|该|当前|上面)?(?:网页|页面|网站|网址|链接)"
+    r"(?:\s*(?:发|传|给)(?:给)?我|\s*(?:一下|吧|吗|么))?[。！？!?]?\s*$"
+    rf"|{_WEBPAGE_SCREENSHOT_PREFIX}{_WEBPAGE_SCREENSHOT_ACTION}"
+    r"(?:\s*(?:一下|吧|给我|发给我|传给我))?\s*[。！？!?]?\s*$"
+    rf"|{_WEBPAGE_SCREENSHOT_PREFIX}{_WEBPAGE_SCREENSHOT_ACTION}\s*(?:一下\s*)?"
+    r"(?!(?:里|中|上|内|内容|是什么|有什么|怎么|如何|工具|软件|方法|教程|识别|分析))"
+    r".{1,100}[。！？!?]?\s*$"
+    r"|(?:take|send|show|share|capture).{0,16}(?:an?\s+)?(?:screenshot|screen shot).{0,24}"
+    r"(?:of\s+)?(?:this\s+|the\s+)?(?:webpage|web page|page|site|website|url|link)"
+    r"|(?:screenshot|screen shot).{0,16}(?:this\s+|the\s+)?"
+    r"(?:webpage|web page|page|site|website|url|link)(?:.{0,16}(?:for|to)\s+me)?",
+    re.IGNORECASE,
+)
 
 
 def _user_text(content: object) -> str:
@@ -125,6 +163,8 @@ def latest_user_requests_image_generation(messages: Sequence[ChatMessage]) -> bo
 
 def latest_user_requests_media(messages: Sequence[ChatMessage]) -> bool:
     """Return whether the latest user turn requests media directly or by recent reference."""
+    if latest_user_requests_webpage_screenshot(messages):
+        return True
 
     for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
@@ -139,6 +179,19 @@ def latest_user_requests_media(messages: Sequence[ChatMessage]) -> bool:
             return False
         recent_context = messages[max(0, index - 4) : index]
         return any(_RECENT_MEDIA_CONTEXT.search(_user_text(item.get("content"))) for item in recent_context)
+    return False
+
+
+def latest_user_requests_webpage_screenshot(messages: Sequence[ChatMessage]) -> bool:
+    """Return whether the latest user explicitly requests a webpage screenshot."""
+
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        text = _user_text(message.get("content")).strip()
+        if not text or _WEBPAGE_SCREENSHOT_NEGATION.search(text) or _WEBPAGE_SCREENSHOT_REFERENCE.search(text):
+            return False
+        return bool(_WEBPAGE_SCREENSHOT_REQUEST.search(text))
     return False
 
 

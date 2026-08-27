@@ -12,7 +12,7 @@ from agno.models.message import Message as AgnoMessage
 from arclet.entari.logger import log
 from entari_plugin_llm.config import get_model_config
 
-from .core.media import strip_internal_media_records
+from .core.media import has_meaningful_text, strip_internal_media_records
 from .core.types import ChatMessage
 from .web.policy import WebAccessLimits, llm_chat_web_access_scope
 from .agno_compat import agno_tool_call_limit_scope, recommended_tool_call_limit
@@ -28,6 +28,7 @@ from .core.media_delivery import (
     is_media_unavailable_reply,
     latest_user_requests_media,
     strip_media_unavailable_marker,
+    latest_user_requests_webpage_screenshot,
 )
 
 GenerationResponse = GenericResponse[None] | litellm.ModelResponse
@@ -46,7 +47,7 @@ _FINALIZATION_SUFFIX = (
     "仅补充尚未发送且有依据的新信息，否则只返回 [END_OF_RESPONSE]。"
 )
 _VISIBLE_RETRY_SUFFIX = (
-    "上一条候选回复不可发送：它为空、只包含结束控制标记，或复述了历史中的媒体发送记录。"
+    "上一条候选回复不可发送：它为空、只包含空白或标点、只包含结束控制标记，或复述了历史中的媒体发送记录。"
     "本轮没有发生任何发送尝试。不得再调用工具，不得输出媒体发送记录或 [END_OF_RESPONSE]，"
     "也不得声称已经发送媒体；请直接给出一条自然、可见且符合当前对话的最终回复。"
 )
@@ -80,7 +81,7 @@ def response_images(response: object) -> tuple[AgnoImage, ...]:
 
 def _has_visible_reply(response: object) -> bool:
     visible = strip_media_unavailable_marker(strip_internal_media_records(response_content(response))).strip()
-    return bool(strip_trailing_end_of_response(visible))
+    return has_meaningful_text(strip_trailing_end_of_response(visible))
 
 
 def _agno_messages(response: object) -> list[AgnoMessage]:
@@ -211,6 +212,7 @@ async def generate_chat_response(
         delivery_state.limits.max_media_messages,
     )
     media_requested = latest_user_requests_media(messages)
+    webpage_screenshot_requested = latest_user_requests_webpage_screenshot(messages)
     generation_timeout = media_request_timeout if media_requested else request_timeout
     generation_max_retries = 0 if media_requested else None
     tool_loop_exhausted = False
@@ -218,7 +220,10 @@ async def generate_chat_response(
     active_channel_image_references = channel_image_references or ChannelImageReferences()
     with (
         agno_tool_call_limit_scope(tool_call_limit),
-        llm_chat_web_access_scope(web_limits),
+        llm_chat_web_access_scope(
+            web_limits,
+            allow_webpage_screenshots=webpage_screenshot_requested,
+        ),
         llm_chat_delivery_scope(delivery_state),
         llm_chat_tool_trace_scope(active_tool_trace),
         llm_chat_context_scope(ctx),

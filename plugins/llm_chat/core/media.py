@@ -6,6 +6,7 @@ import random
 from difflib import SequenceMatcher
 from pathlib import Path, PurePosixPath
 from collections import Counter
+import unicodedata
 
 from .forward import ForwardedSpeakerRole
 
@@ -146,9 +147,17 @@ def normalize_image_tags(text: str, *, limit: int = 20) -> str:
     return "，".join(tags)
 
 
+def has_meaningful_text(text: str) -> bool:
+    """Return whether text contains a letter, number, or visible symbol."""
+
+    return any(unicodedata.category(char)[0] in {"L", "N", "S"} for char in text)
+
+
 def normalize_image_description(text: str, *, limit: int = 100) -> str:
-    """Collapse whitespace/newlines and cap length for prompt injection."""
+    """Collapse and bound a meaningful description for prompt injection."""
     collapsed = " ".join(text.split())
+    if not has_meaningful_text(collapsed):
+        return ""
     if len(collapsed) > limit:
         collapsed = collapsed[: limit - 1] + "…"
     return collapsed

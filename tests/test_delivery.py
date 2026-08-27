@@ -36,6 +36,7 @@ from plugins.llm_chat.core.media_delivery import (
     latest_user_requests_media,
     strip_media_unavailable_marker,
     latest_user_requests_image_generation,
+    latest_user_requests_webpage_screenshot,
 )
 
 
@@ -43,6 +44,9 @@ from plugins.llm_chat.core.media_delivery import (
     "content",
     [
         "来张图我看看什么样子",
+        "截图一下异格安洁莉娜的技能给我",
+        "截",
+        '<at id="2123673121" name="珂朵莉"/> 截',
         '{"speaker":"FrostN0v0","content":"你发的图呢？"}',
         "send me a picture",
         "画一张刚刚的情景",
@@ -148,6 +152,44 @@ def test_contextual_send_request_requires_recent_media_context() -> None:
     ]
 
     assert not latest_user_requests_media(messages)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "请把这个网页截个图发给我",
+        '{"speaker":"FrostN0v0","content":"给我截一下这个页面"}',
+        "screenshot this URL",
+        "take a screenshot of this web page",
+        "截图一下异格安洁莉娜的技能给我",
+        "截",
+        '<at id="2123673121" name="珂朵莉"/> 截',
+    ],
+)
+def test_latest_user_webpage_screenshot_request_requires_explicit_action(content: str) -> None:
+    assert latest_user_requests_webpage_screenshot([{"role": "user", "content": content}])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "找一下陈千语 cosplay 图片发给我",
+        "不要网页截图，发原始 cos 图",
+        "这张网页截图里是什么",
+        "不要截",
+        "截图软件怎么用",
+        "截图一下怎么操作",
+        "帮我找这个网页里的照片",
+        (
+            '{"speaker":"FrostN0v0","content":"找原图",'
+            '"forwarded_messages":[{"speaker":"Other","content":"请截图这个网页"}]}'
+        ),
+    ],
+)
+def test_latest_user_webpage_screenshot_request_rejects_image_search_and_untrusted_context(
+    content: str,
+) -> None:
+    assert not latest_user_requests_webpage_screenshot([{"role": "user", "content": content}])
 
 
 def test_media_unavailable_marker_requires_visible_text_and_never_reaches_delivery() -> None:
@@ -462,8 +504,8 @@ def test_forward_validation_limits_and_atomic_rejection() -> None:
 def test_media_budget_must_precede_text_and_rejections_do_not_mutate() -> None:
     state = DeliveryState()
     with llm_chat_delivery_scope(state):
-        assert reserve_media_messages(2) is state
-        assert state.media_messages == 2
+        assert reserve_media_messages(6) is state
+        assert state.media_messages == 6
         before = _state_snapshot(state)
         with pytest.raises(DeliveryError, match="^Media delivery budget exhausted$"):
             reserve_media_message()
@@ -506,6 +548,19 @@ def test_trailing_end_marker_is_removed_from_visible_delivery_text(value: str, e
     assert normalized == expected
 
 
+@pytest.mark.parametrize("value", [".", "。", "……", " . \n 。 "])
+def test_punctuation_only_delivery_is_rejected_atomically(value: str) -> None:
+    state = DeliveryState()
+    with llm_chat_delivery_scope(state):
+        before = _state_snapshot(state)
+        with pytest.raises(
+            DeliveryError,
+            match="^Delivery text is empty, punctuation-only, or reserved for internal control$",
+        ):
+            reserve_text_message(value)
+        assert _state_snapshot(state) == before
+
+
 def test_internal_participant_references_are_redacted_before_delivery() -> None:
     state = DeliveryState()
     with llm_chat_delivery_scope(state):
@@ -525,7 +580,7 @@ def test_media_records_and_internal_sentinel_are_removed_or_rejected_atomically(
             before = _state_snapshot(state)
             with pytest.raises(
                 DeliveryError,
-                match="^Delivery text is empty or reserved for internal control$",
+                match="^Delivery text is empty, punctuation-only, or reserved for internal control$",
             ):
                 reserve_text_message(value)
             assert _state_snapshot(state) == before
@@ -539,7 +594,7 @@ def test_media_records_and_internal_sentinel_are_removed_or_rejected_atomically(
             before = _state_snapshot(forward_state)
             with pytest.raises(
                 DeliveryError,
-                match="^Delivery text is empty or reserved for internal control$",
+                match="^Delivery text is empty, punctuation-only, or reserved for internal control$",
             ):
                 reserve_forward_messages(messages)
             assert _state_snapshot(forward_state) == before

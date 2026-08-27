@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from types import ModuleType
+import socket
 from typing import Any, cast
 import asyncio
 import importlib
@@ -31,6 +32,9 @@ def web_access_module() -> ModuleType:
 
     policy = importlib.import_module("plugins.llm_chat.web.policy")
     exa = importlib.import_module("plugins.llm_chat.web.exa")
+    public_resolver = importlib.import_module("plugins.llm_chat.web.public_resolver")
+    screenshot_models = importlib.import_module("plugins.llm_chat.web.screenshot_models")
+    safe_browser = importlib.import_module("plugins.llm_chat.web.safe_browser")
     module = ModuleType("plugins.llm_chat.web.test_boundary")
     for source, names in (
         (exa, ("ExaWebClient", "SEARCH_SNIPPET_MAX_CHARS")),
@@ -47,6 +51,9 @@ def web_access_module() -> ModuleType:
                 "require_llm_chat_web_access",
             ),
         ),
+        (public_resolver, ("PublicResolver",)),
+        (screenshot_models, ("WebScreenshotError",)),
+        (safe_browser, ("BrowserFetchProxy", "MAX_BROWSER_REQUESTS", "public_browser_page")),
     ):
         for name in names:
             setattr(module, name, getattr(source, name))
@@ -480,6 +487,105 @@ async def test_sensitive_query_keys_never_reach_exa(web_access_module: ModuleTyp
     assert "sensitive-value" not in str(raised.value)
 
 
+async def test_public_resolver_pins_public_addresses_and_rejects_mixed_answers(
+    web_access_module: ModuleType,
+) -> None:
+    calls: list[tuple[str, int, socket.AddressFamily]] = []
+
+    async def public_lookup(
+        host: str,
+        port: int,
+        family: socket.AddressFamily,
+    ) -> list[tuple[socket.AddressFamily, socket.SocketKind, int, str, tuple[str, int]]]:
+        calls.append((host, port, family))
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", port))]
+
+    resolver = web_access_module.PublicResolver(public_lookup)
+    records = await resolver.resolve("public.example.org", 443, socket.AF_UNSPEC)
+
+    assert calls == [("public.example.org", 443, socket.AF_UNSPEC)]
+    assert records == [
+        {
+            "hostname": "public.example.org",
+            "host": "93.184.216.34",
+            "port": 443,
+            "family": socket.AF_INET,
+            "proto": socket.IPPROTO_TCP,
+            "flags": socket.AI_NUMERICHOST | socket.AI_NUMERICSERV,
+        }
+    ]
+
+    async def mixed_lookup(
+        _host: str,
+        port: int,
+        _family: socket.AddressFamily,
+    ) -> list[tuple[socket.AddressFamily, socket.SocketKind, int, str, tuple[str, int]]]:
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", port)),
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port)),
+        ]
+
+    with pytest.raises(web_access_module.WebScreenshotError, match="non-public address"):
+        await web_access_module.PublicResolver(mixed_lookup).resolve(
+            "rebind.example.org",
+            443,
+            socket.AF_UNSPEC,
+        )
+
+
+async def test_browser_request_budget_accepts_content_heavy_pages_and_keeps_a_hard_limit(
+    web_access_module: ModuleType,
+) -> None:
+    proxy = web_access_module.BrowserFetchProxy(cast(Any, object()), cast(Any, object()))
+
+    for _ in range(143):
+        await proxy._reserve_request(False)
+
+    assert proxy.request_count == 143
+    for _ in range(web_access_module.MAX_BROWSER_REQUESTS - 143):
+        await proxy._reserve_request(False)
+    with pytest.raises(web_access_module.WebScreenshotError, match="request limit"):
+        await proxy._reserve_request(False)
+
+
+async def test_public_browser_page_rethrows_errors_suppressed_by_browser_context(
+    web_access_module: ModuleType,
+) -> None:
+    class PageContext:
+        async def route(self, *_args: object) -> None:
+            return None
+
+        async def route_web_socket(self, *_args: object) -> None:
+            return None
+
+    class Page:
+        context = PageContext()
+
+    class SuppressingPageManager:
+        async def __aenter__(self) -> Page:
+            return Page()
+
+        async def __aexit__(self, *_args: object) -> bool:
+            return True
+
+    class Browser:
+        def page(self, **_kwargs: object) -> SuppressingPageManager:
+            return SuppressingPageManager()
+
+    class CaptureFailure(RuntimeError):
+        pass
+
+    with pytest.raises(CaptureFailure):
+        async with web_access_module.public_browser_page(
+            cast(Any, Browser()),
+            width=1280,
+            height=900,
+            device_scale_factor=1.5,
+            request_timeout_seconds=15.0,
+        ):
+            raise CaptureFailure
+
+
 def test_web_access_scope_resets_after_normal_exit(web_access_module: ModuleType) -> None:
     with pytest.raises(web_access_module.WebAccessError, match="outside llm_chat"):
         web_access_module.require_llm_chat_web_access()
@@ -536,6 +642,26 @@ async def test_web_access_scope_resets_after_cancellation(web_access_module: Mod
     assert reset_observed.is_set()
     with pytest.raises(web_access_module.WebAccessError, match="outside llm_chat"):
         web_access_module.require_llm_chat_web_access()
+
+
+def test_default_web_budget_supports_multi_page_multi_screenshot_tasks(web_access_module: ModuleType) -> None:
+    assert web_access_module.DEFAULT_WEB_ACCESS_LIMITS == web_access_module.WebAccessLimits(16, 24, 32)
+
+
+def test_webpage_screenshot_budget_requires_explicit_current_turn_authorization(
+    web_access_module: ModuleType,
+) -> None:
+    limits = web_access_module.WebAccessLimits(0, 2, 2)
+
+    with web_access_module.llm_chat_web_access_scope(limits):
+        with pytest.raises(web_access_module.WebAccessError, match="explicit webpage screenshot request"):
+            web_access_module.consume_llm_chat_web_access("screenshot_web_page")
+        web_access_module.consume_llm_chat_web_access("read_web_page")
+        web_access_module.consume_llm_chat_web_access("read_web_page")
+
+    with web_access_module.llm_chat_web_access_scope(limits, allow_webpage_screenshots=True):
+        web_access_module.consume_llm_chat_web_access("screenshot_web_page")
+        web_access_module.consume_llm_chat_web_access("read_web_page")
 
 
 def test_web_access_budget_enforces_specific_and_total_limits(web_access_module: ModuleType) -> None:

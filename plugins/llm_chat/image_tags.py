@@ -46,28 +46,29 @@ _TEXT_IMAGE_MIN_SIMILARITY = 0.40
 
 
 async def pick_image(config: LLMChatConfig, rows: Sequence[ImageTag], context: str, recent: deque[str]) -> str | None:
-    """Select a local image via semantic retrieval, falling back to tag IDF."""
+    """Select a matching image without reusing recent resources while any eligible fresh row exists."""
     eligible_rows = [row for row in rows if not image_tag_avoids_context(row.tags, context)]
+    fresh_rows = [row for row in eligible_rows if row.file_path not in recent]
+    search_rows = fresh_rows or eligible_rows
+    if not search_rows:
+        return None
+
     exact_ranked = rank_images_by_exact_tags(
         context,
-        [(row.file_path, image_tag_search_text(row.tags)) for row in eligible_rows],
+        [(row.file_path, image_tag_search_text(row.tags)) for row in search_rows],
     )
-    candidate_rows = eligible_rows
+    candidate_rows = search_rows
     if exact_ranked:
         best_exact_score = exact_ranked[0][1]
         exact_paths = {path for path, score in exact_ranked if score >= best_exact_score - 1e-9}
-        candidate_rows = [row for row in eligible_rows if row.file_path in exact_paths]
-    fresh_rows = [row for row in candidate_rows if row.file_path not in recent]
-    search_rows = fresh_rows or candidate_rows
-    if not search_rows:
-        return None
-    paths = [row.file_path for row in search_rows]
+        candidate_rows = [row for row in search_rows if row.file_path in exact_paths]
+    paths = [row.file_path for row in candidate_rows]
     if is_random_request(context):
         return random.choice(paths)
     query = await embed_text(config, context)
     if query is not None:
         candidates: list[tuple[str, float]] = []
-        for row in search_rows:
+        for row in candidate_rows:
             vector = _image_vectors.get(row.file_path)
             if vector is None:
                 vector = decode_embedding(row.embedding_json)
@@ -90,7 +91,7 @@ async def pick_image(config: LLMChatConfig, rows: Sequence[ImageTag], context: s
             ]
             if top:
                 return random.choice(top)
-    tagged = [(row.file_path, image_tag_search_text(row.tags)) for row in search_rows]
+    tagged = [(row.file_path, image_tag_search_text(row.tags)) for row in candidate_rows]
     return match_image(context, tagged)
 
 

@@ -26,7 +26,7 @@ from importlib.machinery import ModuleSpec
 
 import httpx
 import pytest
-from satori import Text, User, Login, Message as SatoriMessage
+from satori import At, Text, User, Login, Message as SatoriMessage
 import litellm
 from arclet.entari import Audio, Image, Session, MessageChain
 from litellm.exceptions import APIError
@@ -42,10 +42,18 @@ from utils.tts_service_core.voice_catalog import (
     TTSReferenceOption,
     TTSSynthesisSelection,
 )
+from plugins.llm_chat.web.screenshot_models import WebScreenshot
 
 _ROOT = Path(__file__).resolve().parents[1]
 if not hasattr(EntariConfig, "instance"):
     EntariConfig.instance = EntariConfig.load(_ROOT / "entari.yml")
+from entari_plugin_htmlrender import (
+    TemplateRef,
+    PreparedHtml,
+    RasterOptions,
+    RenderedImage,
+    ResourceMaterializationPolicy,
+)
 import entari_plugin_llm.service as llm_service_module
 from entari_plugin_llm.service import LLMService
 from arclet.entari.plugin.model import Plugin, PluginDispatcher, current_plugin
@@ -224,6 +232,53 @@ class _DeliveryToolSession(Session[Any]):
             raise RuntimeError("sanitized transport failure")
         self.sent.append(message)
         return []
+
+
+class _FakeHtmlRenderer:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object, RasterOptions, ResourceMaterializationPolicy | None, float | None]] = []
+
+    async def rasterize_markdown(
+        self,
+        source: str,
+        *,
+        raster: RasterOptions,
+        materialization_policy: ResourceMaterializationPolicy | None = None,
+        timeout_seconds: float | None = None,
+    ) -> RenderedImage:
+        self.calls.append(("markdown", source, raster, materialization_policy, timeout_seconds))
+        return RenderedImage.from_bytes(_PNG_BYTES)
+
+    async def rasterize_prepared(
+        self,
+        prepared: PreparedHtml,
+        *,
+        raster: RasterOptions,
+        materialization_policy: ResourceMaterializationPolicy | None = None,
+        timeout_seconds: float | None = None,
+    ) -> RenderedImage:
+        self.calls.append(("prepared", prepared, raster, materialization_policy, timeout_seconds))
+        return RenderedImage.from_bytes(_PNG_BYTES)
+
+    async def rasterize_template(
+        self,
+        template: TemplateRef,
+        variables: Mapping[str, object] | None = None,
+        *,
+        raster: RasterOptions,
+        materialization_policy: ResourceMaterializationPolicy | None = None,
+        timeout_seconds: float | None = None,
+    ) -> RenderedImage:
+        self.calls.append(
+            (
+                "template",
+                (template, dict(variables or {})),
+                raster,
+                materialization_policy,
+                timeout_seconds,
+            )
+        )
+        return RenderedImage.from_bytes(_PNG_BYTES)
 
 
 class _FakeOneBotNetwork:
@@ -561,7 +616,7 @@ async def test_keyed_registration_exposes_exact_schema_order_and_plugin_disposal
         assert _schema_names(delta) == ["web_search", "read_web_page"]
 
         search_schema = delta[0]["function"]
-        assert search_schema["description"] == _search_description(2, 2, 4)
+        assert search_schema["description"] == _search_description(16, 24, 32)
         assert search_schema["parameters"] == {
             "type": "object",
             "properties": {
@@ -578,7 +633,7 @@ async def test_keyed_registration_exposes_exact_schema_order_and_plugin_disposal
         }
 
         read_schema = delta[1]["function"]
-        assert read_schema["description"] == _read_description(2, 2, 4)
+        assert read_schema["description"] == _read_description(16, 24, 32)
         assert read_schema["parameters"] == {
             "type": "object",
             "properties": {
@@ -610,8 +665,12 @@ async def test_keyed_registration_exposes_exact_schema_order_and_plugin_disposal
 @pytest.mark.parametrize(
     ("api_key", "expected_web_names", "expected_warning"),
     [
-        ("", [], ["web search tools disabled: exa_api_key is required"]),
-        ("fake-runtime-key", ["web_search", "read_web_page"], []),
+        ("", ["screenshot_web_page"], ["web search tools disabled: exa_api_key is required"]),
+        (
+            "fake-runtime-key",
+            ["screenshot_web_page", "web_search", "read_web_page"],
+            [],
+        ),
     ],
 )
 async def test_actual_tool_runtime_uses_configured_gate_order_and_disposal(
@@ -658,8 +717,15 @@ async def test_actual_tool_runtime_uses_configured_gate_order_and_disposal(
         assert runtime.config.web_page_max_chars == 3456
         assert delta_names == runtime.registered_tools
         assert runtime.registered_tools[:3] == ["send_image", "send_text", "send_merged_forward"]
-        assert runtime.registered_tools[4:6] == ["send_external_image", "get_local_time"]
-        assert runtime.registered_tools[6:11] == [
+        assert runtime.registered_tools[4:10] == [
+            "send_external_image",
+            "markdown2pic",
+            "html2pic",
+            "jinja2pic",
+            "screenshot_web_page",
+            "get_local_time",
+        ]
+        assert runtime.registered_tools[10:15] == [
             "find_channel_participants",
             "read_channel_messages",
             "describe_channel_image",
@@ -667,19 +733,23 @@ async def test_actual_tool_runtime_uses_configured_gate_order_and_disposal(
             "describe_channel_participant_avatar",
         ]
         schemas = {schema["function"]["name"]: schema["function"] for schema in delta}
-        for name in runtime.registered_tools[6:11]:
+        for name in runtime.registered_tools[10:15]:
             assert "session" not in schemas[name]["parameters"]["properties"]
         assert schemas["describe_channel_image"]["parameters"]["required"] == ["image_ref"]
         assert schemas["send_channel_image"]["parameters"]["required"] == ["image_ref"]
         assert schemas["describe_channel_participant_avatar"]["parameters"]["required"] == ["participant_ref"]
         assert [
-            name for name in runtime.registered_tools if name in {"web_search", "read_web_page"}
+            name for name in runtime.registered_tools if name in {"screenshot_web_page", "web_search", "read_web_page"}
         ] == expected_web_names
         assert runtime.registered_tools[-1] == "tag_image"
-        if expected_web_names:
-            assert runtime.registered_tools[-3:-1] == expected_web_names
+        schemas = {schema["function"]["name"]: schema["function"] for schema in delta}
+        screenshot_description = schemas["screenshot_web_page"]["description"]
+        assert "public HTTP(S) webpage" in screenshot_description
+        assert "one media delivery and one read_web_page budget slot" in screenshot_description
+        if api_key:
             assert schemas["web_search"]["description"] == _search_description(1, 2, 2)
             assert schemas["read_web_page"]["description"] == _read_description(1, 2, 2)
+            assert runtime.registered_tools[-3:-1] == ["web_search", "read_web_page"]
         assert warnings == expected_warning
 
         await harness.dispose()
@@ -911,6 +981,171 @@ def test_channel_history_tool_keeps_valid_bounded_json(local_modules: SimpleName
 
 
 @pytest.mark.asyncio
+async def test_screenshot_web_page_uses_public_url_budget_and_confirmed_media_delivery(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _registry_snapshot()
+
+    async with _temporary_plugin(
+        config={
+            "tts_enabled": False,
+            "allowed_commands": [],
+            "web_search_enabled": False,
+            "web_page_max_calls_per_generation": 1,
+            "web_total_max_calls_per_generation": 1,
+        },
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        captures: list[tuple[object, str, str, int]] = []
+        markers: list[str] = []
+
+        async def capture(browser: object, url: str, section: str, width: int) -> WebScreenshot:
+            captures.append((browser, url, section, width))
+            return WebScreenshot(data=_PNG_BYTES, matched_section="技能", truncated=False)
+
+        async def append_history(_channel: str, _user: str, _name: str, _role: str, content: str) -> None:
+            markers.append(content)
+
+        browser = object()
+        runtime.web_screenshot_context.get_browser = lambda: browser
+        runtime.web_screenshot_context.capture = capture
+        runtime.web_screenshot_context.append_history = append_history
+        session = _DeliveryToolSession()
+        target = _tool_callable(runtime, "screenshot_web_page")
+        state = runtime.DeliveryState()
+
+        unauthorized_state = runtime.DeliveryState()
+        with (
+            local_modules.web_access.llm_chat_web_access_scope(local_modules.web_access.WebAccessLimits(0, 1, 1)),
+            llm_chat_delivery_scope(unauthorized_state),
+        ):
+            with pytest.raises(
+                local_modules.web_access.WebAccessError,
+                match="explicit webpage screenshot request",
+            ):
+                await target(session, "https://prts.wiki/w/%E6%BE%84%E9%97%AA", "技能", 1200)
+        assert captures == []
+        assert session.sent == []
+        assert unauthorized_state.media_messages == unauthorized_state.confirmed_media_deliveries == 0
+
+        with (
+            local_modules.web_access.llm_chat_web_access_scope(
+                local_modules.web_access.WebAccessLimits(0, 1, 1),
+                allow_webpage_screenshots=True,
+            ),
+            llm_chat_delivery_scope(state),
+        ):
+            result = await target(
+                session,
+                "https://prts.wiki/w/%E6%BE%84%E9%97%AA#fragment",
+                "  技能  ",
+                1200,
+            )
+            with pytest.raises(local_modules.web_access.WebAccessError, match="budget exhausted"):
+                await target(session, "https://prts.wiki/w/%E6%BE%84%E9%97%AA", "技能", 1200)
+
+        assert captures == [(browser, "https://prts.wiki/w/%E6%BE%84%E9%97%AA", "技能", 1200)]
+        assert markers == ["[发送了图片]"]
+        assert len(session.sent) == 1
+        assert cast(MessageChain, session.sent[0]).get(Image)[0].src.startswith("data:image/png;base64,")
+        assert state.media_messages == state.confirmed_media_deliveries == 1
+        assert "Do not repeat" in result
+
+        with pytest.raises(local_modules.web_access.WebAccessError, match="valid public URL"):
+            await target(session, "http://127.0.0.1/internal", "", 1200)
+        assert len(captures) == 1
+
+        async def invalid_capture(_browser: object, _url: str, _section: str, _width: int) -> object:
+            return None
+
+        runtime.web_screenshot_context.capture = invalid_capture
+        invalid_state = runtime.DeliveryState()
+        with (
+            local_modules.web_access.llm_chat_web_access_scope(
+                local_modules.web_access.WebAccessLimits(0, 1, 1),
+                allow_webpage_screenshots=True,
+            ),
+            llm_chat_delivery_scope(invalid_state),
+        ):
+            with pytest.raises(runtime.DeliveryError, match="webpage screenshot failed"):
+                await target(session, "https://www.mcmod.cn/class/682.html", "模拟殖民地", 1280)
+        assert invalid_state.media_messages == invalid_state.confirmed_media_deliveries == 0
+        assert len(session.sent) == 1
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+    _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_screenshot_web_page_delivers_three_requested_operations_in_one_generation(
+    local_modules: SimpleNamespace,
+) -> None:
+    baseline = _registry_snapshot()
+
+    async with _temporary_plugin(
+        config={
+            "tts_enabled": False,
+            "allowed_commands": [],
+            "web_search_enabled": False,
+            "web_page_max_calls_per_generation": 24,
+            "web_total_max_calls_per_generation": 32,
+            "delivery_max_media_messages_per_generation": 6,
+        },
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        captures: list[str] = []
+        markers: list[str] = []
+
+        async def capture(_browser: object, _url: str, section: str, _width: int) -> WebScreenshot:
+            captures.append(section)
+            return WebScreenshot(data=_PNG_BYTES, matched_section=section, truncated=False)
+
+        async def append_history(_channel: str, _user: str, _name: str, _role: str, content: str) -> None:
+            markers.append(content)
+
+        runtime.web_screenshot_context.get_browser = object
+        runtime.web_screenshot_context.capture = capture
+        runtime.web_screenshot_context.append_history = append_history
+        session = _DeliveryToolSession()
+        target = _tool_callable(runtime, "screenshot_web_page")
+        state = runtime.DeliveryState()
+        sections = ("作战一", "作战二", "作战三")
+
+        with (
+            local_modules.web_access.llm_chat_web_access_scope(
+                local_modules.web_access.WebAccessLimits(16, 24, 32),
+                allow_webpage_screenshots=True,
+            ),
+            llm_chat_delivery_scope(state),
+        ):
+            results = [
+                await target(session, f"https://prts.wiki/w/stage-{index}", section, 1280)
+                for index, section in enumerate(sections, start=1)
+            ]
+
+        assert captures == list(sections)
+        assert len(session.sent) == 3
+        assert markers == ["[发送了图片]"] * 3
+        assert state.media_messages == state.confirmed_media_deliveries == 3
+        assert all("Do not repeat" in result for result in results)
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+    _assert_registry_matches(baseline)
+
+
+def test_complex_web_media_tasks_receive_sufficient_agno_tool_headroom(local_modules: SimpleNamespace) -> None:
+    assert local_modules.agno_compat.recommended_tool_call_limit(32, 5, 6) == 46
+    assert local_modules.agno_compat.recommended_tool_call_limit(999, 999, 999) == 64
+
+
+@pytest.mark.asyncio
 async def test_actual_media_tool_schemas_encourage_proactive_expression(
     local_modules: SimpleNamespace,
 ) -> None:
@@ -921,12 +1156,14 @@ async def test_actual_media_tool_schemas_encourage_proactive_expression(
             "tts_enabled": True,
             "allowed_commands": [],
             "web_search_enabled": False,
+            "image_generation_model": "image",
         },
         module_path=_TOOL_RUNTIME_PATH,
     ) as harness:
         schemas = {schema["function"]["name"]: schema["function"] for schema in _schema_delta(baseline)}
         image_schema = schemas["send_image"]
         speak_schema = schemas["speak"]
+        generated_image_schema = schemas["generate_image"]
         voice_catalog_schema = schemas["list_tts_voices"]
 
         assert "Use proactively for explicit requests and natural emotional reactions" in image_schema["description"]
@@ -934,6 +1171,18 @@ async def test_actual_media_tool_schemas_encourage_proactive_expression(
         assert "Do not wait for an explicit sticker request" in image_schema["description"]
         assert "Use only for an explicit local reaction" not in image_schema["description"]
         assert image_schema["parameters"]["required"] == []
+
+        assert "regardless of which" in generated_image_schema["description"]
+        assert "conversation model is active" in generated_image_schema["description"]
+        assert "server-configured image model" in generated_image_schema["description"]
+        assert "exactly one new image" in generated_image_schema["description"]
+        assert set(generated_image_schema["parameters"]["properties"]) == {"prompt", "size"}
+        assert generated_image_schema["parameters"]["required"] == ["prompt"]
+        assert generated_image_schema["parameters"]["properties"]["size"]["enum"] == [
+            "1024x1024",
+            "1536x1024",
+            "1024x1536",
+        ]
 
         assert voice_catalog_schema["parameters"]["required"] == []
         assert set(voice_catalog_schema["parameters"]["properties"]) == {"refresh"}
@@ -977,6 +1226,7 @@ async def test_delivery_tool_schemas_expose_only_supported_arguments(local_modul
         assert _schema_names(delta)[:3] == ["send_image", "send_text", "send_merged_forward"]
         schemas = {schema["function"]["name"]: schema["function"] for schema in delta}
         assert "list_tts_voices" not in schemas
+        assert "generate_image" not in schemas
         assert "speak" not in schemas
 
         image_parameters = schemas["send_image"]["parameters"]
@@ -993,6 +1243,38 @@ async def test_delivery_tool_schemas_expose_only_supported_arguments(local_modul
         assert set(external_image_parameters["properties"]) == {"source"}
         assert external_image_parameters["required"] == ["source"]
         assert external_image_parameters["additionalProperties"] is False
+        markdown_parameters = schemas["markdown2pic"]["parameters"]
+        assert set(markdown_parameters["properties"]) == {"markdown", "width"}
+        assert markdown_parameters["required"] == ["markdown"]
+        assert "Markdown tables" in schemas["markdown2pic"]["description"]
+        html_parameters = schemas["html2pic"]["parameters"]
+        assert set(html_parameters["properties"]) == {"html", "width"}
+        assert html_parameters["required"] == ["html"]
+        assert "self-contained HTML/CSS" in schemas["html2pic"]["description"]
+        jinja_parameters = schemas["jinja2pic"]["parameters"]
+        assert set(jinja_parameters["properties"]) == {
+            "title",
+            "subtitle",
+            "metrics",
+            "columns",
+            "rows",
+            "notes",
+            "width",
+        }
+        assert jinja_parameters["required"] == ["title"]
+        assert jinja_parameters["properties"]["metrics"]["items"]["type"] == "array"
+        assert "fixed" in schemas["jinja2pic"]["description"]
+        assert "trusted template" in schemas["jinja2pic"]["description"]
+        screenshot_parameters = schemas["screenshot_web_page"]["parameters"]
+        assert set(screenshot_parameters["properties"]) == {"url", "section", "width"}
+        assert screenshot_parameters["required"] == ["url"]
+        assert screenshot_parameters["additionalProperties"] is False
+        assert screenshot_parameters["properties"]["width"]["type"] == "integer"
+        screenshot_description = schemas["screenshot_web_page"]["description"]
+        assert "visible heading or distinctive on-page text" in screenshot_description
+        assert "blocks non-public DNS answers" in screenshot_description
+        assert "explicitly issues a screenshot or capture command" in screenshot_description
+        assert "cosplay images" in screenshot_description
         local_time_parameters = schemas["get_local_time"]["parameters"]
         assert set(local_time_parameters["properties"]) == {"timezone"}
         assert local_time_parameters["required"] == []
@@ -1015,14 +1297,17 @@ async def test_delivery_tool_schemas_expose_only_supported_arguments(local_modul
         ]
 
         text_parameters = schemas["send_text"]["parameters"]
-        assert set(text_parameters["properties"]) == {"text", "delay_seconds"}
+        assert set(text_parameters["properties"]) == {"text", "delay_seconds", "mentions"}
         assert text_parameters["required"] == ["text"]
         assert text_parameters["additionalProperties"] is False
+        assert text_parameters["properties"]["mentions"]["type"] == "array"
+        assert text_parameters["properties"]["mentions"]["items"]["type"] == "string"
         text_description = schemas["send_text"]["description"]
-        assert "two or more naturally separate chat beats" in text_description
-        assert "including factual answers" in text_description
-        assert "Use final response text only" in text_description
-        assert "one short self-contained" in text_description
+        assert "real mention is needed" in text_description
+        assert "current_user" in text_description
+        assert "find_channel_participants" in text_description
+        assert "Never place raw platform IDs" in text_description
+        assert "one short self-contained" not in text_description
 
         forward_parameters = schemas["send_merged_forward"]["parameters"]
         assert set(forward_parameters["properties"]) == {"messages", "delay_seconds"}
@@ -1105,6 +1390,100 @@ async def test_list_image_resources_returns_newest_valid_registered_rows_with_pa
 
 
 @pytest.mark.asyncio
+async def test_generate_image_uses_dedicated_model_and_confirms_delivery(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _registry_snapshot()
+
+    async with _temporary_plugin(
+        config={
+            "model": "opus5",
+            "image_generation_model": "image",
+            "image_generation_timeout": 123.0,
+            "image_generation_quality": "high",
+            "image_generation_output_format": "webp",
+            "image_generation_output_compression": 82,
+            "tts_enabled": False,
+            "allowed_commands": [],
+            "web_search_enabled": False,
+        },
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        target = _tool_callable(runtime, "generate_image")
+        requests: list[dict[str, object]] = []
+        markers: list[str] = []
+        warnings: list[str] = []
+        resolved_channels: list[str] = []
+
+        def resolve_model(channel_id: str) -> SimpleNamespace:
+            resolved_channels.append(channel_id)
+            return SimpleNamespace(
+                name="openai/gpt-image-2",
+                api_key="image-key",
+                base_url="https://images.example.com/v1",
+                extra={"organization": "image-org", "ignored": "value"},
+            )
+
+        async def generate(**kwargs: object) -> SimpleNamespace:
+            requests.append(dict(kwargs))
+            return SimpleNamespace(data=[SimpleNamespace(b64_json=base64.b64encode(_PNG_BYTES).decode("ascii"))])
+
+        async def append_history(_channel: str, _user: str, _name: str, _role: str, content: str) -> None:
+            markers.append(content)
+
+        monkeypatch.setattr(runtime.image_generation_context, "resolve_model", resolve_model)
+        monkeypatch.setattr(runtime.image_generation_context, "generate", generate)
+        monkeypatch.setattr(runtime.image_generation_context, "append_history", append_history)
+        monkeypatch.setattr(runtime.image_generation_context, "warn", warnings.append)
+
+        session = _DeliveryToolSession()
+        state = runtime.DeliveryState()
+        with llm_chat_delivery_scope(state):
+            result = await target(session, "  A blue glass bird above a quiet lake  ", "1536x1024")
+
+        assert resolved_channels == ["12345"]
+        assert requests == [
+            {
+                "model": "openai/gpt-image-2",
+                "prompt": "A blue glass bird above a quiet lake",
+                "api_key": "image-key",
+                "api_base": "https://images.example.com/v1",
+                "timeout": 123.0,
+                "n": 1,
+                "size": "1536x1024",
+                "quality": "high",
+                "output_format": "webp",
+                "output_compression": 82,
+                "organization": "image-org",
+                "max_retries": 0,
+            }
+        ]
+        assert len(session.sent) == 1
+        sent_image = cast(MessageChain, session.sent[0]).get(Image)[0]
+        assert sent_image.src.startswith("data:image/png;base64,")
+        assert markers == ["[发送了图片]"]
+        assert warnings == []
+        assert state.media_messages == state.confirmed_deliveries == state.confirmed_media_deliveries == 1
+        assert "Generated image sent successfully" in result
+        assert "blue glass bird" not in result
+
+        invalid_state = runtime.DeliveryState()
+        with llm_chat_delivery_scope(invalid_state):
+            with pytest.raises(runtime.DeliveryError, match="prompt is required"):
+                await target(session, "   ")
+            with pytest.raises(runtime.DeliveryError, match="size must be"):
+                await target(session, "bird", "2048x2048")
+        assert invalid_state.media_messages == 0
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+    _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
 async def test_send_external_image_supports_public_urls_and_bounded_base64(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
@@ -1176,6 +1555,115 @@ async def test_send_external_image_supports_public_urls_and_bounded_base64(
 
 
 @pytest.mark.asyncio
+async def test_render_tools_use_htmlrender_contract_and_confirm_deliveries(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _registry_snapshot()
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        renderer = _FakeHtmlRenderer()
+        markers: list[str] = []
+
+        async def append_history(_channel: str, _user: str, _name: str, _role: str, content: str) -> None:
+            markers.append(content)
+
+        monkeypatch.setattr(runtime.render_context, "get_renderer", lambda: renderer)
+        monkeypatch.setattr(runtime.render_context, "append_history", append_history)
+        session = _DeliveryToolSession()
+        markdown_target = _tool_callable(runtime, "markdown2pic")
+        html_target = _tool_callable(runtime, "html2pic")
+        jinja_target = _tool_callable(runtime, "jinja2pic")
+
+        states = [runtime.DeliveryState() for _ in range(3)]
+        with llm_chat_delivery_scope(states[0]):
+            markdown_result = await markdown_target(
+                session,
+                "| Name | Value |\n| --- | --- |\n| CPU | 25% |",
+                760,
+            )
+        with llm_chat_delivery_scope(states[1]):
+            html_result = await html_target(
+                session,
+                """<!doctype html>
+<html>
+<head><style>html, body { height: 100%; overflow: hidden; } .canvas { height: 700px; }</style></head>
+<body><main class="canvas"><h1>Status</h1><p>Healthy</p></main></body>
+</html>""",
+                820,
+            )
+        with llm_chat_delivery_scope(states[2]):
+            jinja_result = await jinja_target(
+                session,
+                "System Status",
+                "Live snapshot",
+                [["CPU", "25%", "Healthy"]],
+                ["Name", "Value"],
+                [["Memory", "42%"]],
+                ["All services operational"],
+                960,
+            )
+
+        assert [call[0] for call in renderer.calls] == ["markdown", "prepared", "template"]
+        assert [call[2].width for call in renderer.calls] == [760, 820, 960]
+        assert all(call[2].device_pixel_ratio == 1.5 for call in renderer.calls)
+        assert all(call[3] is ResourceMaterializationPolicy.OFF for call in renderer.calls)
+        assert all(call[4] == 30.0 for call in renderer.calls)
+        markdown_source = cast(str, renderer.calls[0][1])
+        assert "font-family: Inter, Noto Sans SC, Noto Sans CJK SC, sans-serif !important" in markdown_source
+        assert "| CPU | 25% |" in markdown_source
+        prepared = cast(PreparedHtml, renderer.calls[1][1])
+        assert "Status" in prepared.html
+        assert any("height: auto !important" in stylesheet.css for stylesheet in prepared.stylesheets)
+        assert any("overflow: visible !important" in stylesheet.css for stylesheet in prepared.stylesheets)
+        assert any(
+            "font-family: Inter, Noto Sans SC, Noto Sans CJK SC, sans-serif !important" in stylesheet.css
+            for stylesheet in prepared.stylesheets
+        )
+        template, variables = cast(tuple[TemplateRef, dict[str, object]], renderer.calls[2][1])
+        assert template.root == runtime.RENDER_TEMPLATE_DIR
+        assert template.name == "report.html"
+        assert variables["columns"] == ["Name", "Value"]
+        assert variables["rows"] == [["Memory", "42%"]]
+        assert variables["font_family"] == "Inter, Noto Sans SC, Noto Sans CJK SC, sans-serif"
+        assert markers == ["[发送了图片]", "[发送了图片]", "[发送了图片]"]
+        assert len(session.sent) == 3
+        assert all(
+            cast(MessageChain, message).get(Image)[0].src.startswith("data:image/png;base64,")
+            for message in session.sent
+        )
+        assert all(state.media_messages == state.confirmed_media_deliveries == 1 for state in states)
+        assert all("Do not repeat" in result for result in (markdown_result, html_result, jinja_result))
+
+        invalid_state = runtime.DeliveryState()
+        with llm_chat_delivery_scope(invalid_state):
+            with pytest.raises(runtime.DeliveryError, match="external or local HTML resources"):
+                await html_target(session, "<img src='https://example.com/private.png'>")
+            with pytest.raises(runtime.DeliveryError, match="external or local HTML resources"):
+                await markdown_target(session, "![private](https://example.com/private.png)")
+            with pytest.raises(runtime.DeliveryError, match="script elements"):
+                await html_target(session, "<script>alert('x')</script>")
+            with pytest.raises(runtime.DeliveryError, match="active HTML attributes"):
+                await html_target(session, "<main onload='alert(1)'>unsafe</main>")
+            with pytest.raises(runtime.DeliveryError, match="CSS resource loading"):
+                await html_target(session, "<main style=\"background:url('https://example.com/a.png')\">unsafe</main>")
+            with pytest.raises(runtime.DeliveryError, match="between 480 and 1200"):
+                await html_target(session, "<main>safe</main>", 320)
+            with pytest.raises(runtime.DeliveryError, match="exactly 2 cells"):
+                await jinja_target(session, "Broken", "", None, ["A", "B"], [["only one"]])
+        assert invalid_state.media_messages == 0
+        assert len(renderer.calls) == 3
+        assert len(session.sent) == 3
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
 async def test_get_local_time_returns_deterministic_local_and_iana_time(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
@@ -1219,6 +1707,164 @@ async def test_get_local_time_returns_deterministic_local_and_iana_time(
 
         await harness.dispose()
         _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_send_text_resolves_bounded_mentions_and_encodes_onebot_at_segments(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _registry_snapshot()
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        target = _tool_callable(runtime, "send_text")
+        session = _DeliveryToolSession()
+        session.event.user.id = "20001"
+        session.event.user.name = "CurrentName"
+        session.event.member = SimpleNamespace(nick="CurrentCard")
+        resolver_calls: list[tuple[object, str]] = []
+
+        async def resolve_participant(current_session: object, participant_ref: str) -> SimpleNamespace | None:
+            resolver_calls.append((current_session, participant_ref))
+            if participant_ref == "participant_0123abcdef":
+                return SimpleNamespace(platform_user_id="20002", display_name="Alice")
+            if participant_ref == "participant_deadbeef00":
+                return SimpleNamespace(platform_user_id="10001", display_name="Bot")
+            return None
+
+        monkeypatch.setattr(runtime.send_text_context, "resolve_participant", resolve_participant)
+
+        state = runtime.DeliveryState()
+        with llm_chat_delivery_scope(state):
+            result = await target(
+                session,
+                "一起看这个吧",
+                None,
+                ["current_user", "participant_0123abcdef", "participant_0123abcdef"],
+            )
+
+        assert resolver_calls == [(session, "participant_0123abcdef")]
+        assert len(session.sent) == 1
+        chain = cast(MessageChain, session.sent[0])
+        assert [(at.id, at.name) for at in chain.get(At)] == [
+            ("20001", "CurrentCard"),
+            ("20002", "Alice"),
+        ]
+        assert chain.extract_plain_text() == "  一起看这个吧"
+        assert state.delivered_texts == ["@CurrentCard @Alice 一起看这个吧"]
+        assert state.text_messages == state.confirmed_deliveries == 1
+        assert "已艾特 2 人" in result
+
+        network = _FakeOneBotNetwork()
+        encoder = OneBot11MessageEncoder(
+            Login(platform="onebot", user=User(id="10001", name="Bot")),
+            cast(Any, network),
+            "12345",
+        )
+        await encoder.send(str(chain))
+
+        assert len(network.calls) == 1
+        action, params = network.calls[0]
+        assert action == "send_group_msg"
+        assert params["group_id"] == 12345
+        segments = params["message"]
+        assert [segment["type"] for segment in segments] == ["at", "text", "at", "text"]
+        assert segments[0]["data"]["qq"] == "20001"
+        assert segments[1]["data"]["text"] == " "
+        assert segments[2]["data"]["qq"] == "20002"
+        assert segments[3]["data"]["text"] == " 一起看这个吧"
+
+        rejected_state = runtime.DeliveryState()
+        sent_before = list(session.sent)
+        with llm_chat_delivery_scope(rejected_state):
+            with pytest.raises(runtime.DeliveryError, match="invalid current-channel target"):
+                await target(session, "raw id", None, ["20002"])
+            with pytest.raises(runtime.DeliveryError, match="per-message limit"):
+                await target(
+                    session,
+                    "too many",
+                    None,
+                    ["current_user", "participant_0123abcdef", "participant_1111111111", "participant_2222222222"],
+                )
+            with pytest.raises(runtime.DeliveryError, match="unavailable in the current channel"):
+                await target(session, "missing", None, ["participant_1111111111"])
+            with pytest.raises(runtime.DeliveryError, match="cannot be the current bot"):
+                await target(session, "self", None, ["participant_deadbeef00"])
+        assert session.sent == sent_before
+        assert (
+            rejected_state.text_messages,
+            rejected_state.text_chars,
+            rejected_state.delivery_attempts,
+            rejected_state.confirmed_deliveries,
+        ) == (0, 0, 0, 0)
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+    _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_send_text_tool_loop_accepts_opaque_participant_mentions(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(
+                tool_calls=[
+                    _tool_call(
+                        "mention-1",
+                        "send_text",
+                        {"text": "轮到你啦", "mentions": ["participant_0123abcdef"]},
+                    )
+                ]
+            ),
+            _model_response("[END_OF_RESPONSE]"),
+        ],
+    )
+    monkeypatch.setattr(
+        local_modules.generation,
+        "get_model_config",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("unexpected finalizer")),
+    )
+    state = local_modules.delivery.DeliveryState()
+    session = _DeliveryToolSession()
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+
+        async def resolve_participant(_session: object, participant_ref: str) -> SimpleNamespace | None:
+            if participant_ref == "participant_0123abcdef":
+                return SimpleNamespace(platform_user_id="20002", display_name="Alice")
+            return None
+
+        monkeypatch.setattr(harness.module.send_text_context, "resolve_participant", resolve_participant)
+        response = await local_modules.generation.generate_chat_response(
+            [{"role": "user", "content": "mention Alice"}],
+            system="delivery system",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=state,
+        )
+
+    assert local_modules.generation.response_content(response) == "[END_OF_RESPONSE]"
+    assert len(session.sent) == 1
+    chain = cast(MessageChain, session.sent[0])
+    assert [(at.id, at.name) for at in chain.get(At)] == [("20002", "Alice")]
+    assert state.delivered_texts == ["@Alice 轮到你啦"]
+    tool_result = json.loads(_tool_messages(payloads[1])[0]["content"])
+    assert tool_result["ok"] is True
+    assert "已艾特 1 人" in tool_result["data"]
 
 
 @pytest.mark.asyncio
@@ -1576,6 +2222,7 @@ async def test_cancelled_delivery_attempts_are_recorded_without_false_confirmati
 
 @pytest.mark.asyncio
 async def test_image_picker_excludes_recent_rows_before_semantic_ranking(
+    local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     baseline = _registry_snapshot()
@@ -1613,6 +2260,112 @@ async def test_image_picker_excludes_recent_rows_before_semantic_ranking(
         )
 
         assert selected == "fresh.jpg"
+
+    _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_image_picker_drops_recent_unique_exact_winner_before_exact_ranking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _registry_snapshot()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        picker = runtime.image_context.pick_image
+        image_tags_module = sys.modules[picker.__module__]
+
+        async def fake_embed_text(_config: object, _context: str) -> list[float]:
+            return [1.0, 0.0]
+
+        recent_exact = json.dumps(
+            {
+                "text": "",
+                "meaning": "糖笑",
+                "use_when": ["用户点名糖笑时"],
+                "avoid_when": [],
+                "tags": ["糖笑", "抽象笑容"],
+            },
+            ensure_ascii=False,
+        )
+        fresh_semantic = json.dumps(
+            {
+                "text": "",
+                "meaning": "憨憨地笑",
+                "use_when": ["想表达抽象笑容时"],
+                "avoid_when": [],
+                "tags": ["憨笑", "抽象笑容"],
+            },
+            ensure_ascii=False,
+        )
+        rows = [
+            SimpleNamespace(
+                file_path="memes/recent.gif",
+                tags=recent_exact,
+                embedding_json=json.dumps([1.0, 0.0]),
+            ),
+            SimpleNamespace(
+                file_path="memes/fresh.gif",
+                tags=fresh_semantic,
+                embedding_json=json.dumps([1.0, 0.0]),
+            ),
+        ]
+        monkeypatch.setattr(image_tags_module, "embed_text", fake_embed_text)
+        image_tags_module._image_vectors.clear()
+
+        selected = await picker(
+            runtime.config,
+            rows,
+            "糖笑表情包",
+            deque(["memes/recent.gif"], maxlen=5),
+        )
+
+        assert selected == "memes/fresh.gif"
+
+    _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_image_picker_returns_none_instead_of_reusing_recent_exact_without_fresh_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _registry_snapshot()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        picker = runtime.image_context.pick_image
+        image_tags_module = sys.modules[picker.__module__]
+
+        async def fake_embed_text(_config: object, _context: str) -> list[float]:
+            return [1.0, 0.0]
+
+        rows = [
+            SimpleNamespace(
+                file_path="memes/recent.gif",
+                tags="糖笑，抽象笑容",
+                embedding_json=json.dumps([1.0, 0.0]),
+            ),
+            SimpleNamespace(
+                file_path="memes/fresh.gif",
+                tags="生气，严肃",
+                embedding_json=json.dumps([0.0, 1.0]),
+            ),
+        ]
+        monkeypatch.setattr(image_tags_module, "embed_text", fake_embed_text)
+        image_tags_module._image_vectors.clear()
+
+        selected = await picker(
+            runtime.config,
+            rows,
+            "糖笑表情包",
+            deque(["memes/recent.gif"], maxlen=5),
+        )
+
+        assert selected is None
 
     _assert_registry_matches(baseline)
 
@@ -2008,11 +2761,12 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
         exhausted_session = _DeliveryToolSession()
         exhausted_state = runtime.DeliveryState()
         with llm_chat_delivery_scope(exhausted_state):
-            runtime.reserve_media_message()
+            for _ in range(5):
+                runtime.reserve_media_message()
             with pytest.raises(runtime.DeliveryError, match="^Media delivery budget exhausted$"):
                 await target(session=exhausted_session, image_paths=[first_relative_path, second_relative_path])
         assert exhausted_session.sent == []
-        assert exhausted_state.media_messages == 1
+        assert exhausted_state.media_messages == 5
 
         ambiguous_session = _DeliveryToolSession()
         ambiguous_state = runtime.DeliveryState()
@@ -2617,7 +3371,7 @@ async def test_generate_chat_response_caps_web_calls_and_returns_final_answer(
                 model="production-model",
                 channel_id="group-B",
                 ctx=None,
-                web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+                web_limits=local_modules.web_access.WebAccessLimits(2, 2, 4),
                 delivery_state=local_modules.delivery.DeliveryState(),
             )
 

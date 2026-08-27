@@ -310,7 +310,7 @@ wheels = [
 
 [[package]]
 name = "arclet-entari"
-version = "0.18.5"
+version = "0.18.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "arclet-alconna" },
@@ -321,9 +321,9 @@ dependencies = [
     { name = "satori-python-core" },
     { name = "simpleeval" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7e/ce/a56fba623b04dd8ac6fb5c58791a416d25692aac32a1f878295fa8906cc9/arclet_entari-0.18.5.tar.gz", hash = "sha256:3abdb70d175688d091e5226663c219118c54e0c146444c3ad1739e8df338ce0c", size = 93989, upload-time = "2026-07-31T08:16:32.948Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b6/58/9a92bd6efb072c124b355846528cb167ffcd79c793f9a003ee1c9a1bb11e/arclet_entari-0.18.6.tar.gz", hash = "sha256:0b10b27edbf75010f740938a23d1164728808f7e97443b917f59fb0844dd0fed", size = 93995, upload-time = "2026-08-05T08:24:00.461Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/88/93/b06929edb7a23a038ffd14f47c84239f5620672eb0ac9312f30bcb33a2b1/arclet_entari-0.18.5-py3-none-any.whl", hash = "sha256:ddec81088c7a340abeb0437fdff2a87374bf68e9365336ddc9e12d2179c0ed47", size = 116485, upload-time = "2026-07-31T08:16:31.568Z" },
+    { url = "https://files.pythonhosted.org/packages/1a/d8/d83e8eb28dd63858db231739c3373e6d86407c2d637a371d7b63cb89dd95/arclet_entari-0.18.6-py3-none-any.whl", hash = "sha256:0f51488bfdb4bc679a3b86e962c52e30c18d771863feface6e81b9c68a9ca365", size = 116461, upload-time = "2026-08-05T08:23:59.028Z" },
 ]
 
 [package.optional-dependencies]
@@ -339,6 +339,9 @@ full = [
     { name = "python-dotenv" },
     { name = "ruamel-yaml" },
     { name = "watchfiles" },
+]
+pydantic = [
+    { name = "pydantic" },
 ]
 reload = [
     { name = "watchfiles" },
@@ -598,9 +601,11 @@ name = "chtholly"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "arclet-entari", extra = ["full"] },
     { name = "entari-plugin-browser", extra = ["jinja2"] },
     { name = "entari-plugin-database" },
+    { name = "entari-plugin-htmlrender", extra = ["playwright"] },
     { name = "entari-plugin-llm" },
     { name = "entari-plugin-permission" },
     { name = "entari-plugin-server" },
@@ -608,6 +613,7 @@ dependencies = [
     { name = "entari-plugin-webui" },
     { name = "exa-py" },
     { name = "httpx", extra = ["http2"] },
+    { name = "markdown" },
     { name = "orjson" },
     { name = "psutil" },
     { name = "rich" },
@@ -628,9 +634,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.14.3" },
     { name = "arclet-entari", extras = ["full"], specifier = ">=0.18.3" },
     { name = "entari-plugin-browser", extras = ["jinja2"], specifier = ">=0.6.1" },
     { name = "entari-plugin-database", specifier = ">=0.3.3" },
+    { name = "entari-plugin-htmlrender", extras = ["playwright"], specifier = ">=0.1.0,<0.2" },
     { name = "entari-plugin-llm", git = "https://github.com/ArcletProject/entari-plugin-llm" },
     { name = "entari-plugin-permission", specifier = ">=0.1.1" },
     { name = "entari-plugin-server", specifier = ">=0.7.1" },
@@ -638,6 +646,7 @@ requires-dist = [
     { name = "entari-plugin-webui", specifier = ">=1.0.1" },
     { name = "exa-py", specifier = ">=2.16.2" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.27.2" },
+    { name = "markdown", specifier = ">=3.10" },
     { name = "orjson", specifier = ">=3.11.9" },
     { name = "psutil", specifier = ">=7.0.0" },
     { name = "rich", specifier = ">=13.9.4" },
@@ -844,6 +853,31 @@ wheels = [
 ]
 
 [[package]]
+name = "entari-plugin-htmlrender"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "arclet-entari", extra = ["pydantic"] },
+    { name = "exceptiongroup" },
+    { name = "jinja2" },
+    { name = "markdown" },
+    { name = "pygments" },
+    { name = "pymdown-extensions" },
+    { name = "python-markdown-math" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d0/a0/1383d39294d24113912d8bce011032642da0fbcbb8e3b8895cea54ec272f/entari_plugin_htmlrender-0.1.0.tar.gz", hash = "sha256:95e582d7d1f5f9e538ef667306d21edea8361990e694cbbad36080918d820cf4", size = 2911316, upload-time = "2026-08-14T09:04:48.03Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0d/d1/229c5569dc41eb5ab82ae94b2ca98803f266c6f2390712dd094173024694/entari_plugin_htmlrender-0.1.0-py3-none-any.whl", hash = "sha256:c982d3e8846f80598d66bd5039810d0d21303070b8a153014457ec4a6782c9fb", size = 1257734, upload-time = "2026-08-14T09:04:45.887Z" },
+]
+
+[package.optional-dependencies]
+playwright = [
+    { name = "playwright" },
+]
+
+[[package]]
 name = "entari-plugin-llm"
 version = "0.2.2"
 source = { git = "https://github.com/ArcletProject/entari-plugin-llm#3731a9b578bbf8152b52d102c9f67c2f824af92f" }
@@ -935,7 +969,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -1789,6 +1823,15 @@ wheels = [
 ]
 
 [[package]]
+name = "markdown"
+version = "3.10.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/29/6f/da4c6aea59b3001f2e8c0ec7497475aadaf3b021c10cab5b2858f0f32b26/markdown-3.10.3.tar.gz", hash = "sha256:3589362618f743188b4d955b874402bc814f4f83f544dc207719f4baa7d9c45f", size = 372596, upload-time = "2026-07-30T19:05:29.005Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/64/69/4a5af2bc115a9a33fefe51709749de8262be3f9ba063d1753a837cdbc49c/markdown-3.10.3-py3-none-any.whl", hash = "sha256:fa6c92a00a4a3c98b22728c64a935ae1928250ae65058a6ded814d2cc29a4cea", size = 110757, upload-time = "2026-07-30T19:05:27.883Z" },
+]
+
+[[package]]
 name = "markdown-it-py"
 version = "3.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2564,6 +2607,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pymdown-extensions"
+version = "11.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "markdown" },
+    { name = "pyyaml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/21/a9/5f0c535ba3b08fe09270c16808e053a968868242ecbd5676d4e3a488bf28/pymdown_extensions-11.0.1.tar.gz", hash = "sha256:dd2905ae6fc5b75582fafb139a1266ffc754705efa902aa50067fa7ff4f94ec0", size = 857113, upload-time = "2026-07-02T17:59:22.955Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d6/54/da572c98c0b77626a91b5d3b89f0231d8bff5125c225420908632f8b342d/pymdown_extensions-11.0.1-py3-none-any.whl", hash = "sha256:db3943a62bab7e03af1364f0c4083e64b91fb097675a4b6cceccfbe9a77e5eb2", size = 269455, upload-time = "2026-07-02T17:59:21.271Z" },
+]
+
+[[package]]
 name = "pytest"
 version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2614,6 +2670,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/82/ed/0301aeeac3e5353ef3d94b6ec08bbcabd04a72018415dcb29e588514bba8/python_dotenv-1.2.2.tar.gz", hash = "sha256:2c371a91fbd7ba082c2c1dc1f8bf89ca22564a087c2c287cd9b662adde799cf3", size = 50135, upload-time = "2026-03-01T16:00:26.196Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0b/d7/1959b9648791274998a9c3526f6d0ec8fd2233e4d4acce81bbae76b44b2a/python_dotenv-1.2.2-py3-none-any.whl", hash = "sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a", size = 22101, upload-time = "2026-03-01T16:00:25.09Z" },
+]
+
+[[package]]
+name = "python-markdown-math"
+version = "0.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "markdown" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4c/68/fbea05ec6fb318bdcf56ea47596605614554f51d77bfd14f6fb481139ad8/python_markdown_math-0.9.tar.gz", hash = "sha256:567395553dc4941e79b3789a1096dcabb3fda9539d150d558ef3507948b264a3", size = 8680, upload-time = "2025-04-10T10:10:31.84Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/68/ecf3535c40845de2efd8ac2d092dd5fca0868219fa3684d9e58ef7abeece/python_markdown_math-0.9-py3-none-any.whl", hash = "sha256:ac9932df517a5c0f6d01c56e7a44d065eca4a420893ac45f7a6937c67cb41e86", size = 6046, upload-time = "2025-04-10T10:10:30.318Z" },
 ]
 
 [[package]]

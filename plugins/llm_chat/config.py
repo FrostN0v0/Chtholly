@@ -46,6 +46,16 @@ class LLMChatConfig(BasicConfModel):
     """Per-completion timeout for the main chat model."""
     media_request_timeout: float = 300.0
     """Per-completion timeout when the latest user explicitly requests media."""
+    image_generation_model: str | None = None
+    """Dedicated model alias/name for original image generation; None disables the tool."""
+    image_generation_timeout: float = 300.0
+    """Maximum duration of one image-generation request."""
+    image_generation_quality: Literal["auto", "low", "medium", "high"] = "medium"
+    """Fixed provider quality for generated images."""
+    image_generation_output_format: Literal["png", "jpeg", "webp"] = "webp"
+    """Generated image format delivered to the chat transport."""
+    image_generation_output_compression: int = 90
+    """Provider compression percentage for JPEG and WebP output."""
     eval_request_timeout: float = 60.0
     """Per-completion timeout for the relationship evaluator."""
     eval_every_n: int = 5
@@ -84,11 +94,11 @@ class LLMChatConfig(BasicConfModel):
     """Max episodic memory rows kept per user/channel."""
     web_search_enabled: bool = False
     """Register Exa search and content retrieval tools for llm_chat."""
-    web_search_max_calls_per_generation: int = 2
+    web_search_max_calls_per_generation: int = 16
     """Maximum web_search calls allowed in one chat generation."""
-    web_page_max_calls_per_generation: int = 2
-    """Maximum read_web_page calls allowed in one chat generation."""
-    web_total_max_calls_per_generation: int = 4
+    web_page_max_calls_per_generation: int = 24
+    """Maximum read_web_page and screenshot calls allowed in one chat generation."""
+    web_total_max_calls_per_generation: int = 32
     """Maximum combined web tool calls allowed in one chat generation."""
     exa_api_key: str | None = None
     """Exa API key; set from env in entari.yml."""
@@ -110,7 +120,7 @@ class LLMChatConfig(BasicConfModel):
     """Maximum search results returned to the model."""
     web_search_timeout: float = 30.0
     """Per-request Exa timeout, clamped to the provider range."""
-    web_page_max_chars: int = 6000
+    web_page_max_chars: int = 16000
     """Maximum retrieved page characters returned to the model."""
     delivery_min_interval_seconds: float = DEFAULT_DELIVERY_LIMITS.min_interval_seconds
     """Minimum paced interval between delivery attempts."""

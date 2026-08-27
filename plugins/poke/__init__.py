@@ -23,10 +23,16 @@ from arclet.entari import (
     collect_disposes,
     register_internal_event,
 )
-from satori.element import Audio
+from satori.element import Audio, Image
 from arclet.entari.event.base import NoticeEvent
 
-from utils.path import AUDIO_DIR
+from utils.path import MEME_DIR, AUDIO_DIR
+from utils.poke_core import (
+    AudioCategory,
+    collect_image_files,
+    select_response_kind,
+    collect_audio_categories,
+)
 
 metadata(
     name="poke",
@@ -38,6 +44,15 @@ metadata(
 plug = Plugin.current()
 
 DINGGONG_DIR: Path = AUDIO_DIR / "dinggong"
+SHENYING_DIR: Path = AUDIO_DIR / "shenying"
+SOUNDBOARD_DIR: Path = AUDIO_DIR / "\u97f3\u9891"
+POKE_AUDIO_DIRS: tuple[tuple[str, Path], ...] = (
+    ("dinggong", DINGGONG_DIR),
+    ("shenying", SHENYING_DIR),
+)
+POKE_TEXT_PERCENT = 10
+POKE_IMAGE_PERCENT = 31
+POKE_AUDIO_PERCENT = 45
 
 POKE_REPLIES: list[str] = [
     "lsp你再戳？",
@@ -111,14 +126,22 @@ def _remove_parser():
 collect_disposes(_remove_parser)
 
 
-_audio_list: list[Path] | None = None
+_image_list: tuple[Path, ...] | None = None
+_audio_category_list: tuple[AudioCategory, ...] | None = None
 
 
-def _audios() -> list[Path]:
-    global _audio_list
-    if _audio_list is None:
-        _audio_list = [p for p in DINGGONG_DIR.iterdir() if p.is_file()] if DINGGONG_DIR.exists() else []
-    return _audio_list
+def _images() -> tuple[Path, ...]:
+    global _image_list
+    if _image_list is None:
+        _image_list = collect_image_files(MEME_DIR)
+    return _image_list
+
+
+def _audio_categories() -> tuple[AudioCategory, ...]:
+    global _audio_category_list
+    if _audio_category_list is None:
+        _audio_category_list = collect_audio_categories(POKE_AUDIO_DIRS, SOUNDBOARD_DIR)
+    return _audio_category_list
 
 
 def _int_id(value: str) -> int | None:
@@ -133,15 +156,25 @@ async def on_poke(session: Session, event: PokeEvent):
     if event.target_id != event.self_id:
         return
 
-    if random.random() < 0.3:
+    response_kind = select_response_kind(
+        random.randrange(100),
+        text_weight=POKE_TEXT_PERCENT,
+        image_weight=POKE_IMAGE_PERCENT,
+        audio_weight=POKE_AUDIO_PERCENT,
+    )
+    if response_kind == "text":
         prefix = "气死我了！" if random.random() < 0.15 else ""
         await session.send(prefix + random.choice(POKE_REPLIES), at_sender=True)
         return
-
-    if random.random() < 0.3:
-        auds = _audios()
-        if auds:
-            await session.send(MessageChain([Audio.of(path=random.choice(auds))]))
+    if response_kind == "image":
+        images = _images()
+        if images:
+            await session.send(MessageChain([Image.of(path=random.choice(images))]))
+    elif response_kind == "audio":
+        categories = _audio_categories()
+        if categories:
+            category = random.choice(categories)
+            await session.send(MessageChain([Audio.of(path=random.choice(category.files))]))
     group_id = event.group_id
     user_id = _int_id(event.user_id)
     if user_id is None:

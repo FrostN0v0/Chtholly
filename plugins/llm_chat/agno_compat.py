@@ -24,7 +24,7 @@ from .core.native_images import extract_native_images
 from .core.tool_trace_policy import DeliverySnapshot
 
 _MIN_TOOL_CALL_LIMIT = 8
-_MAX_TOOL_CALL_LIMIT = 32
+_MAX_TOOL_CALL_LIMIT = 64
 _UTILITY_TOOL_CALL_RESERVE = 3
 _TOOL_CALL_LIMIT: ContextVar[int] = ContextVar(
     "llm_chat_agno_tool_call_limit",

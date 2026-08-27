@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }}</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: {{ font_family }};
+      background: #eef2ff;
+      color: #172033;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 8% 0%, rgba(99, 102, 241, 0.18), transparent 34%),
+        radial-gradient(circle at 100% 18%, rgba(14, 165, 233, 0.16), transparent 30%),
+        #f7f8fc;
+    }
+
+    .report {
+      width: 100%;
+      padding: 38px;
+    }
+
+    .surface {
+      overflow: hidden;
+      border: 1px solid rgba(148, 163, 184, 0.28);
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: 0 24px 70px rgba(30, 41, 59, 0.14);
+    }
+
+    header {
+      padding: 34px 38px 28px;
+      background: linear-gradient(135deg, #172554 0%, #312e81 55%, #0f766e 140%);
+      color: white;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 34px;
+      line-height: 1.2;
+      letter-spacing: -0.025em;
+      overflow-wrap: anywhere;
+    }
+
+    .subtitle {
+      margin: 12px 0 0;
+      max-width: 72ch;
+      color: rgba(255, 255, 255, 0.78);
+      font-size: 16px;
+      line-height: 1.65;
+      white-space: pre-wrap;
+    }
+
+    .content {
+      display: grid;
+      gap: 28px;
+      padding: 30px 38px 38px;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 14px;
+    }
+
+    .metric {
+      min-width: 0;
+      padding: 18px 19px;
+      border: 1px solid #e2e8f0;
+      border-radius: 16px;
+      background: linear-gradient(180deg, #ffffff, #f8fafc);
+    }
+
+    .metric-label {
+      color: #64748b;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.055em;
+      text-transform: uppercase;
+      overflow-wrap: anywhere;
+    }
+
+    .metric-value {
+      margin-top: 8px;
+      color: #1e293b;
+      font-size: 27px;
+      font-weight: 760;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
+    }
+
+    .metric-detail {
+      margin-top: 7px;
+      color: #64748b;
+      font-size: 13px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .table-wrap {
+      overflow: hidden;
+      border: 1px solid #e2e8f0;
+      border-radius: 16px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+
+    th,
+    td {
+      padding: 14px 16px;
+      border-bottom: 1px solid #e2e8f0;
+      text-align: left;
+      vertical-align: top;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    th {
+      background: #eef2ff;
+      color: #3730a3;
+      font-size: 13px;
+      font-weight: 750;
+      letter-spacing: 0.035em;
+      text-transform: uppercase;
+    }
+
+    td {
+      color: #334155;
+      font-size: 14px;
+    }
+
+    tbody tr:nth-child(even) td {
+      background: #f8fafc;
+    }
+
+    tbody tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .notes {
+      margin: 0;
+      padding: 19px 22px 19px 42px;
+      border-left: 4px solid #14b8a6;
+      border-radius: 12px;
+      background: #f0fdfa;
+      color: #134e4a;
+    }
+
+    .notes li {
+      padding: 4px 0;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+  </style>
+</head>
+<body>
+  <main class="report">
+    <article class="surface">
+      <header>
+        <h1>{{ title }}</h1>
+        {% if subtitle %}<p class="subtitle">{{ subtitle }}</p>{% endif %}
+      </header>
+      <div class="content">
+        {% if metrics %}
+        <section class="metrics" aria-label="Summary metrics">
+          {% for metric in metrics %}
+          <div class="metric">
+            <div class="metric-label">{{ metric[0] }}</div>
+            <div class="metric-value">{{ metric[1] }}</div>
+            {% if metric|length > 2 %}<div class="metric-detail">{{ metric[2] }}</div>{% endif %}
+          </div>
+          {% endfor %}
+        </section>
+        {% endif %}
+
+        {% if columns and rows %}
+        <section class="table-wrap" aria-label="Report table">
+          <table>
+            <thead>
+              <tr>{% for column in columns %}<th>{{ column }}</th>{% endfor %}</tr>
+            </thead>
+            <tbody>
+              {% for row in rows %}
+              <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </section>
+        {% endif %}
+
+        {% if notes %}
+        <ul class="notes">
+          {% for note in notes %}<li>{{ note }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+      </div>
+    </article>
+  </main>
+</body>
+</html>
