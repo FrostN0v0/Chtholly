@@ -870,6 +870,27 @@ async def test_tag_image_schema_scope_indexing_and_privacy(monkeypatch: pytest.M
         assert "secret" not in result
         assert "memes/" not in result
 
+        cancelled = asyncio.Event()
+
+        async def slow_import(
+            _config: LLMChatConfig,
+            _session: Session,
+            _image: Image,
+        ) -> MemeImportResult:
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            raise AssertionError("slow import unexpectedly completed")
+
+        monkeypatch.setattr(harness.module.tag_image_context, "import_image", slow_import)
+        harness.module.tag_image_context.timeout_seconds = 0.01
+        with llm_chat_delivery_scope(DeliveryState()):
+            with pytest.raises(MemeImportError, match="timed out"):
+                await target(session)
+        assert cancelled.is_set()
+
         with llm_chat_delivery_scope(DeliveryState()):
             with pytest.raises(MemeImportError, match="positive 1-based"):
                 await target(session, 0)
