@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from collections.abc import Callable, Sequence, Awaitable
 
@@ -26,6 +27,7 @@ class TagImageToolContext:
     config: LLMChatConfig
     collect_images: ImageCollector
     import_image: MemeImporter
+    timeout_seconds: float = 15.0
 
 
 def register_tag_image(
@@ -57,7 +59,15 @@ def register_tag_image(
         if image_index > len(candidates):
             raise MemeImportError("image_index does not identify a current direct or replied image")
 
-        result = await runtime.import_image(runtime.config, session, candidates[image_index - 1][0])
+        try:
+            result = await asyncio.wait_for(
+                runtime.import_image(runtime.config, session, candidates[image_index - 1][0]),
+                timeout=runtime.timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            raise MemeImportError(
+                "Image collection timed out. Continue the reply without retrying tag_image or claiming it was saved."
+            ) from None
         if result.status == "created":
             return "Collected the current image as a reusable meme."
         if result.status == "duplicate":

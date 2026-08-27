@@ -619,6 +619,10 @@ class TestComposePrompt:
         assert "两者职责不得混淆" in prompt
         assert "模型只判断当前图片是否适合收藏，不自行提供标签" in prompt
         assert "标签始终由 image_tag_model 自动生成" in prompt
+        assert "图片本身就是请求" in prompt
+        assert "不得把空文本、单独艾特或纯标点解释成句号、一个点" in prompt
+        assert "当前问题确实依赖该图片细节时" in prompt
+        assert "不得主动声称看不到、从未看过或要求用户重发" in prompt
         assert "send_audio 只选择工具 schema 中已有的预录台词" in prompt
         assert "本轮新短句使用 speak 合成，禁止二者重复表达同一句话" in prompt
         assert "用户明确指定语音角色、版本、参考语言或情绪时，必须先调用 list_tts_voices" in prompt

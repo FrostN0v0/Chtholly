@@ -6,8 +6,12 @@ import re
 from typing import Any, cast
 import asyncio
 from datetime import datetime
+from functools import wraps
+from contextlib import suppress
+from dataclasses import dataclass
+from collections.abc import Callable, Coroutine
 
-from arclet.entari import At, Session, MessageCreatedEvent, plugin_config
+from arclet.entari import At, Session, MessageCreatedEvent, plugin, plugin_config
 from arclet.letoderea import BLOCK, enter_if
 from arclet.entari.config import EntariConfig
 from arclet.entari.logger import log
@@ -19,6 +23,7 @@ from entari_plugin_llm.exception import ModelNotFoundError
 from .config import LLMChatConfig
 from .identity import resolve_chat_identity
 from .core.eval import apply_deltas
+from .core.media import has_meaningful_text
 from .core.types import ChatMessage
 from .generation import response_content, generate_chat_response
 from .web.policy import normalize_web_access_limits
@@ -26,6 +31,7 @@ from .core.errors import summarize_exception
 from .chat_context import (
     build_image_notes,
     build_chat_messages,
+    collect_message_images,
     collect_quoted_message,
     build_eval_conversation,
     model_supports_image_input,
@@ -90,10 +96,80 @@ config = plugin_config(LLMChatConfig)
 plug = Plugin.current()
 
 
+@dataclass(slots=True)
+class _ActiveChannelTurn:
+    task: asyncio.Task[object]
+    generation: int
+    superseded: bool = False
+
+
+_ACTIVE_CHANNEL_TURNS: dict[str, _ActiveChannelTurn] = {}
+_CHANNEL_TURN_GENERATIONS: dict[str, int] = {}
+
+
+def _cancel_active_channel_turns() -> None:
+    for active in tuple(_ACTIVE_CHANNEL_TURNS.values()):
+        if not active.task.done():
+            active.task.cancel()
+    _ACTIVE_CHANNEL_TURNS.clear()
+    _CHANNEL_TURN_GENERATIONS.clear()
+
+
+plugin.collect_disposes(_cancel_active_channel_turns)
+
+
+def _latest_channel_turn(
+    handler: Callable[[Session, Contexts], Coroutine[Any, Any, object]],
+) -> Callable[[Session, Contexts], Coroutine[Any, Any, object]]:
+    """Cancel an older generation before starting the newest channel turn."""
+
+    @wraps(handler)
+    async def wrapped(session: Session, ctx: Contexts) -> object:
+        channel_id = session.channel.id
+        generation = _CHANNEL_TURN_GENERATIONS.get(channel_id, 0) + 1
+        _CHANNEL_TURN_GENERATIONS[channel_id] = generation
+
+        previous = _ACTIVE_CHANNEL_TURNS.get(channel_id)
+        if previous is not None and not previous.task.done():
+            previous.superseded = True
+            previous.task.cancel()
+            try:
+                await previous.task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                _LOGGER.warning(f"superseded channel turn cleanup failed: {summarize_exception(exc)}")
+
+        if _CHANNEL_TURN_GENERATIONS.get(channel_id) != generation:
+            return BLOCK
+
+        task = asyncio.create_task(handler(session, ctx))
+        active = _ActiveChannelTurn(task=task, generation=generation)
+        _ACTIVE_CHANNEL_TURNS[channel_id] = active
+        try:
+            return await task
+        except asyncio.CancelledError:
+            if active.superseded:
+                return BLOCK
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            raise
+        finally:
+            if _ACTIVE_CHANNEL_TURNS.get(channel_id) is active:
+                _ACTIVE_CHANNEL_TURNS.pop(channel_id, None)
+            if _CHANNEL_TURN_GENERATIONS.get(channel_id) == generation:
+                _CHANNEL_TURN_GENERATIONS.pop(channel_id, None)
+
+    return wrapped
+
+
 @plug.dispatch(MessageCreatedEvent).register(priority=900)
 @enter_if(_should_handle_chat)
+@_latest_channel_turn
 async def on_chat(session: Session, ctx: Contexts):
     model_text = session.elements.extract_plain_text().strip()
+    require_text_reply = bool(collect_message_images(session)) and not has_meaningful_text(model_text)
     channel_id = session.channel.id
     user_name = str((session.member.nick if session.member else None) or session.user.name or session.user.id).strip()
 
@@ -239,6 +315,7 @@ async def on_chat(session: Session, ctx: Contexts):
                 request_timeout=config.model_request_timeout,
                 media_request_timeout=config.media_request_timeout,
                 tool_trace=turn.tool_trace,
+                require_text_reply=require_text_reply,
             )
         finally:
             await turn.persist_tool_trace()
@@ -321,6 +398,5 @@ async def on_chat(session: Session, ctx: Contexts):
 
 
 @plug.dispatch(MessageCreatedEvent).register(priority=999)
-@enter_if(_should_handle_chat)
 async def block_native_llm_fallback():
     return BLOCK
