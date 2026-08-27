@@ -45,7 +45,7 @@ _SENSITIVE_QUERY_KEYS = {
     "cookie",
 }
 _SENSITIVE_QUERY_PREFIXES = ("x_amz_", "x_goog_", "oauth_")
-WebToolName = Literal["web_search", "read_web_page"]
+WebToolName = Literal["web_search", "read_web_page", "screenshot_web_page"]
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,7 @@ class WebAccessLimits:
     total_limit: int
 
 
-DEFAULT_WEB_ACCESS_LIMITS = WebAccessLimits(2, 2, 4)
+DEFAULT_WEB_ACCESS_LIMITS = WebAccessLimits(16, 24, 32)
 
 
 def normalize_web_access_limits(
@@ -78,6 +78,7 @@ def normalize_web_access_limits(
 @dataclass
 class WebAccessBudget:
     limits: WebAccessLimits
+    allow_webpage_screenshots: bool = False
     search_calls: int = 0
     read_calls: int = 0
     total_calls: int = 0
@@ -112,10 +113,12 @@ class WebPageData(TypedDict):
 @contextmanager
 def llm_chat_web_access_scope(
     limits: WebAccessLimits = DEFAULT_WEB_ACCESS_LIMITS,
+    *,
+    allow_webpage_screenshots: bool = False,
 ) -> Iterator[None]:
     """Create an isolated budget for the current llm_chat generation."""
 
-    token = _WEB_ACCESS_BUDGET.set(WebAccessBudget(limits))
+    token = _WEB_ACCESS_BUDGET.set(WebAccessBudget(limits, allow_webpage_screenshots=allow_webpage_screenshots))
     try:
         yield
     finally:
@@ -135,6 +138,10 @@ def consume_llm_chat_web_access(tool: WebToolName) -> None:
     budget = _WEB_ACCESS_BUDGET.get()
     if budget is None:
         raise WebAccessError("Web access is unavailable outside llm_chat")
+    if tool == "screenshot_web_page" and not budget.allow_webpage_screenshots:
+        raise WebAccessError(
+            "screenshot_web_page requires an explicit webpage screenshot request in the current user turn"
+        )
     if budget.total_calls >= budget.limits.total_limit:
         raise WebAccessError("Web access budget exhausted; answer from collected evidence without more web tools")
     if tool == "web_search":

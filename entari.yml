@@ -35,6 +35,21 @@ plugins:
   ::echo: {}
   ::inspect: {}
   browser: {}
+  htmlrender:
+    provider: playwright
+    startup: probe
+    provider_config:
+      engine: chromium
+      materialization_policy: off
+    html:
+      max_source_bytes: 8388608
+      max_output_bytes: 6291456
+      max_device_pixel_ratio: 2.0
+      max_auto_height: 8192
+      max_concurrency: 2
+    resources:
+      local_access:
+        allowed_paths: ["plugins/llm_chat/render_templates"]
   database:
     type: sqlite
     name: "data/chtholly.db"
@@ -51,6 +66,8 @@ plugins:
     models:
       - name: "gpt-5.6-sol"
         alias: "gpt"
+      - name: "openai/gpt-image-2"
+        alias: "image"
       - name: "openai/doubao-seed-2-1-turbo-260628"
         alias: "doubao"
         base_url: "https://ark.cn-beijing.volces.com/api/v3/"
@@ -107,9 +124,9 @@ plugins:
     tool_context_max_chars: 3500
     tool_history_max_records_per_channel: 200
     web_search_enabled: true
-    web_search_max_calls_per_generation: 10
-    web_page_max_calls_per_generation: 10
-    web_total_max_calls_per_generation: 20
+    web_search_max_calls_per_generation: 16
+    web_page_max_calls_per_generation: 24
+    web_total_max_calls_per_generation: 32
     exa_api_key: ${{ env.get('EXA_API_KEY', '') }}
     exa_search_type: auto
     exa_search_category:
@@ -119,7 +136,7 @@ plugins:
     exa_end_published_date:
     web_search_max_results: 5
     web_search_timeout: 30.0
-    web_page_max_chars: 6000
+    web_page_max_chars: 16000
     delivery_min_interval_seconds: 1.1
     delivery_default_interval_seconds: 1.2
     delivery_max_interval_seconds: 5.0
@@ -128,11 +145,16 @@ plugins:
     delivery_max_forward_nodes: 20
     delivery_max_forward_chars_per_node: 2000
     delivery_max_total_text_chars_per_generation: 12000
-    delivery_max_media_messages_per_generation: 2
+    delivery_max_media_messages_per_generation: 6
     # Model duties: chat images pass directly to vision-capable chat models; eval pinned below; fallback tag/describe uses image_tag_model.
     eval_model: doubao
     model_request_timeout: 90.0
     media_request_timeout: 300.0
+    image_generation_model: image
+    image_generation_timeout: 300.0
+    image_generation_quality: medium
+    image_generation_output_format: webp
+    image_generation_output_compression: 90
     eval_request_timeout: 60.0
     eval_every_n: 5
     image_tag_model: doubao

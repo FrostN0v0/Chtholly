@@ -33,6 +33,7 @@ if plug is not None and plug.module.__name__ == __name__:
     from .agno_compat import install_agno_tool_bridge  # entari: package
 
     install_agno_tool_bridge()
+    from .config_schema import LLMChatWebUIConfig  # entari: package
 
     metadata(
         name="llm_chat",
@@ -40,6 +41,7 @@ if plug is not None and plug.module.__name__ == __name__:
         version="0.1.0",
         description="群聊会话互动：多轴关系引擎 + 媒体互动 + 可选语音回复",
         role=PluginRole.NORMAL,
+        config=LLMChatWebUIConfig,
     )
     from . import chat_handler as chat_handler  # entari: package
     from . import tag_runtime as tag_runtime  # entari: package

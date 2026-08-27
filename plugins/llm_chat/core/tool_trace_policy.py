@@ -88,8 +88,13 @@ def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> d
     if tool_name == "describe_channel_participant_avatar":
         return {"requested": bool(arguments.get("participant_ref"))}
     if tool_name == "send_text":
+        mentions = arguments.get("mentions")
+        normalized_mentions = (
+            mentions if isinstance(mentions, Sequence) and not isinstance(mentions, (str, bytes)) else ()
+        )
         return {
             "text_chars": text_length(arguments.get("text")),
+            "mention_count": min(3, len(normalized_mentions)),
             **selected_arguments(arguments, "delay_seconds"),
         }
     if tool_name == "send_merged_forward":

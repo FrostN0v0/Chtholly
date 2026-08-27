@@ -5,6 +5,7 @@ import json
 from plugins.llm_chat.core.media import (
     RECENT_MEME_HISTORY_NOTE,
     format_image_note,
+    has_meaningful_text,
     normalize_image_tags,
     is_internal_media_record,
     sanitize_assistant_history,
@@ -41,6 +42,18 @@ class TestNormalizeImageDescription:
 
     def test_whitespace_only_returns_empty(self):
         assert normalize_image_description("  \n\t  ") == ""
+
+    def test_punctuation_only_description_returns_empty(self):
+        assert normalize_image_description(" . 。 …… ") == ""
+
+    def test_emoji_only_description_remains_visible(self):
+        assert normalize_image_description("🤨") == "🤨"
+
+    def test_meaningful_text_accepts_words_numbers_and_symbols(self):
+        assert has_meaningful_text("猫")
+        assert has_meaningful_text("42")
+        assert has_meaningful_text("🤨")
+        assert not has_meaningful_text(" .。…… ")
 
     def test_custom_limit_applies(self):
         result = normalize_image_description("x" * 20, limit=10)

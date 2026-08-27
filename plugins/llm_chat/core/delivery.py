@@ -12,7 +12,7 @@ from contextvars import ContextVar
 from dataclasses import field, dataclass
 from collections.abc import Mapping, Callable, Iterator, Sequence, Awaitable
 
-from .media import strip_internal_media_records
+from .media import has_meaningful_text, strip_internal_media_records
 from .media_delivery import strip_media_unavailable_marker
 
 DeliveryMode = Literal["segments", "forward"]
@@ -46,7 +46,7 @@ DEFAULT_DELIVERY_LIMITS = DeliveryLimits(
     max_forward_nodes=20,
     max_forward_chars_per_node=2000,
     max_total_text_chars=12000,
-    max_media_messages=2,
+    max_media_messages=6,
 )
 
 
@@ -198,8 +198,8 @@ def normalize_delivery_text(text: object, *, field: str) -> str:
         strip_media_unavailable_marker(strip_internal_media_records(text).strip())
     )
     normalized = _INTERNAL_PARTICIPANT_REF.sub("该成员", normalized)
-    if not normalized:
-        raise DeliveryError("Delivery text is empty or reserved for internal control")
+    if not has_meaningful_text(normalized):
+        raise DeliveryError("Delivery text is empty, punctuation-only, or reserved for internal control")
     return normalized
 
 
