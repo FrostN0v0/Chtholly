@@ -215,6 +215,7 @@ config = plugin_config(MyConfig)
 - 可被测试、复用或被 Pyright 独立分析的纯逻辑，放到 import-safe 包中，例如 `utils/<domain>_core/`。这些 core 包不得导入 `arclet.entari`、`entari_plugin_llm`、`entari_plugin_database`、`launart`，也不得执行插件注册、服务注册或其他运行时副作用。
 - Entari/LLM/数据库/HTTP 等动态边界应与纯算法分离；小插件可以在同一 runtime 模块内组织相关 handler、command、tool 或轻量 IO，但当一个模块同时承载多个变化方向（如事件注册、外部 API、持久化事务、渲染、复杂算法）或文件明显膨胀时，必须按职责拆分。
 - 外部 JSON、LiteLLM response、SQLAlchemy row、插件 `_extra` 等动态对象必须在边界处用 `Mapping[str, object]`、`dataclass`、`TypedDict`、`Protocol`、`TypeGuard` 或局部 `cast(...)` 收窄；核心算法不得把 `Any` 贯穿到底。
+- WebUI 通过 `metadata(..., config=...)` 为插件配置生成 JSON Schema：`BasicConfModel` 字段必须使用 Entari `SchemaGenerator` 可表示的类型，递归 `TypeAlias`（如 `JsonValue`）不得直接作为配置字段注解；配置边界可用 `dict[str, Any]`，核心 provider 仍以 `JsonObject` / Protocol 收窄。使用本地化 Pydantic adapter 时，每次新增运行时配置字段必须同步翻译映射，并由 metadata schema 回归测试覆盖，生产部署也必须同步 `config_schema.py`。
 - 测试直接导入 import-safe core 包，不通过 `sys.path.insert(...)`、synthetic package alias 或文件级 Pyright suppress 绕过插件副作用；pytest 的 import 根通过 `pyproject.toml` 配置。
 - 新增 provider / client 类必须支持显式依赖注入测试 seam（例如可传入 HTTP client/transport），测试不得改写私有属性。
 - 对会被 `::auto_reload` 重复加载的运行时副作用，注册时同步考虑清理：长任务用 `collect_disposes(...)` 取消，跨卸载状态用 `keeping(...)` 或明确的持久化存储。

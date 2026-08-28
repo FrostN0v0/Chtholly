@@ -1,11 +1,9 @@
 """Configuration model for the TTS service plugin."""
 
-from typing import Literal
+from typing import Any, Literal
 from dataclasses import field
 
 from arclet.entari import BasicConfModel
-
-from utils.tts_service_core.providers.types import JsonObject
 
 
 class TTSConfig(BasicConfModel):
@@ -33,7 +31,7 @@ class TTSConfig(BasicConfModel):
     """GPT-SoVITS output audio format."""
     gpt_sovits_catalog_ttl: float = 300.0
     """Seconds to cache discovered versions, models, references, and emotions."""
-    gpt_sovits_extra_params: JsonObject = field(default_factory=dict)
+    gpt_sovits_extra_params: dict[str, Any] = field(default_factory=dict)
     """Low-level GSVI other_params merged before validated semantic selectors."""
     fish_api_url: str = "https://api.fish.audio/v1/tts"
     """Fish Audio TTS endpoint."""
@@ -57,5 +55,5 @@ class TTSConfig(BasicConfModel):
     """Fish Audio prosody.volume in dB."""
     fish_prosody_normalize_loudness: bool = True
     """Fish Audio prosody.normalize_loudness."""
-    fish_extra_params: JsonObject = field(default_factory=dict)
+    fish_extra_params: dict[str, Any] = field(default_factory=dict)
     """Extra Fish Audio request payload keys merged after built-in keys."""
