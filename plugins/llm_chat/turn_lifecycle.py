@@ -94,15 +94,19 @@ class ActiveChatTurn:
             return
         self._agent_finalize_attempted = True
         self.capture_tool_events()
-        persisted = False
-        try:
-            await self.persist_agent_event_rows(self.agent_turn_id, tuple(self.agent_events.events))
-            persisted = True
-        except asyncio.CancelledError:
-            self.warn("agent turn persistence cancelled")
-            raise
-        except Exception as exc:
-            self.warn(f"agent event persistence failed: {type(exc).__name__}")
+        pending = self.agent_events.pending_events()
+        persisted = True
+        if pending:
+            persisted = False
+            try:
+                await self.persist_agent_event_rows(self.agent_turn_id, pending)
+                self.agent_events.mark_flushed(len(pending))
+                persisted = True
+            except asyncio.CancelledError:
+                self.warn("agent turn persistence cancelled")
+                raise
+            except Exception as exc:
+                self.warn(f"agent event persistence failed: {type(exc).__name__}")
         try:
             await self.finish_agent_turn_row(
                 self.agent_turn_id,

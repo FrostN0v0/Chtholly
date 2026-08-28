@@ -20,6 +20,7 @@
       </div>
       <div class="toolbar__actions">
         <span class="status" id="status" role="status" aria-live="polite">正在连接…</span>
+        <span class="auto-refresh is-hidden" id="auto-refresh" role="status" aria-live="polite">自动刷新中</span>
         <button class="button" id="refresh-button" type="button">刷新</button>
         <button class="button" id="new-session-button" type="button" disabled>新会话</button>
         <button class="button button--primary" id="rollover-button" type="button" disabled>续接会话</button>
@@ -49,12 +50,13 @@
         </div>
       </section>
 
-      <section class="panel panel--inspector" aria-label="事件与上下文">
+      <section class="panel panel--inspector" aria-label="事件、上下文与人格记忆">
         <div class="panel__head">
-          <h2 class="panel__title">事件与上下文</h2>
+          <h2 class="panel__title">轮次检查器</h2>
           <div class="tabs" role="tablist">
             <button class="tab is-active" id="tab-events" data-tab="events" type="button" role="tab" aria-selected="true" aria-controls="events-view">事件</button>
             <button class="tab" id="tab-context" data-tab="context" type="button" role="tab" aria-selected="false" aria-controls="context-view">上下文</button>
+            <button class="tab" id="tab-persona" data-tab="persona" type="button" role="tab" aria-selected="false" aria-controls="persona-view">人格与记忆</button>
           </div>
         </div>
         <div class="panel__body panel__body--flush">
@@ -66,6 +68,9 @@
           </div>
           <div class="view" id="context-view" role="tabpanel" aria-labelledby="tab-context">
             <pre class="code" id="context-output">请选择一个轮次。</pre>
+          </div>
+          <div class="view" id="persona-view" role="tabpanel" aria-labelledby="tab-persona">
+            <div class="persona" id="persona-output">请选择一个轮次。</div>
           </div>
         </div>
       </section>

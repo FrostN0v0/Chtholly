@@ -32,6 +32,8 @@
     "Microsoft YaHei", "微软雅黑", Arial, sans-serif;
   --el-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
   --el-shadow-light: 0 2px 12px 0 rgba(0, 0, 0, 0.06);
+  --persona-card-bg: #fbfcfe;
+  --persona-injected-bg: #f6f8fd;
   --el-shadow-modal: 0 8px 24px 0 rgba(0, 0, 0, 0.14);
 }
 
@@ -60,6 +62,8 @@
     --el-border-color: #4c4d4f;
     --el-border-color-light: #414243;
     --el-border-color-lighter: #363637;
+    --persona-card-bg: #292a2c;
+    --persona-injected-bg: #23262e;
     --el-shadow-light: 0 2px 12px 0 rgba(0, 0, 0, 0.32);
     --el-shadow-modal: 0 8px 24px 0 rgba(0, 0, 0, 0.48);
   }
@@ -408,6 +412,154 @@ p {
 #context-view {
   padding: 8px;
   overflow: auto;
+}
+
+#persona-view {
+  padding: 8px;
+  overflow: auto;
+}
+
+.auto-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  background: var(--el-color-primary-soft);
+  color: var(--el-color-primary);
+  border: 1px solid var(--el-color-primary-light);
+  border-radius: var(--el-radius-small);
+  font-size: var(--el-font-size-mini);
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.list-item.is-running {
+  border-left: 2px solid var(--el-color-primary);
+}
+
+.list-item__text--pending {
+  color: var(--el-color-primary);
+  font-style: italic;
+}
+
+/* persona and memory inspector */
+
+.persona {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  width: 100%;
+}
+
+.persona.is-empty {
+  display: block;
+}
+
+.persona__group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 10px;
+  background: var(--el-fill-light);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--el-radius);
+}
+
+.persona__group--injected {
+  background: var(--persona-injected-bg);
+  border-color: var(--el-color-primary-light);
+}
+
+.persona__label {
+  margin: 0;
+  color: var(--el-text-primary);
+  font-size: var(--el-font-size-small);
+  font-weight: 600;
+}
+
+.persona__sublabel {
+  margin: 4px 0 0;
+  color: var(--el-text-secondary);
+  font-size: var(--el-font-size-mini);
+  font-weight: 600;
+}
+
+.persona__note {
+  color: var(--el-text-secondary);
+  font-size: var(--el-font-size-mini);
+  overflow-wrap: anywhere;
+}
+
+.persona__rows {
+  display: grid;
+  grid-template-columns: minmax(64px, max-content) minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 0;
+  font-size: var(--el-font-size-small);
+}
+
+.persona__key {
+  color: var(--el-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.persona__value {
+  margin: 0;
+  color: var(--el-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.persona__cards {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.persona__card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 6px 8px;
+  background: var(--persona-card-bg);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--el-radius-small);
+}
+
+.persona__card-label {
+  color: var(--el-color-primary);
+  font-size: var(--el-font-size-mini);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.persona__card-text {
+  color: var(--el-text-primary);
+  font-size: var(--el-font-size-small);
+  overflow-wrap: anywhere;
+}
+
+.persona__card-scores {
+  color: var(--el-text-secondary);
+  font-size: var(--el-font-size-mini);
+  overflow-wrap: anywhere;
+}
+
+.persona__memories {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--el-text-primary);
+  font-size: var(--el-font-size-small);
+}
+
+.persona__memory {
+  overflow-wrap: anywhere;
 }
 
 /* lists */
@@ -992,6 +1144,19 @@ p {
 
   .event-detail {
     max-height: 360px;
+  }
+
+  #persona-view {
+    max-height: 360px;
+  }
+
+  .persona__rows {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px 0;
+  }
+
+  .persona__key {
+    padding-top: 4px;
   }
 
   .toolbar__actions .button {

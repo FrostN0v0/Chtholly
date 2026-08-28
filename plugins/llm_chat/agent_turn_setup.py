@@ -220,6 +220,33 @@ async def prepare_agent_turn(
         user_name=user_name,
         fresh_context=fresh_context,
     )
+    agent_events.record_persona_state(
+        {
+            "relation": {
+                "affection": round(relation.affection, 3),
+                "trust": round(relation.trust, 3),
+                "dependence": round(relation.dependence, 3),
+                "resentment": round(relation.resentment, 3),
+                "familiarity": round(relation.familiarity, 3),
+                "impression": relation.impression,
+                "eval_counter": relation.eval_counter,
+            },
+            "state": {
+                "mood": round(mood, 3),
+                "energy": round(energy_at(datetime.now().hour), 3),
+                "pending_eval": pending_eval,
+            },
+            "memory": memory_context.retrieval,
+            "prompt_profile": memory_context.chat_profile,
+            "prompt_memories": list(memory_context.relevant_memories),
+            "budgets": {
+                "max_input_tokens": config.max_input_tokens,
+                "output_reserve_tokens": config.output_reserve_tokens,
+                "estimated_tokens": selection.estimated_tokens,
+                "full_session_tokens": selection.full_session_tokens,
+            },
+        }
+    )
     agent_events.append(
         "context_selection",
         payload={
@@ -230,6 +257,7 @@ async def prepare_agent_turn(
         },
         model_visible=False,
     )
+    await _flush_started_events(agent_turn.id, agent_events, warn)
     lifecycle = ActiveChatTurn(
         channel_id=channel_id,
         user_message_id=user_message_id,
@@ -265,6 +293,24 @@ async def prepare_agent_turn(
             allow_context_pin=requests_context_pin(model_text),
         ),
     )
+
+
+async def _flush_started_events(
+    turn_id: int,
+    recorder: AgentTurnRecorder,
+    warn: WarningSink,
+) -> None:
+    """Persist turn-start evidence immediately so running turns are inspectable."""
+
+    pending = recorder.pending_events()
+    if not pending:
+        return
+    try:
+        await persist_agent_events(turn_id, pending)
+    except Exception as exc:
+        warn(f"agent turn start persistence failed: {type(exc).__name__}")
+        return
+    recorder.mark_flushed(len(pending))
 
 
 async def _handoff(config: LLMChatConfig, context_session, channel_id: str) -> str:

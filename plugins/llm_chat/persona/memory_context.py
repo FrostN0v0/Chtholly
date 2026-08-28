@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import field, dataclass
 
 from entari_plugin_database import select, get_session
 
 from ..models import UserMemory, UserProfileFact
 from .embedding import embed_text
 from .config_types import LLMChatConfigLike
-from ..core.profile import decode_embedding
+from ..core.profile import decode_embedding, cosine_similarity
 from ..core.memory_policy import (
     MemoryCandidate,
     ProfileFactData,
@@ -27,6 +27,7 @@ class MemoryContext:
     chat_profile: dict[str, list[str]]
     evaluator_profile_facts: list[ProfileFactData]
     relevant_memories: list[str]
+    retrieval: dict[str, object] = field(default_factory=dict)
 
 
 async def load_memory_context(
@@ -41,6 +42,7 @@ async def load_memory_context(
             chat_profile={},
             evaluator_profile_facts=[],
             relevant_memories=[],
+            retrieval={"enabled": False},
         )
 
     async with get_session() as session:
@@ -143,4 +145,50 @@ async def load_memory_context(
         chat_profile=chat_profile,
         evaluator_profile_facts=evaluator_profile_facts,
         relevant_memories=[normalize_prompt_text(memory.text) for memory in selected_memories],
+        retrieval={
+            "enabled": True,
+            "query_embedded": query_embedding is not None,
+            "stored_profile_facts": len(profile_rows),
+            "stored_memories": len(memory_rows),
+            "profile_facts": [
+                {
+                    "category": fact.category,
+                    "key": fact.key,
+                    "value": normalize_prompt_text(fact.value),
+                    "confidence": round(fact.confidence, 4),
+                    "evidence_count": fact.evidence_count,
+                    "similarity": _similarity_score(query_embedding, fact.embedding),
+                }
+                for fact in chat_candidates
+            ],
+            "memories": [
+                {
+                    "text": normalize_prompt_text(memory.text),
+                    "importance": round(memory.importance, 4),
+                    "similarity": _similarity_score(query_embedding, memory.embedding),
+                }
+                for memory in selected_memories
+            ],
+            "thresholds": {
+                "min_similarity": config.memory_min_similarity,
+                "min_importance": config.memory_min_importance,
+                "dedup_similarity": config.memory_prompt_dedup_similarity,
+                "profile_fact_min_confidence": config.profile_fact_min_confidence,
+                "top_profile_facts": config.memory_top_profile_facts,
+                "top_memories": config.memory_top_memories,
+            },
+        },
     )
+
+
+def _similarity_score(
+    query_embedding: list[float] | None,
+    embedding: list[float] | None,
+) -> float | None:
+    """Return the query similarity actually used for retrieval, when computable."""
+
+    if query_embedding is None or embedding is None or not query_embedding:
+        return None
+    if len(query_embedding) != len(embedding):
+        return None
+    return round(cosine_similarity(query_embedding, embedding), 4)

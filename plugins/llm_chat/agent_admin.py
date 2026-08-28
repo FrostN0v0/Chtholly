@@ -21,6 +21,7 @@ from .session_manager import (
     create_session,
     get_scope_by_ref,
     rollover_session,
+    clean_channel_name,
     get_session_by_ref,
     load_scope_anchors,
     list_scope_sessions,
@@ -270,9 +271,9 @@ class AgentAdminService:
 
     @staticmethod
     def _channel_name(scope: ChatScope) -> str:
-        """Return the resolved channel name, never the raw platform ID."""
+        """Return the sanitized channel name, never the raw platform ID."""
 
-        name = scope.display_name.strip()
+        name = clean_channel_name(scope.display_name)
         return "" if name == scope.channel_id.strip() else name
 
     @staticmethod

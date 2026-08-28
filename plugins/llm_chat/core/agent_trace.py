@@ -36,6 +36,7 @@ class AgentTurnRecorder:
     events: list[AgentEventDraft] = field(default_factory=list)
     _next_sequence: int = field(default=0, init=False)
     _attempt: int = field(default=0, init=False)
+    _flushed: int = field(default=0, init=False)
 
     @property
     def attempt(self) -> int:
@@ -93,6 +94,11 @@ class AgentTurnRecorder:
             payload={"content": content, "speaker": user_name, "fresh_context": fresh_context},
         )
 
+    def record_persona_state(self, payload: Mapping[str, object]) -> AgentEventDraft:
+        """Record the persona, relationship, and memory inputs that shaped this turn."""
+
+        return self.append("persona_state", payload=payload, model_visible=False)
+
     def record_model_attempt(
         self,
         *,
@@ -123,8 +129,11 @@ class AgentTurnRecorder:
         )
 
     def record_tool_events(self, events: Sequence[ToolTraceEvent]) -> None:
+        floor = self._earliest_tool_time()
         for event in sorted(events, key=lambda item: item.sequence):
             started_at = event.started_at.replace(tzinfo=None)
+            if floor is not None and started_at < floor:
+                started_at = floor
             self.append(
                 "assistant_tool_call",
                 attempt=event.attempt,
@@ -163,10 +172,27 @@ class AgentTurnRecorder:
             )
         self._resequence_chronologically()
 
+    def pending_events(self) -> tuple[AgentEventDraft, ...]:
+        """Return events recorded since the last flush watermark."""
+
+        return tuple(self.events[self._flushed :])
+
+    def mark_flushed(self, count: int) -> None:
+        """Freeze sequences for events already written to durable storage."""
+
+        self._flushed = min(len(self.events), max(self._flushed, self._flushed + max(0, count)))
+
     def _resequence_chronologically(self) -> None:
-        ordered = sorted(self.events, key=lambda event: (event.created_at, event.sequence))
-        self.events = [replace(event, sequence=index) for index, event in enumerate(ordered, start=1)]
+        frozen = self.events[: self._flushed]
+        ordered = sorted(self.events[self._flushed :], key=lambda event: (event.created_at, event.sequence))
+        renumbered = [replace(event, sequence=index) for index, event in enumerate(ordered, start=self._flushed + 1)]
+        self.events = frozen + renumbered
         self._next_sequence = len(self.events)
+
+    def _earliest_tool_time(self) -> datetime | None:
+        """Return the floor that keeps tool events after already-recorded turn events."""
+
+        return max((event.created_at for event in self.events), default=None)
 
     def record_assistant_output(self, content: str, *, status: str = "confirmed") -> None:
         if content:

@@ -9,7 +9,23 @@ const EVENT_TYPE_LABELS = {
   tool_result: "工具结果",
   model_attempt: "模型调用",
   context_selection: "上下文选择",
+  persona_state: "人格与记忆",
 };
+
+const PERSONA_ROW_GROUPS = [
+  ["relation", "关系轴"],
+  ["state", "当前状态"],
+  ["budgets", "Token 预算"],
+  ["retrieval", "检索概况"],
+  ["thresholds", "阈值"],
+];
+
+const PERSONA_CARD_GROUPS = [
+  ["profile_facts", "画像事实", "检索到的画像事实，尚未必然进入 prompt。"],
+  ["memories", "命中记忆", "检索命中的长期记忆，尚未必然进入 prompt。"],
+];
+
+const TURN_POLL_INTERVAL_MS = 3000;
 
 const STATUS_LABELS = {
   active: "进行中",
@@ -24,6 +40,7 @@ const STATUS_LABELS = {
   rejected: "已拒绝",
   completed: "已完成",
   recorded: "已记录",
+  running: "生成中",
   none: "无副作用",
 };
 
@@ -39,6 +56,7 @@ const TAG_VARIANTS = {
   sealed: "warning",
   requested: "primary",
   closed: "primary",
+  running: "primary",
 };
 
 const REASON_LABELS = {
@@ -87,6 +105,9 @@ const state = {
   payloadPath: "",
   payloadOffset: 0,
   payloadNextOffset: null,
+  pollTimer: null,
+  pollTurnRef: "",
+  pollBusy: false,
   confirmAction: null,
 };
 
@@ -106,6 +127,8 @@ const elements = {
   eventList: document.querySelector("#event-list"),
   eventDetail: document.querySelector("#event-detail"),
   contextOutput: document.querySelector("#context-output"),
+  personaOutput: document.querySelector("#persona-output"),
+  autoRefresh: document.querySelector("#auto-refresh"),
   payloadDialog: document.querySelector("#payload-dialog"),
   payloadTitle: document.querySelector("#payload-title"),
   payloadPath: document.querySelector("#payload-path"),
@@ -207,15 +230,26 @@ function tag(value, variant = "") {
   return createElement("span", kind ? `tag tag--${kind}` : "tag", statusLabel(value));
 }
 
+function scopeName(scope) {
+  const raw = String(scope?.channel_name || scope?.display_name || "");
+  const id = String(scope?.channel_id || "");
+  const cleaned = Array.from(raw.replace(/\s/g, " "))
+    .filter((character) => character >= " " && character !== "\u007f")
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned === id ? "" : cleaned;
+}
+
 function scopeTitle(scope) {
   if (!scope) return "尚未选择聊天范围";
-  const name = String(scope.channel_name || scope.display_name || "").trim();
+  const name = scopeName(scope);
   return name ? `${name}（${scope.channel_id}）` : String(scope.channel_id || "未命名频道");
 }
 
 function scopeOptionLabel(scope) {
-  const name = String(scope.channel_name || scope.display_name || "").trim() || "未命名频道";
-  return `${name}（${scope.channel_id}）`;
+  const name = scopeName(scope);
+  return name ? `${name}（${scope.channel_id}）` : String(scope.channel_id || "未命名频道");
 }
 
 function itemRow(title, status) {
@@ -285,6 +319,7 @@ async function loadSessions(preferredRef = "") {
   if (selected) {
     await selectSession(selected);
   } else {
+    stopTurnPolling();
     state.session = null;
     state.sessionDetail = null;
     state.turns = [];
@@ -294,6 +329,7 @@ async function loadSessions(preferredRef = "") {
     renderTurns();
     renderEvents();
     renderEventDetail();
+    renderPersona();
   }
   renderScope();
 }
@@ -315,6 +351,7 @@ function renderSessions() {
 }
 
 async function selectSession(session) {
+  stopTurnPolling();
   state.session = session;
   state.turn = null;
   state.events = [];
@@ -331,6 +368,7 @@ async function selectSession(session) {
   renderTurns();
   renderEvents();
   renderEventDetail();
+  renderPersona();
   if (state.turns.length) await selectTurn(state.turns[state.turns.length - 1]);
 }
 
@@ -374,16 +412,26 @@ async function unpinAnchor(item) {
   await selectSession(state.session);
 }
 
+function isRunningTurn(turn) {
+  return String(turn?.status ?? "").toLowerCase() === "running";
+}
+
 function renderTurns() {
   elements.turnCount.textContent = String(state.turns.length);
   clearNode(elements.turnList, state.turns.length ? "" : "暂无轮次");
   for (const turn of state.turns) {
+    const running = isRunningTurn(turn);
     const button = createElement("button", "list-item list-item--turn");
     button.type = "button";
     if (state.turn?.turn_ref === turn.turn_ref) button.classList.add("is-active");
+    if (running) button.classList.add("is-running");
     button.append(
       itemRow(`#${turn.sequence} · ${turn.user_name || turn.user_id}`, turn.status),
-      createElement("div", "list-item__text", turn.final_text || "无确认文本输出"),
+      createElement(
+        "div",
+        running && !turn.final_text ? "list-item__text list-item__text--pending" : "list-item__text",
+        turn.final_text || (running ? "生成中…" : "无确认文本输出"),
+      ),
       metaRow([formatDate(turn.created_at), turn.fresh_context ? "本轮忽略前文" : "继承会话上下文"]),
     );
     button.addEventListener("click", () => selectTurn(turn).catch(showError));
@@ -392,6 +440,7 @@ function renderTurns() {
 }
 
 async function selectTurn(turn) {
+  stopTurnPolling();
   state.turn = turn;
   state.event = null;
   renderTurns();
@@ -401,9 +450,171 @@ async function selectTurn(turn) {
   ]);
   state.events = eventsPayload.items || [];
   renderEvents();
+  renderPersona();
   elements.contextOutput.textContent = JSON.stringify(contextPayload.item, null, 2);
   if (state.events.length) selectEvent(state.events[0]);
   else renderEventDetail();
+  if (isRunningTurn(turn)) startTurnPolling(turn);
+}
+
+function setAutoRefresh(active) {
+  elements.autoRefresh.classList.toggle("is-hidden", !active);
+}
+
+function stopTurnPolling() {
+  if (state.pollTimer !== null) {
+    window.clearInterval(state.pollTimer);
+    state.pollTimer = null;
+  }
+  state.pollTurnRef = "";
+  state.pollBusy = false;
+  setAutoRefresh(false);
+}
+
+function startTurnPolling(turn) {
+  stopTurnPolling();
+  state.pollTurnRef = turn.turn_ref;
+  setAutoRefresh(true);
+  state.pollTimer = window.setInterval(() => {
+    pollRunningTurn().catch(() => stopTurnPolling());
+  }, TURN_POLL_INTERVAL_MS);
+}
+
+async function pollRunningTurn() {
+  const turnRef = state.pollTurnRef;
+  if (!turnRef || state.pollBusy) return;
+  if (!state.turn || state.turn.turn_ref !== turnRef) {
+    stopTurnPolling();
+    return;
+  }
+  state.pollBusy = true;
+  try {
+    const [eventsPayload, turnsPayload] = await Promise.all([
+      request(`/turns/${encodeURIComponent(turnRef)}/events`),
+      state.session
+        ? request(`/sessions/${encodeURIComponent(state.session.session_ref)}/turns?limit=1000`)
+        : Promise.resolve(null),
+    ]);
+    if (state.pollTurnRef !== turnRef || state.turn?.turn_ref !== turnRef) return;
+    const items = eventsPayload.items || [];
+    if (items.length) {
+      state.events = items;
+      const pinned = state.event
+        && items.find((item) => item.event_ref === state.event.event_ref);
+      state.event = pinned || items[0];
+      renderEvents();
+      renderEventDetail();
+      renderPersona();
+    }
+    const fresh = turnsPayload
+      && (turnsPayload.items || []).find((item) => item.turn_ref === turnRef);
+    if (fresh) {
+      state.turns = turnsPayload.items || [];
+      state.turn = fresh;
+      renderTurns();
+      if (!isRunningTurn(fresh)) {
+        stopTurnPolling();
+        setStatus("本轮已完成", "success");
+      }
+    }
+  } finally {
+    state.pollBusy = false;
+  }
+}
+
+function personaState() {
+  const event = state.events.find((item) => item.event_type === "persona_state");
+  return event?.persona || null;
+}
+
+function personaRows(rows) {
+  const list = createElement("dl", "persona__rows");
+  for (const row of rows) {
+    list.append(
+      createElement("dt", "persona__key", String(row.label ?? "")),
+      createElement("dd", "persona__value", String(row.value ?? "")),
+    );
+  }
+  return list;
+}
+
+function personaCards(items) {
+  const list = createElement("div", "persona__cards");
+  for (const item of items) {
+    const card = createElement("article", "persona__card");
+    const label = String(item.label ?? "");
+    if (label) card.append(createElement("span", "persona__card-label", label));
+    card.append(createElement("p", "persona__card-text", String(item.text ?? "")));
+    const scores = String(item.scores ?? "");
+    if (scores) card.append(createElement("p", "persona__card-scores", scores));
+    list.append(card);
+  }
+  return list;
+}
+
+function personaGroup(title, note = "") {
+  const group = createElement("section", "persona__group");
+  group.append(createElement("h3", "persona__label", title));
+  if (note) group.append(createElement("p", "persona__note", note));
+  return group;
+}
+
+function renderPersona() {
+  const container = elements.personaOutput;
+  clearNode(container);
+  if (!state.turn) {
+    container.classList.add("is-empty");
+    container.textContent = "请选择一个轮次。";
+    return;
+  }
+  const persona = personaState();
+  if (!persona) {
+    container.classList.add("is-empty");
+    container.textContent = "本轮没有记录人格与记忆快照";
+    return;
+  }
+  container.classList.remove("is-empty");
+
+  for (const [key, title] of PERSONA_ROW_GROUPS) {
+    const rows = Array.isArray(persona[key]) ? persona[key] : [];
+    if (!rows.length) continue;
+    const group = personaGroup(title);
+    group.append(personaRows(rows));
+    container.append(group);
+  }
+
+  for (const [key, title, note] of PERSONA_CARD_GROUPS) {
+    const items = Array.isArray(persona[key]) ? persona[key] : [];
+    if (!items.length) continue;
+    const group = personaGroup(title, note);
+    group.append(personaCards(items));
+    container.append(group);
+  }
+
+  const injectedProfile = Array.isArray(persona.injected_profile) ? persona.injected_profile : [];
+  const injectedMemories = Array.isArray(persona.injected_memories) ? persona.injected_memories : [];
+  if (injectedProfile.length || injectedMemories.length) {
+    const group = personaGroup("实际注入 prompt", "以下内容真正进入了本轮 prompt。");
+    group.classList.add("persona__group--injected");
+    if (injectedProfile.length) {
+      group.append(createElement("h4", "persona__sublabel", "注入画像"));
+      group.append(personaCards(injectedProfile));
+    }
+    if (injectedMemories.length) {
+      group.append(createElement("h4", "persona__sublabel", "注入记忆"));
+      const list = createElement("ul", "persona__memories");
+      for (const memory of injectedMemories) {
+        list.append(createElement("li", "persona__memory", String(memory ?? "")));
+      }
+      group.append(list);
+    }
+    container.append(group);
+  }
+
+  if (!container.childElementCount) {
+    container.classList.add("is-empty");
+    container.textContent = "本轮没有记录人格与记忆快照";
+  }
 }
 
 function eventTitle(event) {
@@ -652,10 +863,19 @@ for (const button of document.querySelectorAll(".tab")) {
 }
 
 elements.scopeSelect.addEventListener("change", () => {
+  stopTurnPolling();
   state.scope = state.scopes.find((item) => item.scope_ref === elements.scopeSelect.value) || null;
   state.session = null;
   renderScope();
   loadSessions().catch(showError);
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopTurnPolling();
+  } else if (isRunningTurn(state.turn)) {
+    startTurnPolling(state.turn);
+  }
 });
 
 elements.refresh.addEventListener("click", () => loadScopes(state.scope?.scope_ref || "").catch(showError));

@@ -46,7 +46,7 @@ def scope_identity(session: Session) -> ScopeIdentity:
     platform = str(session.account.platform)
     account_id = str(session.account.self_id)
     channel_id = str(channel.id)
-    local_name = _clean_name(getattr(channel, "name", None)) or _clean_name(getattr(guild, "name", None))
+    local_name = clean_channel_name(getattr(channel, "name", None)) or clean_channel_name(getattr(guild, "name", None))
     cached = _DISPLAY_NAME_CACHE.get((platform, account_id, channel_id), "")
     return ScopeIdentity(
         platform=platform,
@@ -81,20 +81,26 @@ async def resolve_scope_identity(session: Session, *, now: datetime | None = Non
 
 async def _lookup_channel_name(session: Session, channel_id: str) -> str:
     try:
-        return _clean_name(getattr(await session.channel_get(channel_id), "name", None))
+        return clean_channel_name(getattr(await session.channel_get(channel_id), "name", None))
     except Exception:
         return ""
 
 
 async def _lookup_guild_name(session: Session, guild_id: str) -> str:
     try:
-        return _clean_name(getattr(await session.guild_get(guild_id), "name", None))
+        return clean_channel_name(getattr(await session.guild_get(guild_id), "name", None))
     except Exception:
         return ""
 
 
-def _clean_name(value: object) -> str:
-    return str(value).strip() if isinstance(value, str) else ""
+def clean_channel_name(value: object) -> str:
+    """Return one display-safe channel name without control characters or padding."""
+
+    if not isinstance(value, str):
+        return ""
+    separated = "".join(" " if character.isspace() else character for character in value)
+    printable = "".join(character for character in separated if character.isprintable())
+    return " ".join(printable.split())
 
 
 def _fingerprint_matches(session: ContextSession, baseline: BaselineFingerprint) -> bool:

@@ -7,7 +7,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 from hashlib import sha256
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import select
@@ -43,6 +44,7 @@ from plugins.llm_chat.models import (
     MigrationState,
 )
 from plugins.llm_chat.identity import ChatIdentity
+from plugins.llm_chat.agent_admin import AgentAdminService
 from plugins.llm_chat.agent_events import load_event_payload
 from plugins.llm_chat.agent_context import AgentAccessContext
 from plugins.llm_chat.core.tool_trace import ToolTraceRecorder
@@ -549,7 +551,29 @@ async def test_prepare_agent_turn_wires_session_context_and_persistence(
         return 0.25
 
     async def memory(*_args: object) -> MemoryContext:
-        return MemoryContext(chat_profile={}, evaluator_profile_facts=[], relevant_memories=[])
+        return MemoryContext(
+            chat_profile={"preferences": ["偏好简洁回答"]},
+            evaluator_profile_facts=[],
+            relevant_memories=["上次部署回滚点在 /var/lib"],
+            retrieval={
+                "enabled": True,
+                "query_embedded": True,
+                "stored_profile_facts": 12,
+                "stored_memories": 40,
+                "profile_facts": [
+                    {
+                        "category": "preferences",
+                        "key": "reply_style",
+                        "value": "偏好简洁回答",
+                        "confidence": 0.82,
+                        "evidence_count": 4,
+                        "similarity": 0.6123,
+                    }
+                ],
+                "memories": [{"text": "上次部署回滚点在 /var/lib", "importance": 0.75, "similarity": 0.5412}],
+                "thresholds": {"min_similarity": 0.35, "min_importance": 0.6},
+            },
+        )
 
     async def history(*_args: object) -> list[Conversation]:
         return []
@@ -595,21 +619,52 @@ async def test_prepare_agent_turn_wires_session_context_and_persistence(
     assert prepared.agent_access.scope_id > 0
     assert prepared.lifecycle.agent_turn_id is not None
 
+    async def stored_events() -> list[AgentEvent]:
+        async with agent_store.session_factory() as db:
+            return list(
+                (
+                    await db.execute(
+                        select(AgentEvent)
+                        .where(AgentEvent.turn_id == prepared.lifecycle.agent_turn_id)
+                        .order_by(AgentEvent.sequence)
+                    )
+                ).scalars()
+            )
+
+    started = await stored_events()
+    assert [event.event_type for event in started] == [
+        "user_input",
+        "persona_state",
+        "context_selection",
+    ]
+    assert [event.sequence for event in started] == [1, 2, 3]
+
+    persona_payload = load_event_payload(started[1])
+    assert cast(dict[str, Any], persona_payload["relation"])["affection"] == 30.0
+    assert cast(dict[str, Any], persona_payload["state"])["mood"] == 0.25
+    assert cast(dict[str, Any], persona_payload["memory"])["stored_memories"] == 40
+    assert persona_payload["prompt_memories"] == ["上次部署回滚点在 /var/lib"]
+
+    persona_view = serialize_event_view(started[1], persona_payload)
+    assert persona_view["title"] == "人格与记忆"
+    persona = cast(dict[str, Any], persona_view["persona"])
+    assert {"label": "好感", "value": "30"} in cast(list[dict[str, str]], persona["relation"])
+    assert cast(list[dict[str, str]], persona["profile_facts"])[0]["scores"].startswith("相似度 0.6123")
+
+    prepared.lifecycle.agent_events.record_assistant_output("好的")
     await prepared.lifecycle.finalize_agent_turn("completed")
     async with agent_store.session_factory() as db:
         turn = await db.get(AgentTurn, prepared.lifecycle.agent_turn_id)
-        events = list(
-            (
-                await db.execute(
-                    select(AgentEvent)
-                    .where(AgentEvent.turn_id == prepared.lifecycle.agent_turn_id)
-                    .order_by(AgentEvent.sequence)
-                )
-            ).scalars()
-        )
+    finished = await stored_events()
     assert turn is not None
     assert turn.status == "completed"
-    assert [event.event_type for event in events] == ["user_input", "context_selection"]
+    assert [event.event_type for event in finished] == [
+        "user_input",
+        "persona_state",
+        "context_selection",
+        "assistant_output",
+    ]
+    assert [event.sequence for event in finished] == [1, 2, 3, 4]
 
 
 @pytest.mark.asyncio
@@ -791,3 +846,52 @@ async def test_scope_identity_resolves_channel_name_and_backs_off_on_failure(
         )
     )
     assert unnamed.display_name == ""
+
+    control_session = _Session()
+    control_session.channel = SimpleNamespace(id="1041124011", name="Asgard-RUST腐蚀\u0011\u0010\u007f  腐蚀\t侧")
+    control_session.guild = SimpleNamespace(id="", name="")
+    sanitized = await session_manager.resolve_scope_identity(cast(Session, control_session))
+    assert sanitized.display_name == "Asgard-RUST腐蚀 腐蚀 侧"
+
+    legacy = await session_manager.get_or_create_scope(
+        ScopeIdentity(
+            platform="legacy",
+            account_id="",
+            guild_id="",
+            channel_id="326466216",
+            display_name="326466216",
+        )
+    )
+    assert AgentAdminService._channel_name(legacy) == ""
+    assert session_manager.clean_channel_name("  群\u0007名  ") == "群名"
+    assert session_manager.clean_channel_name(None) == ""
+
+
+@pytest.mark.asyncio
+async def test_flushed_event_sequences_stay_frozen_against_earlier_tool_timestamps() -> None:
+    recorder = AgentTurnRecorder()
+    recorder.record_user_input("hi", user_name="Alice", fresh_context=False)
+    recorder.record_persona_state({"relation": {"affection": 30.0}})
+    started = recorder.pending_events()
+    assert [event.sequence for event in started] == [1, 2]
+
+    recorder.mark_flushed(len(started))
+    assert recorder.pending_events() == ()
+
+    trace = ToolTraceRecorder()
+    call = trace.start("send_text", {"text": "稍等"})
+    trace.finish_success(
+        call,
+        "已发送 1 条文本消息",
+        before=DeliverySnapshot(active=True),
+        after=DeliverySnapshot(active=True, attempts=1, confirmed=1),
+    )
+    stale = replace(trace.events[0], started_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    recorder.record_tool_events([stale])
+
+    assert [event.sequence for event in recorder.events[:2]] == [1, 2]
+    assert [event.event_type for event in recorder.events[:2]] == ["user_input", "persona_state"]
+    pending = recorder.pending_events()
+    assert [event.event_type for event in pending] == ["assistant_tool_call", "tool_result"]
+    assert [event.sequence for event in pending] == [3, 4]
+    assert all(event.created_at >= recorder.events[1].created_at for event in pending)

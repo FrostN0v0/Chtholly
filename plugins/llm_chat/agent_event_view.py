@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import cast
 from urllib.parse import quote
 from collections.abc import Mapping, Sequence
 
@@ -23,43 +24,82 @@ EVENT_TITLES = {
     "tool_result": "工具结果",
     "assistant_output": "最终回复",
     "context_selection": "上下文选择",
+    "persona_state": "人格与记忆",
 }
 _FIELD_LABELS = {
+    "affection": "好感",
     "attempt": "尝试",
     "avoid_when": "避免场景",
+    "budgets": "预算",
+    "category": "类别",
     "chars": "字符数",
     "command": "命令",
+    "confidence": "置信度",
     "content": "内容",
     "context": "检索语境",
+    "dedup_similarity": "去重相似度",
     "delay_seconds": "间隔秒数",
+    "dependence": "依赖",
+    "enabled": "已启用",
+    "energy": "精力",
     "error": "错误",
     "error_code": "错误码",
     "estimated_tokens": "估算 Token",
+    "eval_counter": "评估计数",
+    "evidence_count": "证据条数",
     "excerpt": "摘要",
+    "familiarity": "熟悉度",
     "focus": "关注点",
     "fresh_context": "忽略前文",
     "full_session_tokens": "会话 Token",
     "image_paths": "图片路径",
     "images": "图片",
+    "importance": "重要度",
+    "impression": "印象",
+    "key": "字段",
     "limit": "数量上限",
     "markdown": "Markdown",
+    "max_input_tokens": "输入上限",
     "meaning": "含义",
+    "memories": "命中记忆",
+    "memory": "记忆检索",
     "messages": "消息",
+    "min_importance": "最低重要度",
+    "min_similarity": "最低相似度",
     "model": "模型",
+    "mood": "心情",
+    "output_reserve_tokens": "输出预留",
     "path": "路径",
+    "pending_eval": "本轮将评估",
+    "profile_fact_min_confidence": "画像最低置信度",
+    "profile_facts": "画像事实",
     "prompt": "提示词",
+    "prompt_memories": "注入记忆",
+    "prompt_profile": "注入画像",
     "query": "查询",
+    "query_embedded": "查询已向量化",
+    "relation": "关系轴",
+    "resentment": "怨念",
     "result_count": "结果数",
     "returned_count": "返回条数",
     "selection_mode": "选择方式",
+    "similarity": "相似度",
     "size": "尺寸",
     "sources": "来源",
     "speaker": "发言人",
+    "state": "当前状态",
+    "stored_memories": "库存记忆数",
+    "stored_profile_facts": "库存画像数",
     "summary": "结果摘要",
     "text": "文本",
     "text_chars": "文本字符数",
+    "thresholds": "阈值",
     "timezone": "时区",
+    "top_memories": "记忆取数",
+    "top_profile_facts": "画像取数",
+    "trust": "信任",
     "url": "链接",
+    "value": "内容",
     "width": "宽度",
 }
 _PREVIEW_KEYS = ("content", "text", "summary", "query", "prompt", "excerpt", "command", "context", "markdown")
@@ -224,6 +264,87 @@ def event_evidence(payload: Mapping[str, JSONType]) -> dict[str, JSONType] | Non
     return normalized or None
 
 
+def _rounded(value: object) -> str:
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, (int, float)):
+        return f"{value:g}"
+    return _scalar_text(value)
+
+
+def _labelled_rows(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, Mapping):
+        return []
+    rows: list[dict[str, str]] = []
+    for key, item in value.items():
+        rendered = _rounded(item) or _collection_text(item)
+        if rendered:
+            rows.append({"label": field_label(str(key)), "value": rendered})
+    return rows
+
+
+def _scored_items(value: object, *, text_key: str) -> list[dict[str, str]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    items: list[dict[str, str]] = []
+    for entry in value[:_MAX_EVIDENCE_IMAGES]:
+        if not isinstance(entry, Mapping):
+            continue
+        text = _scalar_text(entry.get(text_key), 300)
+        if not text:
+            continue
+        scores = [
+            f"{field_label(name)} {_rounded(entry[name])}"
+            for name in ("similarity", "confidence", "importance", "evidence_count")
+            if name in entry and _rounded(entry[name])
+        ]
+        label = _scalar_text(entry.get("category")) or _scalar_text(entry.get("key"))
+        items.append({"label": label, "text": text, "scores": "，".join(scores)})
+    return items
+
+
+def event_persona(event: AgentEvent, payload: Mapping[str, JSONType]) -> dict[str, JSONType] | None:
+    """Project the persona, relationship, and memory inputs that shaped one turn."""
+
+    if event.event_type != "persona_state" or not payload:
+        return None
+    memory = payload.get("memory")
+    memory_map = memory if isinstance(memory, Mapping) else {}
+    profile = payload.get("prompt_profile")
+    raw_memories = payload.get("prompt_memories")
+    injected_memories = (
+        raw_memories if isinstance(raw_memories, Sequence) and not isinstance(raw_memories, (str, bytes)) else ()
+    )
+    injected_profile = [
+        {"label": field_label(str(category)), "text": "，".join(str(item) for item in values)}
+        for category, values in (profile.items() if isinstance(profile, Mapping) else ())
+        if isinstance(values, Sequence) and not isinstance(values, (str, bytes)) and values
+    ]
+    return {
+        "relation": cast(JSONType, _labelled_rows(payload.get("relation"))),
+        "state": cast(JSONType, _labelled_rows(payload.get("state"))),
+        "budgets": cast(JSONType, _labelled_rows(payload.get("budgets"))),
+        "thresholds": cast(JSONType, _labelled_rows(memory_map.get("thresholds"))),
+        "retrieval": cast(
+            JSONType,
+            _labelled_rows(
+                {
+                    key: memory_map[key]
+                    for key in ("enabled", "query_embedded", "stored_profile_facts", "stored_memories")
+                    if key in memory_map
+                }
+            ),
+        ),
+        "profile_facts": cast(JSONType, _scored_items(memory_map.get("profile_facts"), text_key="value")),
+        "memories": cast(JSONType, _scored_items(memory_map.get("memories"), text_key="text")),
+        "injected_profile": cast(JSONType, injected_profile),
+        "injected_memories": cast(
+            JSONType,
+            [text for item in injected_memories if (text := _scalar_text(item, 300))],
+        ),
+    }
+
+
 def serialize_event_view(event: AgentEvent, payload: Mapping[str, JSONType]) -> dict[str, object]:
     """Build the WebUI presentation fields for one durable event."""
 
@@ -234,5 +355,6 @@ def serialize_event_view(event: AgentEvent, payload: Mapping[str, JSONType]) -> 
         "arguments": _payload_section(payload, "arguments"),
         "result": _payload_section(payload, "result"),
         "evidence": event_evidence(payload),
+        "persona": event_persona(event, payload),
         "payload_chars": len(event.payload_json or ""),
     }
