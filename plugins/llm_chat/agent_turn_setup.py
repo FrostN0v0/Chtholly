@@ -32,6 +32,16 @@ from .context_builder import (
     requests_archived_context,
     build_baseline_fingerprint,
 )
+from .core.engagement import (
+    EngagementBudget,
+    EngagementSignals,
+    EngagementDecision,
+    decide_engagement,
+    engagement_budget,
+    apply_engagement_budget,
+    engagement_event_payload,
+    engagement_prompt_context,
+)
 from .session_handoff import generate_session_handoff
 from .session_manager import (
     start_turn,
@@ -43,6 +53,7 @@ from .session_manager import (
     resolve_scope_identity,
 )
 from .core.agent_trace import AgentTurnRecorder
+from .engagement_state import collect_engagement_signals
 from .core.media_delivery import latest_user_requests_media, latest_user_requests_image_generation
 from .core.self_reference import append_self_reference_image
 from .persona.memory_context import MemoryContext, load_memory_context
@@ -65,6 +76,9 @@ class PreparedAgentTurn:
     lifecycle: ActiveChatTurn
     agent_events: AgentTurnRecorder
     agent_access: AgentAccessContext
+    engagement: EngagementDecision
+    engagement_budget: EngagementBudget
+    engagement_signals: EngagementSignals
 
 
 async def prepare_agent_turn(
@@ -80,6 +94,8 @@ async def prepare_agent_turn(
     forwarded_messages: Sequence[ForwardedMessage],
     warn: WarningSink,
     tool_schemas: Sequence[Mapping[str, object]],
+    requires_media_reply: bool = False,
+    is_operator: bool = False,
 ) -> PreparedAgentTurn:
     channel_id = session.channel.id
     user_id = identity.user_id
@@ -122,6 +138,21 @@ async def prepare_agent_turn(
         config.delivery_max_total_text_chars_per_generation,
         config.delivery_max_media_messages_per_generation,
     )
+    signals = await collect_engagement_signals(
+        user_id=user_id,
+        channel_id=channel_id,
+        relation=relation,
+        user_mood=mood,
+        energy=energy_at(datetime.now().hour),
+        text=model_text,
+        is_command=False,
+        is_private=not str(getattr(getattr(session, "guild", None), "id", "") or ""),
+        is_operator=is_operator,
+        requires_media_reply=requires_media_reply,
+    )
+    engagement = decide_engagement(signals)
+    budget = engagement_budget(engagement.level, delivery_limits)
+    delivery_limits = apply_engagement_budget(delivery_limits, budget)
     delivery_state = DeliveryState(limits=delivery_limits)
     baseline = build_baseline_fingerprint(
         model_name=model_name or "default",
@@ -168,6 +199,7 @@ async def prepare_agent_turn(
             web_page_limit=web_limits.read_limit,
             web_total_limit=web_limits.total_limit,
             delivery_limits=delivery_limits,
+            engagement=engagement_prompt_context(engagement, budget),
         )
 
     system = compose_system()
@@ -248,6 +280,12 @@ async def prepare_agent_turn(
         }
     )
     agent_events.append(
+        "engagement_decision",
+        payload=engagement_event_payload(engagement, budget, signals),
+        status=engagement.level,
+        model_visible=False,
+    )
+    agent_events.append(
         "context_selection",
         payload={
             "estimated_tokens": selection.estimated_tokens,
@@ -283,6 +321,9 @@ async def prepare_agent_turn(
         channel_image_references=ChannelImageReferences(),
         lifecycle=lifecycle,
         agent_events=agent_events,
+        engagement=engagement,
+        engagement_budget=budget,
+        engagement_signals=signals,
         agent_access=AgentAccessContext(
             scope_id=scope.id,
             session_id=context_session.id,

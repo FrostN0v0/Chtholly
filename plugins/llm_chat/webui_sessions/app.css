@@ -613,6 +613,16 @@ p {
   justify-content: space-between;
 }
 
+.list-item__row--tags {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.list-item__row--tags .list-item__title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .list-item__title {
   color: var(--el-text-primary);
   font-weight: 600;
@@ -865,6 +875,53 @@ p {
 .fields__value {
   margin: 0;
   color: var(--el-text-primary);
+  overflow-wrap: anywhere;
+}
+
+/* engagement (reply intent) */
+
+.engagement__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.engagement__tone {
+  color: var(--el-text-regular);
+  font-size: var(--el-font-size-small);
+  overflow-wrap: anywhere;
+}
+
+.engagement__group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 6px 8px;
+  background: var(--el-fill-light);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--el-radius);
+}
+
+.engagement__sublabel {
+  margin: 0;
+  color: var(--el-text-secondary);
+  font-size: var(--el-font-size-mini);
+  font-weight: 600;
+}
+
+.engagement__reasons {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--el-text-primary);
+  font-size: var(--el-font-size-small);
+}
+
+.engagement__reason {
   overflow-wrap: anywhere;
 }
 
@@ -1156,6 +1213,15 @@ p {
   }
 
   .persona__key {
+    padding-top: 4px;
+  }
+
+  .engagement__group .fields {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px 0;
+  }
+
+  .engagement__group .fields__key {
     padding-top: 4px;
   }
 

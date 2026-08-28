@@ -97,6 +97,11 @@ from plugins.llm_chat.core.delivery import (
 from plugins.llm_chat.channel_images import ChannelImageReferences
 from plugins.llm_chat.persona.runner import run_evaluation
 from plugins.llm_chat.turn_lifecycle import ActiveChatTurn
+from plugins.llm_chat.core.engagement import (
+    EngagementSignals,
+    decide_engagement,
+    engagement_budget,
+)
 from plugins.llm_chat.core.tool_trace import ToolTraceRecorder, llm_chat_tool_trace_scope
 from plugins.llm_chat.runtime_context import copy_llm_chat_context, llm_chat_context_scope
 from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
@@ -289,6 +294,8 @@ def _install_handler_stubs(
         relations=[],
         deleted=[],
         history=[],
+        feedback=[],
+        declined=[],
     )
 
     async def no_image_notes(*_args: Any, **_kwargs: Any) -> list[str]:
@@ -344,6 +351,8 @@ def _install_handler_stubs(
         forwarded_messages: list[ForwardedMessage],
         tool_schemas: object,
         warn: Any,
+        requires_media_reply: bool = False,
+        is_operator: bool = False,
     ) -> SimpleNamespace:
         del model_name, supports_image_input
         relation = await module.get_relation(identity.user_id, session.channel.id)
@@ -390,6 +399,18 @@ def _install_handler_stubs(
             payload={"estimated_tokens": 100, "full_session_tokens": 100},
             model_visible=False,
         )
+        engagement_signals = EngagementSignals(
+            affection=relation.affection,
+            trust=relation.trust,
+            familiarity=relation.familiarity,
+            irritation=relation.resentment,
+            user_mood=mood,
+            text=model_text,
+            requires_media_reply=requires_media_reply,
+            is_operator=is_operator,
+        )
+        engagement_decision = decide_engagement(engagement_signals)
+        engagement_allowance = engagement_budget(engagement_decision.level, delivery_state.limits)
         lifecycle = ActiveChatTurn(
             channel_id=session.channel.id,
             user_message_id=user_message_id,
@@ -417,6 +438,9 @@ def _install_handler_stubs(
             channel_image_references=ChannelImageReferences(),
             lifecycle=lifecycle,
             agent_events=agent_events,
+            engagement=engagement_decision,
+            engagement_budget=engagement_allowance,
+            engagement_signals=engagement_signals,
             agent_access=AgentAccessContext(10, 20, 30, identity.user_id),
         )
 
@@ -441,6 +465,13 @@ def _install_handler_stubs(
             )
         records.relations.append(((kwargs["user_id"], kwargs["channel_id"]), {"eval_counter": counter}))
 
+    async def persist_feedback(**kwargs: Any) -> dict[str, float]:
+        records.feedback.append(kwargs)
+        return {"irritation": 0.0, "user_mood": 0.0, "familiarity": 0.0}
+
+    async def record_declined(channel_id: str, user_id: str, user_name: str) -> None:
+        records.declined.append((channel_id, user_id, user_name))
+
     monkeypatch.setattr(module, "get_model_config", lambda *_args: SimpleNamespace(name="test-model"))
     monkeypatch.setattr(module, "model_supports_image_input", lambda _model: False)
     monkeypatch.setattr(module, "build_image_notes", no_image_notes)
@@ -456,6 +487,8 @@ def _install_handler_stubs(
     monkeypatch.setattr(module, "delete_message", delete_message, raising=False)
     monkeypatch.setattr(module, "prepare_agent_turn", prepare_turn)
     monkeypatch.setattr(module, "update_chat_state_after_delivery", update_after_delivery)
+    monkeypatch.setattr(module, "persist_turn_feedback", persist_feedback, raising=False)
+    monkeypatch.setattr(module, "record_declined_turn", record_declined, raising=False)
     monkeypatch.setattr(ActiveChatTurn, "finalize_agent_turn", finalize_agent_turn)
     return records
 

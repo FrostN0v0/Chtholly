@@ -10,6 +10,28 @@ const EVENT_TYPE_LABELS = {
   model_attempt: "模型调用",
   context_selection: "上下文选择",
   persona_state: "人格与记忆",
+  engagement: "回应意向",
+};
+
+const ENGAGEMENT_LEVEL_LABELS = {
+  full: "完整回应",
+  brief: "简短回应",
+  reaction_only: "仅轻回应",
+  declined: "不回应",
+};
+
+const ENGAGEMENT_LEVEL_VARIANTS = {
+  full: "success",
+  brief: "",
+  reaction_only: "warning",
+  declined: "danger",
+};
+
+const ENGAGEMENT_WARMTH_LABELS = {
+  cold: "冷淡",
+  neutral: "平稳",
+  warm: "亲近",
+  close: "亲昵",
 };
 
 const PERSONA_ROW_GROUPS = [
@@ -90,6 +112,25 @@ const FIELD_LABELS = {
   speaker: "发言人",
   estimated_tokens: "预估 token",
   full_session_tokens: "会话总 token",
+  max_text_messages: "最多消息条数",
+  max_text_chars_per_message: "每条字数上限",
+  max_media_messages: "最多媒体条数",
+  allow_followup_question: "允许追问",
+  allow_topic_extension: "允许延伸话题",
+  allow_stickers: "允许表情包",
+  affection: "好感",
+  trust: "信任",
+  familiarity: "熟悉度",
+  irritation: "烦躁",
+  user_mood: "用户情绪",
+  energy: "精力",
+  consecutive_user_messages: "连续来消息数",
+  consecutive_declines: "连续未回应数",
+  seconds_since_last_reply: "距上次回复秒数",
+  is_command: "命令调用",
+  is_private: "私聊",
+  is_operator: "运维用户",
+  requires_media_reply: "需要媒体回复",
 };
 
 const state = {
@@ -216,6 +257,60 @@ function fieldLabel(value) {
   return FIELD_LABELS[key] || key;
 }
 
+function engagementOf(event) {
+  const engagement = event?.engagement;
+  if (!engagement || typeof engagement !== "object" || Array.isArray(engagement)) return null;
+  const filled = engagementLevelLabel(engagement)
+    || engagementWarmthLabel(engagement)
+    || String(engagement.tone ?? "").trim()
+    || engagement.obligated === true
+    || engagementList(engagement.reasons).length
+    || engagementRows(engagement.budget).length
+    || engagementRows(engagement.signals).length;
+  return filled ? engagement : null;
+}
+
+function engagementLevelLabel(engagement) {
+  const explicit = String(engagement?.level_label ?? "").trim();
+  if (explicit) return explicit;
+  const key = String(engagement?.level ?? "").trim().toLowerCase();
+  return ENGAGEMENT_LEVEL_LABELS[key] || key;
+}
+
+function engagementLevelVariant(engagement) {
+  const key = String(engagement?.level ?? "").trim().toLowerCase();
+  return ENGAGEMENT_LEVEL_VARIANTS[key] ?? "primary";
+}
+
+function engagementWarmthLabel(engagement) {
+  const explicit = String(engagement?.warmth_label ?? "").trim();
+  if (explicit) return explicit;
+  const key = String(engagement?.warmth ?? "").trim().toLowerCase();
+  return ENGAGEMENT_WARMTH_LABELS[key] || key;
+}
+
+function engagementValue(value) {
+  if (typeof value === "boolean") return value ? "是" : "否";
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "";
+  if (typeof value === "string") return value.trim();
+  return "";
+}
+
+function engagementList(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item ?? "").trim()).filter(Boolean);
+}
+
+function engagementRows(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const rows = [];
+  for (const [key, item] of Object.entries(value)) {
+    const rendered = engagementValue(item);
+    if (rendered) rows.push({ label: fieldLabel(key), value: rendered });
+  }
+  return rows;
+}
+
 function formatChars(value) {
   const count = Number(value);
   return Number.isFinite(count) ? `${count} 字符` : "";
@@ -228,6 +323,10 @@ function tagVariant(value) {
 function tag(value, variant = "") {
   const kind = variant || tagVariant(value);
   return createElement("span", kind ? `tag tag--${kind}` : "tag", statusLabel(value));
+}
+
+function textTag(text, variant = "") {
+  return createElement("span", variant ? `tag tag--${variant}` : "tag", text);
 }
 
 function scopeName(scope) {
@@ -635,7 +734,14 @@ function renderEvents() {
     const button = createElement("button", "list-item list-item--event");
     button.type = "button";
     if (state.event?.event_ref === event.event_ref) button.classList.add("is-active");
-    button.append(itemRow(`${event.sequence}. ${eventTitle(event)}`, event.status || event.effect || "recorded"));
+    const row = itemRow(`${event.sequence}. ${eventTitle(event)}`, event.status || event.effect || "recorded");
+    const engagement = engagementOf(event);
+    const levelLabel = engagement ? engagementLevelLabel(engagement) : "";
+    if (levelLabel) {
+      row.classList.add("list-item__row--tags");
+      row.append(textTag(levelLabel, engagementLevelVariant(engagement)));
+    }
+    button.append(row);
     const preview = truncate(previewText(event), 90);
     if (preview) button.append(createElement("div", "list-item__text", preview));
     button.append(metaRow([
@@ -657,6 +763,62 @@ function selectEvent(event) {
 function detailSection(title) {
   const section = createElement("section", "section");
   section.append(createElement("h3", "section__label", title));
+  return section;
+}
+
+function engagementRowList(rows) {
+  const list = createElement("dl", "fields");
+  for (const row of rows) {
+    list.append(
+      createElement("dt", "fields__key", row.label),
+      createElement("dd", "fields__value", row.value),
+    );
+  }
+  return list;
+}
+
+function engagementSubgroup(title, rows) {
+  const group = createElement("div", "engagement__group");
+  group.append(createElement("h4", "engagement__sublabel", title));
+  group.append(engagementRowList(rows));
+  return group;
+}
+
+function engagementDetail(event) {
+  const engagement = engagementOf(event);
+  if (!engagement) return null;
+
+  const section = detailSection("回应意向");
+
+  const header = createElement("div", "engagement__head");
+  const levelLabel = engagementLevelLabel(engagement);
+  if (levelLabel) header.append(textTag(levelLabel, engagementLevelVariant(engagement)));
+  const warmthLabel = engagementWarmthLabel(engagement);
+  if (warmthLabel) header.append(textTag(warmthLabel, "primary"));
+  if (engagement.obligated === true) header.append(textTag("必须响应", "warning"));
+  if (header.childElementCount) section.append(header);
+
+  const tone = String(engagement.tone ?? "").trim();
+  if (tone) section.append(createElement("p", "engagement__tone", tone));
+
+  const reasons = engagementList(engagement.reasons);
+  if (reasons.length) {
+    const group = createElement("div", "engagement__group");
+    group.append(createElement("h4", "engagement__sublabel", "判定原因"));
+    const list = createElement("ol", "engagement__reasons");
+    for (const reason of reasons) {
+      list.append(createElement("li", "engagement__reason", reason));
+    }
+    group.append(list);
+    section.append(group);
+  }
+
+  const budget = engagementRows(engagement.budget);
+  if (budget.length) section.append(engagementSubgroup("行为预算", budget));
+
+  const signals = engagementRows(engagement.signals);
+  if (signals.length) section.append(engagementSubgroup("判定信号", signals));
+
   return section;
 }
 
@@ -730,6 +892,9 @@ function renderEventDetail() {
     event.model_visible === false ? "模型不可见" : "",
     formatDate(event.created_at),
   ]));
+
+  const engagementSection = engagementDetail(event);
+  if (engagementSection) elements.eventDetail.append(engagementSection);
 
   const preview = previewText(event);
   if (preview) {

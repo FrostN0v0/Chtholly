@@ -30,6 +30,7 @@ from plugins.llm_chat import (
     session_handoff,
     session_manager,
     agent_turn_setup,
+    engagement_state,
 )
 from plugins.llm_chat.core import tool_trace
 from plugins.llm_chat.config import LLMChatConfig
@@ -61,7 +62,7 @@ async def agent_store(monkeypatch: pytest.MonkeyPatch):
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
-    for module in (agent_events, agent_migration, agent_query, session_manager):
+    for module in (agent_events, agent_migration, agent_query, session_manager, engagement_state):
         monkeypatch.setattr(module, "get_session", session_factory)
     try:
         yield SimpleNamespace(engine=engine, session_factory=session_factory)
@@ -635,9 +636,10 @@ async def test_prepare_agent_turn_wires_session_context_and_persistence(
     assert [event.event_type for event in started] == [
         "user_input",
         "persona_state",
+        "engagement_decision",
         "context_selection",
     ]
-    assert [event.sequence for event in started] == [1, 2, 3]
+    assert [event.sequence for event in started] == [1, 2, 3, 4]
 
     persona_payload = load_event_payload(started[1])
     assert cast(dict[str, Any], persona_payload["relation"])["affection"] == 30.0
@@ -661,10 +663,11 @@ async def test_prepare_agent_turn_wires_session_context_and_persistence(
     assert [event.event_type for event in finished] == [
         "user_input",
         "persona_state",
+        "engagement_decision",
         "context_selection",
         "assistant_output",
     ]
-    assert [event.sequence for event in finished] == [1, 2, 3, 4]
+    assert [event.sequence for event in finished] == [1, 2, 3, 4, 5]
 
 
 @pytest.mark.asyncio
