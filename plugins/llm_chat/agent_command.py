@@ -14,11 +14,11 @@ from .context_builder import build_baseline_fingerprint
 from .session_handoff import generate_session_handoff
 from .session_manager import (
     create_session,
-    scope_identity,
     rollover_session,
     get_or_create_scope,
     seal_scope_sessions,
     ensure_active_session,
+    resolve_scope_identity,
 )
 
 config = plugin_config(LLMChatConfig)
@@ -39,7 +39,7 @@ def _baseline(channel_id: str):
 
 
 async def _current_session(session: Session):
-    scope = await get_or_create_scope(scope_identity(session))
+    scope = await get_or_create_scope(await resolve_scope_identity(session))
     context_session, _reason = await ensure_active_session(
         scope,
         _baseline(session.channel.id),
@@ -101,7 +101,7 @@ async def hard_reset_session_command(session: Session, confirmation: Match[str])
     value = confirmation.result.strip() if confirmation.available else ""
     if value != "CONFIRM":
         return "高风险操作未执行。请使用：llmchat hard-reset-session CONFIRM"
-    scope = await get_or_create_scope(scope_identity(session))
+    scope = await get_or_create_scope(await resolve_scope_identity(session))
     await seal_scope_sessions(scope.id)
     created = await create_session(scope.id, _baseline(session.channel.id), start_reason="hard_reset")
     return f"已封存旧会话并创建全新会话（#{created.sequence}）；审计事件未删除。"

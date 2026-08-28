@@ -26,6 +26,7 @@ from .session_manager import (
     list_scope_sessions,
     seal_scope_sessions,
 )
+from .agent_event_view import serialize_event_view
 
 
 class AgentAdminError(ValueError):
@@ -58,6 +59,7 @@ class AgentAdminService:
                 "guild_id": scope.guild_id,
                 "channel_id": scope.channel_id,
                 "display_name": scope.display_name,
+                "channel_name": self._channel_name(scope),
                 "created_at": scope.created_at.isoformat(),
                 "updated_at": scope.updated_at.isoformat(),
             }
@@ -80,6 +82,7 @@ class AgentAdminService:
                 "platform": scope.platform,
                 "channel_id": scope.channel_id,
                 "display_name": scope.display_name,
+                "channel_name": self._channel_name(scope),
             },
             "handoff": self._json_object(context_session.handoff_json),
             "anchors": [
@@ -266,6 +269,13 @@ class AgentAdminService:
         return {"event_ref": event.event_ref, "active": not changed}
 
     @staticmethod
+    def _channel_name(scope: ChatScope) -> str:
+        """Return the resolved channel name, never the raw platform ID."""
+
+        name = scope.display_name.strip()
+        return "" if name == scope.channel_id.strip() else name
+
+    @staticmethod
     def _serialize_session(item: ContextSession) -> dict[str, object]:
         return {
             "session_ref": item.session_ref,
@@ -297,6 +307,7 @@ class AgentAdminService:
             "model_visible": event.model_visible,
             "payload_keys": list(payload),
             "created_at": event.created_at.isoformat(),
+            **serialize_event_view(event, payload),
         }
 
     @staticmethod

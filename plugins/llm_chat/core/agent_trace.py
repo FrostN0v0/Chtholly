@@ -141,6 +141,12 @@ class AgentTurnRecorder:
                 model_visible=True,
                 created_at=started_at,
             )
+            result_payload: dict[str, object] = {
+                "result": event.recorded_result,
+                "context_result": event.outcome,
+            }
+            if event.evidence:
+                result_payload["evidence"] = event.evidence
             self.append(
                 "tool_result",
                 attempt=event.attempt,
@@ -148,10 +154,7 @@ class AgentTurnRecorder:
                 tool_call_id=event.execution_ref,
                 execution_ref=event.execution_ref,
                 tool_name=event.tool_name,
-                payload={
-                    "result": event.recorded_result,
-                    "context_result": event.outcome,
-                },
+                payload=result_payload,
                 status=event.status,
                 effect=event.effect,
                 duration_ms=event.duration_ms,

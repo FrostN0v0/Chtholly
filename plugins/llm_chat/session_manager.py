@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from dataclasses import dataclass
+from dataclasses import replace, dataclass
 
 from sqlalchemy import func, select
 from arclet.entari import Session
 from entari_plugin_database import get_session
 
 from .models import AgentTurn, ChatScope, AgentEvent, ContextAnchor, ContextSession
+
+_DISPLAY_NAME_CACHE: dict[tuple[str, str, str], str] = {}
+_NAME_LOOKUP_BACKOFF: dict[tuple[str, str, str], datetime] = {}
+_NAME_LOOKUP_RETRY = timedelta(minutes=30)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,14 +43,58 @@ class SessionHandle:
 def scope_identity(session: Session) -> ScopeIdentity:
     guild = getattr(session, "guild", None)
     channel = session.channel
-    display_name = str(getattr(channel, "name", "") or getattr(guild, "name", "") or channel.id).strip()
+    platform = str(session.account.platform)
+    account_id = str(session.account.self_id)
+    channel_id = str(channel.id)
+    local_name = _clean_name(getattr(channel, "name", None)) or _clean_name(getattr(guild, "name", None))
+    cached = _DISPLAY_NAME_CACHE.get((platform, account_id, channel_id), "")
     return ScopeIdentity(
-        platform=str(session.account.platform),
-        account_id=str(session.account.self_id),
+        platform=platform,
+        account_id=account_id,
         guild_id=str(getattr(guild, "id", "") or ""),
-        channel_id=str(channel.id),
-        display_name=display_name,
+        channel_id=channel_id,
+        display_name=local_name or cached,
     )
+
+
+async def resolve_scope_identity(session: Session, *, now: datetime | None = None) -> ScopeIdentity:
+    """Resolve the platform channel or guild name once per process, never the raw ID."""
+
+    identity = scope_identity(session)
+    if identity.display_name:
+        return identity
+    key = (identity.platform, identity.account_id, identity.channel_id)
+    current_time = now or datetime.utcnow()
+    retry_at = _NAME_LOOKUP_BACKOFF.get(key)
+    if retry_at is not None and current_time < retry_at:
+        return identity
+    resolved = await _lookup_channel_name(session, identity.channel_id)
+    if not resolved and identity.guild_id:
+        resolved = await _lookup_guild_name(session, identity.guild_id)
+    if not resolved:
+        _NAME_LOOKUP_BACKOFF[key] = current_time + _NAME_LOOKUP_RETRY
+        return identity
+    _NAME_LOOKUP_BACKOFF.pop(key, None)
+    _DISPLAY_NAME_CACHE[key] = resolved
+    return replace(identity, display_name=resolved)
+
+
+async def _lookup_channel_name(session: Session, channel_id: str) -> str:
+    try:
+        return _clean_name(getattr(await session.channel_get(channel_id), "name", None))
+    except Exception:
+        return ""
+
+
+async def _lookup_guild_name(session: Session, guild_id: str) -> str:
+    try:
+        return _clean_name(getattr(await session.guild_get(guild_id), "name", None))
+    except Exception:
+        return ""
+
+
+def _clean_name(value: object) -> str:
+    return str(value).strip() if isinstance(value, str) else ""
 
 
 def _fingerprint_matches(session: ContextSession, baseline: BaselineFingerprint) -> bool:
@@ -84,8 +132,8 @@ async def get_or_create_scope(identity: ScopeIdentity) -> ChatScope:
             db.add(scope)
             await db.flush()
         else:
-            scope.guild_id = identity.guild_id
-            scope.display_name = identity.display_name
+            scope.guild_id = identity.guild_id or scope.guild_id
+            scope.display_name = identity.display_name or scope.display_name
             scope.updated_at = now
         await db.commit()
         await db.refresh(scope)

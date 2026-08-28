@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from typing import cast
 from secrets import token_hex
 from datetime import datetime, timezone
 from contextlib import contextmanager
@@ -52,6 +53,7 @@ class ToolTraceEvent:
     outcome: dict[str, JSONType]
     recorded_arguments: dict[str, JSONType]
     recorded_result: JSONType
+    evidence: dict[str, JSONType]
     started_at: datetime
     duration_ms: int
 
@@ -63,6 +65,7 @@ class ToolTraceRecorder:
     events: list[ToolTraceEvent] = field(default_factory=list)
     attempt: int = 1
     _next_sequence: int = field(default=0, init=False)
+    _evidence: dict[str, dict[str, JSONType]] = field(default_factory=dict, init=False)
 
     def set_attempt(self, attempt: int) -> None:
         self.attempt = max(1, int(attempt))
@@ -79,6 +82,21 @@ class ToolTraceRecorder:
             started_at=datetime.now(timezone.utc),
             started_monotonic=time.monotonic(),
         )
+
+    def record_evidence(self, execution_ref: str, payload: Mapping[str, object]) -> None:
+        """Merge one tool's own confirmed delivery evidence for later audit."""
+
+        if not execution_ref:
+            return
+        current = self._evidence.setdefault(execution_ref, {})
+        for key, value in payload.items():
+            if isinstance(value, list):
+                existing = current.get(key)
+                merged = list(existing) if isinstance(existing, list) else []
+                merged.extend(cast(list[JSONType], value))
+                current[key] = cast(JSONType, merged)
+                continue
+            current[key] = cast(JSONType, value)
 
     def finish_success(
         self,
@@ -153,6 +171,7 @@ class ToolTraceRecorder:
                 outcome=outcome,
                 recorded_arguments=call.recorded_arguments,
                 recorded_result=recorded_result,
+                evidence=self._evidence.pop(call.execution_ref, {}),
                 started_at=call.started_at,
                 duration_ms=duration_ms,
             )
@@ -163,6 +182,7 @@ _ACTIVE_TOOL_TRACE: ContextVar[ToolTraceRecorder | None] = ContextVar(
     "llm_chat_tool_trace",
     default=None,
 )
+_ACTIVE_EXECUTION_REF: ContextVar[str] = ContextVar("llm_chat_tool_execution_ref", default="")
 
 
 @contextmanager
@@ -180,3 +200,24 @@ def current_tool_trace() -> ToolTraceRecorder | None:
     """Return the active generation recorder, if any."""
 
     return _ACTIVE_TOOL_TRACE.get()
+
+
+@contextmanager
+def llm_chat_tool_execution_scope(execution_ref: str) -> Iterator[None]:
+    """Bind one in-flight tool call so its handler can attach delivery evidence."""
+
+    token = _ACTIVE_EXECUTION_REF.set(execution_ref)
+    try:
+        yield
+    finally:
+        _ACTIVE_EXECUTION_REF.reset(token)
+
+
+def record_tool_evidence(payload: Mapping[str, object]) -> None:
+    """Record confirmed delivery evidence for the innermost active tool call."""
+
+    recorder = _ACTIVE_TOOL_TRACE.get()
+    execution_ref = _ACTIVE_EXECUTION_REF.get()
+    if recorder is None or not execution_ref:
+        return
+    recorder.record_evidence(execution_ref, payload)

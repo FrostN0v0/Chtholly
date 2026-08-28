@@ -1,6 +1,79 @@
 "use strict";
 
 const apiBase = "/api/llm-chat/sessions";
+
+const EVENT_TYPE_LABELS = {
+  user_input: "用户输入",
+  assistant_output: "最终回复",
+  assistant_tool_call: "工具调用",
+  tool_result: "工具结果",
+  model_attempt: "模型调用",
+  context_selection: "上下文选择",
+};
+
+const STATUS_LABELS = {
+  active: "进行中",
+  closed: "已关闭",
+  sealed: "已封存",
+  confirmed: "已确认",
+  requested: "已发起",
+  succeeded: "成功",
+  failed: "失败",
+  cancelled: "已取消",
+  partial: "部分完成",
+  rejected: "已拒绝",
+  completed: "已完成",
+  recorded: "已记录",
+  none: "无副作用",
+};
+
+const TAG_VARIANTS = {
+  active: "success",
+  succeeded: "success",
+  confirmed: "success",
+  completed: "success",
+  failed: "danger",
+  cancelled: "danger",
+  rejected: "danger",
+  partial: "warning",
+  sealed: "warning",
+  requested: "primary",
+  closed: "primary",
+};
+
+const REASON_LABELS = {
+  initial: "首次创建",
+  idle: "空闲超时",
+  turn_limit: "轮次上限",
+  runtime_change: "运行时变更",
+  hard_reset: "硬重置",
+  webui_new: "新会话",
+  webui_rollover: "续接会话",
+  webui_hard_reset: "硬重置",
+  legacy_import: "历史导入",
+};
+
+const FIELD_LABELS = {
+  text: "文本",
+  content: "内容",
+  query: "查询",
+  image: "图片",
+  images: "图片",
+  path: "路径",
+  arguments: "调用参数",
+  result: "返回结果",
+  duration: "耗时",
+  duration_ms: "耗时",
+  tool: "工具",
+  model: "模型",
+  meaning: "含义",
+  reason: "原因",
+  error: "错误",
+  speaker: "发言人",
+  estimated_tokens: "预估 token",
+  full_session_tokens: "会话总 token",
+};
+
 const state = {
   scopes: [],
   scope: null,
@@ -31,6 +104,7 @@ const elements = {
   turnCount: document.querySelector("#turn-count"),
   turnList: document.querySelector("#turn-list"),
   eventList: document.querySelector("#event-list"),
+  eventDetail: document.querySelector("#event-detail"),
   contextOutput: document.querySelector("#context-output"),
   payloadDialog: document.querySelector("#payload-dialog"),
   payloadTitle: document.querySelector("#payload-title"),
@@ -38,7 +112,12 @@ const elements = {
   payloadLoad: document.querySelector("#payload-load-button"),
   payloadNext: document.querySelector("#payload-next-button"),
   payloadOutput: document.querySelector("#payload-output"),
+  payloadMeta: document.querySelector("#payload-meta"),
   pinEvent: document.querySelector("#pin-event-button"),
+  imageDialog: document.querySelector("#image-dialog"),
+  imageTitle: document.querySelector("#image-title"),
+  imagePreview: document.querySelector("#image-preview"),
+  imageCaption: document.querySelector("#image-caption"),
   confirmDialog: document.querySelector("#confirm-dialog"),
   confirmTitle: document.querySelector("#confirm-title"),
   confirmMessage: document.querySelector("#confirm-message"),
@@ -47,9 +126,27 @@ const elements = {
   confirmAction: document.querySelector("#confirm-action-button"),
 };
 
+function createElement(tag, className = "", text = "") {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (text) element.textContent = text;
+  return element;
+}
+
+function clearNode(node, emptyText = "") {
+  node.replaceChildren();
+  node.classList.toggle("is-empty", Boolean(emptyText));
+  if (emptyText) node.textContent = emptyText;
+}
+
 function setStatus(message, kind = "") {
   elements.status.textContent = message;
-  elements.status.className = `status ${kind}`.trim();
+  elements.status.className = kind ? `status is-${kind}` : "status";
+}
+
+function showError(error) {
+  console.error(error);
+  setStatus(error instanceof Error ? error.message : String(error), "error");
 }
 
 async function request(path, options = {}) {
@@ -58,9 +155,9 @@ async function request(path, options = {}) {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
   });
-  const payload = await response.json().catch(() => ({ success: false, message: "Invalid server response" }));
+  const payload = await response.json().catch(() => ({ success: false, message: "服务器响应无法解析" }));
   if (!response.ok || payload.success === false) {
-    throw new Error(payload.message || `Request failed (${response.status})`);
+    throw new Error(payload.message || `请求失败（${response.status}）`);
   }
   return payload;
 }
@@ -72,31 +169,63 @@ function formatDate(value) {
 }
 
 function truncate(value, maximum = 120) {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
   return text.length > maximum ? `${text.slice(0, maximum - 1)}…` : text;
 }
 
-function badge(value) {
-  const node = document.createElement("span");
-  node.className = `badge ${String(value || "").toLowerCase()}`;
-  node.textContent = value || "unknown";
-  return node;
+function statusLabel(value) {
+  const key = String(value ?? "").toLowerCase();
+  return STATUS_LABELS[key] || value || "未知";
 }
 
-function clearNode(node, emptyText = "") {
-  node.replaceChildren();
-  node.classList.toggle("empty-state", Boolean(emptyText));
-  if (emptyText) node.textContent = emptyText;
+function reasonLabel(value) {
+  const key = String(value ?? "").toLowerCase();
+  return REASON_LABELS[key] || value || "—";
+}
+
+function eventTypeLabel(value) {
+  const key = String(value ?? "");
+  return EVENT_TYPE_LABELS[key] || key || "未知事件";
+}
+
+function fieldLabel(value) {
+  const key = String(value ?? "");
+  return FIELD_LABELS[key] || key;
+}
+
+function formatChars(value) {
+  const count = Number(value);
+  return Number.isFinite(count) ? `${count} 字符` : "";
+}
+
+function tagVariant(value) {
+  return TAG_VARIANTS[String(value ?? "").toLowerCase()] || "";
+}
+
+function tag(value, variant = "") {
+  const kind = variant || tagVariant(value);
+  return createElement("span", kind ? `tag tag--${kind}` : "tag", statusLabel(value));
+}
+
+function scopeTitle(scope) {
+  if (!scope) return "尚未选择聊天范围";
+  const name = String(scope.channel_name || scope.display_name || "").trim();
+  return name ? `${name}（${scope.channel_id}）` : String(scope.channel_id || "未命名频道");
+}
+
+function scopeOptionLabel(scope) {
+  const name = String(scope.channel_name || scope.display_name || "").trim() || "未命名频道";
+  return `${name}（${scope.channel_id}）`;
 }
 
 function itemRow(title, status) {
-  const row = document.createElement("div");
-  row.className = "item-row";
-  const label = document.createElement("span");
-  label.className = "item-title";
-  label.textContent = title;
-  row.append(label, badge(status));
+  const row = createElement("div", "list-item__row");
+  row.append(createElement("span", "list-item__title", title), tag(status));
   return row;
+}
+
+function metaRow(parts) {
+  return createElement("div", "list-item__meta", parts.filter(Boolean).join(" · "));
 }
 
 async function loadScopes(preferredRef = "") {
@@ -105,8 +234,7 @@ async function loadScopes(preferredRef = "") {
   state.scopes = payload.items || [];
   elements.scopeSelect.replaceChildren();
   if (!state.scopes.length) {
-    const option = document.createElement("option");
-    option.textContent = "暂无聊天范围";
+    const option = createElement("option", "", "暂无聊天范围");
     option.value = "";
     elements.scopeSelect.append(option);
     state.scope = null;
@@ -115,9 +243,8 @@ async function loadScopes(preferredRef = "") {
     return;
   }
   for (const scope of state.scopes) {
-    const option = document.createElement("option");
+    const option = createElement("option", "", scopeOptionLabel(scope));
     option.value = scope.scope_ref;
-    option.textContent = scope.display_name || `${scope.platform}:${scope.channel_id}`;
     elements.scopeSelect.append(option);
   }
   const selected = state.scopes.find((item) => item.scope_ref === preferredRef) || state.scopes[0];
@@ -130,13 +257,19 @@ async function loadScopes(preferredRef = "") {
 
 function renderScope() {
   const scope = state.scope;
-  elements.scopeMeta.textContent = scope
-    ? `${scope.platform} · ${scope.channel_id} · 更新于 ${formatDate(scope.updated_at)}`
-    : "尚未选择聊天范围";
-  const enabled = Boolean(scope);
-  elements.newSession.disabled = !enabled || !state.session || state.session.status !== "active";
-  elements.rollover.disabled = !enabled || !state.session || state.session.status !== "active";
-  elements.hardReset.disabled = !enabled;
+  clearNode(elements.scopeMeta);
+  if (!scope) {
+    elements.scopeMeta.textContent = "尚未选择聊天范围";
+  } else {
+    elements.scopeMeta.append(
+      createElement("strong", "toolbar__scope-name", scopeTitle(scope)),
+      createElement("span", "", `${scope.platform} · 更新于 ${formatDate(scope.updated_at)}`),
+    );
+  }
+  const active = Boolean(scope) && state.session?.status === "active";
+  elements.newSession.disabled = !active;
+  elements.rollover.disabled = !active;
+  elements.hardReset.disabled = !scope;
 }
 
 async function loadSessions(preferredRef = "") {
@@ -155,8 +288,12 @@ async function loadSessions(preferredRef = "") {
     state.session = null;
     state.sessionDetail = null;
     state.turns = [];
+    state.events = [];
+    state.event = null;
     renderSessionDetail();
     renderTurns();
+    renderEvents();
+    renderEventDetail();
   }
   renderScope();
 }
@@ -164,17 +301,14 @@ async function loadSessions(preferredRef = "") {
 function renderSessions() {
   clearNode(elements.sessionList, state.sessions.length ? "" : "暂无会话");
   for (const session of state.sessions) {
-    const button = document.createElement("button");
+    const button = createElement("button", "list-item");
     button.type = "button";
-    button.className = `list-item${state.session?.session_ref === session.session_ref ? " active" : ""}`;
-    button.append(itemRow(`会话 #${session.sequence}`, session.status));
-    const subtitle = document.createElement("div");
-    subtitle.className = "item-subtitle";
-    subtitle.textContent = `${session.start_reason} · ${session.turn_count} 轮`;
-    const meta = document.createElement("div");
-    meta.className = "meta-row";
-    meta.append(document.createTextNode(formatDate(session.created_at)));
-    button.append(subtitle, meta);
+    if (state.session?.session_ref === session.session_ref) button.classList.add("is-active");
+    button.append(
+      itemRow(`会话 #${session.sequence}`, session.status),
+      createElement("div", "list-item__subtitle", `${reasonLabel(session.start_reason)} · ${session.turn_count} 轮`),
+      metaRow([formatDate(session.created_at)]),
+    );
     button.addEventListener("click", () => selectSession(session).catch(showError));
     elements.sessionList.append(button);
   }
@@ -184,6 +318,7 @@ async function selectSession(session) {
   state.session = session;
   state.turn = null;
   state.events = [];
+  state.event = null;
   renderSessions();
   renderScope();
   const [detailPayload, turnsPayload] = await Promise.all([
@@ -194,6 +329,8 @@ async function selectSession(session) {
   state.turns = turnsPayload.items || [];
   renderSessionDetail();
   renderTurns();
+  renderEvents();
+  renderEventDetail();
   if (state.turns.length) await selectTurn(state.turns[state.turns.length - 1]);
 }
 
@@ -201,64 +338,54 @@ function renderSessionDetail() {
   const detail = state.sessionDetail;
   clearNode(elements.sessionDetail);
   if (!detail) {
+    elements.sessionDetail.classList.add("is-empty");
     elements.sessionDetail.textContent = "请选择一个会话。";
-    elements.sessionDetail.classList.add("muted");
     return;
   }
-  elements.sessionDetail.classList.remove("muted");
-  const summary = document.createElement("div");
-  summary.textContent = `${detail.model} · ${detail.start_reason} · ${detail.turn_count} 轮`;
-  elements.sessionDetail.append(summary);
+  elements.sessionDetail.classList.remove("is-empty");
+  elements.sessionDetail.append(
+    createElement("div", "session-detail__row", `${detail.model} · ${reasonLabel(detail.start_reason)} · ${detail.turn_count} 轮`),
+  );
   if (detail.handoff && Object.keys(detail.handoff).length) {
-    const handoff = document.createElement("div");
-    handoff.className = "item-subtitle";
-    handoff.textContent = `交接：${truncate(detail.handoff.topic || JSON.stringify(detail.handoff), 180)}`;
-    elements.sessionDetail.append(handoff);
+    elements.sessionDetail.append(
+      createElement("div", "session-detail__handoff", `交接：${truncate(detail.handoff.topic || JSON.stringify(detail.handoff), 180)}`),
+    );
   }
   if (Array.isArray(detail.anchors) && detail.anchors.length) {
-    const anchors = document.createElement("div");
-    anchors.className = "anchor-list";
+    const anchors = createElement("div", "anchors");
     for (const item of detail.anchors) {
-      const button = document.createElement("button");
+      const button = createElement("button", "anchor", `${item.label} ×`);
       button.type = "button";
-      button.className = "anchor";
-      button.textContent = `${item.label} ×`;
       button.title = "取消固定";
-      button.addEventListener("click", async () => {
-        try {
-          await request(
-            `/scopes/${encodeURIComponent(state.scope.scope_ref)}/events/${encodeURIComponent(item.event_ref)}/pin`,
-            { method: "DELETE" },
-          );
-          await selectSession(state.session);
-        } catch (error) {
-          showError(error);
-        }
-      });
+      button.addEventListener("click", () => unpinAnchor(item).catch(showError));
       anchors.append(button);
     }
     elements.sessionDetail.append(anchors);
   }
 }
 
+async function unpinAnchor(item) {
+  if (!state.scope) return;
+  await request(
+    `/scopes/${encodeURIComponent(state.scope.scope_ref)}/events/${encodeURIComponent(item.event_ref)}/pin`,
+    { method: "DELETE" },
+  );
+  setStatus("已取消固定", "success");
+  await selectSession(state.session);
+}
+
 function renderTurns() {
   elements.turnCount.textContent = String(state.turns.length);
   clearNode(elements.turnList, state.turns.length ? "" : "暂无轮次");
   for (const turn of state.turns) {
-    const button = document.createElement("button");
+    const button = createElement("button", "list-item list-item--turn");
     button.type = "button";
-    button.className = `turn-item${state.turn?.turn_ref === turn.turn_ref ? " active" : ""}`;
-    button.append(itemRow(`#${turn.sequence} · ${turn.user_name || turn.user_id}`, turn.status));
-    const text = document.createElement("div");
-    text.className = "turn-text";
-    text.textContent = turn.final_text || "无确认文本输出";
-    const meta = document.createElement("div");
-    meta.className = "meta-row";
-    meta.append(
-      document.createTextNode(formatDate(turn.created_at)),
-      document.createTextNode(turn.fresh_context ? "本轮忽略前文" : "继承会话上下文"),
+    if (state.turn?.turn_ref === turn.turn_ref) button.classList.add("is-active");
+    button.append(
+      itemRow(`#${turn.sequence} · ${turn.user_name || turn.user_id}`, turn.status),
+      createElement("div", "list-item__text", turn.final_text || "无确认文本输出"),
+      metaRow([formatDate(turn.created_at), turn.fresh_context ? "本轮忽略前文" : "继承会话上下文"]),
     );
-    button.append(text, meta);
     button.addEventListener("click", () => selectTurn(turn).catch(showError));
     elements.turnList.append(button);
   }
@@ -266,6 +393,7 @@ function renderTurns() {
 
 async function selectTurn(turn) {
   state.turn = turn;
+  state.event = null;
   renderTurns();
   const [eventsPayload, contextPayload] = await Promise.all([
     request(`/turns/${encodeURIComponent(turn.turn_ref)}/events`),
@@ -274,64 +402,228 @@ async function selectTurn(turn) {
   state.events = eventsPayload.items || [];
   renderEvents();
   elements.contextOutput.textContent = JSON.stringify(contextPayload.item, null, 2);
+  if (state.events.length) selectEvent(state.events[0]);
+  else renderEventDetail();
+}
+
+function eventTitle(event) {
+  if (event.title) return String(event.title);
+  return event.tool || eventTypeLabel(event.event_type);
+}
+
+function previewText(event) {
+  const preview = event.preview;
+  if (typeof preview === "string") return preview;
+  if (preview && typeof preview === "object" && typeof preview.text === "string") return preview.text;
+  return "";
 }
 
 function renderEvents() {
   clearNode(elements.eventList, state.events.length ? "" : "该轮次没有事件");
   for (const event of state.events) {
-    const button = document.createElement("button");
+    const button = createElement("button", "list-item list-item--event");
     button.type = "button";
-    button.className = "event-item";
-    const title = event.tool ? `${event.sequence}. ${event.tool}` : `${event.sequence}. ${event.event_type}`;
-    button.append(itemRow(title, event.status || event.effect || "recorded"));
-    const body = document.createElement("div");
-    body.className = "event-body";
-    body.textContent = [
-      event.attempt ? `attempt ${event.attempt}` : "",
-      event.effect || "",
+    if (state.event?.event_ref === event.event_ref) button.classList.add("is-active");
+    button.append(itemRow(`${event.sequence}. ${eventTitle(event)}`, event.status || event.effect || "recorded"));
+    const preview = truncate(previewText(event), 90);
+    if (preview) button.append(createElement("div", "list-item__text", preview));
+    button.append(metaRow([
+      eventTypeLabel(event.event_type),
+      event.attempt ? `第 ${event.attempt} 次尝试` : "",
       event.duration_ms ? `${event.duration_ms} ms` : "",
-      event.payload_keys?.length ? event.payload_keys.join(", ") : "",
-    ].filter(Boolean).join(" · ");
-    button.append(body);
-    button.addEventListener("click", () => openPayload(event));
+    ]));
+    button.addEventListener("click", () => selectEvent(event));
     elements.eventList.append(button);
   }
 }
 
+function selectEvent(event) {
+  state.event = event;
+  renderEvents();
+  renderEventDetail();
+}
+
+function detailSection(title) {
+  const section = createElement("section", "section");
+  section.append(createElement("h3", "section__label", title));
+  return section;
+}
+
+function structuredBlock(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "object" && value.stored === true) {
+    return createElement("p", "section__note", `内容过大未内联（${formatChars(value.chars)}），请用原生 JSON 查看。`);
+  }
+  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  if (!text || text === "{}" || text === "[]") return null;
+  return createElement("pre", "code code--inline", text);
+}
+
+function imageThumb(image) {
+  const figure = createElement("figure", "thumb");
+  const label = String(image.path || image.name || image.url || "图片");
+  const source = image.url || image.image_url;
+  if (source) {
+    const img = createElement("img", "thumb__image");
+    img.src = source;
+    img.alt = label;
+    img.loading = "lazy";
+    img.addEventListener("error", () => {
+      img.replaceWith(createElement("span", "thumb__fallback", label.split("/").pop() || label));
+    });
+    const button = createElement("button", "thumb__button");
+    button.type = "button";
+    button.title = "放大查看";
+    button.append(img);
+    button.addEventListener("click", () => openImage(source, label, image.meaning || image.text || ""));
+    figure.append(button);
+  } else {
+    figure.append(createElement("span", "thumb__fallback", label.split("/").pop() || label));
+  }
+  const caption = image.meaning || image.text || label.split("/").pop() || label;
+  figure.append(createElement("figcaption", "thumb__caption", truncate(caption, 40)));
+  return figure;
+}
+
+function renderEventDetail() {
+  const event = state.event;
+  clearNode(elements.eventDetail);
+  if (!event) {
+    elements.eventDetail.classList.add("is-empty");
+    elements.eventDetail.textContent = "请选择一个事件。";
+    return;
+  }
+  elements.eventDetail.classList.remove("is-empty");
+
+  const head = createElement("div", "detail__head");
+  const heading = createElement("div", "detail__title");
+  heading.append(
+    createElement("span", "detail__name", eventTitle(event)),
+    tag(event.status || event.effect || "recorded"),
+  );
+  const actions = createElement("div", "detail__actions");
+  const jsonButton = createElement("button", "button button--small", "原生 JSON");
+  jsonButton.type = "button";
+  jsonButton.addEventListener("click", () => openPayload(event));
+  actions.append(jsonButton);
+  head.append(heading, actions);
+  elements.eventDetail.append(head);
+
+  elements.eventDetail.append(metaRow([
+    eventTypeLabel(event.event_type),
+    event.role ? `角色 ${event.role}` : "",
+    event.attempt ? `第 ${event.attempt} 次尝试` : "",
+    event.duration_ms ? `${event.duration_ms} ms` : "",
+    event.effect ? `副作用 ${statusLabel(event.effect)}` : "",
+    formatChars(event.payload_chars),
+    event.model_visible === false ? "模型不可见" : "",
+    formatDate(event.created_at),
+  ]));
+
+  const preview = previewText(event);
+  if (preview) {
+    const section = detailSection("关键内容");
+    section.append(createElement("p", "preview-text", preview));
+    elements.eventDetail.append(section);
+  }
+
+  const fields = Array.isArray(event.details) ? event.details : event.preview?.fields;
+  if (Array.isArray(fields) && fields.length) {
+    const section = detailSection("关键字段");
+    const list = createElement("dl", "fields");
+    for (const field of fields) {
+      list.append(
+        createElement("dt", "fields__key", fieldLabel(field.label)),
+        createElement("dd", "fields__value", truncate(field.value, 400)),
+      );
+    }
+    section.append(list);
+    elements.eventDetail.append(section);
+  }
+
+  const images = event.evidence?.images || event.preview?.images;
+  if (Array.isArray(images) && images.length) {
+    const section = detailSection("关联图片");
+    const grid = createElement("div", "thumbs");
+    for (const image of images) grid.append(imageThumb(image));
+    section.append(grid);
+    elements.eventDetail.append(section);
+  }
+
+  for (const [key, label] of [["arguments", "调用参数"], ["result", "返回结果"]]) {
+    const block = structuredBlock(event[key]);
+    if (block) {
+      const section = detailSection(label);
+      section.append(block);
+      elements.eventDetail.append(section);
+    }
+  }
+
+  if (Array.isArray(event.payload_keys) && event.payload_keys.length) {
+    const section = detailSection("负载字段");
+    const keys = createElement("div", "keys");
+    for (const key of event.payload_keys) keys.append(createElement("code", "keys__key", key));
+    section.append(keys);
+    elements.eventDetail.append(section);
+  }
+}
+
+function openImage(source, label, caption) {
+  elements.imageTitle.textContent = label.split("/").pop() || label;
+  elements.imagePreview.src = source;
+  elements.imagePreview.alt = label;
+  elements.imageCaption.textContent = caption || label;
+  elements.imageDialog.showModal();
+}
+
 function openPayload(event) {
   state.event = event;
+  state.payloadPath = "";
   state.payloadOffset = 0;
   state.payloadNextOffset = null;
-  elements.payloadTitle.textContent = event.tool || event.event_type;
+  elements.payloadTitle.textContent = `原生 JSON · ${eventTitle(event)}`;
   elements.payloadPath.value = "";
-  elements.payloadOutput.textContent = "选择字段路径，或直接读取完整事件。";
+  elements.payloadOutput.textContent = "正在读取…";
+  elements.payloadMeta.textContent = "";
   elements.payloadNext.disabled = true;
   elements.pinEvent.disabled = !state.scope;
+  elements.pinEvent.textContent = "固定事件";
   elements.payloadDialog.showModal();
+  loadPayload(0).catch((error) => {
+    elements.payloadOutput.textContent = error instanceof Error ? error.message : String(error);
+  });
 }
 
 async function loadPayload(offset = 0) {
   if (!state.event) return;
   const path = elements.payloadPath.value.trim();
-  const query = new URLSearchParams({ path, offset: String(offset), limit: "16000" });
+  const query = new URLSearchParams({ path, offset: String(offset), limit: "100000" });
   const payload = await request(`/events/${encodeURIComponent(state.event.event_ref)}/payload?${query}`);
   const item = payload.item;
   state.payloadPath = path;
   state.payloadOffset = item.offset || 0;
-  state.payloadNextOffset = item.next_offset;
-  elements.payloadOutput.textContent = typeof item.data === "string"
-    ? item.data
-    : JSON.stringify(item, null, 2);
-  elements.payloadNext.disabled = item.next_offset === null || item.next_offset === undefined;
+  state.payloadNextOffset = item.next_offset ?? null;
+  if (item.stored === true) {
+    elements.payloadOutput.textContent = `内容过大未内联（${formatChars(item.chars)}），请填写更精确的字段路径。`;
+  } else if (typeof item.data === "string") {
+    elements.payloadOutput.textContent = item.data || "（空字符串）";
+  } else {
+    elements.payloadOutput.textContent = JSON.stringify(item.data, null, 2);
+  }
+  elements.payloadMeta.textContent = [
+    item.total_chars ? `共 ${formatChars(item.total_chars)}` : "",
+    state.payloadOffset ? `偏移 ${state.payloadOffset}` : "",
+  ].filter(Boolean).join(" · ");
+  elements.payloadNext.disabled = state.payloadNextOffset === null;
 }
 
 function showConfirm({ title, message, dangerous = false, requireToken = false, action }) {
   state.confirmAction = action;
   elements.confirmTitle.textContent = title;
   elements.confirmMessage.textContent = message;
-  elements.confirmationField.classList.toggle("hidden", !requireToken);
+  elements.confirmationField.classList.toggle("is-hidden", !requireToken);
   elements.confirmationInput.value = "";
-  elements.confirmAction.className = `button ${dangerous ? "danger" : "primary"}`;
+  elements.confirmAction.className = `button ${dangerous ? "button--danger" : "button--primary"}`;
   elements.confirmDialog.showModal();
 }
 
@@ -339,23 +631,23 @@ async function runConfirmedAction() {
   if (!state.confirmAction) return;
   const action = state.confirmAction;
   state.confirmAction = null;
+  const token = elements.confirmationInput.value;
   elements.confirmDialog.close();
   setStatus("正在执行…");
-  await action();
+  await action(token);
   setStatus("操作完成", "success");
 }
 
-function showError(error) {
-  console.error(error);
-  setStatus(error instanceof Error ? error.message : String(error), "error");
-}
-
-for (const tab of document.querySelectorAll(".tab")) {
-  tab.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((item) => item.classList.toggle("active", item === tab));
-    document.querySelectorAll(".tab-view").forEach((view) => {
-      view.classList.toggle("active", view.id === `${tab.dataset.tab}-view`);
-    });
+for (const button of document.querySelectorAll(".tab")) {
+  button.addEventListener("click", () => {
+    for (const tabButton of document.querySelectorAll(".tab")) {
+      const active = tabButton === button;
+      tabButton.classList.toggle("is-active", active);
+      tabButton.setAttribute("aria-selected", active ? "true" : "false");
+    }
+    for (const view of document.querySelectorAll(".view")) {
+      view.classList.toggle("is-active", view.id === `${button.dataset.tab}-view`);
+    }
   });
 }
 
@@ -409,8 +701,8 @@ elements.hardReset.addEventListener("click", () => {
     message: "所有旧会话将被封存并从模型访问路径移除。审计事件不会删除。",
     dangerous: true,
     requireToken: true,
-    action: async () => {
-      if (elements.confirmationInput.value !== "CONFIRM") throw new Error("必须输入 CONFIRM");
+    action: async (token) => {
+      if (token !== "CONFIRM") throw new Error("必须输入 CONFIRM");
       const payload = await request(`/scopes/${encodeURIComponent(state.scope.scope_ref)}/hard-reset`, {
         method: "POST",
         body: JSON.stringify({ confirmation: "CONFIRM" }),
@@ -422,7 +714,7 @@ elements.hardReset.addEventListener("click", () => {
 
 elements.pinEvent.addEventListener("click", async () => {
   if (!state.scope || !state.event) return;
-  const label = `${state.event.tool || state.event.event_type} · ${formatDate(state.event.created_at)}`;
+  const label = `${eventTitle(state.event)} · ${formatDate(state.event.created_at)}`;
   try {
     await request(
       `/scopes/${encodeURIComponent(state.scope.scope_ref)}/events/${encodeURIComponent(state.event.event_ref)}/pin`,
@@ -430,6 +722,7 @@ elements.pinEvent.addEventListener("click", async () => {
     );
     elements.pinEvent.textContent = "已固定";
     elements.pinEvent.disabled = true;
+    setStatus("已固定事件", "success");
     await selectSession(state.session);
   } catch (error) {
     showError(error);

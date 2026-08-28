@@ -3,125 +3,134 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>LLM 会话</title>
   <link rel="stylesheet" href="/api/llm-chat/sessions/assets/app.css">
+  <script src="/api/llm-chat/sessions/assets/app.js" defer></script>
 </head>
 <body>
-  <main class="app-shell">
-    <header class="topbar">
-      <div>
-        <p class="eyebrow">AGENT CONTEXT</p>
-        <h1>LLM 会话</h1>
-        <p class="subtitle">查看 Session、Turn、AgentEvent 与实际上下文选择。</p>
+  <div class="app">
+    <header class="toolbar">
+      <div class="toolbar__scope">
+        <label class="field field--scope" for="scope-select">
+          <span class="field__label">聊天范围</span>
+          <select class="select" id="scope-select"></select>
+        </label>
+        <p class="toolbar__meta" id="scope-meta">尚未选择聊天范围</p>
       </div>
-      <div class="topbar-actions">
-        <button id="refresh-button" class="button secondary" type="button">刷新</button>
-        <span id="status" class="status" role="status">正在连接…</span>
+      <div class="toolbar__actions">
+        <span class="status" id="status" role="status" aria-live="polite">正在连接…</span>
+        <button class="button" id="refresh-button" type="button">刷新</button>
+        <button class="button" id="new-session-button" type="button" disabled>新会话</button>
+        <button class="button button--primary" id="rollover-button" type="button" disabled>续接会话</button>
+        <button class="button button--danger" id="hard-reset-button" type="button" disabled>硬重置</button>
       </div>
     </header>
 
-    <section class="toolbar card">
-      <label>
-        <span>聊天范围</span>
-        <select id="scope-select" aria-label="聊天范围"></select>
-      </label>
-      <div class="scope-meta" id="scope-meta">尚未选择聊天范围</div>
-      <div class="toolbar-actions">
-        <button id="new-session-button" class="button secondary" type="button" disabled>新会话</button>
-        <button id="rollover-button" class="button primary" type="button" disabled>续接会话</button>
-        <button id="hard-reset-button" class="button danger" type="button" disabled>硬重置</button>
-      </div>
-    </section>
-
-    <section class="workspace">
-      <aside class="panel card">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">SESSIONS</p>
-            <h2>会话列表</h2>
-          </div>
-          <span id="session-count" class="count">0</span>
+    <main class="workspace">
+      <section class="panel panel--sessions" aria-label="会话列表">
+        <div class="panel__head">
+          <h2 class="panel__title">会话</h2>
+          <span class="panel__count" id="session-count">0</span>
         </div>
-        <div id="session-list" class="list empty-state">暂无会话</div>
-      </aside>
-
-      <section class="panel card timeline-panel">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">TIMELINE</p>
-            <h2>轮次时间线</h2>
-          </div>
-          <span id="turn-count" class="count">0</span>
+        <div class="panel__body">
+          <div class="list" id="session-list">暂无会话</div>
         </div>
-        <div id="session-detail" class="session-detail muted">请选择一个会话。</div>
-        <div id="turn-list" class="timeline empty-state">暂无轮次</div>
       </section>
 
-      <aside class="panel card inspector-panel">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">INSPECTOR</p>
-            <h2>事件与上下文</h2>
+      <section class="panel panel--turns" aria-label="轮次时间线">
+        <div class="panel__head">
+          <h2 class="panel__title">轮次</h2>
+          <span class="panel__count" id="turn-count">0</span>
+        </div>
+        <div class="panel__body">
+          <div class="session-detail" id="session-detail">请选择一个会话。</div>
+          <div class="list list--turns" id="turn-list">暂无轮次</div>
+        </div>
+      </section>
+
+      <section class="panel panel--inspector" aria-label="事件与上下文">
+        <div class="panel__head">
+          <h2 class="panel__title">事件与上下文</h2>
+          <div class="tabs" role="tablist">
+            <button class="tab is-active" id="tab-events" data-tab="events" type="button" role="tab" aria-selected="true" aria-controls="events-view">事件</button>
+            <button class="tab" id="tab-context" data-tab="context" type="button" role="tab" aria-selected="false" aria-controls="context-view">上下文</button>
           </div>
         </div>
-        <div class="tabs" role="tablist">
-          <button class="tab active" data-tab="events" type="button">事件</button>
-          <button class="tab" data-tab="context" type="button">上下文</button>
+        <div class="panel__body panel__body--flush">
+          <div class="view is-active" id="events-view" role="tabpanel" aria-labelledby="tab-events">
+            <div class="events-split">
+              <div class="event-list" id="event-list">请选择一个轮次。</div>
+              <div class="event-detail" id="event-detail">请选择一个事件。</div>
+            </div>
+          </div>
+          <div class="view" id="context-view" role="tabpanel" aria-labelledby="tab-context">
+            <pre class="code" id="context-output">请选择一个轮次。</pre>
+          </div>
         </div>
-        <div id="events-view" class="tab-view active">
-          <div id="event-list" class="event-list empty-state">请选择一个轮次。</div>
-        </div>
-        <div id="context-view" class="tab-view">
-          <pre id="context-output" class="json-output">请选择一个轮次。</pre>
-        </div>
-      </aside>
-    </section>
-  </main>
+      </section>
+    </main>
+  </div>
 
-  <dialog id="payload-dialog">
-    <form method="dialog" class="dialog-card">
-      <header>
-        <div>
-          <p class="eyebrow">EVENT PAYLOAD</p>
-          <h2 id="payload-title">事件内容</h2>
-        </div>
-        <button class="icon-button" value="close" aria-label="关闭" type="submit">×</button>
+  <dialog class="modal modal--wide" id="payload-dialog">
+    <form class="modal__card" id="payload-form" method="dialog">
+      <header class="modal__head">
+        <h2 class="modal__title" id="payload-title">原生 JSON</h2>
+        <button class="icon-button" value="close" type="submit" aria-label="关闭">×</button>
       </header>
-      <div class="payload-controls">
-        <label>
-          <span>字段路径</span>
-          <input id="payload-path" type="text" placeholder="例如 arguments.html">
-        </label>
-        <button id="payload-load-button" class="button primary" type="button">读取</button>
+      <div class="modal__body">
+        <p class="modal__hint" id="payload-hint">默认读取完整事件负载；字段路径为可选的高级过滤。</p>
+        <div class="payload-controls">
+          <label class="field field--grow" for="payload-path">
+            <span class="field__label">字段路径（可选）</span>
+            <input class="input" id="payload-path" type="text" autocomplete="off" placeholder="例如 arguments.html">
+          </label>
+          <button class="button" id="payload-load-button" type="button">读取</button>
+          <button class="button" id="payload-next-button" type="button" disabled>下一段</button>
+        </div>
+        <pre class="code code--payload" id="payload-output">正在读取…</pre>
       </div>
-      <pre id="payload-output" class="json-output payload-output">尚未读取。</pre>
-      <footer>
-        <button id="payload-next-button" class="button secondary" type="button" disabled>下一段</button>
-        <button id="pin-event-button" class="button secondary" type="button">固定事件</button>
+      <footer class="modal__foot">
+        <span class="modal__note" id="payload-meta"></span>
+        <button class="button" id="pin-event-button" type="button">固定事件</button>
+        <button class="button" value="close" type="submit">关闭</button>
       </footer>
     </form>
   </dialog>
 
-  <dialog id="confirm-dialog">
-    <form method="dialog" class="dialog-card compact">
-      <header>
-        <div>
-          <p class="eyebrow">CONFIRM</p>
-          <h2 id="confirm-title">确认操作</h2>
-        </div>
+  <dialog class="modal" id="image-dialog">
+    <form class="modal__card" id="image-form" method="dialog">
+      <header class="modal__head">
+        <h2 class="modal__title" id="image-title">图片预览</h2>
+        <button class="icon-button" value="close" type="submit" aria-label="关闭">×</button>
       </header>
-      <p id="confirm-message" class="dialog-message"></p>
-      <label id="confirmation-field" class="hidden">
-        <span>输入 CONFIRM</span>
-        <input id="confirmation-input" type="text" autocomplete="off">
-      </label>
-      <footer>
-        <button class="button secondary" value="cancel" type="submit">取消</button>
-        <button id="confirm-action-button" class="button danger" value="default" type="button">确认</button>
+      <div class="modal__body modal__body--center">
+        <img class="image-preview" id="image-preview" alt="事件关联图片">
+        <p class="modal__note" id="image-caption"></p>
+      </div>
+      <footer class="modal__foot">
+        <button class="button" value="close" type="submit">关闭</button>
       </footer>
     </form>
   </dialog>
 
-  <script src="/api/llm-chat/sessions/assets/app.js" defer></script>
+  <dialog class="modal modal--compact" id="confirm-dialog">
+    <form class="modal__card" id="confirm-form" method="dialog">
+      <header class="modal__head">
+        <h2 class="modal__title" id="confirm-title">确认操作</h2>
+      </header>
+      <div class="modal__body">
+        <p class="modal__message" id="confirm-message"></p>
+        <label class="field is-hidden" id="confirmation-field" for="confirmation-input">
+          <span class="field__label">输入 CONFIRM 以继续</span>
+          <input class="input" id="confirmation-input" type="text" autocomplete="off" placeholder="CONFIRM">
+        </label>
+      </div>
+      <footer class="modal__foot">
+        <button class="button" value="cancel" type="submit">取消</button>
+        <button class="button button--primary" id="confirm-action-button" value="default" type="button">确认</button>
+      </footer>
+    </form>
+  </dialog>
 </body>
 </html>

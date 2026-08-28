@@ -30,6 +30,7 @@ from plugins.llm_chat import (
     session_manager,
     agent_turn_setup,
 )
+from plugins.llm_chat.core import tool_trace
 from plugins.llm_chat.config import LLMChatConfig
 from plugins.llm_chat.models import (
     AgentTurn,
@@ -46,6 +47,7 @@ from plugins.llm_chat.agent_events import load_event_payload
 from plugins.llm_chat.agent_context import AgentAccessContext
 from plugins.llm_chat.core.tool_trace import ToolTraceRecorder
 from plugins.llm_chat.session_manager import ScopeIdentity, BaselineFingerprint
+from plugins.llm_chat.agent_event_view import serialize_event_view
 from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
 from plugins.llm_chat.core.tool_trace_policy import DeliverySnapshot
 from plugins.llm_chat.persona.memory_context import MemoryContext
@@ -608,3 +610,184 @@ async def test_prepare_agent_turn_wires_session_context_and_persistence(
     assert turn is not None
     assert turn.status == "completed"
     assert [event.event_type for event in events] == ["user_input", "context_selection"]
+
+
+@pytest.mark.asyncio
+async def test_send_image_records_delivered_paths_as_auditable_evidence() -> None:
+    trace = ToolTraceRecorder()
+    call = trace.start("send_image", {"context": "开心", "image_paths": ["memes/12.jpg"]})
+    tool_trace.record_tool_evidence({"images": [{"path": "memes/99.jpg", "meaning": "范围外", "text": ""}]})
+    with tool_trace.llm_chat_tool_trace_scope(trace), tool_trace.llm_chat_tool_execution_scope(call.execution_ref):
+        tool_trace.record_tool_evidence({"images": [{"path": "memes/12.jpg", "meaning": "开心大笑", "text": "哈哈"}]})
+        tool_trace.record_tool_evidence({"images": [{"path": "memes/34.gif", "meaning": "撒娇", "text": ""}]})
+    trace.finish_success(
+        call,
+        "已发送 2 张图片",
+        before=DeliverySnapshot(active=True),
+        after=DeliverySnapshot(active=True, attempts=2, confirmed=2, confirmed_media=2),
+    )
+    event = trace.events[0]
+    assert event.recorded_arguments["image_paths"] == ["memes/12.jpg"]
+    assert [image["path"] for image in cast(list[dict[str, str]], event.evidence["images"])] == [
+        "memes/12.jpg",
+        "memes/34.gif",
+    ]
+
+    recorder = AgentTurnRecorder()
+    recorder.record_tool_events(trace.events)
+    result_event = recorder.events[1]
+    evidence = cast(dict[str, Any], result_event.payload["evidence"])
+    assert [image["path"] for image in cast(list[dict[str, str]], evidence["images"])] == [
+        "memes/12.jpg",
+        "memes/34.gif",
+    ]
+
+    view = serialize_event_view(
+        AgentEvent(
+            event_ref="event_view",
+            turn_id=1,
+            sequence=2,
+            event_type="tool_result",
+            role="tool",
+            tool_name="send_image",
+            payload_json=json.dumps(result_event.payload, ensure_ascii=False),
+            status="succeeded",
+            effect="confirmed",
+            duration_ms=120,
+        ),
+        result_event.payload,
+    )
+    images = cast(list[dict[str, str]], cast(dict[str, Any], view["evidence"])["images"])
+    assert [image["url"] for image in images] == [
+        "/api/llm-chat/memes/files/12.jpg",
+        "/api/llm-chat/memes/files/34.gif",
+    ]
+    assert images[0]["meaning"] == "开心大笑"
+    assert view["title"] == "send_image"
+    assert view["preview"] == "已发送 2 张图片"
+    assert {"label": "耗时", "value": "120 ms"} in cast(list[dict[str, str]], view["details"])
+
+
+@pytest.mark.asyncio
+async def test_event_view_inlines_key_content_without_extra_read_step() -> None:
+    payload = {
+        "arguments": {"text": "先确认回滚点", "delay_seconds": 1.2},
+        "context_arguments": {"text_chars": 6},
+    }
+    event = AgentEvent(
+        event_ref="event_call",
+        turn_id=1,
+        sequence=1,
+        event_type="assistant_tool_call",
+        role="assistant",
+        tool_name="send_text",
+        payload_json=json.dumps(payload, ensure_ascii=False),
+        status="requested",
+        effect="none",
+    )
+    view = serialize_event_view(event, payload)
+    assert view["preview"] == "先确认回滚点"
+    assert view["arguments"] == payload["arguments"]
+    assert view["evidence"] is None
+    assert view["payload_chars"] == len(event.payload_json)
+    assert {"label": "文本", "value": "先确认回滚点"} in cast(list[dict[str, str]], view["details"])
+
+    user_payload = {
+        "content": json.dumps(
+            {"speaker": "FrostN0v0", "content": "帮我发个开心的表情"},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        "speaker": "FrostN0v0",
+        "fresh_context": False,
+    }
+    user_event = AgentEvent(
+        event_ref="event_user",
+        turn_id=1,
+        sequence=2,
+        event_type="user_input",
+        role="user",
+        payload_json=json.dumps(user_payload, ensure_ascii=False),
+    )
+    user_view = serialize_event_view(user_event, user_payload)
+    assert user_view["preview"] == "FrostN0v0：帮我发个开心的表情"
+    assert "{" not in cast(str, user_view["preview"])
+    assert user_view["title"] == "用户输入"
+
+    untitled = AgentEvent(
+        event_ref="event_unknown",
+        turn_id=1,
+        sequence=3,
+        event_type="future_event",
+        role="",
+        payload_json="{}",
+    )
+    assert serialize_event_view(untitled, {})["title"] == "future_event"
+
+
+@pytest.mark.asyncio
+async def test_scope_identity_resolves_channel_name_and_backs_off_on_failure(
+    agent_store: SimpleNamespace,
+) -> None:
+    lookups: list[str] = []
+
+    class _Account:
+        platform = "qq"
+        self_id = "bot"
+
+    class _Session:
+        channel = SimpleNamespace(id="957729172", name="")
+        account = _Account()
+        guild = SimpleNamespace(id="957729172", name="")
+
+        async def channel_get(self, channel_id: str) -> SimpleNamespace:
+            lookups.append(channel_id)
+            return SimpleNamespace(name="珂朵莉的测试群")
+
+        async def guild_get(self, guild_id: str) -> SimpleNamespace:
+            return SimpleNamespace(name="")
+
+    session = cast(Session, _Session())
+    identity = await session_manager.resolve_scope_identity(session)
+    assert identity.display_name == "珂朵莉的测试群"
+    assert lookups == ["957729172"]
+
+    cached = await session_manager.resolve_scope_identity(session)
+    assert cached.display_name == "珂朵莉的测试群"
+    assert lookups == ["957729172"]
+
+    scope = await session_manager.get_or_create_scope(identity)
+    assert scope.display_name == "珂朵莉的测试群"
+
+    class _FailingSession(_Session):
+        channel = SimpleNamespace(id="1032658892", name="")
+        guild = SimpleNamespace(id="", name="")
+
+        async def channel_get(self, channel_id: str) -> SimpleNamespace:
+            lookups.append(channel_id)
+            raise RuntimeError("channel lookup unavailable")
+
+    failing = cast(Session, _FailingSession())
+    assert (await session_manager.resolve_scope_identity(failing)).display_name == ""
+    assert lookups == ["957729172", "1032658892"]
+
+    assert (await session_manager.resolve_scope_identity(failing)).display_name == ""
+    assert lookups == ["957729172", "1032658892"]
+
+    retried = await session_manager.resolve_scope_identity(
+        failing,
+        now=datetime.utcnow() + timedelta(minutes=31),
+    )
+    assert retried.display_name == ""
+    assert lookups == ["957729172", "1032658892", "1032658892"]
+
+    unnamed = await session_manager.get_or_create_scope(
+        ScopeIdentity(
+            platform="qq",
+            account_id="bot",
+            guild_id="",
+            channel_id="1032658892",
+            display_name="",
+        )
+    )
+    assert unnamed.display_name == ""

@@ -36,11 +36,11 @@ from .session_handoff import generate_session_handoff
 from .session_manager import (
     start_turn,
     finish_turn,
-    scope_identity,
     rollover_session,
     load_scope_anchors,
     get_or_create_scope,
     ensure_active_session,
+    resolve_scope_identity,
 )
 from .core.agent_trace import AgentTurnRecorder
 from .core.media_delivery import latest_user_requests_media, latest_user_requests_image_generation
@@ -128,7 +128,7 @@ async def prepare_agent_turn(
         persona=config.persona,
         tool_schemas=tool_schemas,
     )
-    scope = await get_or_create_scope(scope_identity(session))
+    scope = await get_or_create_scope(await resolve_scope_identity(session))
     context_session, rollover_reason = await ensure_active_session(
         scope,
         baseline,

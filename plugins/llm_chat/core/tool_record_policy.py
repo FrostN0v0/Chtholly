@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import cast
 from hashlib import sha256
 from collections.abc import Mapping
 
@@ -66,7 +67,12 @@ def record_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> di
             "source": safe_url(source) if external_source_type(source) == "public_url" else _text_descriptor(source),
         }
     if tool_name == "send_image":
-        return _record_selected(arguments, "context")
+        paths = arguments.get("image_paths")
+        normalized_paths = [value for value in paths if isinstance(value, str)] if isinstance(paths, list) else []
+        return {
+            **_record_selected(arguments, "context"),
+            "image_paths": cast(JSONType, normalized_paths[:12]),
+        }
     if tool_name == "read_channel_messages":
         return {
             "limit": _safe_integer(arguments.get("limit"), 10),
