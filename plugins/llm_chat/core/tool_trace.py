@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from secrets import token_hex
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -20,6 +21,7 @@ from .tool_trace_policy import (
     project_tool_success,
     project_tool_arguments,
 )
+from .tool_record_policy import record_tool_result, record_tool_arguments
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,22 +29,29 @@ class PendingToolCall:
     """One started call awaiting a terminal trace event."""
 
     sequence: int
+    attempt: int
+    execution_ref: str
     tool_name: str
     arguments: dict[str, JSONType]
+    recorded_arguments: dict[str, JSONType]
     started_at: datetime
     started_monotonic: float
 
 
 @dataclass(frozen=True, slots=True)
 class ToolTraceEvent:
-    """A bounded, persistence-safe tool execution record."""
+    """One durable tool execution plus its compact context projection."""
 
     sequence: int
+    attempt: int
+    execution_ref: str
     tool_name: str
     status: ToolStatus
     effect: ToolEffect
     arguments: dict[str, JSONType]
     outcome: dict[str, JSONType]
+    recorded_arguments: dict[str, JSONType]
+    recorded_result: JSONType
     started_at: datetime
     duration_ms: int
 
@@ -52,14 +61,21 @@ class ToolTraceRecorder:
     """Collect tool events for one generation without performing I/O."""
 
     events: list[ToolTraceEvent] = field(default_factory=list)
+    attempt: int = 1
     _next_sequence: int = field(default=0, init=False)
+
+    def set_attempt(self, attempt: int) -> None:
+        self.attempt = max(1, int(attempt))
 
     def start(self, tool_name: str, arguments: Mapping[str, object]) -> PendingToolCall:
         self._next_sequence += 1
         return PendingToolCall(
             sequence=self._next_sequence,
+            attempt=self.attempt,
+            execution_ref=f"exec_{token_hex(10)}",
             tool_name=tool_name,
             arguments=project_tool_arguments(tool_name, arguments),
+            recorded_arguments=record_tool_arguments(tool_name, arguments),
             started_at=datetime.now(timezone.utc),
             started_monotonic=time.monotonic(),
         )
@@ -73,7 +89,13 @@ class ToolTraceRecorder:
         after: DeliverySnapshot,
     ) -> None:
         status, effect, outcome = project_tool_success(call.tool_name, result, before=before, after=after)
-        self._append(call, status=status, effect=effect, outcome=outcome)
+        self._append(
+            call,
+            status=status,
+            effect=effect,
+            outcome=outcome,
+            recorded_result=record_tool_result(call.tool_name, result, projected_result=outcome),
+        )
 
     def finish_error(
         self,
@@ -84,11 +106,13 @@ class ToolTraceRecorder:
         after: DeliverySnapshot,
     ) -> None:
         status, error_code = classify_tool_error(exc, delivery_attempted=after.attempts > before.attempts)
+        error: dict[str, JSONType] = {"error_code": error_code, "error": summarize_exception(exc)}
         self._append(
             call,
             status=status,
             effect=tool_error_effect(call.tool_name, before, after, terminal_status=status),
-            outcome={"error_code": error_code, "error": summarize_exception(exc)},
+            outcome=error,
+            recorded_result=error,
         )
 
     def finish_cancelled(
@@ -98,11 +122,13 @@ class ToolTraceRecorder:
         before: DeliverySnapshot,
         after: DeliverySnapshot,
     ) -> None:
+        error: dict[str, JSONType] = {"error_code": "cancelled", "error": "Tool execution was cancelled"}
         self._append(
             call,
             status="cancelled",
             effect=tool_error_effect(call.tool_name, before, after, terminal_status="cancelled"),
-            outcome={"error_code": "cancelled", "error": "Tool execution was cancelled"},
+            outcome=error,
+            recorded_result=error,
         )
 
     def _append(
@@ -112,16 +138,21 @@ class ToolTraceRecorder:
         status: ToolStatus,
         effect: ToolEffect,
         outcome: dict[str, JSONType],
+        recorded_result: JSONType,
     ) -> None:
         duration_ms = max(0, round((time.monotonic() - call.started_monotonic) * 1000))
         self.events.append(
             ToolTraceEvent(
                 sequence=call.sequence,
+                attempt=call.attempt,
+                execution_ref=call.execution_ref,
                 tool_name=call.tool_name,
                 status=status,
                 effect=effect,
                 arguments=call.arguments,
                 outcome=outcome,
+                recorded_arguments=call.recorded_arguments,
+                recorded_result=recorded_result,
                 started_at=call.started_at,
                 duration_ms=duration_ms,
             )

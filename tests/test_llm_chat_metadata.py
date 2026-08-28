@@ -30,10 +30,19 @@ sys.modules["litellm"] = litellm
 agno_compat = ModuleType("llm_chat.agno_compat")
 agno_compat.install_agno_tool_bridge = lambda: None
 sys.modules[agno_compat.__name__] = agno_compat
-for child in ("chat_handler", "tag_runtime", "meme_command", "meme_webui"):
+for child in (
+    "chat_handler",
+    "agent_command",
+    "agent_runtime",
+    "agent_webui",
+    "tag_runtime",
+    "meme_command",
+    "meme_webui",
+):
     sys.modules[f"llm_chat.{{child}}"] = ModuleType(f"llm_chat.{{child}}")
 tool_runtime = ModuleType("llm_chat.tool_runtime")
 tool_runtime.registered_tools = []
+tool_runtime.registered_tool_schemas = []
 sys.modules[tool_runtime.__name__] = tool_runtime
 
 from arclet.entari.config import EntariConfig
@@ -54,9 +63,11 @@ assert all(any("\u4e00" <= char <= "\u9fff" for char in item["title"]) for item 
 assert all(any("\u4e00" <= char <= "\u9fff" for char in item["description"]) for item in properties.values())
 from llm_chat.config_schema import _CONFIG_SCHEMA_TEXT
 assert {{
-    "tool_context_max_events",
-    "tool_context_max_chars",
-    "tool_history_max_records_per_channel",
+    "max_input_tokens",
+    "output_reserve_tokens",
+    "context_rollover_ratio",
+    "session_idle_minutes",
+    "session_max_turns",
     "channel_message_max_images",
     "self_reference_image",
 }} <= _CONFIG_SCHEMA_TEXT.keys()

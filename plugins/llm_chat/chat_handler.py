@@ -3,13 +3,9 @@
 from __future__ import annotations
 
 import re
-from typing import Any, cast
+from typing import Any
 import asyncio
-from datetime import datetime
-from functools import wraps
 from contextlib import suppress
-from dataclasses import dataclass
-from collections.abc import Callable, Coroutine
 
 from arclet.entari import At, Session, MessageCreatedEvent, plugin, plugin_config
 from arclet.letoderea import BLOCK, enter_if
@@ -22,43 +18,22 @@ from entari_plugin_llm.exception import ModelNotFoundError
 
 from .config import LLMChatConfig
 from .identity import resolve_chat_identity
-from .core.eval import apply_deltas
 from .core.media import has_meaningful_text
-from .core.types import ChatMessage
 from .generation import response_content, generate_chat_response
-from .web.policy import normalize_web_access_limits
 from .core.errors import summarize_exception
 from .chat_context import (
     build_image_notes,
-    build_chat_messages,
     collect_message_images,
     collect_quoted_message,
-    build_eval_conversation,
     model_supports_image_input,
     build_multimodal_user_content,
-    requests_recent_channel_context,
 )
-from .core.compose import energy_at, compose_persona_prompt
 from .core.forward import render_forwarded_storage
-from .tool_history import persist_tool_events, load_recent_tool_activity
-from .core.delivery import DeliveryState, normalize_delivery_limits
-from .persona.store import (
-    get_mood,
-    set_mood,
-    get_relation,
-    load_history,
-    save_relation,
-    append_message,
-    delete_message,
-)
-from .channel_images import ChannelImageReferences
-from .persona.runner import run_evaluation
-from .turn_lifecycle import ActiveChatTurn
+from .tool_runtime import registered_tool_schemas
+from .channel_turns import latest_channel_turn, cancel_active_channel_turns
+from .chat_evaluation import update_chat_state_after_delivery
 from .forward_context import resolve_merged_forward_messages
-from .core.media_delivery import latest_user_requests_media, latest_user_requests_image_generation
-from .core.self_reference import append_self_reference_image
-from .persona.memory_update import apply_memory_updates
-from .persona.memory_context import load_memory_context
+from .agent_turn_setup import prepare_agent_turn
 
 _LOGGER = log.wrapper("[llm_chat]")
 _CHAT_FAILURE_REPLY = "这次回复没有成功，请稍后重试。"
@@ -96,77 +71,12 @@ config = plugin_config(LLMChatConfig)
 plug = Plugin.current()
 
 
-@dataclass(slots=True)
-class _ActiveChannelTurn:
-    task: asyncio.Task[object]
-    generation: int
-    superseded: bool = False
-
-
-_ACTIVE_CHANNEL_TURNS: dict[str, _ActiveChannelTurn] = {}
-_CHANNEL_TURN_GENERATIONS: dict[str, int] = {}
-
-
-def _cancel_active_channel_turns() -> None:
-    for active in tuple(_ACTIVE_CHANNEL_TURNS.values()):
-        if not active.task.done():
-            active.task.cancel()
-    _ACTIVE_CHANNEL_TURNS.clear()
-    _CHANNEL_TURN_GENERATIONS.clear()
-
-
-plugin.collect_disposes(_cancel_active_channel_turns)
-
-
-def _latest_channel_turn(
-    handler: Callable[[Session, Contexts], Coroutine[Any, Any, object]],
-) -> Callable[[Session, Contexts], Coroutine[Any, Any, object]]:
-    """Cancel an older generation before starting the newest channel turn."""
-
-    @wraps(handler)
-    async def wrapped(session: Session, ctx: Contexts) -> object:
-        channel_id = session.channel.id
-        generation = _CHANNEL_TURN_GENERATIONS.get(channel_id, 0) + 1
-        _CHANNEL_TURN_GENERATIONS[channel_id] = generation
-
-        previous = _ACTIVE_CHANNEL_TURNS.get(channel_id)
-        if previous is not None and not previous.task.done():
-            previous.superseded = True
-            previous.task.cancel()
-            try:
-                await previous.task
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:
-                _LOGGER.warning(f"superseded channel turn cleanup failed: {summarize_exception(exc)}")
-
-        if _CHANNEL_TURN_GENERATIONS.get(channel_id) != generation:
-            return BLOCK
-
-        task = asyncio.create_task(handler(session, ctx))
-        active = _ActiveChannelTurn(task=task, generation=generation)
-        _ACTIVE_CHANNEL_TURNS[channel_id] = active
-        try:
-            return await task
-        except asyncio.CancelledError:
-            if active.superseded:
-                return BLOCK
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-            raise
-        finally:
-            if _ACTIVE_CHANNEL_TURNS.get(channel_id) is active:
-                _ACTIVE_CHANNEL_TURNS.pop(channel_id, None)
-            if _CHANNEL_TURN_GENERATIONS.get(channel_id) == generation:
-                _CHANNEL_TURN_GENERATIONS.pop(channel_id, None)
-
-    return wrapped
+plugin.collect_disposes(cancel_active_channel_turns)
 
 
 @plug.dispatch(MessageCreatedEvent).register(priority=900)
 @enter_if(_should_handle_chat)
-@_latest_channel_turn
+@latest_channel_turn
 async def on_chat(session: Session, ctx: Contexts):
     model_text = session.elements.extract_plain_text().strip()
     require_text_reply = bool(collect_message_images(session)) and not has_meaningful_text(model_text)
@@ -216,95 +126,37 @@ async def on_chat(session: Session, ctx: Contexts):
         return BLOCK
     user_id = identity.user_id
     user_name = identity.display_name
-    channel_image_references = ChannelImageReferences()
-
-    rel = await get_relation(user_id, channel_id)
-    mood = await get_mood(channel_id)
-    energy = energy_at(datetime.now().hour)
-    memory_context = await load_memory_context(config, user_id, channel_id, content)
-    history = await load_history(channel_id, config.context_window)
-    try:
-        recent_tool_activity = await load_recent_tool_activity(
-            channel_id,
-            history,
-            max_events=config.tool_context_max_events,
-            max_chars=config.tool_context_max_chars,
-        )
-    except Exception as exc:
-        _LOGGER.warning(f"tool history load failed: {summarize_exception(exc)}")
-        recent_tool_activity = []
-    generation_history = [] if requests_recent_channel_context(model_text) else history
-    messages = build_chat_messages(
-        generation_history,
-        user_name,
-        model_text,
-        current_content,
-        forwarded_messages,
+    prepared = await prepare_agent_turn(
+        config,
+        session,
+        identity,
+        model_name=model_name,
+        supports_image_input=supports_image_input,
+        model_text=model_text,
+        content=content,
+        current_content=current_content,
+        forwarded_messages=forwarded_messages,
+        warn=_LOGGER.warning,
+        tool_schemas=registered_tool_schemas,
     )
-    chat_messages = cast(list[ChatMessage], messages)
-    self_reference_attached = False
-    if supports_image_input and latest_user_requests_image_generation(chat_messages):
-        self_reference_attached = append_self_reference_image(
-            chat_messages,
-            config.self_reference_image,
-            _LOGGER.warning,
-        )
-    media_requested = latest_user_requests_media(chat_messages)
-    web_limits = normalize_web_access_limits(
-        config.web_search_max_calls_per_generation,
-        config.web_page_max_calls_per_generation,
-        config.web_total_max_calls_per_generation,
-    )
-    delivery_limits = normalize_delivery_limits(
-        config.delivery_min_interval_seconds,
-        config.delivery_default_interval_seconds,
-        config.delivery_max_interval_seconds,
-        config.delivery_max_text_messages_per_generation,
-        config.delivery_max_text_chars_per_message,
-        config.delivery_max_forward_nodes,
-        config.delivery_max_forward_chars_per_node,
-        config.delivery_max_total_text_chars_per_generation,
-        config.delivery_max_media_messages_per_generation,
-    )
-    delivery_state = DeliveryState(limits=delivery_limits)
-    system = compose_persona_prompt(
-        config.persona,
-        mood,
-        energy,
-        affection=rel.affection,
-        trust=rel.trust,
-        dependence=rel.dependence,
-        resentment=rel.resentment,
-        familiarity=rel.familiarity,
-        impression=rel.impression,
-        profile=memory_context.chat_profile,
-        relevant_memories=memory_context.relevant_memories,
-        recent_tool_activity=recent_tool_activity,
-        user_name=user_name,
-        current_participant_ref=identity.participant_ref,
-        self_reference_attached=self_reference_attached,
-        web_search_limit=web_limits.search_limit,
-        web_page_limit=web_limits.read_limit,
-        web_total_limit=web_limits.total_limit,
-        delivery_limits=delivery_limits,
-    )
-
-    user_message_id = await append_message(channel_id, user_id, user_name, "user", content)
-
-    turn = ActiveChatTurn(
-        channel_id=channel_id,
-        user_message_id=user_message_id,
-        delivery_state=delivery_state,
-        append_history=append_message,
-        delete_history=delete_message,
-        warn=lambda message: _LOGGER.warning(message),
-        persist_tool_events=persist_tool_events,
-        tool_history_retention=config.tool_history_max_records_per_channel,
-    )
+    rel = prepared.relation
+    mood = prepared.mood
+    memory_context = prepared.memory_context
+    eval_history = prepared.eval_history
+    chat_messages = prepared.chat_messages
+    system = prepared.system
+    media_requested = prepared.media_requested
+    web_limits = prepared.web_limits
+    delivery_state = prepared.delivery_state
+    channel_image_references = prepared.channel_image_references
+    turn = prepared.lifecycle
+    agent_events = prepared.agent_events
+    agent_access = prepared.agent_access
+    turn_status = "failed"
     try:
         try:
             response = await generate_chat_response(
-                cast(list[ChatMessage], messages),
+                chat_messages,
                 system=system,
                 model=model_name,
                 channel_id=channel_id,
@@ -315,86 +167,70 @@ async def on_chat(session: Session, ctx: Contexts):
                 request_timeout=config.model_request_timeout,
                 media_request_timeout=config.media_request_timeout,
                 tool_trace=turn.tool_trace,
+                agent_events=agent_events,
+                agent_access=agent_access,
                 require_text_reply=require_text_reply,
             )
-        finally:
-            await turn.persist_tool_trace()
-    except asyncio.CancelledError:
-        await turn.preserve_and_rollback()
-        raise
-    except Exception as exc:
-        _LOGGER.warning(f"llm generate failed: {summarize_exception(exc)}")
-        if delivery_state.delivery_attempts:
+        except asyncio.CancelledError:
+            turn.capture_tool_events()
+            turn_status = "partial" if delivery_state.confirmed_deliveries else "cancelled"
             await turn.preserve_and_rollback()
+            raise
+        except Exception as exc:
+            turn.capture_tool_events()
+            _LOGGER.warning(f"llm generate failed: {summarize_exception(exc)}")
+            if delivery_state.delivery_attempts:
+                await turn.preserve_and_rollback()
+                return BLOCK
+            failure_reply = _MEDIA_FAILURE_REPLY if media_requested else _CHAT_FAILURE_REPLY
+            try:
+                if await turn.deliver_model_reply(session, failure_reply):
+                    await turn.persist_delivered_text()
+                    turn_status = "completed"
+            except asyncio.CancelledError:
+                raise
+            except Exception as delivery_exc:
+                await turn.preserve_and_rollback()
+                _LOGGER.warning(f"generation failure notice delivery failed: {summarize_exception(delivery_exc)}")
             return BLOCK
-        failure_reply = _MEDIA_FAILURE_REPLY if media_requested else _CHAT_FAILURE_REPLY
+
+        turn.capture_tool_events()
         try:
-            if await turn.deliver_model_reply(session, failure_reply):
-                await turn.persist_delivered_text()
+            if not await turn.deliver_model_images(session, response):
+                return BLOCK
         except asyncio.CancelledError:
             raise
-        except Exception as delivery_exc:
-            await turn.preserve_and_rollback()
-            _LOGGER.warning(f"generation failure notice delivery failed: {summarize_exception(delivery_exc)}")
-        return BLOCK
-
-    try:
-        if not await turn.deliver_model_images(session, response):
-            return BLOCK
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        _LOGGER.warning(f"native image delivery failed: {summarize_exception(exc)}")
-        return BLOCK
-    if not await turn.deliver_model_reply(session, response_content(response)):
-        return BLOCK
-    assistant_reply = await turn.persist_delivered_text()
-    familiarity = min(100.0, rel.familiarity + 1)
-    axes = {
-        "affection": rel.affection,
-        "trust": rel.trust,
-        "dependence": rel.dependence,
-        "resentment": rel.resentment,
-    }
-    impression = rel.impression
-    counter = rel.eval_counter + 1
-
-    if counter >= config.eval_every_n:
-        counter = 0
-        recent = history[-config.eval_context_window :] if config.eval_context_window > 0 else []
-        conversation = build_eval_conversation(recent, user_id, user_name, content, assistant_reply)
-        try:
-            result = await run_evaluation(
-                config,
-                config.persona,
-                axes,
-                impression,
-                memory_context.evaluator_profile_facts,
-                conversation,
-                user_name,
-                channel_id,
-            )
         except Exception as exc:
-            _LOGGER.warning(f"relationship evaluation failed: {summarize_exception(exc)}")
-            result = None
-        if result is not None:
-            axes = apply_deltas(axes, result)
-            impression = result.impression
-            try:
-                await apply_memory_updates(config, user_id, channel_id, result)
-            except Exception as exc:
-                _LOGGER.warning(f"memory update failed: {summarize_exception(exc)}")
-            await set_mood(channel_id, mood + result.mood_delta)
-
-    await save_relation(
-        user_id,
-        channel_id,
-        axes=axes,
-        impression=impression,
-        familiarity=familiarity,
-        eval_counter=counter,
-    )
-    return BLOCK
+            _LOGGER.warning(f"native image delivery failed: {summarize_exception(exc)}")
+            return BLOCK
+        if not await turn.deliver_model_reply(session, response_content(response)):
+            return BLOCK
+        assistant_reply = await turn.persist_delivered_text()
+        turn_status = "completed"
+        await update_chat_state_after_delivery(
+            config,
+            rel,
+            memory_context,
+            eval_history,
+            user_id=user_id,
+            user_name=user_name,
+            channel_id=channel_id,
+            user_content=content,
+            assistant_reply=assistant_reply,
+            mood=mood,
+            warn=_LOGGER.warning,
+        )
+        return BLOCK
+    finally:
+        if turn_status not in {"completed", "cancelled"} and delivery_state.confirmed_deliveries:
+            turn_status = "partial"
+        finalize_task = asyncio.create_task(turn.finalize_agent_turn(turn_status))
+        try:
+            await asyncio.shield(finalize_task)
+        except asyncio.CancelledError:
+            with suppress(asyncio.CancelledError):
+                await finalize_task
+            raise
 
 
 @plug.dispatch(MessageCreatedEvent).register(priority=999)

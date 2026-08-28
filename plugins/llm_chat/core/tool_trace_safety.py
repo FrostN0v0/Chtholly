@@ -26,8 +26,15 @@ _SENSITIVE_KEY_PARTS = (
     "credential",
     "password",
     "secret",
-    "token",
 )
+
+
+def _is_sensitive_key(normalized_key: str) -> bool:
+    if any(part in normalized_key for part in _SENSITIVE_KEY_PARTS):
+        return True
+    if "token" not in normalized_key:
+        return False
+    return not (normalized_key.endswith("_tokens") or normalized_key.endswith("_token_count"))
 
 
 def compact_tool_activity(
@@ -77,7 +84,7 @@ def sanitize_json(value: object, *, max_text: int, depth: int = 0) -> JSONType:
             if not key:
                 continue
             normalized_key = key.casefold().replace("-", "_")
-            if any(part in normalized_key for part in _SENSITIVE_KEY_PARTS):
+            if _is_sensitive_key(normalized_key):
                 result[key] = _REDACTED
             else:
                 result[key] = sanitize_json(raw_value, max_text=max_text, depth=depth + 1)

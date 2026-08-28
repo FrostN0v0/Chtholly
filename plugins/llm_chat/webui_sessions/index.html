@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM 会话</title>
+  <link rel="stylesheet" href="/api/llm-chat/sessions/assets/app.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">AGENT CONTEXT</p>
+        <h1>LLM 会话</h1>
+        <p class="subtitle">查看 Session、Turn、AgentEvent 与实际上下文选择。</p>
+      </div>
+      <div class="topbar-actions">
+        <button id="refresh-button" class="button secondary" type="button">刷新</button>
+        <span id="status" class="status" role="status">正在连接…</span>
+      </div>
+    </header>
+
+    <section class="toolbar card">
+      <label>
+        <span>聊天范围</span>
+        <select id="scope-select" aria-label="聊天范围"></select>
+      </label>
+      <div class="scope-meta" id="scope-meta">尚未选择聊天范围</div>
+      <div class="toolbar-actions">
+        <button id="new-session-button" class="button secondary" type="button" disabled>新会话</button>
+        <button id="rollover-button" class="button primary" type="button" disabled>续接会话</button>
+        <button id="hard-reset-button" class="button danger" type="button" disabled>硬重置</button>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <aside class="panel card">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">SESSIONS</p>
+            <h2>会话列表</h2>
+          </div>
+          <span id="session-count" class="count">0</span>
+        </div>
+        <div id="session-list" class="list empty-state">暂无会话</div>
+      </aside>
+
+      <section class="panel card timeline-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">TIMELINE</p>
+            <h2>轮次时间线</h2>
+          </div>
+          <span id="turn-count" class="count">0</span>
+        </div>
+        <div id="session-detail" class="session-detail muted">请选择一个会话。</div>
+        <div id="turn-list" class="timeline empty-state">暂无轮次</div>
+      </section>
+
+      <aside class="panel card inspector-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">INSPECTOR</p>
+            <h2>事件与上下文</h2>
+          </div>
+        </div>
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-tab="events" type="button">事件</button>
+          <button class="tab" data-tab="context" type="button">上下文</button>
+        </div>
+        <div id="events-view" class="tab-view active">
+          <div id="event-list" class="event-list empty-state">请选择一个轮次。</div>
+        </div>
+        <div id="context-view" class="tab-view">
+          <pre id="context-output" class="json-output">请选择一个轮次。</pre>
+        </div>
+      </aside>
+    </section>
+  </main>
+
+  <dialog id="payload-dialog">
+    <form method="dialog" class="dialog-card">
+      <header>
+        <div>
+          <p class="eyebrow">EVENT PAYLOAD</p>
+          <h2 id="payload-title">事件内容</h2>
+        </div>
+        <button class="icon-button" value="close" aria-label="关闭" type="submit">×</button>
+      </header>
+      <div class="payload-controls">
+        <label>
+          <span>字段路径</span>
+          <input id="payload-path" type="text" placeholder="例如 arguments.html">
+        </label>
+        <button id="payload-load-button" class="button primary" type="button">读取</button>
+      </div>
+      <pre id="payload-output" class="json-output payload-output">尚未读取。</pre>
+      <footer>
+        <button id="payload-next-button" class="button secondary" type="button" disabled>下一段</button>
+        <button id="pin-event-button" class="button secondary" type="button">固定事件</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog">
+    <form method="dialog" class="dialog-card compact">
+      <header>
+        <div>
+          <p class="eyebrow">CONFIRM</p>
+          <h2 id="confirm-title">确认操作</h2>
+        </div>
+      </header>
+      <p id="confirm-message" class="dialog-message"></p>
+      <label id="confirmation-field" class="hidden">
+        <span>输入 CONFIRM</span>
+        <input id="confirmation-input" type="text" autocomplete="off">
+      </label>
+      <footer>
+        <button class="button secondary" value="cancel" type="submit">取消</button>
+        <button id="confirm-action-button" class="button danger" value="default" type="button">确认</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <script src="/api/llm-chat/sessions/assets/app.js" defer></script>
+</body>
+</html>
