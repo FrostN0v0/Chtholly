@@ -58,6 +58,12 @@ _MEDIA_RECOVERY_SUFFIX = (
     "若经过有界尝试仍不能确认媒体发送成功，最终普通文本必须以 [MEDIA_UNAVAILABLE] 开头，"
     "如实说明本轮未能发送，不得承诺下一轮必然成功；失败说明不得通过 send_text 或其他发送工具发送。"
 )
+_IMAGE_INPUT_REPLY_SUFFIX = (
+    "当前轮用户只发送或引用了图片，没有提供有意义的文字。不得把空文本解释为句号、一个点、沉默或无事发生；"
+    "请依据当前上下文中实际可见的图片或图片描述，补充一条简短自然的文字回应。"
+    "即使本轮已有媒体工具发送成功，也不得只输出 [END_OF_RESPONSE] 或复述已发送媒体；"
+    "只有图片内容确实不可用时，才自然请用户重新发送原图。不得再调用任何工具。"
+)
 _LOGGER = log.wrapper("[llm_chat]")
 
 
@@ -82,6 +88,10 @@ def response_images(response: object) -> tuple[AgnoImage, ...]:
 def _has_visible_reply(response: object) -> bool:
     visible = strip_media_unavailable_marker(strip_internal_media_records(response_content(response))).strip()
     return has_meaningful_text(strip_trailing_end_of_response(visible))
+
+
+def _requires_visible_reply(delivery_state: DeliveryState, require_text_reply: bool) -> bool:
+    return delivery_state.delivery_attempts == 0 or (require_text_reply and not delivery_state.delivered_texts)
 
 
 def _agno_messages(response: object) -> list[AgnoMessage]:
@@ -199,6 +209,7 @@ async def generate_chat_response(
     ctx: Contexts | None,
     web_limits: WebAccessLimits,
     delivery_state: DeliveryState,
+    require_text_reply: bool = False,
     channel_image_references: ChannelImageReferences | None = None,
     request_timeout: float = 90.0,
     media_request_timeout: float = 300.0,
@@ -266,16 +277,26 @@ async def generate_chat_response(
                 )
             if _tool_call_limit_hit(response):
                 _LOGGER.warning("Agno tool call limit reached; finalizing once without tools")
+                visible_reply_required = _requires_visible_reply(delivery_state, require_text_reply)
                 return await _finalize_without_tools(
                     transcript,
                     system=system,
                     model=model,
                     channel_id=channel_id,
-                    suffix=_FINALIZATION_SUFFIX,
-                    require_visible=delivery_state.delivery_attempts == 0,
+                    suffix=(
+                        _IMAGE_INPUT_REPLY_SUFFIX
+                        if require_text_reply and not delivery_state.delivered_texts
+                        else _FINALIZATION_SUFFIX
+                    ),
+                    require_visible=visible_reply_required,
                     request_timeout=request_timeout,
                 )
-            if delivery_state.delivery_attempts or _has_visible_reply(response):
+            if _has_visible_reply(response):
+                return response
+            if delivery_state.delivery_attempts and not _requires_visible_reply(
+                delivery_state,
+                require_text_reply,
+            ):
                 return response
             _LOGGER.warning("model returned no visible reply; retrying once without tools")
             return await _finalize_without_tools(
@@ -283,20 +304,29 @@ async def generate_chat_response(
                 system=system,
                 model=model,
                 channel_id=channel_id,
-                suffix=_VISIBLE_RETRY_SUFFIX,
+                suffix=(
+                    _IMAGE_INPUT_REPLY_SUFFIX
+                    if require_text_reply and not delivery_state.delivered_texts
+                    else _VISIBLE_RETRY_SUFFIX
+                ),
                 require_visible=True,
                 request_timeout=request_timeout,
             )
 
     if not tool_loop_exhausted:
         raise RuntimeError(_TOOL_LOOP_EXHAUSTED)
+    visible_reply_required = _requires_visible_reply(delivery_state, require_text_reply)
     return await _finalize_without_tools(
         messages,
         system=system,
         model=model,
         channel_id=channel_id,
-        suffix=_FINALIZATION_SUFFIX,
-        require_visible=delivery_state.delivery_attempts == 0,
+        suffix=(
+            _IMAGE_INPUT_REPLY_SUFFIX
+            if require_text_reply and not delivery_state.delivered_texts
+            else _FINALIZATION_SUFFIX
+        ),
+        require_visible=visible_reply_required,
         request_timeout=request_timeout,
     )
 

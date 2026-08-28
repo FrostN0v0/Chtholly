@@ -13,7 +13,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from importlib.util import module_from_spec, spec_from_file_location
-from collections.abc import Mapping, AsyncIterator
+from collections.abc import Mapping, Iterator, AsyncIterator
 from importlib.machinery import ModuleSpec
 
 import pytest
@@ -202,6 +202,9 @@ class _ChatElements:
 
     def select(self, _element_type: type[Any]) -> list[Any]:
         return []
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(())
 
 
 class _ChatSession:
@@ -2419,6 +2422,82 @@ async def test_generation_accepts_end_marker_after_confirmed_media_without_retry
 
 
 @pytest.mark.asyncio
+async def test_generation_requires_text_after_media_only_image_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = DeliveryState()
+    final_requests: list[dict[str, Any]] = []
+
+    async def fake_generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        mark_delivery_success(state, media=True)
+        return _handler_response("[END_OF_RESPONSE]")
+
+    async def fake_acompletion(**kwargs: Any) -> SimpleNamespace:
+        final_requests.append(kwargs)
+        return _handler_response("这张图的反应很明显，是在无语地吐槽。")
+
+    monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
+    monkeypatch.setattr(generation_module.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(
+        generation_module,
+        "get_model_config",
+        lambda *_args: SimpleNamespace(
+            name="resolved-model",
+            base_url="https://model.invalid/v1",
+            api_key="test-only-key",
+            extra={},
+        ),
+    )
+
+    response = await generation_module.generate_chat_response(
+        cast(list[Any], [{"role": "user", "content": "[Image]"}]),
+        system="system",
+        model="deepseek",
+        channel_id="group",
+        ctx=Contexts(),
+        web_limits=generation_module.WebAccessLimits(0, 0, 0),
+        delivery_state=state,
+        require_text_reply=True,
+        request_timeout=12.5,
+    )
+
+    assert generation_module.response_content(response) == "这张图的反应很明显，是在无语地吐槽。"
+    assert len(final_requests) == 1
+    assert "不得把空文本解释为句号、一个点" in final_requests[0]["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_generation_accepts_confirmed_tool_text_for_image_only_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = DeliveryState()
+    mark_delivery_success(state, ["已经回应图片。"], media=True)
+
+    async def fake_generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return _handler_response("[END_OF_RESPONSE]")
+
+    async def unexpected_acompletion(**_kwargs: Any) -> None:
+        raise AssertionError("confirmed tool text must satisfy the image-only reply requirement")
+
+    monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
+    monkeypatch.setattr(generation_module.litellm, "acompletion", unexpected_acompletion)
+
+    response = await generation_module.generate_chat_response(
+        cast(list[Any], [{"role": "user", "content": "[Image]"}]),
+        system="system",
+        model="deepseek",
+        channel_id="group",
+        ctx=Contexts(),
+        web_limits=generation_module.WebAccessLimits(0, 0, 0),
+        delivery_state=state,
+        require_text_reply=True,
+        request_timeout=12.5,
+    )
+
+    assert generation_module.response_content(response) == "[END_OF_RESPONSE]"
+
+
+@pytest.mark.asyncio
 async def test_tool_history_is_scoped_to_loaded_channel_turns(
     monkeypatch: pytest.MonkeyPatch,
     isolated_memory_store: SimpleNamespace,
@@ -3293,6 +3372,38 @@ async def test_on_chat_mention_only_returns_block_without_generation(
 
 
 @pytest.mark.asyncio
+async def test_latest_channel_turn_cancels_superseded_generation() -> None:
+    async with _temporary_chat_handler() as harness:
+        module = harness.module
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        calls = 0
+
+        async def handler(_session: Session, _ctx: Contexts) -> object:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+            return "latest"
+
+        wrapped = module._latest_channel_turn(handler)
+        first = asyncio.create_task(wrapped(cast(Session, _ChatSession("first")), Contexts()))
+        await started.wait()
+
+        latest = await wrapped(cast(Session, _ChatSession("second")), Contexts())
+
+        assert latest == "latest"
+        assert await first is BLOCK
+        assert cancelled.is_set()
+        assert module._ACTIVE_CHANNEL_TURNS == {}
+
+
+@pytest.mark.asyncio
 async def test_direct_merged_forward_does_not_claim_chat() -> None:
     session = _MergedForwardChatSession(direct=True, quoted=False)
     async with _temporary_chat_handler() as harness:
@@ -3420,12 +3531,14 @@ async def test_on_chat_keeps_bot_owned_quoted_image_out_of_current_user_attribut
         module = harness.module
         records = _install_handler_stubs(monkeypatch, module)
         observed_payload: dict[str, Any] = {}
+        observed_require_text_reply: list[bool] = []
 
         async def image_notes(*_args: Any, **_kwargs: Any) -> list[str]:
             return ["[引用自当前 Bot 的图片: 被男娘@了]"]
 
-        async def generate(messages: list[dict[str, Any]], **_kwargs: Any) -> SimpleNamespace:
+        async def generate(messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
             observed_payload.update(json.loads(cast(str, messages[-1]["content"])))
+            observed_require_text_reply.append(kwargs["require_text_reply"])
             return _handler_response("这是我之前发的图。")
 
         monkeypatch.setattr(module, "build_image_notes", image_notes)
@@ -3460,10 +3573,11 @@ async def test_on_chat_keeps_bot_owned_quoted_image_out_of_current_user_attribut
             "forwarded_messages": quoted_context,
         }
         assert session.sent == ["这是我之前发的图。"]
+        assert observed_require_text_reply == [True]
 
 
 @pytest.mark.asyncio
-async def test_block_native_llm_fallback_claims_addressed_public_message_after_uncaught_failure(
+async def test_block_native_llm_fallback_claims_all_public_messages_after_uncaught_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with _temporary_chat_handler() as harness:
@@ -3509,34 +3623,43 @@ async def test_block_native_llm_fallback_claims_addressed_public_message_after_u
         channel = Channel("group-B", ChannelType.TEXT)
         user = User("same-user", "Current User")
         member = Member(user=user, nick="Current User")
-        message = MessageObject(
-            "message-B",
-            '<at id="bot"/> NEW_GROUP_B_SENTINEL',
-            channel=channel,
-            member=member,
-            user=user,
-        )
         login = Login(platform="test-platform", user=User("bot", "Bot"))
-        origin = OriginEvent(
-            type=EventType.MESSAGE_CREATED,
-            timestamp=datetime.now(),
-            login=login,
-            channel=channel,
-            member=member,
-            message=message,
-            user=user,
-            sn=2026,
-        )
         account = Account(login, ApiInfo(), [])
-        event = MessageCreatedEvent(account, origin)
-
-        await dispatch(event, scope=harness.plugin._scope)
-        await asyncio.sleep(0)
+        events: list[MessageCreatedEvent] = []
+        for sequence, content in enumerate(
+            (
+                '<at id="bot"/> NEW_GROUP_B_SENTINEL',
+                '<img src="https://example.invalid/unaddressed.png"/>',
+            ),
+            start=2026,
+        ):
+            message = MessageObject(
+                f"message-{sequence}",
+                content,
+                channel=channel,
+                member=member,
+                user=user,
+            )
+            origin = OriginEvent(
+                type=EventType.MESSAGE_CREATED,
+                timestamp=datetime.now(),
+                login=login,
+                channel=channel,
+                member=member,
+                message=message,
+                user=user,
+                sn=sequence,
+            )
+            event = MessageCreatedEvent(account, origin)
+            events.append(event)
+            await dispatch(event, scope=harness.plugin._scope)
+            await asyncio.sleep(0)
 
         assert old_native_session["channel_id"] == "group-A"
-        assert event.channel.id == "group-B"
-        assert event.user.id == "same-user"
-        assert "NEW_GROUP_B_SENTINEL" in event.message.content
+        assert all(event.channel.id == "group-B" for event in events)
+        assert all(event.user.id == "same-user" for event in events)
+        assert "NEW_GROUP_B_SENTINEL" in events[0].message.content
+        assert "unaddressed.png" in events[1].message.content
         assert native_calls == 0
         assert native_persistence == []
 
