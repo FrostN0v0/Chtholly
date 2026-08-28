@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from typing import cast
+from pathlib import Path
+from importlib.util import module_from_spec, spec_from_file_location
 from collections.abc import Callable
 
 import httpx
 import pytest
+from arclet.entari.config import config_model_schema
 
 from utils.tts_service_core.voice_catalog import TTSSynthesisRequest
 from utils.tts_service_core.providers.base import TTSSynthesisError
@@ -25,6 +28,21 @@ _DEFAULT = "\u9ed8\u8ba4"
 _HAPPY = "\u5f00\u5fc3"
 _CALM = "\u5e73\u9759"
 _SPLIT = "\u4e0d\u5207"
+
+
+async def test_tts_config_schema_supports_json_extra_params():
+    config_path = Path(__file__).resolve().parents[1] / "plugins" / "tts_service" / "config.py"
+    spec = spec_from_file_location("_tts_config_schema_test", config_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    schema = config_model_schema(module.TTSConfig, ref_root="/")
+    properties = schema["properties"]
+    for name in ("gpt_sovits_extra_params", "fish_extra_params"):
+        assert properties[name]["type"] == "object"
+        assert properties[name]["additionalProperties"] == {}
 
 
 def make_provider(
