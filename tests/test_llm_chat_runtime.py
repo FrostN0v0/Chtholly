@@ -51,13 +51,15 @@ from plugins.llm_chat import (
     agno_compat as agno_compat_module,
     chat_context as chat_context_module,
     channel_turns as channel_turns_module,
+    chat_evaluation as chat_evaluation_module,
     forward_context as forward_context_module,
+    engagement_state as engagement_state_module,
 )
 from plugins.llm_chat.web import policy as web_policy_module
 from plugins.llm_chat.core import image_source as image_source_module
 from plugins.llm_chat.tools import is_command_allowed
 from plugins.llm_chat.config import LLMChatConfig
-from plugins.llm_chat.models import UserMemory, Conversation, UserRelation, ToolExecution, UserProfileFact
+from plugins.llm_chat.models import BotState, UserMemory, Conversation, UserRelation, ToolExecution, UserProfileFact
 from plugins.llm_chat.vision import VISION_TAG_TIMEOUT, VISION_DESCRIBE_TIMEOUT, vision_completion
 from plugins.llm_chat.persona import (
     store as store_module,
@@ -98,6 +100,7 @@ from plugins.llm_chat.channel_images import ChannelImageReferences
 from plugins.llm_chat.persona.runner import run_evaluation
 from plugins.llm_chat.turn_lifecycle import ActiveChatTurn
 from plugins.llm_chat.core.engagement import (
+    TurnFeedback,
     EngagementSignals,
     decide_engagement,
     engagement_budget,
@@ -122,7 +125,7 @@ from plugins.llm_chat.core.self_reference import (
 from plugins.llm_chat.persona.memory_update import apply_memory_updates, resolve_fact_embedding_update
 from plugins.llm_chat.core.tool_trace_policy import DeliverySnapshot, project_tool_arguments
 from plugins.llm_chat.core.tool_trace_safety import compact_tool_activity
-from plugins.llm_chat.persona.memory_context import load_memory_context
+from plugins.llm_chat.persona.memory_context import MemoryContext, load_memory_context
 
 if _PREVIOUS_GENERATION_MODULE is None:
     sys.modules.pop("plugins.llm_chat.generation", None)
@@ -296,6 +299,8 @@ def _install_handler_stubs(
         history=[],
         feedback=[],
         declined=[],
+        state_updates=[],
+        current_relation=None,
     )
 
     async def no_image_notes(*_args: Any, **_kwargs: Any) -> list[str]:
@@ -356,6 +361,7 @@ def _install_handler_stubs(
     ) -> SimpleNamespace:
         del model_name, supports_image_input
         relation = await module.get_relation(identity.user_id, session.channel.id)
+        records.current_relation = relation
         mood = await module.get_mood(session.channel.id)
         memory = await module.load_memory_context(config, identity.user_id, session.channel.id, content)
         eval_history = (
@@ -444,13 +450,14 @@ def _install_handler_stubs(
             agent_access=AgentAccessContext(10, 20, 30, identity.user_id),
         )
 
-    async def update_after_delivery(
+    def schedule_after_delivery(
         config: Any,
-        relation: Any,
         _memory: Any,
         eval_history: list[Any],
         **kwargs: Any,
     ) -> None:
+        records.state_updates.append("evaluation")
+        relation = records.current_relation
         counter = relation.eval_counter + 1
         if counter >= config.eval_every_n:
             counter = 0
@@ -466,6 +473,7 @@ def _install_handler_stubs(
         records.relations.append(((kwargs["user_id"], kwargs["channel_id"]), {"eval_counter": counter}))
 
     async def persist_feedback(**kwargs: Any) -> dict[str, float]:
+        records.state_updates.append("feedback")
         records.feedback.append(kwargs)
         return {"irritation": 0.0, "user_mood": 0.0, "familiarity": 0.0}
 
@@ -486,7 +494,7 @@ def _install_handler_stubs(
     monkeypatch.setattr(module, "append_message", append_message, raising=False)
     monkeypatch.setattr(module, "delete_message", delete_message, raising=False)
     monkeypatch.setattr(module, "prepare_agent_turn", prepare_turn)
-    monkeypatch.setattr(module, "update_chat_state_after_delivery", update_after_delivery)
+    monkeypatch.setattr(module, "schedule_chat_state_after_delivery", schedule_after_delivery)
     monkeypatch.setattr(module, "persist_turn_feedback", persist_feedback, raising=False)
     monkeypatch.setattr(module, "record_declined_turn", record_declined, raising=False)
     monkeypatch.setattr(ActiveChatTurn, "finalize_agent_turn", finalize_agent_turn)
@@ -1839,6 +1847,7 @@ async def test_run_evaluation_uses_dedicated_json_payload_without_tools(
                 "seed": 7,
                 "response_format": {"type": "json_object"},
                 "timeout": 999,
+                "max_retries": 9,
                 "tools": [{"type": "function"}],
             },
         )
@@ -1899,6 +1908,7 @@ async def test_run_evaluation_uses_dedicated_json_payload_without_tools(
     assert "response_format" not in request
     assert request["timeout"] == 23.0
     assert request["seed"] == 7
+    assert request["max_retries"] == 0
     assert "tools" not in request
     assert "tool_choice" not in request
     messages = request["messages"]
@@ -3024,6 +3034,25 @@ async def test_on_chat_runs_relationship_evaluation_every_five_replies(
 
 
 @pytest.mark.asyncio
+async def test_on_chat_persists_feedback_before_periodic_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+
+        async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            return _handler_response("Current reply")
+
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        result = await module.on_chat.callable_target(_ChatSession("current turn"), SimpleNamespace())
+
+        assert result is BLOCK
+        assert records.state_updates == ["feedback", "evaluation"]
+
+
+@pytest.mark.asyncio
 async def test_segmented_delivery_is_aggregated_once_and_reuses_normalized_limits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3848,3 +3877,154 @@ async def test_on_chat_native_image_failure_blocks_without_evaluator_or_leaking_
             "native image delivery failed: DeliveryError: native image delivery confirmed 1/2 images before failure; "
             "do not repeat the confirmed prefix"
         ]
+
+
+@pytest.mark.asyncio
+async def test_turn_feedback_persistence_uses_latest_database_values(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_memory_store: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(engagement_state_module, "get_session", isolated_memory_store.session_factory)
+    async with isolated_memory_store.session_factory() as session:
+        session.add(
+            UserRelation(
+                user_id="user",
+                channel_id="channel",
+                resentment=10.0,
+                familiarity=20.0,
+            )
+        )
+        session.add(BotState(channel_id="channel", mood=0.2))
+        await session.commit()
+
+    feedback = TurnFeedback(
+        irritation_delta=14.0,
+        mood_delta=-0.12,
+        closeness_delta=0.4,
+        reasons=("hostile",),
+    )
+    first = await engagement_state_module.persist_turn_feedback(
+        user_id="user",
+        channel_id="channel",
+        feedback=feedback,
+    )
+    second = await engagement_state_module.persist_turn_feedback(
+        user_id="user",
+        channel_id="channel",
+        feedback=feedback,
+    )
+
+    assert first == pytest.approx({"irritation": 24.0, "user_mood": 0.08, "familiarity": 20.4})
+    assert second == pytest.approx({"irritation": 38.0, "user_mood": -0.04, "familiarity": 20.8})
+
+
+@pytest.mark.asyncio
+async def test_relationship_evaluation_claim_preserves_turns_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_memory_store: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(store_module, "get_session", isolated_memory_store.session_factory)
+    async with isolated_memory_store.session_factory() as session:
+        session.add(UserRelation(user_id="user", channel_id="channel", eval_counter=4))
+        await session.commit()
+
+    assert await store_module.claim_relationship_evaluation("user", "channel", 5) is True
+    assert await store_module.claim_relationship_evaluation("user", "channel", 5) is False
+    await store_module.restore_relationship_evaluation("user", "channel", 5)
+
+    async with isolated_memory_store.session_factory() as session:
+        relation = await session.get(UserRelation, ("user", "channel"))
+        assert relation is not None
+        assert relation.eval_counter == 6
+
+    assert await store_module.claim_relationship_evaluation("user", "channel", 5) is True
+    async with isolated_memory_store.session_factory() as session:
+        relation = await session.get(UserRelation, ("user", "channel"))
+        assert relation is not None
+        assert relation.eval_counter == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_relationship_evaluation_restores_claimed_counter(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_memory_store: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(store_module, "get_session", isolated_memory_store.session_factory)
+    warnings: list[str] = []
+    async with isolated_memory_store.session_factory() as session:
+        session.add(UserRelation(user_id="user", channel_id="channel", eval_counter=4))
+        await session.commit()
+
+    async def fail_evaluation(*_args: Any, **_kwargs: Any) -> EvalResult:
+        raise TimeoutError("upstream stalled")
+
+    monkeypatch.setattr(chat_evaluation_module, "run_evaluation", fail_evaluation)
+    config = LLMChatConfig()
+    config.eval_every_n = 5
+    config.eval_context_window = 0
+
+    await chat_evaluation_module.update_chat_state_after_delivery(
+        config,
+        cast(MemoryContext, _memory_context()),
+        [],
+        user_id="user",
+        user_name="User",
+        channel_id="channel",
+        user_content="hostile turn",
+        assistant_reply="reply",
+        warn=warnings.append,
+    )
+
+    async with isolated_memory_store.session_factory() as session:
+        relation = await session.get(UserRelation, ("user", "channel"))
+        assert relation is not None
+        assert relation.eval_counter == 5
+        assert relation.affection == 30.0
+        assert relation.resentment == 0.0
+    assert warnings == ["relationship evaluation failed: TimeoutError: upstream stalled"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_relationship_evaluation_restores_claimed_counter(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_memory_store: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(store_module, "get_session", isolated_memory_store.session_factory)
+    async with isolated_memory_store.session_factory() as session:
+        session.add(UserRelation(user_id="user", channel_id="channel", eval_counter=4))
+        await session.commit()
+
+    started = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def wait_forever(*_args: Any, **_kwargs: Any) -> EvalResult:
+        started.set()
+        await blocked.wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(chat_evaluation_module, "run_evaluation", wait_forever)
+    config = LLMChatConfig()
+    config.eval_every_n = 5
+    config.eval_context_window = 0
+    task = asyncio.create_task(
+        chat_evaluation_module.update_chat_state_after_delivery(
+            config,
+            cast(MemoryContext, _memory_context()),
+            [],
+            user_id="user",
+            user_name="User",
+            channel_id="channel",
+            user_content="hostile turn",
+            assistant_reply="reply",
+            warn=lambda _message: None,
+        )
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    async with isolated_memory_store.session_factory() as session:
+        relation = await session.get(UserRelation, ("user", "channel"))
+        assert relation is not None
+        assert relation.eval_counter == 5

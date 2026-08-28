@@ -154,7 +154,7 @@ plugins:
     delivery_max_total_text_chars_per_generation: 12000
     delivery_max_media_messages_per_generation: 6
     # Model duties: chat images pass directly to vision-capable chat models; eval pinned below; fallback tag/describe uses image_tag_model.
-    eval_model: doubao
+    eval_model: gpt
     model_request_timeout: 90.0
     media_request_timeout: 300.0
     image_generation_model: image
