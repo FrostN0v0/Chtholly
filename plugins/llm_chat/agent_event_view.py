@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 
 from .models import AgentEvent
 from .core.types import JSONType
+from .agent_attachments import is_user_input_attachment
 
 _INLINE_OBJECT_CHARS = 8000
 _PREVIEW_CHARS = 400
@@ -16,6 +17,7 @@ _DETAIL_VALUE_CHARS = 200
 _MAX_DETAILS = 8
 _MAX_EVIDENCE_IMAGES = 12
 _MEME_FILE_ENDPOINT = "/api/llm-chat/memes/files"
+_INPUT_ATTACHMENT_ENDPOINT = "/api/llm-chat/sessions/events"
 
 EVENT_TITLES = {
     "user_input": "用户输入",
@@ -122,7 +124,9 @@ _FIELD_LABELS = {
     "width": "宽度",
 }
 _PREVIEW_KEYS = ("content", "text", "summary", "query", "prompt", "excerpt", "command", "context", "markdown")
-_SKIPPED_DETAIL_KEYS = frozenset({"content", "context_arguments", "context_result", "metrics", "evidence"})
+_SKIPPED_DETAIL_KEYS = frozenset(
+    {"content", "context_arguments", "context_result", "metrics", "evidence", "attachments"}
+)
 
 
 def event_title(event: AgentEvent) -> str:
@@ -394,6 +398,42 @@ def event_engagement(event: AgentEvent, payload: Mapping[str, JSONType]) -> dict
     }
 
 
+def event_input_images(event: AgentEvent, payload: Mapping[str, JSONType]) -> list[dict[str, JSONType]]:
+    """Project private user-input attachments into authenticated WebUI URLs."""
+
+    if event.event_type != "user_input":
+        return []
+    attachments = payload.get("attachments")
+    if not isinstance(attachments, Sequence) or isinstance(attachments, (str, bytes)):
+        return []
+    images: list[dict[str, JSONType]] = []
+    for raw in attachments[:_MAX_EVIDENCE_IMAGES]:
+        if not isinstance(raw, Mapping):
+            continue
+        attachment_ref = raw.get("attachment_ref")
+        mime = raw.get("mime")
+        if not is_user_input_attachment(attachment_ref, mime):
+            continue
+        source = raw.get("source")
+        index = raw.get("index")
+        ordinal = index if isinstance(index, int) and index > 0 else len(images) + 1
+        quoted = source == "quoted"
+        label = f"{'引用' if quoted else '用户'}图片 {ordinal}"
+        images.append(
+            {
+                "name": label,
+                "source": "quoted" if quoted else "direct",
+                "mime": cast(str, mime),
+                "bytes": raw.get("bytes") if isinstance(raw.get("bytes"), int) else 0,
+                "url": (
+                    f"{_INPUT_ATTACHMENT_ENDPOINT}/{quote(event.event_ref, safe='')}"
+                    f"/attachments/{quote(cast(str, attachment_ref), safe='')}"
+                ),
+            }
+        )
+    return images
+
+
 def serialize_event_view(event: AgentEvent, payload: Mapping[str, JSONType]) -> dict[str, object]:
     """Build the WebUI presentation fields for one durable event."""
 
@@ -406,5 +446,6 @@ def serialize_event_view(event: AgentEvent, payload: Mapping[str, JSONType]) -> 
         "evidence": event_evidence(payload),
         "persona": event_persona(event, payload),
         "engagement": event_engagement(event, payload),
+        "images": event_input_images(event, payload),
         "payload_chars": len(event.payload_json or ""),
     }

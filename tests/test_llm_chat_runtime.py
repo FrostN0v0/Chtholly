@@ -13,7 +13,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from importlib.util import module_from_spec, spec_from_file_location
-from collections.abc import Mapping, Iterator, AsyncIterator
+from collections.abc import Mapping, Iterator, Sequence, AsyncIterator
 from importlib.machinery import ModuleSpec
 
 import pytest
@@ -301,12 +301,16 @@ def _install_handler_stubs(
         declined=[],
         state_updates=[],
         current_relation=None,
+        input_attachments=[],
     )
 
     async def no_image_notes(*_args: Any, **_kwargs: Any) -> list[str]:
         return []
 
     async def no_forward_messages(*_args: Any, **_kwargs: Any) -> list[ForwardedMessage]:
+        return []
+
+    async def no_input_attachments(*_args: Any, **_kwargs: Any) -> list[dict[str, object]]:
         return []
 
     async def resolve_identity(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
@@ -356,10 +360,12 @@ def _install_handler_stubs(
         forwarded_messages: list[ForwardedMessage],
         tool_schemas: object,
         warn: Any,
+        input_attachments: Sequence[Mapping[str, object]] = (),
         requires_media_reply: bool = False,
         is_operator: bool = False,
     ) -> SimpleNamespace:
         del model_name, supports_image_input
+        records.input_attachments.extend(input_attachments)
         relation = await module.get_relation(identity.user_id, session.channel.id)
         records.current_relation = relation
         mood = await module.get_mood(session.channel.id)
@@ -493,6 +499,8 @@ def _install_handler_stubs(
     monkeypatch.setattr(module, "compose_persona_prompt", compose_prompt, raising=False)
     monkeypatch.setattr(module, "append_message", append_message, raising=False)
     monkeypatch.setattr(module, "delete_message", delete_message, raising=False)
+    monkeypatch.setattr(module, "capture_user_input_images", no_input_attachments)
+    monkeypatch.setattr(module, "remove_user_input_attachments", lambda _items: None)
     monkeypatch.setattr(module, "prepare_agent_turn", prepare_turn)
     monkeypatch.setattr(module, "schedule_chat_state_after_delivery", schedule_after_delivery)
     monkeypatch.setattr(module, "persist_turn_feedback", persist_feedback, raising=False)
@@ -2137,6 +2145,28 @@ def test_tool_trace_distinguishes_observation_rejection_and_partial_effect() -> 
         "partial",
         "delivery_failed",
     )
+
+
+def test_tag_image_pending_result_is_not_recorded_as_confirmed() -> None:
+    recorder = ToolTraceRecorder()
+    call = recorder.start("tag_image", {"image_index": 1})
+    recorder.finish_success(
+        call,
+        {
+            "status": "pending",
+            "message": "Image collection continues in the background.",
+        },
+        before=DeliverySnapshot(),
+        after=DeliverySnapshot(),
+    )
+
+    event = recorder.events[0]
+    assert event.status == "pending"
+    assert event.effect == "none"
+    assert event.outcome == {
+        "status": "pending",
+        "summary": "Image collection continues in the background.",
+    }
 
 
 def test_tool_trace_hashes_full_web_content_and_rejects_string_result_lists() -> None:

@@ -20,7 +20,7 @@ _ASSET_FILES = {
 _PAGE_HEADERS = {
     "Cache-Control": "no-store",
     "Content-Security-Policy": (
-        "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; "
+        "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' blob:; "
         "base-uri 'none'; form-action 'self'; frame-ancestors 'self'"
     ),
 }
@@ -129,6 +129,21 @@ def create_agent_sessions_router(
         except AgentAdminError as exc:
             return _error_response(exc)
         return {"success": True, "item": item}
+
+    @router.get("/events/{event_ref}/attachments/{attachment_ref}", include_in_schema=False, response_model=None)
+    async def event_attachment(event_ref: str, attachment_ref: str) -> FileResponse | JSONResponse:
+        try:
+            attachment = await service.read_event_attachment(event_ref, attachment_ref)
+        except AgentAdminError as exc:
+            return _error_response(exc)
+        return FileResponse(
+            attachment.path,
+            media_type=attachment.mime,
+            headers={
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @router.get("/events/{event_ref}/payload", response_model=None)
     async def event_payload(

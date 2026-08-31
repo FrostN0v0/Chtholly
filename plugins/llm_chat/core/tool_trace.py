@@ -202,6 +202,12 @@ def current_tool_trace() -> ToolTraceRecorder | None:
     return _ACTIVE_TOOL_TRACE.get()
 
 
+def current_tool_execution_ref() -> str:
+    """Return the active tool execution reference, if any."""
+
+    return _ACTIVE_EXECUTION_REF.get()
+
+
 @contextmanager
 def llm_chat_tool_execution_scope(execution_ref: str) -> Iterator[None]:
     """Bind one in-flight tool call so its handler can attach delivery evidence."""

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+import base64
 from typing import Any, cast
+import asyncio
 from hashlib import sha256
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -12,7 +14,7 @@ from dataclasses import replace
 
 import pytest
 from sqlalchemy import select
-from arclet.entari import Session
+from arclet.entari import Image, Session
 from arclet.entari.config import EntariConfig
 
 if not hasattr(EntariConfig, "instance"):
@@ -31,6 +33,7 @@ from plugins.llm_chat import (
     session_manager,
     agent_turn_setup,
     engagement_state,
+    agent_attachments,
 )
 from plugins.llm_chat.core import tool_trace
 from plugins.llm_chat.config import LLMChatConfig
@@ -302,11 +305,25 @@ async def test_history_query_enforces_scope_archive_payload_and_pin_authorizatio
         fresh_context=False,
     )
     recorder = AgentTurnRecorder()
-    recorder.record_user_input("source", user_name="Alice", fresh_context=False)
+    recorder.record_user_input(
+        "source",
+        user_name="Alice",
+        fresh_context=False,
+        attachments=[
+            {
+                "attachment_ref": "input_dddddddddddddddddddddddddddddddd",
+                "mime": "image/png",
+                "bytes": 68,
+                "source": "direct",
+                "index": 1,
+            }
+        ],
+    )
     recorder.append("assistant_output", role="assistant", payload={"content": "large-source"})
     await agent_events.persist_agent_events(turn.id, recorder.events)
     await session_manager.finish_turn(turn.id, status="completed", final_text="large-source")
     event = (await agent_events.load_turn_events(turn.id))[1]
+    user_event = (await agent_events.load_turn_events(turn.id))[0]
     second = await session_manager.rollover_session(scope, first, _baseline(), reason="manual_new", carry_handoff=False)
 
     denied = AgentAccessContext(scope.id, second.id, 999, "alice")
@@ -347,6 +364,13 @@ async def test_history_query_enforces_scope_archive_payload_and_pin_authorizatio
         max_chars=1000,
     )
     assert payload["data"] == "large-source"
+    with pytest.raises(agent_query.AgentQueryError, match="not model-readable"):
+        await agent_query.read_event_payload(
+            full_access,
+            event_ref=user_event.event_ref,
+            path="attachments",
+            max_chars=1000,
+        )
     pinned = await agent_query.pin_context_payload(
         full_access,
         event_ref=event.event_ref,
@@ -609,6 +633,15 @@ async def test_prepare_agent_turn_wires_session_context_and_persistence(
         content="hello",
         current_content=None,
         forwarded_messages=(),
+        input_attachments=[
+            {
+                "attachment_ref": "input_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "mime": "image/png",
+                "bytes": 68,
+                "source": "direct",
+                "index": 1,
+            }
+        ],
         warn=lambda _message: None,
         tool_schemas=[{"name": "send_text", "source_hash": "test"}],
     )
@@ -639,6 +672,15 @@ async def test_prepare_agent_turn_wires_session_context_and_persistence(
         "engagement_decision",
         "context_selection",
     ]
+    user_payload = load_event_payload(started[0])
+    assert cast(list[dict[str, object]], user_payload["attachments"])[0]["attachment_ref"] == (
+        "input_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    )
+    user_view = serialize_event_view(started[0], user_payload)
+    assert cast(list[dict[str, object]], user_view["images"])[0]["url"] == (
+        "/api/llm-chat/sessions/events/" + started[0].event_ref + "/attachments/input_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    )
+
     assert [event.sequence for event in started] == [1, 2, 3, 4]
 
     persona_payload = load_event_payload(started[1])
@@ -668,6 +710,75 @@ async def test_prepare_agent_turn_wires_session_context_and_persistence(
         "assistant_output",
     ]
     assert [event.sequence for event in finished] == [1, 2, 3, 4, 5]
+
+
+@pytest.mark.asyncio
+async def test_user_input_images_are_copied_to_private_audit_attachments(tmp_path: Path) -> None:
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+
+    class _ImageSession:
+        async def download(self, src: str) -> bytes:
+            assert src in {"local://direct", "local://quoted"}
+            return png
+
+    attachments = await agent_attachments.capture_user_input_images(
+        cast(Session, _ImageSession()),
+        [
+            (Image.of(url="local://direct"), False),
+            (Image.of(url="local://quoted"), True),
+        ],
+        root=tmp_path,
+    )
+
+    assert [item["source"] for item in attachments] == ["direct", "quoted"]
+    assert all("src" not in item and "path" not in item for item in attachments)
+    for item in attachments:
+        path = agent_attachments.resolve_user_input_attachment(
+            cast(str, item["attachment_ref"]),
+            cast(str, item["mime"]),
+            root=tmp_path,
+        )
+        assert path.read_bytes() == png
+
+    agent_attachments.remove_user_input_attachments(attachments, root=tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_user_image_capture_removes_completed_files(tmp_path: Path) -> None:
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    blocker = asyncio.Event()
+
+    class _CancelledSession:
+        async def download(self, src: str) -> bytes:
+            if src == "local://direct":
+                return png
+            await blocker.wait()
+            return png
+
+    task = asyncio.create_task(
+        agent_attachments.capture_user_input_images(
+            cast(Session, _CancelledSession()),
+            [
+                (Image.of(url="local://direct"), False),
+                (Image.of(url="local://quoted"), True),
+            ],
+            root=tmp_path,
+        )
+    )
+    for _ in range(100):
+        if list(tmp_path.iterdir()):
+            break
+        await asyncio.sleep(0.01)
+    assert list(tmp_path.iterdir())
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.asyncio
@@ -724,6 +835,59 @@ async def test_send_image_records_delivered_paths_as_auditable_evidence() -> Non
     assert view["title"] == "send_image"
     assert view["preview"] == "已发送 2 张图片"
     assert {"label": "耗时", "value": "120 ms"} in cast(list[dict[str, str]], view["details"])
+
+
+@pytest.mark.asyncio
+async def test_background_tag_image_result_replaces_pending_event(agent_store: SimpleNamespace) -> None:
+    _scope, context_session = await _scope_and_session()
+    turn = await session_manager.start_turn(
+        context_session,
+        trigger_message_id="message",
+        user_id="alice",
+        user_name="Alice",
+        conversation_user_id=None,
+        fresh_context=False,
+    )
+    async with agent_store.session_factory() as db:
+        db.add(
+            AgentEvent(
+                turn_id=turn.id,
+                sequence=1,
+                event_type="tool_result",
+                role="tool",
+                execution_ref="exec_tag",
+                tool_call_id="exec_tag",
+                tool_name="tag_image",
+                payload_json=json.dumps(
+                    {
+                        "result": {"status": "pending", "summary": "processing"},
+                        "context_result": {"status": "pending", "summary": "processing"},
+                    }
+                ),
+                status="pending",
+                effect="none",
+            )
+        )
+        await db.commit()
+
+    assert await agent_events.settle_background_tool_result(
+        turn.id,
+        "exec_tag",
+        status="succeeded",
+        effect="confirmed",
+        result={"status": "created", "summary": "Collected in background."},
+        duration_ms=65_000,
+        wait_seconds=0,
+    )
+
+    event = (await agent_events.load_turn_events(turn.id))[0]
+    assert event.status == "succeeded"
+    assert event.effect == "confirmed"
+    assert event.duration_ms == 65_000
+    assert load_event_payload(event)["result"] == {
+        "status": "created",
+        "summary": "Collected in background.",
+    }
 
 
 @pytest.mark.asyncio

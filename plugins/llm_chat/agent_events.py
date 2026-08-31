@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from collections.abc import Mapping, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from entari_plugin_database import get_session
 
 from .models import AgentTurn, AgentEvent, ContextSession
@@ -38,6 +39,49 @@ async def persist_agent_events(turn_id: int, events: Sequence[AgentEventDraft]) 
     async with get_session() as db:
         db.add_all(rows)
         await db.commit()
+
+
+async def settle_background_tool_result(
+    turn_id: int,
+    execution_ref: str,
+    *,
+    status: str,
+    effect: str,
+    result: Mapping[str, object],
+    duration_ms: int,
+    wait_seconds: float = 30.0,
+) -> bool:
+    """Replace one pending tool result after its detached side effect settles."""
+
+    payload = json.dumps(
+        {"result": dict(result), "context_result": dict(result)},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    attempts = max(1, round(max(0.0, wait_seconds) / 0.25))
+    for attempt in range(attempts):
+        async with get_session() as db:
+            updated = await db.execute(
+                update(AgentEvent)
+                .where(
+                    AgentEvent.turn_id == turn_id,
+                    AgentEvent.execution_ref == execution_ref,
+                    AgentEvent.event_type == "tool_result",
+                    AgentEvent.tool_name == "tag_image",
+                )
+                .values(
+                    payload_json=payload,
+                    status=status,
+                    effect=effect,
+                    duration_ms=max(0, int(duration_ms)),
+                )
+            )
+            await db.commit()
+        if getattr(updated, "rowcount", None):
+            return True
+        if attempt + 1 < attempts:
+            await asyncio.sleep(0.25)
+    return False
 
 
 def load_event_payload(event: AgentEvent) -> dict[str, JSONType]:

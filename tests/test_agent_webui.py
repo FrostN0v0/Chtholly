@@ -27,6 +27,7 @@ from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
 @pytest.mark.asyncio
 async def test_agent_sessions_api_exposes_timeline_context_payload_and_safe_reset(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -47,8 +48,24 @@ async def test_agent_sessions_api_exposes_timeline_context_payload_and_safe_rese
         conversation_user_id=None,
         fresh_context=False,
     )
+    attachment_ref = "input_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    attachment_bytes = b"private-user-image"
+    (tmp_path / f"{attachment_ref}.png").write_bytes(attachment_bytes)
     recorder = AgentTurnRecorder()
-    recorder.record_user_input("hello", user_name="Alice", fresh_context=False)
+    recorder.record_user_input(
+        "hello",
+        user_name="Alice",
+        fresh_context=False,
+        attachments=[
+            {
+                "attachment_ref": attachment_ref,
+                "mime": "image/png",
+                "bytes": len(attachment_bytes),
+                "source": "direct",
+                "index": 1,
+            }
+        ],
+    )
     recorder.append(
         "context_selection",
         payload={
@@ -65,6 +82,7 @@ async def test_agent_sessions_api_exposes_timeline_context_payload_and_safe_rese
     service = AgentAdminService(
         LLMChatConfig(),
         [{"name": "send_text", "source_hash": "send"}, {"name": "web_search", "source_hash": "web"}],
+        attachment_root=tmp_path,
     )
     app = FastAPI()
     asset_dir = Path(__file__).resolve().parents[1] / "plugins" / "llm_chat" / "webui_sessions"
@@ -75,6 +93,7 @@ async def test_agent_sessions_api_exposes_timeline_context_payload_and_safe_rese
             page = await client.get("/api/llm-chat/sessions/page")
             assert page.status_code == 200
             assert "LLM 会话" in page.text
+            assert "img-src 'self' blob:" in page.headers["content-security-policy"]
 
             scopes = (await client.get("/api/llm-chat/sessions/scopes")).json()["items"]
             assert scopes[0]["scope_ref"] == scope.scope_ref
@@ -93,6 +112,18 @@ async def test_agent_sessions_api_exposes_timeline_context_payload_and_safe_rese
                 "context_selection",
                 "assistant_output",
             ]
+            assert events[0]["images"][0]["url"].endswith(
+                f"/events/{events[0]['event_ref']}/attachments/{attachment_ref}"
+            )
+            attachment = await client.get(events[0]["images"][0]["url"])
+            assert attachment.status_code == 200
+            assert attachment.content == attachment_bytes
+            assert attachment.headers["content-type"] == "image/png"
+            assert attachment.headers["cache-control"] == "private, no-store"
+            missing_attachment = await client.get(
+                f"/api/llm-chat/sessions/events/{events[0]['event_ref']}/attachments/input_cccccccccccccccccccccccccccccccc"
+            )
+            assert missing_attachment.status_code == 404
 
             inspector = (await client.get(f"/api/llm-chat/sessions/turns/{turn.turn_ref}/context")).json()["item"]
             assert inspector["selection"]["estimated_tokens"] == 100

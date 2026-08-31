@@ -94,6 +94,7 @@ async def prepare_agent_turn(
     forwarded_messages: Sequence[ForwardedMessage],
     warn: WarningSink,
     tool_schemas: Sequence[Mapping[str, object]],
+    input_attachments: Sequence[Mapping[str, object]] = (),
     requires_media_reply: bool = False,
     is_operator: bool = False,
 ) -> PreparedAgentTurn:
@@ -251,6 +252,7 @@ async def prepare_agent_turn(
         serialize_user_turn(user_name, content),
         user_name=user_name,
         fresh_context=fresh_context,
+        attachments=input_attachments,
     )
     agent_events.record_persona_state(
         {
