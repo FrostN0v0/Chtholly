@@ -1216,10 +1216,14 @@ async def test_resolve_merged_forward_fetches_nested_nodes_and_describes_bounded
                     "message": [
                         {"type": "text", "data": {"text": "Look"}},
                         {"type": "image", "data": {"url": "https://example.com/image.png"}},
-                        {"type": "forward", "data": {"id": "nested-forward"}},
+                        {"type": "forward", "data": {"id": "", "resId": "nested-forward"}},
                     ],
-                }
-            ]
+                },
+                {
+                    "sender": {"nickname": "Carol", "user_id": 3},
+                    "message": [{"type": "text", "data": {"text": "After nested"}}],
+                },
+            ],
         },
         "nested-forward": {
             "messages": [
@@ -1264,8 +1268,89 @@ async def test_resolve_merged_forward_fetches_nested_nodes_and_describes_bounded
             "source": "quoted",
         },
         {"speaker": "Bob", "content": "Nested text", "source": "quoted"},
+        {"speaker": "Carol", "content": "After nested", "source": "quoted"},
     ]
     assert warnings == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_merged_forward_marks_empty_nested_identifier_as_incomplete() -> None:
+    session = _ForwardContextSession(
+        {
+            "forward-1": {
+                "messages": [
+                    {
+                        "sender": {"nickname": "Alice", "user_id": 1},
+                        "message": [{"type": "forward", "data": {"id": ""}}],
+                    }
+                ]
+            }
+        }
+    )
+    warnings: list[str] = []
+
+    messages = await forward_context_module.resolve_merged_forward_messages(
+        LLMChatConfig(image_understanding_enabled=False),
+        cast(Session, session),
+        warnings.append,
+    )
+
+    assert session.internal_calls == [("get_forward_msg", "forward-1")]
+    assert messages == [
+        {"speaker": "Alice", "content": "[Nested merged forward]", "source": "quoted"},
+        {
+            "speaker": "Merged forward",
+            "content": "[Additional forwarded content omitted by configured limits]",
+            "source": "quoted",
+        },
+    ]
+    assert warnings == ["merged forward nested content unavailable or exceeded recursion limits"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_merged_forward_marks_cycles_as_incomplete() -> None:
+    session = _ForwardContextSession(
+        {
+            "forward-1": {
+                "messages": [
+                    {
+                        "sender": {"nickname": "Alice"},
+                        "message": [{"type": "forward", "data": {"id": "nested-forward"}}],
+                    }
+                ]
+            },
+            "nested-forward": {
+                "messages": [
+                    {
+                        "sender": {"nickname": "Bob"},
+                        "message": [{"type": "forward", "data": {"id": "forward-1"}}],
+                    }
+                ]
+            },
+        }
+    )
+    warnings: list[str] = []
+
+    messages = await forward_context_module.resolve_merged_forward_messages(
+        LLMChatConfig(image_understanding_enabled=False),
+        cast(Session, session),
+        warnings.append,
+    )
+
+    assert session.internal_calls == [
+        ("get_forward_msg", "forward-1"),
+        ("get_forward_msg", "nested-forward"),
+    ]
+    assert messages == [
+        {"speaker": "Alice", "content": "[Nested merged forward]", "source": "quoted"},
+        {"speaker": "Bob", "content": "[Nested merged forward]", "source": "quoted"},
+        {
+            "speaker": "Merged forward",
+            "content": "[Additional forwarded content omitted by configured limits]",
+            "source": "quoted",
+        },
+    ]
+    assert warnings == ["merged forward nested content unavailable or exceeded recursion limits"]
 
 
 @pytest.mark.asyncio
