@@ -93,6 +93,7 @@ from plugins.llm_chat.core.delivery import (
     DeliveryState,
     reserve_text_message,
     mark_delivery_success,
+    reserve_media_message,
     llm_chat_delivery_scope,
     normalize_delivery_limits,
 )
@@ -2268,6 +2269,92 @@ async def test_agno_tool_bridge_merges_arguments_and_inherits_context(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_agno_tool_bridge_orders_delivery_tools_without_blocking_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+    state = DeliveryState()
+    media_started = asyncio.Event()
+    read_started = asyncio.Event()
+    release_media = asyncio.Event()
+
+    class FakeSubscriber:
+        def __init__(self, name: str) -> None:
+            self.__name__ = name
+            self.__doc__ = f"Run {name}."
+            self.params: list[Any] = []
+
+        async def handle(self, _context: Contexts, inner: bool = False) -> str:
+            assert inner is True
+            order.append(f"{self.__name__}:start")
+            if self.__name__ == "send_channel_image":
+                media_started.set()
+                await release_media.wait()
+                reserve_media_message()
+                mark_delivery_success(state, media=True)
+            elif self.__name__ == "send_text":
+                _, text = reserve_text_message("after image")
+                mark_delivery_success(state, [text])
+            elif self.__name__ == "web_search":
+                read_started.set()
+            order.append(f"{self.__name__}:end")
+            return self.__name__
+
+    names = ("send_channel_image", "send_text", "web_search")
+    monkeypatch.setattr(
+        agno_compat_module,
+        "available_functions",
+        {name: FakeSubscriber(name) for name in names},
+    )
+    monkeypatch.setattr(
+        agno_compat_module,
+        "tools",
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": f"Run {name}.",
+                    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                },
+            }
+            for name in names
+        ],
+    )
+    tools_by_name = {tool.name: tool for tool in agno_compat_module.build_agno_tools()}
+    image_entrypoint = tools_by_name["send_channel_image"].entrypoint
+    text_entrypoint = tools_by_name["send_text"].entrypoint
+    read_entrypoint = tools_by_name["web_search"].entrypoint
+    assert image_entrypoint is not None
+    assert text_entrypoint is not None
+    assert read_entrypoint is not None
+
+    with (
+        agno_compat_module.agno_delivery_tool_scope(),
+        llm_chat_delivery_scope(state),
+    ):
+        batch = asyncio.gather(
+            image_entrypoint(),
+            text_entrypoint(),
+            read_entrypoint(),
+        )
+        try:
+            await asyncio.wait_for(media_started.wait(), timeout=1.0)
+            await asyncio.wait_for(read_started.wait(), timeout=1.0)
+            await asyncio.sleep(0)
+            assert "send_text:start" not in order
+        finally:
+            release_media.set()
+            results = await batch
+
+    assert order.index("send_channel_image:end") < order.index("send_text:start")
+    assert order.index("web_search:start") < order.index("send_channel_image:end")
+    assert [json.loads(result)["data"] for result in results] == list(names)
+    assert state.confirmed_media_deliveries == 1
+    assert state.delivered_texts == ["after image"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "invalid_content",
     [
@@ -2332,6 +2419,7 @@ async def test_generation_retries_invisible_reply_once_without_tools(
     assert primary_requests[0]["timeout"] == 12.5
     assert "ctx" not in primary_requests[0]
     assert "max_retries" not in primary_requests[0]
+    assert "parallel_tool_calls" not in primary_requests[0]
     assert len(final_requests) == 1
     final_request = final_requests[0]
     assert final_request["timeout"] == 12.5
@@ -2423,6 +2511,7 @@ async def test_generation_retries_contextual_avatar_send_request_until_delivery_
     assert len(requests) == 2
     assert all(request["timeout"] == 45.0 for request in requests)
     assert all(request["max_retries"] == 0 for request in requests)
+    assert all(request["parallel_tool_calls"] is False for request in requests)
     assert "上一条候选回复没有产生任何确认的媒体发送" in requests[1]["system"]
     assert state.confirmed_media_deliveries == 1
 
@@ -2491,7 +2580,15 @@ async def test_generation_uses_media_timeout_for_natural_media_requests(
     )
 
     assert generation_module.response_content(response) == "[END_OF_RESPONSE]"
-    assert requests == [{"system": "system", "model": "deepseek", "timeout": 180.0, "max_retries": 0}]
+    assert requests == [
+        {
+            "system": "system",
+            "model": "deepseek",
+            "timeout": 180.0,
+            "max_retries": 0,
+            "parallel_tool_calls": False,
+        }
+    ]
 
 
 @pytest.mark.asyncio
