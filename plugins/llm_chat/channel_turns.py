@@ -1,4 +1,4 @@
-"""Per-channel latest-turn cancellation for claimed llm_chat generations."""
+"""Per-participant latest-turn cancellation within public channels."""
 
 from __future__ import annotations
 
@@ -17,39 +17,49 @@ from arclet.letoderea.context import Contexts
 from .core.errors import summarize_exception
 
 _LOGGER = log.wrapper("[llm_chat]")
+_ParticipantTurnScope = tuple[str, str, str, str]
 
 
 @dataclass(slots=True)
-class _ActiveChannelTurn:
+class _ActiveParticipantTurn:
     task: asyncio.Task[object]
     generation: int
     superseded: bool = False
 
 
-_ACTIVE_CHANNEL_TURNS: dict[str, _ActiveChannelTurn] = {}
-_CHANNEL_TURN_GENERATIONS: dict[str, int] = {}
+_ACTIVE_PARTICIPANT_TURNS: dict[_ParticipantTurnScope, _ActiveParticipantTurn] = {}
+_PARTICIPANT_TURN_GENERATIONS: dict[_ParticipantTurnScope, int] = {}
 
 
-def cancel_active_channel_turns() -> None:
-    for active in tuple(_ACTIVE_CHANNEL_TURNS.values()):
+def _participant_turn_scope(session: Session) -> _ParticipantTurnScope:
+    return (
+        str(session.account.platform),
+        str(session.account.self_id),
+        str(session.channel.id),
+        str(session.user.id),
+    )
+
+
+def cancel_active_participant_turns() -> None:
+    for active in tuple(_ACTIVE_PARTICIPANT_TURNS.values()):
         if not active.task.done():
             active.task.cancel()
-    _ACTIVE_CHANNEL_TURNS.clear()
-    _CHANNEL_TURN_GENERATIONS.clear()
+    _ACTIVE_PARTICIPANT_TURNS.clear()
+    _PARTICIPANT_TURN_GENERATIONS.clear()
 
 
-def latest_channel_turn(
+def latest_participant_turn(
     handler: Callable[[Session, Contexts], Coroutine[Any, Any, object]],
 ) -> Callable[[Session, Contexts], Coroutine[Any, Any, object]]:
-    """Cancel an older generation before starting the newest channel turn."""
+    """Cancel only an older turn from the same participant and channel."""
 
     @wraps(handler)
     async def wrapped(session: Session, ctx: Contexts) -> object:
-        channel_id = session.channel.id
-        generation = _CHANNEL_TURN_GENERATIONS.get(channel_id, 0) + 1
-        _CHANNEL_TURN_GENERATIONS[channel_id] = generation
+        scope = _participant_turn_scope(session)
+        generation = _PARTICIPANT_TURN_GENERATIONS.get(scope, 0) + 1
+        _PARTICIPANT_TURN_GENERATIONS[scope] = generation
 
-        previous = _ACTIVE_CHANNEL_TURNS.get(channel_id)
+        previous = _ACTIVE_PARTICIPANT_TURNS.get(scope)
         if previous is not None and not previous.task.done():
             previous.superseded = True
             previous.task.cancel()
@@ -58,14 +68,14 @@ def latest_channel_turn(
             except asyncio.CancelledError:
                 pass
             except Exception as exc:
-                _LOGGER.warning(f"superseded channel turn cleanup failed: {summarize_exception(exc)}")
+                _LOGGER.warning(f"superseded participant turn cleanup failed: {summarize_exception(exc)}")
 
-        if _CHANNEL_TURN_GENERATIONS.get(channel_id) != generation:
+        if _PARTICIPANT_TURN_GENERATIONS.get(scope) != generation:
             return BLOCK
 
         task = asyncio.create_task(handler(session, ctx))
-        active = _ActiveChannelTurn(task=task, generation=generation)
-        _ACTIVE_CHANNEL_TURNS[channel_id] = active
+        active = _ActiveParticipantTurn(task=task, generation=generation)
+        _ACTIVE_PARTICIPANT_TURNS[scope] = active
         try:
             return await task
         except asyncio.CancelledError:
@@ -76,9 +86,9 @@ def latest_channel_turn(
                 await task
             raise
         finally:
-            if _ACTIVE_CHANNEL_TURNS.get(channel_id) is active:
-                _ACTIVE_CHANNEL_TURNS.pop(channel_id, None)
-            if _CHANNEL_TURN_GENERATIONS.get(channel_id) == generation:
-                _CHANNEL_TURN_GENERATIONS.pop(channel_id, None)
+            if _ACTIVE_PARTICIPANT_TURNS.get(scope) is active:
+                _ACTIVE_PARTICIPANT_TURNS.pop(scope, None)
+            if _PARTICIPANT_TURN_GENERATIONS.get(scope) == generation:
+                _PARTICIPANT_TURN_GENERATIONS.pop(scope, None)
 
     return wrapped

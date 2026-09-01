@@ -3500,7 +3500,7 @@ async def test_on_chat_mention_only_returns_block_without_generation(
 
 
 @pytest.mark.asyncio
-async def test_latest_channel_turn_cancels_superseded_generation() -> None:
+async def test_latest_participant_turn_cancels_superseded_generation_from_same_user() -> None:
     async with _temporary_chat_handler():
         started = asyncio.Event()
         cancelled = asyncio.Event()
@@ -3518,7 +3518,7 @@ async def test_latest_channel_turn_cancels_superseded_generation() -> None:
                     raise
             return "latest"
 
-        wrapped = channel_turns_module.latest_channel_turn(handler)
+        wrapped = channel_turns_module.latest_participant_turn(handler)
         first = asyncio.create_task(wrapped(cast(Session, _ChatSession("first")), Contexts()))
         await started.wait()
 
@@ -3527,7 +3527,44 @@ async def test_latest_channel_turn_cancels_superseded_generation() -> None:
         assert latest == "latest"
         assert await first is BLOCK
         assert cancelled.is_set()
-        assert channel_turns_module._ACTIVE_CHANNEL_TURNS == {}
+        assert channel_turns_module._ACTIVE_PARTICIPANT_TURNS == {}
+        assert channel_turns_module._PARTICIPANT_TURN_GENERATIONS == {}
+
+
+@pytest.mark.asyncio
+async def test_latest_participant_turn_keeps_different_users_in_same_channel_active() -> None:
+    async with _temporary_chat_handler():
+        first_started = asyncio.Event()
+        second_started = asyncio.Event()
+        release = asyncio.Event()
+        cancelled: list[str] = []
+
+        async def handler(session: Session, _ctx: Contexts) -> object:
+            user_id = str(session.user.id)
+            (first_started if user_id == "user-a" else second_started).set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.append(user_id)
+                raise
+            return user_id
+
+        wrapped = channel_turns_module.latest_participant_turn(handler)
+        first = asyncio.create_task(wrapped(cast(Session, _ChatSession("first", user_id="user-a")), Contexts()))
+        await first_started.wait()
+        second = asyncio.create_task(wrapped(cast(Session, _ChatSession("second", user_id="user-b")), Contexts()))
+        try:
+            await asyncio.wait_for(second_started.wait(), timeout=1.0)
+            assert not first.done()
+            assert not second.done()
+        finally:
+            release.set()
+            results = await asyncio.gather(first, second)
+
+        assert results == ["user-a", "user-b"]
+        assert cancelled == []
+        assert channel_turns_module._ACTIVE_PARTICIPANT_TURNS == {}
+        assert channel_turns_module._PARTICIPANT_TURN_GENERATIONS == {}
 
 
 @pytest.mark.asyncio
