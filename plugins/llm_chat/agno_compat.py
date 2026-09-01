@@ -18,7 +18,7 @@ from entari_plugin_llm.tools.event import LLMToolEvent, tools, available_functio
 
 from .core.errors import summarize_exception
 from .core.delivery import current_llm_chat_delivery, contains_internal_participant_reference
-from .core.tool_trace import current_tool_trace
+from .core.tool_trace import current_tool_trace, llm_chat_tool_execution_scope
 from .runtime_context import copy_llm_chat_context
 from .core.native_images import extract_native_images
 from .core.tool_trace_policy import DeliverySnapshot
@@ -30,6 +30,39 @@ _TOOL_CALL_LIMIT: ContextVar[int] = ContextVar(
     "llm_chat_agno_tool_call_limit",
     default=_MIN_TOOL_CALL_LIMIT,
 )
+_ORDERED_DELIVERY_TOOLS = frozenset(
+    {
+        "generate_image",
+        "html2pic",
+        "jinja2pic",
+        "markdown2pic",
+        "screenshot_web_page",
+        "send_audio",
+        "send_channel_image",
+        "send_external_image",
+        "send_image",
+        "send_merged_forward",
+        "send_text",
+        "speak",
+    }
+)
+_DELIVERY_TOOL_LOCK: ContextVar[asyncio.Lock | None] = ContextVar(
+    "llm_chat_agno_delivery_tool_lock",
+    default=None,
+)
+
+
+@contextmanager
+def agno_delivery_tool_scope() -> Iterator[None]:
+    """Serialize delivery tools while leaving read-only tools concurrent."""
+
+    token = _DELIVERY_TOOL_LOCK.set(asyncio.Lock())
+    try:
+        yield
+    finally:
+        _DELIVERY_TOOL_LOCK.reset(token)
+
+
 _INTERNAL_REFERENCE_TOOLS = {
     "describe_channel_participant_avatar",
     "describe_channel_image",
@@ -91,25 +124,43 @@ def _build_agno_tool(name: str) -> Function:
         recorder = current_tool_trace()
         unsafe_reference = name not in _INTERNAL_REFERENCE_TOOLS and contains_internal_participant_reference(kwargs)
         call = recorder.start(name, {} if unsafe_reference else kwargs) if recorder is not None else None
-        before = _delivery_snapshot()
+        executing = False
+
+        async def invoke() -> str:
+            nonlocal executing
+            executing = True
+            before = _delivery_snapshot()
+            try:
+                if unsafe_reference:
+                    raise ValueError("Invalid internal participant reference for this tool")
+                tool_context = await generate_contexts(LLMToolEvent(), inherit_ctx=copy_llm_chat_context())
+                tool_context.update(kwargs)
+                with llm_chat_tool_execution_scope(call.execution_ref if call is not None else ""):
+                    response = await subscriber.handle(tool_context, inner=True)
+                data = _normalize_tool_data(response)
+                if recorder is not None and call is not None:
+                    recorder.finish_success(call, data, before=before, after=_delivery_snapshot())
+                return json.dumps({"ok": True, "data": data}, ensure_ascii=False)
+            except asyncio.CancelledError:
+                if recorder is not None and call is not None:
+                    recorder.finish_cancelled(call, before=before, after=_delivery_snapshot())
+                raise
+            except Exception as exc:
+                if recorder is not None and call is not None:
+                    recorder.finish_error(call, exc, before=before, after=_delivery_snapshot())
+                return json.dumps({"ok": False, "error": summarize_exception(exc)}, ensure_ascii=False)
+
+        lock = _DELIVERY_TOOL_LOCK.get() if name in _ORDERED_DELIVERY_TOOLS else None
         try:
-            if unsafe_reference:
-                raise ValueError("Invalid internal participant reference for this tool")
-            tool_context = await generate_contexts(LLMToolEvent(), inherit_ctx=copy_llm_chat_context())
-            tool_context.update(kwargs)
-            response = await subscriber.handle(tool_context, inner=True)
-            data = _normalize_tool_data(response)
-            if recorder is not None and call is not None:
-                recorder.finish_success(call, data, before=before, after=_delivery_snapshot())
-            return json.dumps({"ok": True, "data": data}, ensure_ascii=False)
+            if lock is not None:
+                async with lock:
+                    return await invoke()
+            return await invoke()
         except asyncio.CancelledError:
-            if recorder is not None and call is not None:
-                recorder.finish_cancelled(call, before=before, after=_delivery_snapshot())
+            if not executing and recorder is not None and call is not None:
+                snapshot = _delivery_snapshot()
+                recorder.finish_cancelled(call, before=snapshot, after=snapshot)
             raise
-        except Exception as exc:
-            if recorder is not None and call is not None:
-                recorder.finish_error(call, exc, before=before, after=_delivery_snapshot())
-            return json.dumps({"ok": False, "error": summarize_exception(exc)}, ensure_ascii=False)
 
     schema = next(schema["function"] for schema in tools if schema["function"]["name"] == name)
     return Function(

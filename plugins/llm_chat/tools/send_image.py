@@ -25,8 +25,9 @@ from ._image_catalog import (
     find_explicit_image_row,
     normalize_image_reference,
 )
+from ..core.tool_trace import record_tool_evidence
 from ..core.image_source import image_file_to_data_url
-from ..core.image_tag_metadata import image_tag_history_hint
+from ..core.image_tag_metadata import image_tag_history_hint, parse_image_tag_metadata
 
 ImagePicker = Callable[[LLMChatConfig, Sequence[ImageTag], str, deque[str]], Awaitable[str | None]]
 HistoryAppender = Callable[[str, str, str, str, str], Awaitable[object]]
@@ -152,6 +153,18 @@ def register_send_image(
                     ) from None
                 raise
             recent.append(row.file_path)
+            metadata = parse_image_tag_metadata(row.tags)
+            record_tool_evidence(
+                {
+                    "images": [
+                        {
+                            "path": row.file_path.replace("\\", "/"),
+                            "meaning": metadata.meaning if metadata is not None else "",
+                            "text": metadata.text if metadata is not None else "",
+                        }
+                    ]
+                }
+            )
             tag_hint = image_tag_history_hint(row.tags)
             try:
                 await runtime.append_history(

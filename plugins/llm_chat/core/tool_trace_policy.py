@@ -24,7 +24,7 @@ from .tool_trace_safety import (
     external_source_type,
 )
 
-ToolStatus = Literal["succeeded", "failed", "rejected", "cancelled"]
+ToolStatus = Literal["succeeded", "pending", "failed", "rejected", "cancelled"]
 ToolEffect = Literal["observed", "confirmed", "partial", "none", "unknown"]
 
 _DELIVERY_TOOLS = {
@@ -164,7 +164,15 @@ def project_tool_success(
     if tool_name in _OBSERVATION_TOOLS:
         return "succeeded", "observed", outcome
     if tool_name == "tag_image":
-        return "succeeded", "confirmed", outcome
+        return (
+            ("pending", "none", outcome)
+            if outcome.get("status") == "pending"
+            else (
+                "succeeded",
+                "confirmed",
+                outcome,
+            )
+        )
     return "succeeded", "unknown", outcome
 
 
@@ -263,6 +271,11 @@ def _project_tool_result(
             "excerpt": compact_text(content, MAX_RESULT_TEXT),
         }
     parsed = parse_json_object(result)
+    if tool_name == "tag_image" and parsed is not None:
+        return {
+            "status": compact_text(parsed.get("status"), MAX_ARGUMENT_TEXT),
+            "summary": compact_text(parsed.get("message"), MAX_RESULT_TEXT),
+        }
     if tool_name == "get_local_time" and parsed is not None:
         return {
             key: sanitize_json(parsed.get(key), max_text=MAX_ARGUMENT_TEXT)

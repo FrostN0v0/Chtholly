@@ -54,6 +54,7 @@ from plugins.llm_chat import (
     meme_store as meme_store_module,
     agno_compat as agno_compat_module,
 )
+from plugins.llm_chat.tools import tag_image as tag_image_tool_module
 from plugins.llm_chat.config import LLMChatConfig
 from plugins.llm_chat.models import ImageTag, Conversation
 from plugins.llm_chat.persona import store as persona_store_module
@@ -65,7 +66,9 @@ from plugins.llm_chat.meme_store import (
     import_meme_image,
 )
 from plugins.llm_chat.web.policy import DEFAULT_WEB_ACCESS_LIMITS
+from plugins.llm_chat.agent_context import AgentAccessContext, agent_access_scope
 from plugins.llm_chat.core.delivery import DeliveryState, llm_chat_delivery_scope
+from plugins.llm_chat.core.tool_trace import llm_chat_tool_execution_scope
 from plugins.llm_chat.core.image_source import IMAGE_FETCH_MAX_BYTES
 from plugins.llm_chat.tools._image_catalog import ImageCatalog
 from plugins.llm_chat.core.image_tag_metadata import (
@@ -870,26 +873,46 @@ async def test_tag_image_schema_scope_indexing_and_privacy(monkeypatch: pytest.M
         assert "secret" not in result
         assert "memes/" not in result
 
-        cancelled = asyncio.Event()
+        release = asyncio.Event()
+        settled = asyncio.Event()
+        settlement: list[dict[str, object]] = []
 
         async def slow_import(
             _config: LLMChatConfig,
             _session: Session,
             _image: Image,
         ) -> MemeImportResult:
-            try:
-                await asyncio.Future()
-            except asyncio.CancelledError:
-                cancelled.set()
-                raise
-            raise AssertionError("slow import unexpectedly completed")
+            await release.wait()
+            return MemeImportResult("created", "memes/secret.png", "secret，tags")
+
+        async def settle_result(turn_id: int, execution_ref: str, **kwargs: object) -> bool:
+            settlement.append({"turn_id": turn_id, "execution_ref": execution_ref, **kwargs})
+            settled.set()
+            return True
 
         monkeypatch.setattr(harness.module.tag_image_context, "import_image", slow_import)
+        monkeypatch.setattr(tag_image_tool_module, "settle_background_tool_result", settle_result)
         harness.module.tag_image_context.timeout_seconds = 0.01
-        with llm_chat_delivery_scope(DeliveryState()):
-            with pytest.raises(MemeImportError, match="timed out"):
-                await target(session)
-        assert cancelled.is_set()
+        with (
+            llm_chat_delivery_scope(DeliveryState()),
+            agent_access_scope(AgentAccessContext(10, 20, 30, "user")),
+            llm_chat_tool_execution_scope("exec_tag"),
+        ):
+            pending = await target(session)
+        assert pending == {
+            "status": "pending",
+            "message": (
+                "Image collection continues in the background. Continue the reply without retrying tag_image "
+                "or claiming it was saved."
+            ),
+        }
+        release.set()
+        await asyncio.wait_for(settled.wait(), timeout=1)
+        assert settlement[0]["turn_id"] == 30
+        assert settlement[0]["execution_ref"] == "exec_tag"
+        assert settlement[0]["status"] == "succeeded"
+        assert settlement[0]["effect"] == "confirmed"
+        assert cast(dict[str, object], settlement[0]["result"])["status"] == "created"
 
         with llm_chat_delivery_scope(DeliveryState()):
             with pytest.raises(MemeImportError, match="positive 1-based"):

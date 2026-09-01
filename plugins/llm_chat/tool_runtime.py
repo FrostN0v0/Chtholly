@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import cast
+from hashlib import sha256
 from pathlib import Path
 from datetime import datetime
 
@@ -40,17 +41,21 @@ from .tools.support import audio_mime_type
 from .tools.html2pic import register_html2pic
 from .tools.jinja2pic import register_jinja2pic
 from .tools.send_text import SendTextToolContext, register_send_text
-from .tools.tag_image import TagImageToolContext, register_tag_image
+from .tools.tag_image import TagImageToolContext, register_tag_image, cancel_pending_image_collections
 from .tools._rendering import RenderToolContext
 from .tools.send_audio import AudioToolContext, register_send_audio
 from .tools.send_image import ImageToolContext, register_send_image
 from .tools.call_plugin import CommandToolContext, register_call_plugin
+from .tools.pin_context import register_pin_context
 from .tools.markdown2pic import register_markdown2pic
+from .tools.list_sessions import register_list_sessions
 from .tools._image_catalog import ImageCatalog
 from .tools.generate_image import ImageGenerationToolContext, register_generate_image
 from .tools.get_local_time import LocalTimeToolContext, register_get_local_time
 from .tools.list_tts_voices import TTSVoiceToolContext, register_list_tts_voices
+from .tools.read_agent_event import register_read_agent_event
 from .tools.send_channel_image import ChannelImageToolContext, register_send_channel_image
+from .tools.read_tool_execution import register_read_tool_execution
 from .tools.screenshot_web_page import (
     WebScreenshotToolContext,
     register_screenshot_web_page,
@@ -58,6 +63,8 @@ from .tools.screenshot_web_page import (
 from .tools.send_external_image import ExternalImageToolContext, register_send_external_image
 from .tools.send_merged_forward import MergedForwardToolContext, register_send_merged_forward
 from .tools.list_image_resources import register_list_image_resources
+from .tools.list_tool_executions import register_list_tool_executions
+from .tools.read_session_handoff import register_read_session_handoff
 from .tools.read_channel_messages import register_read_channel_messages
 from .tools.describe_channel_image import ChannelImageDescriptionContext, register_describe_channel_image
 from .tools.find_channel_participants import register_find_channel_participants
@@ -243,6 +250,21 @@ if registered := register_call_plugin(tools, command_context):
     call_plugin = registered
     registered_tools.append("call_plugin")
 
+list_sessions = register_list_sessions(tools, maximum=config.archived_session_read_limit)
+registered_tools.append("list_sessions")
+read_session_handoff = register_read_session_handoff(tools)
+registered_tools.append("read_session_handoff")
+list_tool_executions = register_list_tool_executions(tools)
+registered_tools.append("list_tool_executions")
+read_agent_event = register_read_agent_event(tools, maximum_chars=config.event_payload_delivery_max_chars)
+registered_tools.append("read_agent_event")
+read_tool_execution = register_read_tool_execution(
+    tools,
+    maximum_chars=config.event_payload_delivery_max_chars,
+)
+registered_tools.append("read_tool_execution")
+pin_context = register_pin_context(tools)
+registered_tools.append("pin_context")
 registered_tools.extend(register_web_access_tools(tools, config))
 
 tag_image_context = TagImageToolContext(
@@ -252,3 +274,13 @@ tag_image_context = TagImageToolContext(
 )
 tag_image = register_tag_image(tools, tag_image_context)
 registered_tools.append("tag_image")
+plugin.collect_disposes(cancel_pending_image_collections)
+
+
+def _tool_schema_identity(name: str) -> dict[str, str]:
+    source_path = Path(__file__).with_name("tools") / f"{name}.py"
+    source_hash = sha256(source_path.read_bytes()).hexdigest() if source_path.is_file() else "missing"
+    return {"name": name, "source_hash": source_hash}
+
+
+registered_tool_schemas = [_tool_schema_identity(name) for name in registered_tools]

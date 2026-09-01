@@ -13,7 +13,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from importlib.util import module_from_spec, spec_from_file_location
-from collections.abc import Mapping, Iterator, AsyncIterator
+from collections.abc import Mapping, Iterator, Sequence, AsyncIterator
 from importlib.machinery import ModuleSpec
 
 import pytest
@@ -50,14 +50,16 @@ from plugins.llm_chat import (
     generation as generation_module,
     agno_compat as agno_compat_module,
     chat_context as chat_context_module,
-    tool_history as tool_history_module,
+    channel_turns as channel_turns_module,
+    chat_evaluation as chat_evaluation_module,
     forward_context as forward_context_module,
+    engagement_state as engagement_state_module,
 )
 from plugins.llm_chat.web import policy as web_policy_module
 from plugins.llm_chat.core import image_source as image_source_module
 from plugins.llm_chat.tools import is_command_allowed
 from plugins.llm_chat.config import LLMChatConfig
-from plugins.llm_chat.models import UserMemory, Conversation, UserRelation, ToolExecution, UserProfileFact
+from plugins.llm_chat.models import BotState, UserMemory, Conversation, UserRelation, ToolExecution, UserProfileFact
 from plugins.llm_chat.vision import VISION_TAG_TIMEOUT, VISION_DESCRIBE_TIMEOUT, vision_completion
 from plugins.llm_chat.persona import (
     store as store_module,
@@ -86,15 +88,27 @@ from plugins.llm_chat.core.forward import (
 )
 from plugins.llm_chat.core.profile import MemoryItem
 from plugins.llm_chat.core.prompts import DEFAULT_PERSONA, SYSTEM_SCAFFOLD
+from plugins.llm_chat.agent_context import AgentAccessContext
 from plugins.llm_chat.core.delivery import (
     DeliveryState,
     reserve_text_message,
     mark_delivery_success,
+    reserve_media_message,
     llm_chat_delivery_scope,
+    normalize_delivery_limits,
 )
+from plugins.llm_chat.channel_images import ChannelImageReferences
 from plugins.llm_chat.persona.runner import run_evaluation
+from plugins.llm_chat.turn_lifecycle import ActiveChatTurn
+from plugins.llm_chat.core.engagement import (
+    TurnFeedback,
+    EngagementSignals,
+    decide_engagement,
+    engagement_budget,
+)
 from plugins.llm_chat.core.tool_trace import ToolTraceRecorder, llm_chat_tool_trace_scope
 from plugins.llm_chat.runtime_context import copy_llm_chat_context, llm_chat_context_scope
+from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
 from plugins.llm_chat.core.image_source import (
     IMAGE_FETCH_MAX_BYTES,
     fetch_image_bytes,
@@ -103,6 +117,7 @@ from plugins.llm_chat.core.image_source import (
     image_file_to_data_url,
 )
 from plugins.llm_chat.persona.embedding import embed_text
+from plugins.llm_chat.core.media_delivery import latest_user_requests_media
 from plugins.llm_chat.core.self_reference import (
     SELF_REFERENCE_IMAGE_MARKER,
     append_self_reference_image,
@@ -111,7 +126,7 @@ from plugins.llm_chat.core.self_reference import (
 from plugins.llm_chat.persona.memory_update import apply_memory_updates, resolve_fact_embedding_update
 from plugins.llm_chat.core.tool_trace_policy import DeliverySnapshot, project_tool_arguments
 from plugins.llm_chat.core.tool_trace_safety import compact_tool_activity
-from plugins.llm_chat.persona.memory_context import load_memory_context
+from plugins.llm_chat.persona.memory_context import MemoryContext, load_memory_context
 
 if _PREVIOUS_GENERATION_MODULE is None:
     sys.modules.pop("plugins.llm_chat.generation", None)
@@ -278,16 +293,25 @@ def _install_handler_stubs(
         evaluations=[],
         memory_updates=[],
         moods=[],
-        tool_events=[],
+        agent_events=[],
+        agent_statuses=[],
         relations=[],
         deleted=[],
         history=[],
+        feedback=[],
+        declined=[],
+        state_updates=[],
+        current_relation=None,
+        input_attachments=[],
     )
 
     async def no_image_notes(*_args: Any, **_kwargs: Any) -> list[str]:
         return []
 
     async def no_forward_messages(*_args: Any, **_kwargs: Any) -> list[ForwardedMessage]:
+        return []
+
+    async def no_input_attachments(*_args: Any, **_kwargs: Any) -> list[dict[str, object]]:
         return []
 
     async def resolve_identity(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
@@ -306,14 +330,11 @@ def _install_handler_stubs(
     async def load_memory(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
         return _memory_context()
 
-    async def load_tool_activity(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
-        return []
-
-    async def persist_events(*args: Any) -> None:
-        records.tool_events.append(args)
-
     async def load_history(*_args: Any, **_kwargs: Any) -> list[Any]:
         return records.history
+
+    def compose_prompt(*_args: Any, **_kwargs: Any) -> str:
+        return "test system"
 
     async def append_message(*args: Any) -> int:
         records.appended.append(args)
@@ -322,35 +343,170 @@ def _install_handler_stubs(
     async def delete_message(message_id: int | None) -> None:
         records.deleted.append(message_id)
 
-    async def run_evaluation(*args: Any) -> None:
-        records.evaluations.append(args[5])
+    async def finalize_agent_turn(turn: Any, status: str) -> None:
+        turn.capture_tool_events()
+        records.agent_events.extend(turn.agent_events.events)
+        records.agent_statuses.append(status)
 
-    async def apply_memory_updates(*args: Any, **kwargs: Any) -> None:
-        records.memory_updates.append((args, kwargs))
+    async def prepare_turn(
+        config: Any,
+        session: Any,
+        identity: Any,
+        *,
+        model_name: str | None,
+        supports_image_input: bool,
+        model_text: str,
+        content: str,
+        current_content: object,
+        forwarded_messages: list[ForwardedMessage],
+        tool_schemas: object,
+        warn: Any,
+        input_attachments: Sequence[Mapping[str, object]] = (),
+        requires_media_reply: bool = False,
+        is_operator: bool = False,
+    ) -> SimpleNamespace:
+        del model_name, supports_image_input
+        records.input_attachments.extend(input_attachments)
+        relation = await module.get_relation(identity.user_id, session.channel.id)
+        records.current_relation = relation
+        mood = await module.get_mood(session.channel.id)
+        memory = await module.load_memory_context(config, identity.user_id, session.channel.id, content)
+        eval_history = (
+            await module.load_history(session.channel.id, config.eval_context_window)
+            if relation.eval_counter + 1 >= config.eval_every_n
+            else []
+        )
+        messages = cast(
+            list[ChatMessage],
+            module.build_chat_messages([], identity.display_name, model_text, current_content, forwarded_messages),
+        )
+        delivery_limits = normalize_delivery_limits(
+            config.delivery_min_interval_seconds,
+            config.delivery_default_interval_seconds,
+            config.delivery_max_interval_seconds,
+            config.delivery_max_text_messages_per_generation,
+            config.delivery_max_text_chars_per_message,
+            config.delivery_max_forward_nodes,
+            config.delivery_max_forward_chars_per_node,
+            config.delivery_max_total_text_chars_per_generation,
+            config.delivery_max_media_messages_per_generation,
+        )
+        delivery_state = DeliveryState(limits=delivery_limits)
+        system = module.compose_persona_prompt(
+            agent_session={},
+            current_participant_ref=identity.participant_ref,
+            self_reference_attached=False,
+            delivery_limits=delivery_limits,
+        )
+        user_message_id = await module.append_message(
+            session.channel.id,
+            identity.user_id,
+            identity.display_name,
+            "user",
+            content,
+        )
+        agent_events = AgentTurnRecorder()
+        agent_events.record_user_input(content, user_name=identity.display_name, fresh_context=False)
+        agent_events.append(
+            "context_selection",
+            payload={"estimated_tokens": 100, "full_session_tokens": 100},
+            model_visible=False,
+        )
+        engagement_signals = EngagementSignals(
+            affection=relation.affection,
+            trust=relation.trust,
+            familiarity=relation.familiarity,
+            irritation=relation.resentment,
+            user_mood=mood,
+            text=model_text,
+            requires_media_reply=requires_media_reply,
+            is_operator=is_operator,
+        )
+        engagement_decision = decide_engagement(engagement_signals)
+        engagement_allowance = engagement_budget(engagement_decision.level, delivery_state.limits)
+        lifecycle = ActiveChatTurn(
+            channel_id=session.channel.id,
+            user_message_id=user_message_id,
+            delivery_state=delivery_state,
+            append_history=module.append_message,
+            delete_history=module.delete_message,
+            warn=warn,
+            agent_turn_id=30,
+            agent_events=agent_events,
+        )
+        return SimpleNamespace(
+            relation=relation,
+            mood=mood,
+            memory_context=memory,
+            eval_history=eval_history,
+            chat_messages=messages,
+            system=system,
+            media_requested=latest_user_requests_media(messages),
+            web_limits=web_policy_module.normalize_web_access_limits(
+                config.web_search_max_calls_per_generation,
+                config.web_page_max_calls_per_generation,
+                config.web_total_max_calls_per_generation,
+            ),
+            delivery_state=delivery_state,
+            channel_image_references=ChannelImageReferences(),
+            lifecycle=lifecycle,
+            agent_events=agent_events,
+            engagement=engagement_decision,
+            engagement_budget=engagement_allowance,
+            engagement_signals=engagement_signals,
+            agent_access=AgentAccessContext(10, 20, 30, identity.user_id),
+        )
 
-    async def set_mood(*args: Any, **kwargs: Any) -> None:
-        records.moods.append((args, kwargs))
+    def schedule_after_delivery(
+        config: Any,
+        _memory: Any,
+        eval_history: list[Any],
+        **kwargs: Any,
+    ) -> None:
+        records.state_updates.append("evaluation")
+        relation = records.current_relation
+        counter = relation.eval_counter + 1
+        if counter >= config.eval_every_n:
+            counter = 0
+            records.evaluations.append(
+                build_eval_conversation(
+                    eval_history,
+                    kwargs["user_id"],
+                    kwargs["user_name"],
+                    kwargs["user_content"],
+                    kwargs["assistant_reply"],
+                )
+            )
+        records.relations.append(((kwargs["user_id"], kwargs["channel_id"]), {"eval_counter": counter}))
 
-    async def save_relation(*args: Any, **kwargs: Any) -> None:
-        records.relations.append((args, kwargs))
+    async def persist_feedback(**kwargs: Any) -> dict[str, float]:
+        records.state_updates.append("feedback")
+        records.feedback.append(kwargs)
+        return {"irritation": 0.0, "user_mood": 0.0, "familiarity": 0.0}
+
+    async def record_declined(channel_id: str, user_id: str, user_name: str) -> None:
+        records.declined.append((channel_id, user_id, user_name))
 
     monkeypatch.setattr(module, "get_model_config", lambda *_args: SimpleNamespace(name="test-model"))
     monkeypatch.setattr(module, "model_supports_image_input", lambda _model: False)
     monkeypatch.setattr(module, "build_image_notes", no_image_notes)
     monkeypatch.setattr(module, "resolve_merged_forward_messages", no_forward_messages)
     monkeypatch.setattr(module, "resolve_chat_identity", resolve_identity)
-    monkeypatch.setattr(module, "get_relation", get_relation)
-    monkeypatch.setattr(module, "get_mood", get_mood)
-    monkeypatch.setattr(module, "load_memory_context", load_memory)
-    monkeypatch.setattr(module, "load_history", load_history)
-    monkeypatch.setattr(module, "load_recent_tool_activity", load_tool_activity)
-    monkeypatch.setattr(module, "persist_tool_events", persist_events)
-    monkeypatch.setattr(module, "append_message", append_message)
-    monkeypatch.setattr(module, "delete_message", delete_message)
-    monkeypatch.setattr(module, "run_evaluation", run_evaluation)
-    monkeypatch.setattr(module, "apply_memory_updates", apply_memory_updates)
-    monkeypatch.setattr(module, "set_mood", set_mood)
-    monkeypatch.setattr(module, "save_relation", save_relation)
+    monkeypatch.setattr(module, "get_relation", get_relation, raising=False)
+    monkeypatch.setattr(module, "get_mood", get_mood, raising=False)
+    monkeypatch.setattr(module, "load_memory_context", load_memory, raising=False)
+    monkeypatch.setattr(module, "load_history", load_history, raising=False)
+    monkeypatch.setattr(module, "build_chat_messages", build_chat_messages, raising=False)
+    monkeypatch.setattr(module, "compose_persona_prompt", compose_prompt, raising=False)
+    monkeypatch.setattr(module, "append_message", append_message, raising=False)
+    monkeypatch.setattr(module, "delete_message", delete_message, raising=False)
+    monkeypatch.setattr(module, "capture_user_input_images", no_input_attachments)
+    monkeypatch.setattr(module, "remove_user_input_attachments", lambda _items: None)
+    monkeypatch.setattr(module, "prepare_agent_turn", prepare_turn)
+    monkeypatch.setattr(module, "schedule_chat_state_after_delivery", schedule_after_delivery)
+    monkeypatch.setattr(module, "persist_turn_feedback", persist_feedback, raising=False)
+    monkeypatch.setattr(module, "record_declined_turn", record_declined, raising=False)
+    monkeypatch.setattr(ActiveChatTurn, "finalize_agent_turn", finalize_agent_turn)
     return records
 
 
@@ -1700,6 +1856,7 @@ async def test_run_evaluation_uses_dedicated_json_payload_without_tools(
                 "seed": 7,
                 "response_format": {"type": "json_object"},
                 "timeout": 999,
+                "max_retries": 9,
                 "tools": [{"type": "function"}],
             },
         )
@@ -1760,6 +1917,7 @@ async def test_run_evaluation_uses_dedicated_json_payload_without_tools(
     assert "response_format" not in request
     assert request["timeout"] == 23.0
     assert request["seed"] == 7
+    assert request["max_retries"] == 0
     assert "tools" not in request
     assert "tool_choice" not in request
     messages = request["messages"]
@@ -1990,6 +2148,28 @@ def test_tool_trace_distinguishes_observation_rejection_and_partial_effect() -> 
     )
 
 
+def test_tag_image_pending_result_is_not_recorded_as_confirmed() -> None:
+    recorder = ToolTraceRecorder()
+    call = recorder.start("tag_image", {"image_index": 1})
+    recorder.finish_success(
+        call,
+        {
+            "status": "pending",
+            "message": "Image collection continues in the background.",
+        },
+        before=DeliverySnapshot(),
+        after=DeliverySnapshot(),
+    )
+
+    event = recorder.events[0]
+    assert event.status == "pending"
+    assert event.effect == "none"
+    assert event.outcome == {
+        "status": "pending",
+        "summary": "Image collection continues in the background.",
+    }
+
+
 def test_tool_trace_hashes_full_web_content_and_rejects_string_result_lists() -> None:
     recorder = ToolTraceRecorder()
     first = recorder.start("read_web_page", {"url": "https://example.com/a"})
@@ -2089,6 +2269,92 @@ async def test_agno_tool_bridge_merges_arguments_and_inherits_context(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_agno_tool_bridge_orders_delivery_tools_without_blocking_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+    state = DeliveryState()
+    media_started = asyncio.Event()
+    read_started = asyncio.Event()
+    release_media = asyncio.Event()
+
+    class FakeSubscriber:
+        def __init__(self, name: str) -> None:
+            self.__name__ = name
+            self.__doc__ = f"Run {name}."
+            self.params: list[Any] = []
+
+        async def handle(self, _context: Contexts, inner: bool = False) -> str:
+            assert inner is True
+            order.append(f"{self.__name__}:start")
+            if self.__name__ == "send_channel_image":
+                media_started.set()
+                await release_media.wait()
+                reserve_media_message()
+                mark_delivery_success(state, media=True)
+            elif self.__name__ == "send_text":
+                _, text = reserve_text_message("after image")
+                mark_delivery_success(state, [text])
+            elif self.__name__ == "web_search":
+                read_started.set()
+            order.append(f"{self.__name__}:end")
+            return self.__name__
+
+    names = ("send_channel_image", "send_text", "web_search")
+    monkeypatch.setattr(
+        agno_compat_module,
+        "available_functions",
+        {name: FakeSubscriber(name) for name in names},
+    )
+    monkeypatch.setattr(
+        agno_compat_module,
+        "tools",
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": f"Run {name}.",
+                    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                },
+            }
+            for name in names
+        ],
+    )
+    tools_by_name = {tool.name: tool for tool in agno_compat_module.build_agno_tools()}
+    image_entrypoint = tools_by_name["send_channel_image"].entrypoint
+    text_entrypoint = tools_by_name["send_text"].entrypoint
+    read_entrypoint = tools_by_name["web_search"].entrypoint
+    assert image_entrypoint is not None
+    assert text_entrypoint is not None
+    assert read_entrypoint is not None
+
+    with (
+        agno_compat_module.agno_delivery_tool_scope(),
+        llm_chat_delivery_scope(state),
+    ):
+        batch = asyncio.gather(
+            image_entrypoint(),
+            text_entrypoint(),
+            read_entrypoint(),
+        )
+        try:
+            await asyncio.wait_for(media_started.wait(), timeout=1.0)
+            await asyncio.wait_for(read_started.wait(), timeout=1.0)
+            await asyncio.sleep(0)
+            assert "send_text:start" not in order
+        finally:
+            release_media.set()
+            results = await batch
+
+    assert order.index("send_channel_image:end") < order.index("send_text:start")
+    assert order.index("web_search:start") < order.index("send_channel_image:end")
+    assert [json.loads(result)["data"] for result in results] == list(names)
+    assert state.confirmed_media_deliveries == 1
+    assert state.delivered_texts == ["after image"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "invalid_content",
     [
@@ -2153,6 +2419,7 @@ async def test_generation_retries_invisible_reply_once_without_tools(
     assert primary_requests[0]["timeout"] == 12.5
     assert "ctx" not in primary_requests[0]
     assert "max_retries" not in primary_requests[0]
+    assert "parallel_tool_calls" not in primary_requests[0]
     assert len(final_requests) == 1
     final_request = final_requests[0]
     assert final_request["timeout"] == 12.5
@@ -2244,6 +2511,7 @@ async def test_generation_retries_contextual_avatar_send_request_until_delivery_
     assert len(requests) == 2
     assert all(request["timeout"] == 45.0 for request in requests)
     assert all(request["max_retries"] == 0 for request in requests)
+    assert all(request["parallel_tool_calls"] is False for request in requests)
     assert "上一条候选回复没有产生任何确认的媒体发送" in requests[1]["system"]
     assert state.confirmed_media_deliveries == 1
 
@@ -2312,7 +2580,15 @@ async def test_generation_uses_media_timeout_for_natural_media_requests(
     )
 
     assert generation_module.response_content(response) == "[END_OF_RESPONSE]"
-    assert requests == [{"system": "system", "model": "deepseek", "timeout": 180.0, "max_retries": 0}]
+    assert requests == [
+        {
+            "system": "system",
+            "model": "deepseek",
+            "timeout": 180.0,
+            "max_retries": 0,
+            "parallel_tool_calls": False,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -2498,172 +2774,7 @@ async def test_generation_accepts_confirmed_tool_text_for_image_only_turn(
 
 
 @pytest.mark.asyncio
-async def test_tool_history_is_scoped_to_loaded_channel_turns(
-    monkeypatch: pytest.MonkeyPatch,
-    isolated_memory_store: SimpleNamespace,
-) -> None:
-    monkeypatch.setattr(tool_history_module, "get_session", isolated_memory_store.session_factory)
-    async with isolated_memory_store.session_factory() as session:
-        previous_user = Conversation(
-            channel_id="group",
-            user_id="alice",
-            user_name="Alice",
-            role="user",
-            content="Search the release notes",
-        )
-        previous_assistant = Conversation(
-            channel_id="group",
-            user_id="",
-            user_name="bot",
-            role="assistant",
-            content="I found the release notes.",
-        )
-        omitted_user = Conversation(
-            channel_id="group",
-            user_id="bob",
-            user_name="Bob",
-            role="user",
-            content="Older unrelated turn",
-        )
-        session.add_all([omitted_user, previous_user, previous_assistant])
-        await session.flush()
-        omitted_turn_id = omitted_user.id
-        previous_turn_id = previous_user.id
-        await session.commit()
-
-    retained = ToolTraceRecorder()
-    retained_call = retained.start("web_search", {"query": "current release"})
-    retained.finish_success(
-        retained_call,
-        {"query": "current release", "results": []},
-        before=DeliverySnapshot(),
-        after=DeliverySnapshot(),
-    )
-    omitted = ToolTraceRecorder()
-    omitted_call = omitted.start("get_local_time", {"timezone": "UTC"})
-    omitted.finish_success(
-        omitted_call,
-        '{"timezone":"UTC","datetime":"2026-08-17T01:00:00+00:00"}',
-        before=DeliverySnapshot(),
-        after=DeliverySnapshot(),
-    )
-    await tool_history_module.persist_tool_events("group", previous_turn_id, retained.events, 20)
-    await tool_history_module.persist_tool_events("group", omitted_turn_id, omitted.events, 20)
-
-    activity = await tool_history_module.load_recent_tool_activity(
-        "group",
-        [previous_user, previous_assistant],
-        max_events=8,
-        max_chars=3500,
-    )
-
-    assert len(activity) == 1
-    assert activity[0]["turn_offset"] == -1
-    assert activity[0]["speaker"] == "Alice"
-    assert activity[0]["tool"] == "web_search"
-    assert activity[0]["status"] == "succeeded"
-    assert activity[0]["effect"] == "observed"
-
-
-@pytest.mark.asyncio
-async def test_tool_history_applies_hard_event_and_character_caps(
-    monkeypatch: pytest.MonkeyPatch,
-    isolated_memory_store: SimpleNamespace,
-) -> None:
-    monkeypatch.setattr(tool_history_module, "get_session", isolated_memory_store.session_factory)
-    async with isolated_memory_store.session_factory() as session:
-        event_turn = Conversation(
-            channel_id="event-cap",
-            user_id="alice",
-            user_name="Alice",
-            role="user",
-            content="Check many observations",
-        )
-        char_turn = Conversation(
-            channel_id="char-cap",
-            user_id="alice",
-            user_name="Alice",
-            role="user",
-            content="Check verbose observations",
-        )
-        session.add_all([event_turn, char_turn])
-        await session.flush()
-        event_turn_id = event_turn.id
-        char_turn_id = char_turn.id
-        await session.commit()
-
-    event_recorder = ToolTraceRecorder()
-    for index in range(40):
-        call = event_recorder.start("get_local_time", {"timezone": "UTC"})
-        event_recorder.finish_success(
-            call,
-            json.dumps({"timezone": "UTC", "time": f"00:{index:02d}"}),
-            before=DeliverySnapshot(),
-            after=DeliverySnapshot(),
-        )
-    await tool_history_module.persist_tool_events("event-cap", event_turn_id, event_recorder.events, 100)
-    event_activity = await tool_history_module.load_recent_tool_activity(
-        "event-cap",
-        [event_turn],
-        max_events=100,
-        max_chars=100000,
-    )
-
-    char_recorder = ToolTraceRecorder()
-    for index in range(20):
-        call = char_recorder.start("probe", {"index": index})
-        char_recorder.finish_success(
-            call,
-            "x" * 1100 + str(index),
-            before=DeliverySnapshot(),
-            after=DeliverySnapshot(),
-        )
-    await tool_history_module.persist_tool_events("char-cap", char_turn_id, char_recorder.events, 100)
-    char_activity = await tool_history_module.load_recent_tool_activity(
-        "char-cap",
-        [char_turn],
-        max_events=100,
-        max_chars=100000,
-    )
-
-    assert len(event_activity) == 32
-    assert len(char_activity) < 20
-    assert len(json.dumps(char_activity, ensure_ascii=False, separators=(",", ":"))) <= 12000
-
-
-@pytest.mark.asyncio
-async def test_tool_history_prunes_old_channel_rows(
-    monkeypatch: pytest.MonkeyPatch,
-    isolated_memory_store: SimpleNamespace,
-) -> None:
-    monkeypatch.setattr(tool_history_module, "get_session", isolated_memory_store.session_factory)
-    recorder = ToolTraceRecorder()
-    for query in ("first", "second", "third"):
-        call = recorder.start("web_search", {"query": query})
-        recorder.finish_success(
-            call,
-            {"query": query, "results": []},
-            before=DeliverySnapshot(),
-            after=DeliverySnapshot(),
-        )
-
-    await tool_history_module.persist_tool_events("group", 1, recorder.events, 2)
-
-    async with isolated_memory_store.session_factory() as session:
-        rows = (
-            (
-                await session.execute(
-                    select(ToolExecution).where(ToolExecution.channel_id == "group").order_by(ToolExecution.id)
-                )
-            )
-            .scalars()
-            .all()
-        )
-    assert [row.sequence for row in rows] == [2, 3]
-
-
-@pytest.mark.asyncio
-async def test_message_append_and_exact_delete_round_trip(
+async def test_message_delete_preserves_legacy_tool_audit_rows(
     monkeypatch: pytest.MonkeyPatch,
     isolated_memory_store: SimpleNamespace,
 ) -> None:
@@ -2692,7 +2803,7 @@ async def test_message_append_and_exact_delete_round_trip(
     async with isolated_memory_store.session_factory() as session:
         assert (
             await session.execute(select(ToolExecution).where(ToolExecution.turn_id == message_id))
-        ).scalar_one_or_none() is None
+        ).scalar_one_or_none() is not None
         assert await session.get(Conversation, message_id) is None
 
 
@@ -2887,31 +2998,17 @@ async def test_on_chat_media_generation_failure_requests_original_images_again(
 
 
 @pytest.mark.asyncio
-async def test_on_chat_injects_recent_tool_activity_and_persists_current_trace(
+async def test_on_chat_persists_current_tool_trace_as_agent_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
         module = harness.module
         records = _install_handler_stubs(monkeypatch, module)
-        captured_activity: list[list[dict[str, Any]]] = []
-        prior_activity = [
-            {
-                "turn_offset": -1,
-                "speaker": "Current User",
-                "tool": "web_search",
-                "status": "failed",
-                "effect": "none",
-                "arguments": {"query": "previous query"},
-                "outcome": {"error_code": "timeout"},
-            }
-        ]
-
-        async def load_tool_activity(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
-            return prior_activity
+        captured_sessions: list[dict[str, object]] = []
 
         def compose_prompt(*_args: Any, **kwargs: Any) -> str:
-            captured_activity.append(kwargs["recent_tool_activity"])
-            return "tool memory system"
+            captured_sessions.append(kwargs["agent_session"])
+            return "agent session system"
 
         async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
             trace = cast(ToolTraceRecorder, kwargs["tool_trace"])
@@ -2924,23 +3021,35 @@ async def test_on_chat_injects_recent_tool_activity_and_persists_current_trace(
             )
             return _handler_response("Search completed.")
 
-        monkeypatch.setattr(module, "load_recent_tool_activity", load_tool_activity)
         monkeypatch.setattr(module, "compose_persona_prompt", compose_prompt)
         monkeypatch.setattr(module, "generate_chat_response", generate)
 
         result = await module.on_chat.callable_target(_ChatSession("continue the search"), SimpleNamespace())
 
         assert result is BLOCK
-        assert captured_activity == [prior_activity]
-        assert len(records.tool_events) == 1
-        channel_id, turn_id, events, retention = records.tool_events[0]
-        assert (channel_id, turn_id, retention) == ("group-B", 1, 200)
-        assert len(events) == 1
-        assert (events[0].tool_name, events[0].status, events[0].effect) == (
+        assert captured_sessions == [{}]
+        event_types = [event.event_type for event in records.agent_events]
+        assert event_types == [
+            "user_input",
+            "context_selection",
+            "assistant_tool_call",
+            "tool_result",
+            "assistant_output",
+        ]
+        call_event = records.agent_events[2]
+        result_event = records.agent_events[3]
+        assert (call_event.tool_name, call_event.status, call_event.effect) == (
+            "web_search",
+            "requested",
+            "none",
+        )
+        assert (result_event.tool_name, result_event.status, result_event.effect) == (
             "web_search",
             "succeeded",
             "observed",
         )
+        assert call_event.tool_call_id == result_event.tool_call_id
+        assert call_event.payload["arguments"] == {"query": "current query"}
 
 
 @pytest.mark.asyncio
@@ -3049,6 +3158,25 @@ async def test_on_chat_runs_relationship_evaluation_every_five_replies(
         assert result is BLOCK
         assert len(records.evaluations) == expected_evaluations
         assert records.relations[0][1]["eval_counter"] == saved_counter
+
+
+@pytest.mark.asyncio
+async def test_on_chat_persists_feedback_before_periodic_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler({"eval_every_n": 1}) as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+
+        async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            return _handler_response("Current reply")
+
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+
+        result = await module.on_chat.callable_target(_ChatSession("current turn"), SimpleNamespace())
+
+        assert result is BLOCK
+        assert records.state_updates == ["feedback", "evaluation"]
 
 
 @pytest.mark.asyncio
@@ -3372,9 +3500,8 @@ async def test_on_chat_mention_only_returns_block_without_generation(
 
 
 @pytest.mark.asyncio
-async def test_latest_channel_turn_cancels_superseded_generation() -> None:
-    async with _temporary_chat_handler() as harness:
-        module = harness.module
+async def test_latest_participant_turn_cancels_superseded_generation_from_same_user() -> None:
+    async with _temporary_chat_handler():
         started = asyncio.Event()
         cancelled = asyncio.Event()
         calls = 0
@@ -3391,7 +3518,7 @@ async def test_latest_channel_turn_cancels_superseded_generation() -> None:
                     raise
             return "latest"
 
-        wrapped = module._latest_channel_turn(handler)
+        wrapped = channel_turns_module.latest_participant_turn(handler)
         first = asyncio.create_task(wrapped(cast(Session, _ChatSession("first")), Contexts()))
         await started.wait()
 
@@ -3400,7 +3527,44 @@ async def test_latest_channel_turn_cancels_superseded_generation() -> None:
         assert latest == "latest"
         assert await first is BLOCK
         assert cancelled.is_set()
-        assert module._ACTIVE_CHANNEL_TURNS == {}
+        assert channel_turns_module._ACTIVE_PARTICIPANT_TURNS == {}
+        assert channel_turns_module._PARTICIPANT_TURN_GENERATIONS == {}
+
+
+@pytest.mark.asyncio
+async def test_latest_participant_turn_keeps_different_users_in_same_channel_active() -> None:
+    async with _temporary_chat_handler():
+        first_started = asyncio.Event()
+        second_started = asyncio.Event()
+        release = asyncio.Event()
+        cancelled: list[str] = []
+
+        async def handler(session: Session, _ctx: Contexts) -> object:
+            user_id = str(session.user.id)
+            (first_started if user_id == "user-a" else second_started).set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.append(user_id)
+                raise
+            return user_id
+
+        wrapped = channel_turns_module.latest_participant_turn(handler)
+        first = asyncio.create_task(wrapped(cast(Session, _ChatSession("first", user_id="user-a")), Contexts()))
+        await first_started.wait()
+        second = asyncio.create_task(wrapped(cast(Session, _ChatSession("second", user_id="user-b")), Contexts()))
+        try:
+            await asyncio.wait_for(second_started.wait(), timeout=1.0)
+            assert not first.done()
+            assert not second.done()
+        finally:
+            release.set()
+            results = await asyncio.gather(first, second)
+
+        assert results == ["user-a", "user-b"]
+        assert cancelled == []
+        assert channel_turns_module._ACTIVE_PARTICIPANT_TURNS == {}
+        assert channel_turns_module._PARTICIPANT_TURN_GENERATIONS == {}
 
 
 @pytest.mark.asyncio
@@ -3618,7 +3782,7 @@ async def test_block_native_llm_fallback_claims_all_public_messages_after_uncaug
         monkeypatch.setattr(module, "get_model_config", lambda *_args: SimpleNamespace(name="test-model"))
         monkeypatch.setattr(module, "model_supports_image_input", lambda _model: False)
         monkeypatch.setattr(module, "build_image_notes", no_image_notes)
-        monkeypatch.setattr(module, "get_relation", fail_before_generation)
+        monkeypatch.setattr(module, "prepare_agent_turn", fail_before_generation)
 
         channel = Channel("group-B", ChannelType.TEXT)
         user = User("same-user", "Current User")
@@ -3877,3 +4041,154 @@ async def test_on_chat_native_image_failure_blocks_without_evaluator_or_leaking_
             "native image delivery failed: DeliveryError: native image delivery confirmed 1/2 images before failure; "
             "do not repeat the confirmed prefix"
         ]
+
+
+@pytest.mark.asyncio
+async def test_turn_feedback_persistence_uses_latest_database_values(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_memory_store: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(engagement_state_module, "get_session", isolated_memory_store.session_factory)
+    async with isolated_memory_store.session_factory() as session:
+        session.add(
+            UserRelation(
+                user_id="user",
+                channel_id="channel",
+                resentment=10.0,
+                familiarity=20.0,
+            )
+        )
+        session.add(BotState(channel_id="channel", mood=0.2))
+        await session.commit()
+
+    feedback = TurnFeedback(
+        irritation_delta=14.0,
+        mood_delta=-0.12,
+        closeness_delta=0.4,
+        reasons=("hostile",),
+    )
+    first = await engagement_state_module.persist_turn_feedback(
+        user_id="user",
+        channel_id="channel",
+        feedback=feedback,
+    )
+    second = await engagement_state_module.persist_turn_feedback(
+        user_id="user",
+        channel_id="channel",
+        feedback=feedback,
+    )
+
+    assert first == pytest.approx({"irritation": 24.0, "user_mood": 0.08, "familiarity": 20.4})
+    assert second == pytest.approx({"irritation": 38.0, "user_mood": -0.04, "familiarity": 20.8})
+
+
+@pytest.mark.asyncio
+async def test_relationship_evaluation_claim_preserves_turns_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_memory_store: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(store_module, "get_session", isolated_memory_store.session_factory)
+    async with isolated_memory_store.session_factory() as session:
+        session.add(UserRelation(user_id="user", channel_id="channel", eval_counter=4))
+        await session.commit()
+
+    assert await store_module.claim_relationship_evaluation("user", "channel", 5) is True
+    assert await store_module.claim_relationship_evaluation("user", "channel", 5) is False
+    await store_module.restore_relationship_evaluation("user", "channel", 5)
+
+    async with isolated_memory_store.session_factory() as session:
+        relation = await session.get(UserRelation, ("user", "channel"))
+        assert relation is not None
+        assert relation.eval_counter == 6
+
+    assert await store_module.claim_relationship_evaluation("user", "channel", 5) is True
+    async with isolated_memory_store.session_factory() as session:
+        relation = await session.get(UserRelation, ("user", "channel"))
+        assert relation is not None
+        assert relation.eval_counter == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_relationship_evaluation_restores_claimed_counter(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_memory_store: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(store_module, "get_session", isolated_memory_store.session_factory)
+    warnings: list[str] = []
+    async with isolated_memory_store.session_factory() as session:
+        session.add(UserRelation(user_id="user", channel_id="channel", eval_counter=4))
+        await session.commit()
+
+    async def fail_evaluation(*_args: Any, **_kwargs: Any) -> EvalResult:
+        raise TimeoutError("upstream stalled")
+
+    monkeypatch.setattr(chat_evaluation_module, "run_evaluation", fail_evaluation)
+    config = LLMChatConfig()
+    config.eval_every_n = 5
+    config.eval_context_window = 0
+
+    await chat_evaluation_module.update_chat_state_after_delivery(
+        config,
+        cast(MemoryContext, _memory_context()),
+        [],
+        user_id="user",
+        user_name="User",
+        channel_id="channel",
+        user_content="hostile turn",
+        assistant_reply="reply",
+        warn=warnings.append,
+    )
+
+    async with isolated_memory_store.session_factory() as session:
+        relation = await session.get(UserRelation, ("user", "channel"))
+        assert relation is not None
+        assert relation.eval_counter == 5
+        assert relation.affection == 30.0
+        assert relation.resentment == 0.0
+    assert warnings == ["relationship evaluation failed: TimeoutError: upstream stalled"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_relationship_evaluation_restores_claimed_counter(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_memory_store: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(store_module, "get_session", isolated_memory_store.session_factory)
+    async with isolated_memory_store.session_factory() as session:
+        session.add(UserRelation(user_id="user", channel_id="channel", eval_counter=4))
+        await session.commit()
+
+    started = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def wait_forever(*_args: Any, **_kwargs: Any) -> EvalResult:
+        started.set()
+        await blocked.wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(chat_evaluation_module, "run_evaluation", wait_forever)
+    config = LLMChatConfig()
+    config.eval_every_n = 5
+    config.eval_context_window = 0
+    task = asyncio.create_task(
+        chat_evaluation_module.update_chat_state_after_delivery(
+            config,
+            cast(MemoryContext, _memory_context()),
+            [],
+            user_id="user",
+            user_name="User",
+            channel_id="channel",
+            user_content="hostile turn",
+            assistant_reply="reply",
+            warn=lambda _message: None,
+        )
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    async with isolated_memory_store.session_factory() as session:
+        relation = await session.get(UserRelation, ("user", "channel"))
+        assert relation is not None
+        assert relation.eval_counter == 5

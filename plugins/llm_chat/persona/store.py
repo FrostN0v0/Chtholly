@@ -2,10 +2,10 @@
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, update
+from sqlalchemy import case, delete, update
 from entari_plugin_database import select, get_session
 
-from ..models import BotState, Conversation, UserRelation, ToolExecution, UserProfileFact
+from ..models import BotState, Conversation, UserRelation, UserProfileFact
 
 AFFECTION_BASELINE = 30.0
 TRUST_BASELINE = 30.0
@@ -28,30 +28,88 @@ async def get_relation(user_id: str, channel_id: str) -> UserRelation:
         return rel
 
 
-async def save_relation(
-    user_id: str,
-    channel_id: str,
-    *,
-    axes: dict[str, float],
-    impression: str,
-    familiarity: float,
-    eval_counter: int,
-) -> None:
+async def claim_relationship_evaluation(user_id: str, channel_id: str, every_n: int) -> bool:
+    """Atomically count one delivered turn and claim each complete batch once."""
+
+    interval = max(1, every_n)
+    async with get_session() as session:
+        result = await session.execute(
+            update(UserRelation)
+            .where(UserRelation.user_id == user_id, UserRelation.channel_id == channel_id)
+            .values(eval_counter=UserRelation.eval_counter + 1)
+        )
+        if getattr(result, "rowcount", None) == 0:
+            raise LookupError(f"relation not found: {user_id}/{channel_id}")
+        counter = await session.scalar(
+            select(UserRelation.eval_counter).where(
+                UserRelation.user_id == user_id,
+                UserRelation.channel_id == channel_id,
+            )
+        )
+        claimed = counter is not None and counter >= interval
+        if claimed:
+            await session.execute(
+                update(UserRelation)
+                .where(UserRelation.user_id == user_id, UserRelation.channel_id == channel_id)
+                .values(eval_counter=UserRelation.eval_counter - interval)
+            )
+        await session.commit()
+        return claimed
+
+
+async def restore_relationship_evaluation(user_id: str, channel_id: str, every_n: int) -> None:
+    """Return a failed evaluator's claimed turns without losing newer turns."""
+
     async with get_session() as session:
         await session.execute(
             update(UserRelation)
             .where(UserRelation.user_id == user_id, UserRelation.channel_id == channel_id)
-            .values(
-                affection=axes["affection"],
-                trust=axes["trust"],
-                dependence=axes["dependence"],
-                resentment=axes["resentment"],
-                familiarity=familiarity,
-                impression=impression,
-                eval_counter=eval_counter,
-                last_interaction=datetime.utcnow(),
-            )
+            .values(eval_counter=UserRelation.eval_counter + max(1, every_n))
         )
+        await session.commit()
+
+
+async def apply_relationship_evaluation(
+    user_id: str,
+    channel_id: str,
+    *,
+    deltas: dict[str, float],
+    impression: str,
+) -> None:
+    """Atomically apply evaluator deltas to the latest relationship axes."""
+
+    values: dict[str, object] = {"impression": impression, "last_interaction": datetime.utcnow()}
+    for key in ("affection", "trust", "dependence", "resentment"):
+        column = getattr(UserRelation, key)
+        shifted = column + deltas.get(key, 0.0)
+        values[key] = case((shifted < 0.0, 0.0), (shifted > 100.0, 100.0), else_=shifted)
+    async with get_session() as session:
+        await session.execute(
+            update(UserRelation)
+            .where(UserRelation.user_id == user_id, UserRelation.channel_id == channel_id)
+            .values(**values)
+        )
+        await session.commit()
+
+
+async def adjust_mood(channel_id: str, delta: float) -> None:
+    """Atomically apply one evaluator mood delta to the latest channel mood."""
+
+    now = datetime.utcnow()
+    async with get_session() as session:
+        state = await session.get(BotState, channel_id)
+        if state is None:
+            session.add(BotState(channel_id=channel_id, mood=max(-1.0, min(1.0, delta))))
+        else:
+            shifted = BotState.mood + delta
+            await session.execute(
+                update(BotState)
+                .where(BotState.channel_id == channel_id)
+                .values(
+                    mood=case((shifted < -1.0, -1.0), (shifted > 1.0, 1.0), else_=shifted),
+                    updated_at=now,
+                )
+            )
         await session.commit()
 
 
@@ -59,18 +117,6 @@ async def get_mood(channel_id: str) -> float:
     async with get_session() as session:
         state = await session.get(BotState, channel_id)
         return state.mood if state else 0.0
-
-
-async def set_mood(channel_id: str, mood: float) -> None:
-    mood = max(-1.0, min(1.0, mood))
-    async with get_session() as session:
-        state = await session.get(BotState, channel_id)
-        if state is None:
-            session.add(BotState(channel_id=channel_id, mood=mood))
-        else:
-            state.mood = mood
-            state.updated_at = datetime.utcnow()
-        await session.commit()
 
 
 async def load_history(channel_id: str, limit: int) -> list[Conversation]:
@@ -110,7 +156,6 @@ async def delete_message(message_id: int | None) -> None:
     if message_id is None:
         return
     async with get_session() as session:
-        await session.execute(delete(ToolExecution).where(ToolExecution.turn_id == message_id))
         await session.execute(delete(Conversation).where(Conversation.id == message_id))
         await session.commit()
 

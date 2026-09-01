@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, cast
+import asyncio
+from contextlib import nullcontext
+from collections.abc import Callable, Awaitable
 
 import litellm
 from agno.media import Image as AgnoImage
@@ -15,7 +19,8 @@ from entari_plugin_llm.config import get_model_config
 from .core.media import has_meaningful_text, strip_internal_media_records
 from .core.types import ChatMessage
 from .web.policy import WebAccessLimits, llm_chat_web_access_scope
-from .agno_compat import agno_tool_call_limit_scope, recommended_tool_call_limit
+from .agno_compat import agno_delivery_tool_scope, agno_tool_call_limit_scope, recommended_tool_call_limit
+from .agent_context import AgentAccessContext, agent_access_scope
 from .core.delivery import DeliveryState, llm_chat_delivery_scope, strip_trailing_end_of_response
 from .channel_images import (
     ChannelImageReferences,
@@ -23,6 +28,7 @@ from .channel_images import (
 )
 from .core.tool_trace import ToolTraceRecorder, llm_chat_tool_trace_scope
 from .runtime_context import llm_chat_context_scope
+from .core.agent_trace import AgentTurnRecorder
 from .core.native_images import extract_native_images
 from .core.media_delivery import (
     is_media_unavailable_reply,
@@ -30,6 +36,7 @@ from .core.media_delivery import (
     strip_media_unavailable_marker,
     latest_user_requests_webpage_screenshot,
 )
+from .core.tool_trace_safety import sanitize_json
 
 GenerationResponse = GenericResponse[None] | litellm.ModelResponse
 
@@ -155,10 +162,13 @@ async def _generate_with_tools(
     model: str | None,
     request_timeout: float,
     max_retries: int | None = None,
+    parallel_tool_calls: bool | None = None,
 ) -> GenericResponse[None]:
     request_options: dict[str, Any] = {"timeout": request_timeout}
     if max_retries is not None:
         request_options["max_retries"] = max_retries
+    if parallel_tool_calls is not None:
+        request_options["parallel_tool_calls"] = parallel_tool_calls
     return cast(
         GenericResponse[None],
         await llm.generate(
@@ -170,6 +180,58 @@ async def _generate_with_tools(
     )
 
 
+def _response_metrics(response: object) -> object:
+    metrics = getattr(response, "metrics", None) or getattr(response, "usage", None)
+    if metrics is not None and hasattr(metrics, "model_dump"):
+        metrics = metrics.model_dump()
+    elif metrics is not None and hasattr(metrics, "dict"):
+        metrics = metrics.dict()
+    return sanitize_json(metrics, max_text=2000)
+
+
+async def _record_model_attempt(
+    run: Callable[[], Awaitable[object]],
+    *,
+    recorder: AgentTurnRecorder | None,
+    tool_trace: ToolTraceRecorder,
+    model_name: str,
+) -> object:
+    attempt = recorder.next_attempt() if recorder is not None else tool_trace.attempt
+    tool_trace.set_attempt(attempt)
+    started = time.monotonic()
+    try:
+        response = await run()
+    except asyncio.CancelledError:
+        if recorder is not None:
+            recorder.record_model_attempt(
+                attempt=attempt,
+                model_name=model_name,
+                status="cancelled",
+                duration_ms=round((time.monotonic() - started) * 1000),
+            )
+        raise
+    except Exception as exc:
+        if recorder is not None:
+            recorder.record_model_attempt(
+                attempt=attempt,
+                model_name=model_name,
+                status="failed",
+                duration_ms=round((time.monotonic() - started) * 1000),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        raise
+    if recorder is not None:
+        recorder.record_model_attempt(
+            attempt=attempt,
+            model_name=model_name,
+            status="succeeded",
+            duration_ms=round((time.monotonic() - started) * 1000),
+            content=response_content(response),
+            metrics=_response_metrics(response),
+        )
+    return response
+
+
 async def _recover_requested_media(
     messages: list[ChatMessage],
     *,
@@ -178,16 +240,27 @@ async def _recover_requested_media(
     delivery_state: DeliveryState,
     request_timeout: float,
     max_retries: int | None,
+    agent_events: AgentTurnRecorder | None,
+    tool_trace: ToolTraceRecorder,
 ) -> GenericResponse[None]:
     _LOGGER.warning("requested media was not confirmed; retrying once with tools")
     try:
         with agno_tool_call_limit_scope(_MEDIA_RECOVERY_TOOL_CALL_LIMIT):
-            response = await _generate_with_tools(
-                messages,
-                system=f"{system}\n\n{_MEDIA_RECOVERY_SUFFIX}",
-                model=model,
-                request_timeout=request_timeout,
-                max_retries=max_retries,
+            response = cast(
+                GenericResponse[None],
+                await _record_model_attempt(
+                    lambda: _generate_with_tools(
+                        messages,
+                        system=f"{system}\n\n{_MEDIA_RECOVERY_SUFFIX}",
+                        model=model,
+                        request_timeout=request_timeout,
+                        max_retries=max_retries,
+                        parallel_tool_calls=False,
+                    ),
+                    recorder=agent_events,
+                    tool_trace=tool_trace,
+                    model_name=model or "default",
+                ),
             )
     except RuntimeError as exc:
         if str(exc) == _TOOL_LOOP_EXHAUSTED:
@@ -214,6 +287,8 @@ async def generate_chat_response(
     request_timeout: float = 90.0,
     media_request_timeout: float = 300.0,
     tool_trace: ToolTraceRecorder | None = None,
+    agent_events: AgentTurnRecorder | None = None,
+    agent_access: AgentAccessContext | None = None,
 ) -> GenerationResponse:
     """Generate with a longer single-attempt timeout for explicit media requests."""
 
@@ -231,6 +306,7 @@ async def generate_chat_response(
     active_channel_image_references = channel_image_references or ChannelImageReferences()
     with (
         agno_tool_call_limit_scope(tool_call_limit),
+        agno_delivery_tool_scope(),
         llm_chat_web_access_scope(
             web_limits,
             allow_webpage_screenshots=webpage_screenshot_requested,
@@ -239,14 +315,24 @@ async def generate_chat_response(
         llm_chat_tool_trace_scope(active_tool_trace),
         llm_chat_context_scope(ctx),
         llm_chat_channel_image_scope(active_channel_image_references),
+        agent_access_scope(agent_access) if agent_access is not None else nullcontext(),
     ):
         try:
-            response = await _generate_with_tools(
-                messages,
-                system=system,
-                model=model,
-                request_timeout=generation_timeout,
-                max_retries=generation_max_retries,
+            response = cast(
+                GenericResponse[None],
+                await _record_model_attempt(
+                    lambda: _generate_with_tools(
+                        messages,
+                        system=system,
+                        model=model,
+                        request_timeout=generation_timeout,
+                        max_retries=generation_max_retries,
+                        parallel_tool_calls=False if media_requested else None,
+                    ),
+                    recorder=agent_events,
+                    tool_trace=active_tool_trace,
+                    model_name=model or "default",
+                ),
             )
         except RuntimeError as exc:
             if str(exc) != _TOOL_LOOP_EXHAUSTED:
@@ -260,6 +346,8 @@ async def generate_chat_response(
                     delivery_state=delivery_state,
                     request_timeout=generation_timeout,
                     max_retries=generation_max_retries,
+                    agent_events=agent_events,
+                    tool_trace=active_tool_trace,
                 )
         else:
             transcript = _response_transcript(response, messages)
@@ -274,6 +362,8 @@ async def generate_chat_response(
                     delivery_state=delivery_state,
                     request_timeout=generation_timeout,
                     max_retries=generation_max_retries,
+                    agent_events=agent_events,
+                    tool_trace=active_tool_trace,
                 )
             if _tool_call_limit_hit(response):
                 _LOGGER.warning("Agno tool call limit reached; finalizing once without tools")
@@ -290,6 +380,8 @@ async def generate_chat_response(
                     ),
                     require_visible=visible_reply_required,
                     request_timeout=request_timeout,
+                    agent_events=agent_events,
+                    tool_trace=active_tool_trace,
                 )
             if _has_visible_reply(response):
                 return response
@@ -311,6 +403,8 @@ async def generate_chat_response(
                 ),
                 require_visible=True,
                 request_timeout=request_timeout,
+                agent_events=agent_events,
+                tool_trace=active_tool_trace,
             )
 
     if not tool_loop_exhausted:
@@ -328,6 +422,8 @@ async def generate_chat_response(
         ),
         require_visible=visible_reply_required,
         request_timeout=request_timeout,
+        agent_events=agent_events,
+        tool_trace=active_tool_trace,
     )
 
 
@@ -340,20 +436,27 @@ async def _finalize_without_tools(
     suffix: str,
     require_visible: bool,
     request_timeout: float,
+    agent_events: AgentTurnRecorder | None,
+    tool_trace: ToolTraceRecorder,
 ) -> litellm.ModelResponse:
     conf = get_model_config(model, channel_id)
     excluded_extra = {"tools", "tool_choice", "response_format", "timeout"}
     extra = {key: value for key, value in conf.extra.items() if key not in excluded_extra}
-    response = await litellm.acompletion(
-        model=conf.name,
-        messages=[
-            {"role": "system", "content": f"{system}\n\n{suffix}"},
-            *messages,
-        ],
-        base_url=conf.base_url,
-        api_key=conf.api_key,
-        timeout=request_timeout,
-        **extra,
+    response = await _record_model_attempt(
+        lambda: litellm.acompletion(
+            model=conf.name,
+            messages=[
+                {"role": "system", "content": f"{system}\n\n{suffix}"},
+                *messages,
+            ],
+            base_url=conf.base_url,
+            api_key=conf.api_key,
+            timeout=request_timeout,
+            **extra,
+        ),
+        recorder=agent_events,
+        tool_trace=tool_trace,
+        model_name=conf.name,
     )
     completion = cast(litellm.ModelResponse, response)
     content = response_content(completion)

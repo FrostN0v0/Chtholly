@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Protocol
 import asyncio
 from dataclasses import field, dataclass
 from collections.abc import Callable, Sequence, Awaitable
@@ -20,15 +21,22 @@ from .core.delivery import (
     strip_trailing_end_of_response,
     reserve_media_messages_for_state,
 )
-from .core.tool_trace import ToolTraceEvent, ToolTraceRecorder
+from .core.tool_trace import ToolTraceRecorder
 from .tools._delivery import send_with_delivery
+from .core.agent_trace import AgentEventDraft, AgentTurnRecorder
 from .core.native_images import to_entari_image, extract_native_images
 from .core.media_delivery import strip_media_unavailable_marker
 
 HistoryAppender = Callable[[str, str, str, str, str], Awaitable[object]]
 HistoryDeleter = Callable[[int], Awaitable[object]]
-ToolTracePersister = Callable[[str, int, Sequence[ToolTraceEvent], int], Awaitable[object]]
 WarningSink = Callable[[str], object]
+
+
+AgentEventPersister = Callable[[int, Sequence[AgentEventDraft]], Awaitable[object]]
+
+
+class AgentTurnFinisher(Protocol):
+    def __call__(self, turn_id: int, *, status: str, final_text: str) -> Awaitable[object]: ...
 
 
 @dataclass
@@ -41,10 +49,13 @@ class ActiveChatTurn:
     append_history: HistoryAppender
     delete_history: HistoryDeleter
     warn: WarningSink
+    persist_agent_event_rows: AgentEventPersister | None = None
+    finish_agent_turn_row: AgentTurnFinisher | None = None
     tool_trace: ToolTraceRecorder = field(default_factory=ToolTraceRecorder)
-    persist_tool_events: ToolTracePersister | None = None
-    tool_history_retention: int = 200
-    _tool_trace_persist_attempted: bool = field(default=False, init=False)
+    agent_turn_id: int | None = None
+    agent_events: AgentTurnRecorder = field(default_factory=AgentTurnRecorder)
+    _tool_events_recorded: bool = field(default=False, init=False)
+    _agent_finalize_attempted: bool = field(default=False, init=False)
     _assistant_persist_attempted: bool = field(default=False, init=False)
 
     async def persist_delivered_text(self, *, preserve_original: bool = False) -> str:
@@ -54,6 +65,7 @@ class ActiveChatTurn:
         if self._assistant_persist_attempted or not delivered_text:
             return delivered_text
         self._assistant_persist_attempted = True
+        self.agent_events.record_assistant_output(delivered_text)
         try:
             await self.append_history(self.channel_id, "", "bot", "assistant", delivered_text)
         except asyncio.CancelledError:
@@ -64,24 +76,48 @@ class ActiveChatTurn:
             self.warn(f"assistant delivery persistence failed: {type(exc).__name__}")
         return delivered_text
 
-    async def persist_tool_trace(self) -> None:
-        """Persist completed tool events at most once without blocking delivery."""
-
-        if self._tool_trace_persist_attempted or not self.tool_trace.events or self.persist_tool_events is None:
+    def capture_tool_events(self) -> None:
+        if self._tool_events_recorded:
             return
-        self._tool_trace_persist_attempted = True
+        self._tool_events_recorded = True
+        self.agent_events.record_tool_events(self.tool_trace.events)
+
+    async def finalize_agent_turn(self, status: str) -> None:
+        """Persist AgentEvent rows and terminal turn state exactly once."""
+
+        if (
+            self._agent_finalize_attempted
+            or self.agent_turn_id is None
+            or self.persist_agent_event_rows is None
+            or self.finish_agent_turn_row is None
+        ):
+            return
+        self._agent_finalize_attempted = True
+        self.capture_tool_events()
+        pending = self.agent_events.pending_events()
+        persisted = True
+        if pending:
+            persisted = False
+            try:
+                await self.persist_agent_event_rows(self.agent_turn_id, pending)
+                self.agent_events.mark_flushed(len(pending))
+                persisted = True
+            except asyncio.CancelledError:
+                self.warn("agent turn persistence cancelled")
+                raise
+            except Exception as exc:
+                self.warn(f"agent event persistence failed: {type(exc).__name__}")
         try:
-            await self.persist_tool_events(
-                self.channel_id,
-                self.user_message_id,
-                tuple(sorted(self.tool_trace.events, key=lambda event: event.sequence)),
-                self.tool_history_retention,
+            await self.finish_agent_turn_row(
+                self.agent_turn_id,
+                status=status if persisted else "event_persistence_failed",
+                final_text=render_delivered_text(self.delivery_state),
             )
         except asyncio.CancelledError:
-            self.warn("tool trace persistence cancelled")
+            self.warn("agent turn finalization cancelled")
             raise
         except Exception as exc:
-            self.warn(f"tool trace persistence failed: {type(exc).__name__}")
+            self.warn(f"agent turn finalization failed: {type(exc).__name__}")
 
     async def rollback_if_unstarted(self) -> None:
         """Delete the user history row only when no delivery attempt occurred."""
@@ -130,6 +166,7 @@ class ActiveChatTurn:
                         "do not repeat the confirmed prefix"
                     ) from None
                 raise
+            self.agent_events.record_assistant_output("[发送了图片]")
             try:
                 await self.append_history(self.channel_id, "", "bot", "assistant", "[发送了图片]")
             except asyncio.CancelledError:
