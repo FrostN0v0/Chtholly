@@ -7,7 +7,7 @@ import asyncio
 from contextlib import suppress, contextmanager
 from contextvars import ContextVar
 from dataclasses import field, dataclass
-from collections.abc import Callable, Iterator, Awaitable
+from collections.abc import Mapping, Callable, Iterator, Awaitable
 
 from arclet.entari import Session
 
@@ -71,6 +71,7 @@ _MEDIA_TOOLS = frozenset(
         "tag_image",
     }
 )
+_LLONEBOT_REACTION_BACKENDS: dict[tuple[str, str], bool] = {}
 
 
 def _tool_stage(tool_name: str) -> ReactionStage:
@@ -114,7 +115,7 @@ class MessageReactionFeedback:
             if self._disabled or self._terminal or self._current_emoji is None:
                 return
             if await self._call(
-                self.session.reaction_delete(self._current_emoji),
+                self._delete_reaction(self._current_emoji),
                 action="delete",
                 stage="cancelled",
             ):
@@ -134,7 +135,7 @@ class MessageReactionFeedback:
                 return
             if self._current_emoji is not None:
                 if not await self._call(
-                    self.session.reaction_delete(self._current_emoji),
+                    self._delete_reaction(self._current_emoji),
                     action="delete",
                     stage=stage,
                 ):
@@ -143,7 +144,7 @@ class MessageReactionFeedback:
                     return
                 self._current_emoji = None
             if not await self._call(
-                self.session.reaction_create(emoji_id),
+                self._create_reaction(emoji_id),
                 action="create",
                 stage=stage,
             ):
@@ -152,6 +153,57 @@ class MessageReactionFeedback:
                 return
             self._current_emoji = emoji_id
             self._terminal = terminal
+
+    async def _create_reaction(self, emoji_id: str) -> None:
+        if await self._uses_llonebot_reactions():
+            await self.session.internal(
+                "set_msg_emoji_like",
+                message_id=self._event_message_id(),
+                emoji_id=int(emoji_id),
+                set=True,
+            )
+            return
+        await self.session.reaction_create(emoji_id)
+
+    async def _delete_reaction(self, emoji_id: str) -> None:
+        if await self._uses_llonebot_reactions():
+            await self.session.internal(
+                "set_msg_emoji_like",
+                message_id=self._event_message_id(),
+                emoji_id=int(emoji_id),
+                set=False,
+            )
+            return
+        await self.session.reaction_delete(emoji_id)
+
+    async def _uses_llonebot_reactions(self) -> bool:
+        platform = str(self.session.account.platform)
+        if platform.casefold() not in {"onebot", "onebot11"}:
+            return False
+        key = (platform, str(self.session.account.self_id))
+        cached = _LLONEBOT_REACTION_BACKENDS.get(key)
+        if cached is not None:
+            return cached
+        try:
+            info = await self.session.internal("get_version_info")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+        direct = isinstance(info, Mapping) and info.get("app_name") == "LLOneBot"
+        _LLONEBOT_REACTION_BACKENDS[key] = direct
+        return direct
+
+    def _event_message_id(self) -> int:
+        event = getattr(self.session, "event", None)
+        message = getattr(event, "message", None)
+        message_id = getattr(message, "id", None)
+        if isinstance(message_id, bool) or not isinstance(message_id, (str, int)):
+            raise RuntimeError("message reaction requires a numeric message ID")
+        try:
+            return int(message_id)
+        except ValueError:
+            raise RuntimeError("message reaction requires a numeric message ID") from None
 
     async def _call(
         self,

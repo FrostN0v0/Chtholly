@@ -2377,6 +2377,57 @@ async def test_reaction_feedback_fails_open_after_protocol_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reaction_feedback_uses_llonebot_emoji_id_contract() -> None:
+    class LLOneBotSession(_ChatSession):
+        def __init__(self) -> None:
+            super().__init__("llonebot")
+            self.account.platform = "onebot"
+            self.account.self_id = "reaction-contract-bot"
+            self.event.message.id = "12345"
+            self.internal_calls: list[tuple[str, dict[str, object]]] = []
+
+        async def internal(self, action: str, method: str = "POST", **kwargs: object) -> object:
+            assert method == "POST"
+            self.internal_calls.append((action, kwargs))
+            if action == "get_version_info":
+                return {"app_name": "LLOneBot"}
+            if action == "set_msg_emoji_like":
+                return None
+            raise AssertionError(f"unexpected internal action: {action}")
+
+        async def reaction_create(self, emoji_id: str, message_id: str | None = None) -> None:
+            del emoji_id, message_id
+            raise AssertionError("generic reaction_create must not be used for LLOneBot")
+
+        async def reaction_delete(
+            self,
+            emoji_id: str,
+            message_id: str | None = None,
+            user_id: str | None = None,
+        ) -> None:
+            del emoji_id, message_id, user_id
+            raise AssertionError("generic reaction_delete must not be used for LLOneBot")
+
+    session = LLOneBotSession()
+    reaction_feedback_module._LLONEBOT_REACTION_BACKENDS.pop(("onebot", "reaction-contract-bot"), None)
+    feedback = reaction_feedback_module.MessageReactionFeedback(
+        cast(Session, session),
+        lambda _message: None,
+        timeout_seconds=0.1,
+    )
+
+    await feedback.set_stage("processing")
+    await feedback.finish("success")
+
+    assert session.internal_calls == [
+        ("get_version_info", {}),
+        ("set_msg_emoji_like", {"message_id": 12345, "emoji_id": 125, "set": True}),
+        ("set_msg_emoji_like", {"message_id": 12345, "emoji_id": 125, "set": False}),
+        ("set_msg_emoji_like", {"message_id": 12345, "emoji_id": 124, "set": True}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_agno_tool_bridge_merges_arguments_and_inherits_context(monkeypatch: pytest.MonkeyPatch) -> None:
     handled: list[tuple[dict[str, Any], bool]] = []
 
