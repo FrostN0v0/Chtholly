@@ -54,6 +54,7 @@ from plugins.llm_chat import (
     chat_evaluation as chat_evaluation_module,
     forward_context as forward_context_module,
     engagement_state as engagement_state_module,
+    reaction_feedback as reaction_feedback_module,
 )
 from plugins.llm_chat.web import policy as web_policy_module
 from plugins.llm_chat.core import image_source as image_source_module
@@ -231,10 +232,24 @@ class _ChatSession:
         self.elements = _ChatElements(text)
         self.quote = None
         self.sent: list[str] = []
+        self.reactions: list[tuple[str, str]] = []
         self.event = SimpleNamespace(message=SimpleNamespace(id="current-message"))
 
     async def send(self, content: str) -> None:
         self.sent.append(content)
+
+    async def reaction_create(self, emoji_id: str, message_id: str | None = None) -> None:
+        del message_id
+        self.reactions.append(("create", emoji_id))
+
+    async def reaction_delete(
+        self,
+        emoji_id: str,
+        message_id: str | None = None,
+        user_id: str | None = None,
+    ) -> None:
+        del message_id, user_id
+        self.reactions.append(("delete", emoji_id))
 
 
 class _MergedForwardChatSession(_ChatSession):
@@ -2286,6 +2301,82 @@ def test_tool_trace_hashes_full_web_content_and_rejects_string_result_lists() ->
 
 
 @pytest.mark.asyncio
+async def test_reaction_feedback_replaces_one_status_and_locks_terminal() -> None:
+    session = _ChatSession("status")
+    warnings: list[str] = []
+    feedback = reaction_feedback_module.MessageReactionFeedback(
+        cast(Session, session),
+        warnings.append,
+        timeout_seconds=0.1,
+    )
+
+    await feedback.set_stage("processing")
+    await feedback.set_stage("thinking")
+    await feedback.finish("success")
+    await feedback.set_stage("researching")
+
+    assert feedback.terminal
+    assert warnings == []
+    assert session.reactions == [
+        ("create", "125"),
+        ("delete", "125"),
+        ("create", "314"),
+        ("delete", "314"),
+        ("create", "124"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reaction_feedback_maps_tool_stages_and_recoverable_errors() -> None:
+    session = _ChatSession("tools")
+    feedback = reaction_feedback_module.MessageReactionFeedback(
+        cast(Session, session),
+        lambda _message: None,
+        timeout_seconds=0.1,
+    )
+
+    await feedback.tool_started("web_search")
+    await feedback.tool_started("generate_image")
+    await feedback.tool_failed()
+    await feedback.finish("failed")
+
+    assert session.reactions == [
+        ("create", "269"),
+        ("delete", "269"),
+        ("create", "294"),
+        ("delete", "294"),
+        ("create", "174"),
+        ("delete", "174"),
+        ("create", "123"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reaction_feedback_fails_open_after_protocol_error() -> None:
+    class FailingReactionSession(_ChatSession):
+        async def reaction_create(self, emoji_id: str, message_id: str | None = None) -> None:
+            del emoji_id, message_id
+            self.reactions.append(("create", "failed"))
+            raise RuntimeError("unsupported")
+
+    session = FailingReactionSession("failure")
+    warnings: list[str] = []
+    feedback = reaction_feedback_module.MessageReactionFeedback(
+        cast(Session, session),
+        warnings.append,
+        timeout_seconds=0.1,
+    )
+
+    await feedback.set_stage("processing")
+    await feedback.set_stage("thinking")
+    await feedback.finish("failed")
+
+    assert feedback.terminal
+    assert session.reactions == [("create", "failed")]
+    assert warnings == ["message reaction create failed at processing: RuntimeError"]
+
+
+@pytest.mark.asyncio
 async def test_agno_tool_bridge_merges_arguments_and_inherits_context(monkeypatch: pytest.MonkeyPatch) -> None:
     handled: list[tuple[dict[str, Any], bool]] = []
 
@@ -2325,9 +2416,16 @@ async def test_agno_tool_bridge_merges_arguments_and_inherits_context(monkeypatc
     assert tool.entrypoint is not None
 
     recorder = ToolTraceRecorder()
+    reaction_session = _ChatSession("tool reaction")
+    reaction = reaction_feedback_module.MessageReactionFeedback(
+        cast(Session, reaction_session),
+        lambda _message: None,
+        timeout_seconds=0.1,
+    )
     with (
         llm_chat_context_scope(Contexts({"sentinel": "event-context"})),
         llm_chat_tool_trace_scope(recorder),
+        reaction_feedback_module.llm_chat_reaction_scope(reaction),
     ):
         result = json.loads(await tool.entrypoint(value="tool-argument"))
         failed = json.loads(await tool.entrypoint(value="fail"))
@@ -2351,6 +2449,15 @@ async def test_agno_tool_bridge_merges_arguments_and_inherits_context(monkeypatc
     }
     assert recorder.events[2].arguments == {}
     assert DeliverySnapshot().active is False
+    assert reaction_session.reactions == [
+        ("create", "314"),
+        ("delete", "314"),
+        ("create", "174"),
+        ("delete", "174"),
+        ("create", "314"),
+        ("delete", "314"),
+        ("create", "174"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -3047,6 +3154,13 @@ async def test_on_chat_generation_failure_sends_notice_and_keeps_turn(
         assert warnings == [
             "llm generate failed: RuntimeError: provider failed <- ModuleNotFoundError: No module named 'orjson'"
         ]
+        assert session.reactions == [
+            ("create", "125"),
+            ("delete", "125"),
+            ("create", "314"),
+            ("delete", "314"),
+            ("create", "123"),
+        ]
 
 
 @pytest.mark.asyncio
@@ -3322,6 +3436,13 @@ async def test_trailing_end_marker_is_not_sent_or_persisted(
         assert session.sent == ["visible final reply"]
         assert assistant_rows == [("group-B", "", "bot", "assistant", "visible final reply")]
         assert records.evaluations[0]["current_turn"]["assistant"]["content"] == "visible final reply"
+        assert session.reactions == [
+            ("create", "125"),
+            ("delete", "125"),
+            ("create", "314"),
+            ("delete", "314"),
+            ("create", "124"),
+        ]
 
 
 @pytest.mark.asyncio
@@ -3465,6 +3586,13 @@ async def test_delivery_generation_failure_persists_confirmed_prefix_without_eva
         assert records.memory_updates == []
         assert records.moods == []
         assert records.relations == []
+        assert session.reactions == [
+            ("create", "125"),
+            ("delete", "125"),
+            ("create", "314"),
+            ("delete", "314"),
+            ("create", "27"),
+        ]
 
 
 @pytest.mark.asyncio
@@ -3582,6 +3710,123 @@ async def test_on_chat_mention_only_returns_block_without_generation(
         assert result is BLOCK
         assert generation_calls == 0
         assert session.sent == []
+        assert session.reactions == [
+            ("create", "125"),
+            ("delete", "125"),
+            ("create", "123"),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_on_chat_declined_turn_leaves_neutral_terminal_reaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler() as harness:
+        module = harness.module
+        records = _install_handler_stubs(monkeypatch, module)
+
+        async def hostile_relation(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            relation = _relation_state()
+            relation.resentment = 80.0
+            return relation
+
+        async def not_operator(_session: Session) -> bool:
+            return False
+
+        async def unexpected_generation(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("declined turns must not generate")
+
+        monkeypatch.setattr(module, "get_relation", hostile_relation, raising=False)
+        monkeypatch.setattr(module, "_is_operator", not_operator)
+        monkeypatch.setattr(module, "generate_chat_response", unexpected_generation)
+
+        session = _ChatSession("leave me alone")
+        result = await module.on_chat.callable_target(session, SimpleNamespace())
+
+        assert result is BLOCK
+        assert session.sent == []
+        assert records.declined == [("group-B", "same-user", "Current User")]
+        assert session.reactions == [
+            ("create", "125"),
+            ("delete", "125"),
+            ("create", "284"),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_on_chat_latest_turn_marks_old_message_superseded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler() as harness:
+        module = harness.module
+        _install_handler_stubs(monkeypatch, module)
+        first_started = asyncio.Event()
+        calls = 0
+
+        async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_started.set()
+                await asyncio.Future()
+            return _handler_response("latest reply")
+
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+        first_session = _ChatSession("first")
+        latest_session = _ChatSession("latest")
+        first = asyncio.create_task(module.on_chat.callable_target(first_session, SimpleNamespace()))
+        await first_started.wait()
+
+        latest_result = await module.on_chat.callable_target(latest_session, SimpleNamespace())
+        first_result = await first
+
+        assert latest_result is BLOCK
+        assert first_result is BLOCK
+        assert first_session.reactions == [
+            ("create", "125"),
+            ("delete", "125"),
+            ("create", "314"),
+            ("delete", "314"),
+            ("create", "129"),
+        ]
+        assert latest_session.reactions == [
+            ("create", "125"),
+            ("delete", "125"),
+            ("create", "314"),
+            ("delete", "314"),
+            ("create", "124"),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_on_chat_plugin_cancellation_clears_transient_reaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _temporary_chat_handler() as harness:
+        module = harness.module
+        _install_handler_stubs(monkeypatch, module)
+        started = asyncio.Event()
+
+        async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            started.set()
+            await asyncio.Future()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(module, "generate_chat_response", generate)
+        session = _ChatSession("reload")
+        task = asyncio.create_task(module.on_chat.callable_target(session, SimpleNamespace()))
+        await started.wait()
+
+        channel_turns_module.cancel_active_participant_turns()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert session.reactions == [
+            ("create", "125"),
+            ("delete", "125"),
+            ("create", "314"),
+            ("delete", "314"),
+        ]
 
 
 @pytest.mark.asyncio
@@ -3589,6 +3834,7 @@ async def test_latest_participant_turn_cancels_superseded_generation_from_same_u
     async with _temporary_chat_handler():
         started = asyncio.Event()
         cancelled = asyncio.Event()
+        superseded_states: list[bool] = []
         calls = 0
 
         async def handler(_session: Session, _ctx: Contexts) -> object:
@@ -3599,6 +3845,7 @@ async def test_latest_participant_turn_cancels_superseded_generation_from_same_u
                 try:
                     await asyncio.Future()
                 except asyncio.CancelledError:
+                    superseded_states.append(channel_turns_module.current_participant_turn_superseded())
                     cancelled.set()
                     raise
             return "latest"
@@ -3612,6 +3859,7 @@ async def test_latest_participant_turn_cancels_superseded_generation_from_same_u
         assert latest == "latest"
         assert await first is BLOCK
         assert cancelled.is_set()
+        assert superseded_states == [True]
         assert channel_turns_module._ACTIVE_PARTICIPANT_TURNS == {}
         assert channel_turns_module._PARTICIPANT_TURN_GENERATIONS == {}
 
