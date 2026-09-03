@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, cast
 import asyncio
@@ -20,6 +21,7 @@ from .core.media import has_meaningful_text, strip_internal_media_records
 from .core.types import ChatMessage
 from .web.policy import WebAccessLimits, llm_chat_web_access_scope
 from .agno_compat import agno_delivery_tool_scope, agno_tool_call_limit_scope, recommended_tool_call_limit
+from .core.errors import is_moderation_empty_choices_error
 from .agent_context import AgentAccessContext, agent_access_scope
 from .core.delivery import DeliveryState, llm_chat_delivery_scope, strip_trailing_end_of_response
 from .channel_images import (
@@ -71,6 +73,14 @@ _IMAGE_INPUT_REPLY_SUFFIX = (
     "即使本轮已有媒体工具发送成功，也不得只输出 [END_OF_RESPONSE] 或复述已发送媒体；"
     "只有图片内容确实不可用时，才自然请用户重新发送原图。不得再调用任何工具。"
 )
+_MODERATION_RECOVERY_SUFFIX = (
+    "上一次请求没有返回可用候选。此次恢复只包含最新用户轮次，历史对话、画像、记忆、会话交接和图片像素均未提供。"
+    "只依据当前仍可见的文字、系统生成的图片描述和实际工具结果行动，不得推测或复述被移除内容。"
+    "若用户明确要求收藏当前图片，且现有描述足以确认它是可复用的表情包、反应图或贴纸，可以调用 tag_image；"
+    "描述不足或图片不适合收藏时不得调用，并自然说明本轮无法确认。任何收藏结果仍以工具返回为准。"
+)
+_RUNTIME_CONTEXT_OPEN = "<runtime_context>\n"
+_RUNTIME_CONTEXT_CLOSE = "\n</runtime_context>"
 _LOGGER = log.wrapper("[llm_chat]")
 
 
@@ -153,6 +163,99 @@ def _without_invalid_tail(messages: list[ChatMessage]) -> list[ChatMessage]:
     if last.get("role") == "assistant" and not last.get("tool_calls"):
         return messages[:-1]
     return messages
+
+
+def _isolated_latest_user_turn(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Keep only the latest user turn and remove image bytes for one safe retry."""
+
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            isolated_content: str | list[dict[str, Any]] = content
+        elif isinstance(content, list):
+            text_parts = [
+                {"type": "text", "text": text}
+                for part in content
+                if isinstance(part, dict)
+                and part.get("type") == "text"
+                and isinstance((text := part.get("text")), str)
+                and text
+            ]
+            isolated_content = text_parts or "[Image pixels unavailable in isolated retry]"
+        else:
+            continue
+        isolated: dict[str, Any] = {"role": "user", "content": isolated_content}
+        name = message.get("name")
+        if isinstance(name, str) and name:
+            isolated["name"] = name
+        return [cast(ChatMessage, isolated)]
+    raise RuntimeError("LLM isolated recovery has no current user turn")
+
+
+def _moderation_recovery_system(system: str) -> str:
+    """Remove user-derived runtime context while retaining trusted tool rules."""
+
+    prefix, opening, remainder = system.partition(_RUNTIME_CONTEXT_OPEN)
+    if not opening:
+        return f"{system}\n\n{_MODERATION_RECOVERY_SUFFIX}"
+    raw_context, closing, suffix = remainder.partition(_RUNTIME_CONTEXT_CLOSE)
+    if not closing:
+        return f"{system}\n\n{_MODERATION_RECOVERY_SUFFIX}"
+    try:
+        parsed = json.loads(raw_context)
+    except ValueError:
+        parsed = {}
+    reply_intent = parsed.get("reply_intent", {}) if isinstance(parsed, dict) else {}
+    if not isinstance(reply_intent, dict):
+        reply_intent = {}
+    safe_context = {
+        "current_state": {},
+        "current_speaker": "current user",
+        "current_participant_ref": "",
+        "relationship_style": "",
+        "self_reference_attached": False,
+        "user_profile": {},
+        "relevant_memories": [],
+        "agent_session": {},
+        "recent_impression": "",
+        "reply_intent": reply_intent,
+    }
+    serialized = json.dumps(safe_context, ensure_ascii=False, separators=(",", ":"))
+    return (
+        f"{prefix}{_RUNTIME_CONTEXT_OPEN}{serialized}{_RUNTIME_CONTEXT_CLOSE}{suffix}\n\n{_MODERATION_RECOVERY_SUFFIX}"
+    )
+
+
+async def _recover_moderation_empty_choices(
+    isolated_messages: list[ChatMessage],
+    *,
+    system: str,
+    model: str | None,
+    request_timeout: float,
+    agent_events: AgentTurnRecorder | None,
+    tool_trace: ToolTraceRecorder,
+) -> GenericResponse[None]:
+    """Retry one moderation-empty response without historical or binary context."""
+
+    _LOGGER.warning("provider moderation returned no choices; retrying isolated current turn once")
+    return cast(
+        GenericResponse[None],
+        await _record_model_attempt(
+            lambda: _generate_with_tools(
+                isolated_messages,
+                system=_moderation_recovery_system(system),
+                model=model,
+                request_timeout=request_timeout,
+                max_retries=0,
+                parallel_tool_calls=False,
+            ),
+            recorder=agent_events,
+            tool_trace=tool_trace,
+            model_name=model or "default",
+        ),
+    )
 
 
 async def _generate_with_tools(
@@ -317,6 +420,8 @@ async def generate_chat_response(
         llm_chat_channel_image_scope(active_channel_image_references),
         agent_access_scope(agent_access) if agent_access is not None else nullcontext(),
     ):
+        response: GenericResponse[None] | None = None
+        response_context = messages
         try:
             response = cast(
                 GenericResponse[None],
@@ -335,22 +440,38 @@ async def generate_chat_response(
                 ),
             )
         except RuntimeError as exc:
-            if str(exc) != _TOOL_LOOP_EXHAUSTED:
-                raise
-            tool_loop_exhausted = True
-            if media_requested and delivery_state.confirmed_media_deliveries == 0:
-                return await _recover_requested_media(
-                    messages,
+            if (
+                is_moderation_empty_choices_error(exc)
+                and not active_tool_trace.events
+                and delivery_state.delivery_attempts == 0
+            ):
+                response_context = _isolated_latest_user_turn(messages)
+                response = await _recover_moderation_empty_choices(
+                    response_context,
                     system=system,
                     model=model,
-                    delivery_state=delivery_state,
                     request_timeout=generation_timeout,
-                    max_retries=generation_max_retries,
                     agent_events=agent_events,
                     tool_trace=active_tool_trace,
                 )
-        else:
-            transcript = _response_transcript(response, messages)
+            elif str(exc) == _TOOL_LOOP_EXHAUSTED:
+                tool_loop_exhausted = True
+                if media_requested and delivery_state.confirmed_media_deliveries == 0:
+                    return await _recover_requested_media(
+                        messages,
+                        system=system,
+                        model=model,
+                        delivery_state=delivery_state,
+                        request_timeout=generation_timeout,
+                        max_retries=generation_max_retries,
+                        agent_events=agent_events,
+                        tool_trace=active_tool_trace,
+                    )
+            else:
+                raise
+
+        if response is not None:
+            transcript = _response_transcript(response, response_context)
             native_images = response_images(response)
             if native_images:
                 return response

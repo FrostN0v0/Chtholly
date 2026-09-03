@@ -18,6 +18,27 @@ _SECRET_PATTERNS = (
     ),
     (re.compile(r"(?i)(https?://[^\s?]+)\?[^\s]+"), r"\1?[REDACTED]"),
 )
+_EMPTY_CHOICES_ERROR = "provider returned a response with no 'choices'"
+_MODERATION_RESPONSE_KEY = "moderation"
+
+
+def is_moderation_empty_choices_error(exc: BaseException) -> bool:
+    """Return whether an upstream moderation response omitted completion choices."""
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(seen) < _MAX_CHAIN_DEPTH:
+        seen.add(id(current))
+        message = str(current).casefold()
+        if _EMPTY_CHOICES_ERROR in message and _MODERATION_RESPONSE_KEY in message:
+            return True
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            current = None
+    return False
 
 
 def _sanitize_message(message: str) -> str:
