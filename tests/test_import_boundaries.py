@@ -127,6 +127,7 @@ submodules = {
     "agno_compat": agno_compat,
     "chat_handler": ModuleType(f"{package_name}.chat_handler"),
     "agent_command": ModuleType(f"{package_name}.agent_command"),
+    "model_state_runtime": ModuleType(f"{package_name}.model_state_runtime"),
     "agent_runtime": ModuleType(f"{package_name}.agent_runtime"),
     "agent_webui": ModuleType(f"{package_name}.agent_webui"),
     "tag_runtime": ModuleType(f"{package_name}.tag_runtime"),

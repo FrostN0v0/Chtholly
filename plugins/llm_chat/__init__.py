@@ -43,6 +43,8 @@ if plug is not None and plug.module.__name__ == __name__:
         role=PluginRole.NORMAL,
         config=LLMChatWebUIConfig,
     )
+    from . import model_state_runtime as model_state_runtime  # entari: package
+
     from . import tool_runtime as tool_runtime  # entari: package
     from . import chat_handler as chat_handler  # entari: package
     from . import agent_command as agent_command  # entari: package

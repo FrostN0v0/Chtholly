@@ -34,6 +34,7 @@ for child in (
     "chat_handler",
     "agent_command",
     "agent_runtime",
+    "model_state_runtime",
     "agent_webui",
     "tag_runtime",
     "meme_command",
