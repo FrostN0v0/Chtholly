@@ -6,12 +6,14 @@ from dataclasses import dataclass
 from collections.abc import Iterable
 
 from sqlalchemy import delete, update
-from arclet.entari import Session
+from arclet.entari import At, Session
 from entari_plugin_database import select, get_session
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import UserMemory, Conversation, UserRelation, UserProfileFact
-from .perception import get_channel_perception
+from .perception import MentionedParticipant, get_channel_perception
+
+MAX_MENTIONED_PARTICIPANTS = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +27,43 @@ class ChatIdentity:
 
 def _clean_text(value: object) -> str:
     return str(value).strip() if value is not None else ""
+
+
+async def resolve_mentioned_participants(session: Session) -> list[MentionedParticipant]:
+    """Resolve non-Bot At elements without exposing platform user IDs."""
+
+    self_id = _clean_text(session.account.self_id)
+    perception = get_channel_perception()
+    resolved: list[MentionedParticipant] = []
+    seen_user_ids: set[str] = set()
+    for element in session.elements:
+        if not isinstance(element, At):
+            continue
+        mention = element
+        platform_user_id = _clean_text(mention.id)
+        if not platform_user_id or platform_user_id == self_id or platform_user_id in seen_user_ids:
+            continue
+        if len(seen_user_ids) >= MAX_MENTIONED_PARTICIPANTS:
+            break
+        seen_user_ids.add(platform_user_id)
+        display_name = _clean_text(mention.name)
+        try:
+            participant = await perception.resolve_participant_by_platform_user(session, platform_user_id)
+        except Exception:
+            participant = None
+        if participant is not None:
+            resolved.append(
+                {
+                    "display_name": display_name or participant.display_name,
+                    "participant_ref": participant.public_ref,
+                }
+            )
+        elif display_name:
+            resolved.append({"display_name": display_name})
+        else:
+            continue
+
+    return resolved
 
 
 def _identity_sources(values: Iterable[str], target: str) -> set[str]:

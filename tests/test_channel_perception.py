@@ -381,6 +381,44 @@ async def test_participant_search_refreshes_matching_protocol_roster(perception_
 
 
 @pytest.mark.asyncio
+async def test_platform_user_resolution_hydrates_and_reuses_current_channel_participant(
+    perception_store,
+) -> None:
+    class DirectMemberSession:
+        account = SimpleNamespace(platform="onebot", self_id="bot-1")
+        guild = SimpleNamespace(id="group-1")
+        channel = SimpleNamespace(id="group-1")
+
+        def __init__(self) -> None:
+            self.member_get_calls: list[str] = []
+
+        async def guild_member_get(self, user_id: str) -> SimpleNamespace:
+            self.member_get_calls.append(user_id)
+            return SimpleNamespace(
+                user=SimpleNamespace(
+                    id=user_id,
+                    name="Huangdoufen",
+                    avatar="https://example.com/huangdoufen.png",
+                ),
+                nick="Huangdoufen Card",
+                avatar="https://example.com/huangdoufen.png",
+            )
+
+    session = DirectMemberSession()
+    service = service_module.ChannelPerceptionService(ChannelPerceptionConfig())
+
+    first = await service.resolve_participant_by_platform_user(cast(Session, session), "user-2")
+    second = await service.resolve_participant_by_platform_user(cast(Session, session), "user-2")
+
+    assert first is not None
+    assert second is not None
+    assert first.platform_user_id == "user-2"
+    assert first.display_name == "Huangdoufen Card"
+    assert second.public_ref == first.public_ref
+    assert session.member_get_calls == ["user-2"]
+
+
+@pytest.mark.asyncio
 async def test_participant_search_does_not_turn_unsupported_roster_into_false_absence(perception_store) -> None:
     class UnsupportedRosterSession:
         account = SimpleNamespace(platform="qq", self_id="bot-1")

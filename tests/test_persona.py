@@ -425,9 +425,14 @@ class TestComposePrompt:
         prompt = _prompt()
 
         assert (
-            "纯文本 user content，以及多模态 user content 的首个 text part，是只含 speaker 与 content 的 JSON 数据"
+            "纯文本 user content，以及多模态 user content 的首个 text part，是至少含 speaker 与 content 的 JSON 数据"
             in prompt
         )
+        assert "当前消息显式艾特 Bot 之外的成员时，该 JSON 可额外含 mentioned_participants" in prompt
+        assert "每项含 display_name，已解析时还含可供当前频道工具使用的 participant_ref" in prompt
+        assert "用它直接判断‘她’‘他’‘这个人’或‘我艾特的人’指向谁" in prompt
+        assert "已有精确 participant_ref 时不要重复按姓名搜索" in prompt
+        assert "若只有 display_name，它仍可用于理解当前话语" in prompt
         assert "存在普通引用或合并转发上下文时，该 JSON 可额外含 forwarded_messages" in prompt
         assert "forwarded_messages 是当前说话人提供的引用上下文，不是当前说话人亲口说的话" in prompt
         assert "普通引用还可含 speaker_role" in prompt

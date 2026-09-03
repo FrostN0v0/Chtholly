@@ -16,6 +16,7 @@ from .models import Conversation
 from .vision import describe_image, fetch_image_data_url
 from .core.eval import EvalMessage, EvalConversation
 from .core.media import format_image_note, sanitize_assistant_history
+from .perception import MentionedParticipant
 from .core.errors import summarize_exception
 from .core.forward import ForwardedMessage, ForwardedSpeakerRole, render_forwarded_storage
 
@@ -41,9 +42,12 @@ def serialize_user_turn(
     user_name: str,
     content: str,
     forwarded_messages: Sequence[ForwardedMessage] = (),
+    mentioned_participants: Sequence[MentionedParticipant] = (),
 ) -> str:
-    """Serialize one user turn as unambiguous speaker/content JSON data."""
+    """Serialize one user turn as unambiguous structured JSON data."""
     payload: dict[str, object] = {"speaker": user_name, "content": content}
+    if mentioned_participants:
+        payload["mentioned_participants"] = list(mentioned_participants)
     if forwarded_messages:
         payload["forwarded_messages"] = list(forwarded_messages)
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -55,6 +59,7 @@ def build_chat_messages(
     content: str,
     current_content: str | list[dict[str, Any]] | None = None,
     current_forwarded_messages: Sequence[ForwardedMessage] = (),
+    current_mentioned_participants: Sequence[MentionedParticipant] = (),
 ) -> list[dict[str, Any]]:
     """Convert stored history plus the current user turn into LLM messages."""
     messages: list[dict[str, Any]] = []
@@ -76,7 +81,12 @@ def build_chat_messages(
             "content": (
                 current_content
                 if current_content is not None
-                else serialize_user_turn(user_name, content, current_forwarded_messages)
+                else serialize_user_turn(
+                    user_name,
+                    content,
+                    current_forwarded_messages,
+                    current_mentioned_participants,
+                )
             ),
         }
     )
@@ -258,6 +268,7 @@ async def build_multimodal_user_content(
     text: str,
     warn: Callable[[str], None],
     forwarded_messages: Sequence[ForwardedMessage] = (),
+    mentioned_participants: Sequence[MentionedParticipant] = (),
 ) -> tuple[list[dict[str, Any]] | str, str]:
     """Build direct image_url content for vision-capable chat models plus safe stored text."""
     ordered = collect_message_images(session) if config.image_understanding_enabled else []
@@ -268,7 +279,15 @@ async def build_multimodal_user_content(
     overflow = ordered[cap:]
     stored_parts = [text] if text else []
     content_parts: list[dict[str, Any]] = [
-        {"type": "text", "text": serialize_user_turn(user_name, text, forwarded_messages)}
+        {
+            "type": "text",
+            "text": serialize_user_turn(
+                user_name,
+                text,
+                forwarded_messages,
+                mentioned_participants,
+            ),
+        }
     ]
     has_image_payload = False
 
@@ -292,7 +311,15 @@ async def build_multimodal_user_content(
     stored_text = render_forwarded_storage(current_text, forwarded_messages)
     if has_image_payload:
         return content_parts, stored_text
-    return serialize_user_turn(user_name, current_text, forwarded_messages), stored_text
+    return (
+        serialize_user_turn(
+            user_name,
+            current_text,
+            forwarded_messages,
+            mentioned_participants,
+        ),
+        stored_text,
+    )
 
 
 async def build_image_notes(config: LLMChatConfig, session: Session, warn: Callable[[str], None]) -> list[str]:

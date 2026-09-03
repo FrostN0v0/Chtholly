@@ -13,6 +13,7 @@ from .config import LLMChatConfig
 from .models import Conversation, UserRelation
 from .identity import ChatIdentity
 from .core.types import ChatMessage
+from .perception import MentionedParticipant
 from .web.policy import WebAccessLimits, normalize_web_access_limits
 from .agent_events import persist_agent_events
 from .chat_context import build_chat_messages, serialize_user_turn, requests_recent_channel_context
@@ -92,6 +93,7 @@ async def prepare_agent_turn(
     content: str,
     current_content: str | list[dict[str, Any]] | None,
     forwarded_messages: Sequence[ForwardedMessage],
+    mentioned_participants: Sequence[MentionedParticipant],
     warn: WarningSink,
     tool_schemas: Sequence[Mapping[str, object]],
     input_attachments: Sequence[Mapping[str, object]] = (),
@@ -113,7 +115,14 @@ async def prepare_agent_turn(
 
     current_messages = cast(
         list[ChatMessage],
-        build_chat_messages([], user_name, model_text, current_content, forwarded_messages),
+        build_chat_messages(
+            [],
+            user_name,
+            model_text,
+            current_content,
+            current_forwarded_messages=forwarded_messages,
+            current_mentioned_participants=mentioned_participants,
+        ),
     )
     self_reference_attached = False
     if supports_image_input and latest_user_requests_image_generation(current_messages):
@@ -249,7 +258,11 @@ async def prepare_agent_turn(
 
     agent_events = AgentTurnRecorder()
     agent_events.record_user_input(
-        serialize_user_turn(user_name, content),
+        serialize_user_turn(
+            user_name,
+            content,
+            mentioned_participants=mentioned_participants,
+        ),
         user_name=user_name,
         fresh_context=fresh_context,
         attachments=input_attachments,

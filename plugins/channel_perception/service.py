@@ -30,7 +30,11 @@ from .schemas import (
     ParticipantObservation,
 )
 from .message_store import store_observation
-from .participant_store import upsert_participant, update_avatar_observation
+from .participant_store import (
+    upsert_participant,
+    update_avatar_observation,
+    find_participant_by_platform_user,
+)
 
 _LOGGER = log.wrapper("[channel_perception]")
 Observation = MessageObservation | MessageMutation | ParticipantObservation
@@ -120,6 +124,34 @@ class ChannelPerceptionService(Service):
 
     async def resolve_current_participant(self, session: Session) -> ParticipantSnapshot:
         return await upsert_participant(participant_from_session(session, datetime.utcnow()))
+
+    async def resolve_participant_by_platform_user(
+        self,
+        session: Session,
+        platform_user_id: str,
+    ) -> ParticipantSnapshot | None:
+        await self.flush()
+        scope = scope_from_session(session)
+        participant = await find_participant_by_platform_user(scope, platform_user_id)
+        if participant is not None:
+            return participant
+        try:
+            member = await session.guild_member_get(platform_user_id)
+        except Exception:
+            return None
+        user = member.user
+        if user is None:
+            return None
+        return await upsert_participant(
+            ParticipantObservation(
+                scope=scope,
+                platform_user_id=clean_text(user.id),
+                platform_nickname=clean_text(user.name),
+                group_card=clean_text(member.nick),
+                avatar_url=clean_text(member.avatar or user.avatar),
+                observed_at=datetime.utcnow(),
+            )
+        )
 
     async def refresh_participant(self, session: Session, public_ref: str) -> ParticipantSnapshot | None:
         scope = scope_from_session(session)
