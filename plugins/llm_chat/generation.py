@@ -29,6 +29,10 @@ from .channel_images import (
     llm_chat_channel_image_scope,
 )
 from .core.tool_trace import ToolTraceRecorder, llm_chat_tool_trace_scope
+from .image_edit_refs import (
+    ImageEditReferences,
+    llm_chat_image_edit_scope,
+)
 from .runtime_context import llm_chat_context_scope
 from .core.agent_trace import AgentTurnRecorder
 from .core.native_images import extract_native_images
@@ -37,6 +41,7 @@ from .core.media_delivery import (
     latest_user_requests_media,
     strip_media_unavailable_marker,
     latest_user_requests_webpage_screenshot,
+    latest_user_requests_web_image_reference,
 )
 from .core.tool_trace_safety import sanitize_json
 
@@ -66,6 +71,14 @@ _MEDIA_RECOVERY_SUFFIX = (
     "并以工具成功结果为准；不得用普通文字假装附件已经发出。"
     "若经过有界尝试仍不能确认媒体发送成功，最终普通文本必须以 [MEDIA_UNAVAILABLE] 开头，"
     "如实说明本轮未能发送，不得承诺下一轮必然成功；失败说明不得通过 send_text 或其他发送工具发送。"
+)
+_REFERENCE_EDIT_RECOVERY_SUFFIX = (
+    "当前用户明确要求从公开网页取得真实视觉参考后完成图片修改。"
+    "上一条候选回复没有通过 edit_image 确认发送合格结果，因此不可直接交付。"
+    "必须先用 web_search/read_web_page 选择公开来源，再调用 capture_web_reference 私下抓取并检查视觉描述，"
+    "确认与目标一致后把返回的 image_ref 传给 edit_image。generate_image 和模型原生图片输出不能满足本轮要求。"
+    "若在剩余有界额度内无法取得可靠参考或 edit_image 未确认发送，"
+    "最终普通文本必须以 [MEDIA_UNAVAILABLE] 开头并如实说明失败。"
 )
 _IMAGE_INPUT_REPLY_SUFFIX = (
     "当前轮用户只发送或引用了图片，没有提供有意义的文字。不得把空文本解释为句号、一个点、沉默或无事发生；"
@@ -100,6 +113,15 @@ def response_images(response: object) -> tuple[AgnoImage, ...]:
     """Return safely normalized native images from one model response."""
 
     return extract_native_images(response)
+
+
+def _suppress_native_images(response: object) -> None:
+    """Prevent unverified provider-native images from reaching delivery."""
+
+    try:
+        setattr(response, "_llm_chat_native_images", ())
+    except Exception:
+        return
 
 
 def _has_visible_reply(response: object) -> bool:
@@ -341,12 +363,18 @@ async def _recover_requested_media(
     system: str,
     model: str | None,
     delivery_state: DeliveryState,
+    image_edit_references: ImageEditReferences,
     request_timeout: float,
     max_retries: int | None,
     agent_events: AgentTurnRecorder | None,
     tool_trace: ToolTraceRecorder,
 ) -> GenericResponse[None]:
-    _LOGGER.warning("requested media was not confirmed; retrying once with tools")
+    reference_required = image_edit_references.requires_web_reference
+    _LOGGER.warning(
+        "required reference image edit was not confirmed; retrying once with tools"
+        if reference_required
+        else "requested media was not confirmed; retrying once with tools"
+    )
     try:
         with agno_tool_call_limit_scope(_MEDIA_RECOVERY_TOOL_CALL_LIMIT):
             response = cast(
@@ -354,7 +382,10 @@ async def _recover_requested_media(
                 await _record_model_attempt(
                     lambda: _generate_with_tools(
                         messages,
-                        system=f"{system}\n\n{_MEDIA_RECOVERY_SUFFIX}",
+                        system=(
+                            f"{system}\n\n"
+                            f"{_REFERENCE_EDIT_RECOVERY_SUFFIX if reference_required else _MEDIA_RECOVERY_SUFFIX}"
+                        ),
                         model=model,
                         request_timeout=request_timeout,
                         max_retries=max_retries,
@@ -369,7 +400,11 @@ async def _recover_requested_media(
         if str(exc) == _TOOL_LOOP_EXHAUSTED:
             raise RuntimeError(_MEDIA_RECOVERY_FAILED) from exc
         raise
-    if delivery_state.confirmed_media_deliveries > 0 or response_images(response):
+    if reference_required:
+        if image_edit_references.edit_confirmed:
+            _suppress_native_images(response)
+            return response
+    elif delivery_state.confirmed_media_deliveries > 0 or response_images(response):
         return response
     if is_media_unavailable_reply(response_content(response)):
         return response
@@ -385,6 +420,7 @@ async def generate_chat_response(
     ctx: Contexts | None,
     web_limits: WebAccessLimits,
     delivery_state: DeliveryState,
+    image_edit_references: ImageEditReferences | None = None,
     require_text_reply: bool = False,
     channel_image_references: ChannelImageReferences | None = None,
     request_timeout: float = 90.0,
@@ -402,22 +438,32 @@ async def generate_chat_response(
     )
     media_requested = latest_user_requests_media(messages)
     webpage_screenshot_requested = latest_user_requests_webpage_screenshot(messages)
+    web_reference_requested = latest_user_requests_web_image_reference(messages)
     generation_timeout = media_request_timeout if media_requested else request_timeout
     generation_max_retries = 0 if media_requested else None
     tool_loop_exhausted = False
     active_tool_trace = tool_trace or ToolTraceRecorder()
     active_channel_image_references = channel_image_references or ChannelImageReferences()
+    active_image_edit_references = image_edit_references or ImageEditReferences.from_input_attachments(
+        (),
+        requires_web_reference=web_reference_requested,
+    )
+    active_image_edit_references.requires_web_reference = (
+        active_image_edit_references.requires_web_reference or web_reference_requested
+    )
     with (
         agno_tool_call_limit_scope(tool_call_limit),
         agno_delivery_tool_scope(),
         llm_chat_web_access_scope(
             web_limits,
             allow_webpage_screenshots=webpage_screenshot_requested,
+            allow_reference_capture=active_image_edit_references.requires_web_reference,
         ),
         llm_chat_delivery_scope(delivery_state),
         llm_chat_tool_trace_scope(active_tool_trace),
         llm_chat_context_scope(ctx),
         llm_chat_channel_image_scope(active_channel_image_references),
+        llm_chat_image_edit_scope(active_image_edit_references),
         agent_access_scope(agent_access) if agent_access is not None else nullcontext(),
     ):
         response: GenericResponse[None] | None = None
@@ -456,12 +502,19 @@ async def generate_chat_response(
                 )
             elif str(exc) == _TOOL_LOOP_EXHAUSTED:
                 tool_loop_exhausted = True
-                if media_requested and delivery_state.confirmed_media_deliveries == 0:
+                if media_requested and (
+                    delivery_state.confirmed_media_deliveries == 0
+                    or (
+                        active_image_edit_references.requires_web_reference
+                        and not active_image_edit_references.edit_confirmed
+                    )
+                ):
                     return await _recover_requested_media(
                         messages,
                         system=system,
                         model=model,
                         delivery_state=delivery_state,
+                        image_edit_references=active_image_edit_references,
                         request_timeout=generation_timeout,
                         max_retries=generation_max_retries,
                         agent_events=agent_events,
@@ -473,14 +526,37 @@ async def generate_chat_response(
         if response is not None:
             transcript = _response_transcript(response, response_context)
             native_images = response_images(response)
-            if native_images:
-                return response
-            if media_requested and delivery_state.confirmed_media_deliveries == 0:
+            if active_image_edit_references.edit_confirmed:
+                _suppress_native_images(response)
+                native_images = ()
+            elif native_images and active_image_edit_references.requires_web_reference:
+                _suppress_native_images(response)
                 return await _recover_requested_media(
                     _without_invalid_tail(transcript),
                     system=system,
                     model=model,
                     delivery_state=delivery_state,
+                    image_edit_references=active_image_edit_references,
+                    request_timeout=generation_timeout,
+                    max_retries=generation_max_retries,
+                    agent_events=agent_events,
+                    tool_trace=active_tool_trace,
+                )
+            if native_images:
+                return response
+            if media_requested and (
+                delivery_state.confirmed_media_deliveries == 0
+                or (
+                    active_image_edit_references.requires_web_reference
+                    and not active_image_edit_references.edit_confirmed
+                )
+            ):
+                return await _recover_requested_media(
+                    _without_invalid_tail(transcript),
+                    system=system,
+                    model=model,
+                    delivery_state=delivery_state,
+                    image_edit_references=active_image_edit_references,
                     request_timeout=generation_timeout,
                     max_retries=generation_max_retries,
                     agent_events=agent_events,

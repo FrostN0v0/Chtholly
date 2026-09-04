@@ -17,8 +17,13 @@ from arclet.letoderea.exceptions import ExitState, _ExitException
 from entari_plugin_llm.tools.event import LLMToolEvent, tools, available_functions
 
 from .core.errors import summarize_exception
-from .core.delivery import current_llm_chat_delivery, contains_internal_participant_reference
+from .core.delivery import (
+    current_llm_chat_delivery,
+    contains_internal_image_reference,
+    contains_internal_participant_reference,
+)
 from .core.tool_trace import current_tool_trace, llm_chat_tool_execution_scope
+from .image_edit_refs import current_image_edit_references
 from .runtime_context import copy_llm_chat_context
 from .reaction_feedback import current_reaction_feedback
 from .core.native_images import extract_native_images
@@ -33,7 +38,9 @@ _TOOL_CALL_LIMIT: ContextVar[int] = ContextVar(
 )
 _ORDERED_DELIVERY_TOOLS = frozenset(
     {
+        "capture_web_reference",
         "generate_image",
+        "edit_image",
         "html2pic",
         "jinja2pic",
         "markdown2pic",
@@ -47,6 +54,7 @@ _ORDERED_DELIVERY_TOOLS = frozenset(
         "speak",
     }
 )
+_REFERENCE_EDIT_BLOCKED_TOOLS = _ORDERED_DELIVERY_TOOLS - {"capture_web_reference", "edit_image"}
 _DELIVERY_TOOL_LOCK: ContextVar[asyncio.Lock | None] = ContextVar(
     "llm_chat_agno_delivery_tool_lock",
     default=None,
@@ -64,7 +72,7 @@ def agno_delivery_tool_scope() -> Iterator[None]:
         _DELIVERY_TOOL_LOCK.reset(token)
 
 
-_INTERNAL_REFERENCE_TOOLS = {
+_INTERNAL_PARTICIPANT_REFERENCE_TOOLS = {
     "describe_channel_participant_avatar",
     "describe_channel_image",
     "find_channel_participants",
@@ -73,6 +81,7 @@ _INTERNAL_REFERENCE_TOOLS = {
     "send_merged_forward",
     "send_text",
 }
+_INTERNAL_IMAGE_REFERENCE_TOOLS = {"edit_image"}
 
 
 def recommended_tool_call_limit(web_calls: int, text_messages: int, media_messages: int) -> int:
@@ -123,7 +132,9 @@ def _build_agno_tool(name: str) -> Function:
 
     async def wrapper(**kwargs: Any) -> str:
         recorder = current_tool_trace()
-        unsafe_reference = name not in _INTERNAL_REFERENCE_TOOLS and contains_internal_participant_reference(kwargs)
+        unsafe_reference = (
+            name not in _INTERNAL_PARTICIPANT_REFERENCE_TOOLS and contains_internal_participant_reference(kwargs)
+        ) or (name not in _INTERNAL_IMAGE_REFERENCE_TOOLS and contains_internal_image_reference(kwargs))
         call = recorder.start(name, {} if unsafe_reference else kwargs) if recorder is not None else None
         executing = False
 
@@ -135,8 +146,16 @@ def _build_agno_tool(name: str) -> Function:
                 await reaction.tool_started(name)
             before = _delivery_snapshot()
             try:
+                image_edit_references = current_image_edit_references()
+                if (
+                    name in _REFERENCE_EDIT_BLOCKED_TOOLS
+                    and image_edit_references is not None
+                    and image_edit_references.requires_web_reference
+                    and not image_edit_references.edit_confirmed
+                ):
+                    raise ValueError("This turn requires edit_image before any other delivery tool")
                 if unsafe_reference:
-                    raise ValueError("Invalid internal participant reference for this tool")
+                    raise ValueError("Invalid internal reference for this tool")
                 tool_context = await generate_contexts(LLMToolEvent(), inherit_ctx=copy_llm_chat_context())
                 tool_context.update(kwargs)
                 with llm_chat_tool_execution_scope(call.execution_ref if call is not None else ""):

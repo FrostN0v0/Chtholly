@@ -210,6 +210,7 @@ async def _run_chat(
     web_limits = prepared.web_limits
     delivery_state = prepared.delivery_state
     channel_image_references = prepared.channel_image_references
+    image_edit_references = prepared.image_edit_references
     turn = prepared.lifecycle
     engagement = prepared.engagement
     feedback = turn_feedback(prepared.engagement_signals, declined=not engagement.replies)
@@ -240,6 +241,7 @@ async def _run_chat(
                 web_limits=web_limits,
                 delivery_state=delivery_state,
                 channel_image_references=channel_image_references,
+                image_edit_references=image_edit_references,
                 request_timeout=config.model_request_timeout,
                 media_request_timeout=config.media_request_timeout,
                 tool_trace=turn.tool_trace,

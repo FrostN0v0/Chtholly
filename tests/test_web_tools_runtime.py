@@ -35,14 +35,24 @@ from arclet.entari.config import EntariConfig
 from arclet.letoderea.context import Contexts
 from satori.adapters.onebot11.message import OneBot11MessageEncoder
 
+from plugins.llm_chat.web.policy import WebAccessLimits, llm_chat_web_access_scope
 from plugins.llm_chat.core.delivery import llm_chat_delivery_scope
+from plugins.llm_chat.core.tool_trace import (
+    ToolTraceRecorder,
+    llm_chat_tool_trace_scope,
+    llm_chat_tool_execution_scope,
+)
+from plugins.llm_chat.image_edit_refs import ImageEditReferences, llm_chat_image_edit_scope
+from plugins.llm_chat.agent_attachments import store_agent_attachment
 from utils.tts_service_core.voice_catalog import (
     TTSVoiceOption,
     TTSVoiceCatalog,
     TTSReferenceOption,
     TTSSynthesisSelection,
 )
+from plugins.llm_chat.web.reference_capture import WebReferenceCapture
 from plugins.llm_chat.web.screenshot_models import WebScreenshot
+from plugins.llm_chat.core.tool_trace_policy import DeliverySnapshot
 
 _ROOT = Path(__file__).resolve().parents[1]
 if not hasattr(EntariConfig, "instance"):
@@ -1164,6 +1174,8 @@ async def test_actual_media_tool_schemas_encourage_proactive_expression(
         image_schema = schemas["send_image"]
         speak_schema = schemas["speak"]
         generated_image_schema = schemas["generate_image"]
+        edit_image_schema = schemas["edit_image"]
+        capture_reference_schema = schemas["capture_web_reference"]
         markdown_schema = schemas["markdown2pic"]
         voice_catalog_schema = schemas["list_tts_voices"]
 
@@ -1173,10 +1185,9 @@ async def test_actual_media_tool_schemas_encourage_proactive_expression(
         assert "Use only for an explicit local reaction" not in image_schema["description"]
         assert image_schema["parameters"]["required"] == []
 
-        assert "regardless of which" in generated_image_schema["description"]
-        assert "conversation model is active" in generated_image_schema["description"]
         assert "server-configured image model" in generated_image_schema["description"]
         assert "exactly one new image" in generated_image_schema["description"]
+        assert "requires a web visual reference" in generated_image_schema["description"]
         assert set(generated_image_schema["parameters"]["properties"]) == {"prompt", "size"}
         assert generated_image_schema["parameters"]["required"] == ["prompt"]
         assert generated_image_schema["parameters"]["properties"]["size"]["enum"] == [
@@ -1184,6 +1195,28 @@ async def test_actual_media_tool_schemas_encourage_proactive_expression(
             "1536x1024",
             "1024x1536",
         ]
+        assert set(edit_image_schema["parameters"]["properties"]) == {
+            "prompt",
+            "source_image_index",
+            "reference_image_refs",
+            "size",
+        }
+        assert edit_image_schema["parameters"]["required"] == ["prompt"]
+        assert edit_image_schema["parameters"]["properties"]["reference_image_refs"]["type"] == "array"
+        assert "first provider input" in edit_image_schema["description"]
+        assert "cannot be guessed or reused across generations" in edit_image_schema["description"]
+
+        assert set(capture_reference_schema["parameters"]["properties"]) == {
+            "url",
+            "purpose",
+            "section",
+            "width",
+        }
+        assert capture_reference_schema["parameters"]["required"] == ["url", "purpose"]
+        assert "authenticated AgentEvent audit view" in capture_reference_schema["description"]
+        assert "Never expose image_ref to the user" in capture_reference_schema["description"]
+        assert "Verify that description" in capture_reference_schema["description"]
+        assert "matches the requested subject" in capture_reference_schema["description"]
 
         assert "fenced code blocks, configuration examples" in markdown_schema["description"]
         assert "complete code or Markdown first" in markdown_schema["description"]
@@ -1482,6 +1515,301 @@ async def test_generate_image_uses_dedicated_model_and_confirms_delivery(
             with pytest.raises(runtime.DeliveryError, match="size must be"):
                 await target(session, "bird", "2048x2048")
         assert invalid_state.media_messages == 0
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+    _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_capture_web_reference_is_private_generation_local_and_audited(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    baseline = _registry_snapshot()
+
+    async with _temporary_plugin(
+        config={
+            "image_generation_model": "image",
+            "tts_enabled": False,
+            "allowed_commands": [],
+            "web_search_enabled": False,
+        },
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        target = _tool_callable(runtime, "capture_web_reference")
+        captures: list[tuple[object, str, str, int]] = []
+
+        async def capture(browser: object, url: str, section: str, width: int) -> WebReferenceCapture:
+            captures.append((browser, url, section, width))
+            return WebReferenceCapture(_PNG_BYTES, "image/png", "page_capture", True, False)
+
+        async def inspect_reference(
+            _config: object,
+            data_url: str,
+            system_prompt: str,
+            user_text: str,
+            *,
+            timeout: float,
+        ) -> str:
+            assert data_url.startswith("data:image/png;base64,")
+            assert "matched (boolean)" in system_prompt
+            assert user_text == "Requested visual reference: Chen Qianyu character appearance"
+            assert timeout == 60.0
+            return (
+                'prefix {"matched":true,"description":"A young woman with a dark braid, muted red clothing, '
+                'and period-inspired accessories."}'
+            )
+
+        browser = object()
+        monkeypatch.setattr(runtime.web_reference_context, "get_browser", lambda: browser)
+        monkeypatch.setattr(runtime.web_reference_context, "capture", capture)
+        monkeypatch.setattr(runtime, "vision_completion", inspect_reference)
+
+        references = ImageEditReferences.from_input_attachments(
+            (),
+            requires_web_reference=True,
+            attachment_root=tmp_path,
+        )
+        recorder = ToolTraceRecorder()
+        arguments = {
+            "url": "https://example.com/character",
+            "purpose": "Chen Qianyu character appearance",
+            "section": "Character gallery",
+            "width": 1200,
+        }
+        call = recorder.start("capture_web_reference", arguments)
+        with (
+            llm_chat_web_access_scope(
+                WebAccessLimits(0, 2, 2),
+                allow_reference_capture=True,
+            ),
+            llm_chat_image_edit_scope(references),
+            llm_chat_tool_trace_scope(recorder),
+            llm_chat_tool_execution_scope(call.execution_ref),
+        ):
+            result = await target(**arguments)
+        recorder.finish_success(call, result, before=DeliverySnapshot(), after=DeliverySnapshot())
+
+        payload = json.loads(result)
+        reference_ref = payload["image_ref"]
+        assert reference_ref.startswith("web_ref_")
+        assert payload["description"].startswith("A young woman")
+        assert captures == [(browser, "https://example.com/character", "Character gallery", 1200)]
+        resolved = references.resolve_web_references([reference_ref])
+        assert len(resolved) == 1
+        assert resolved[0].data == _PNG_BYTES
+        assert resolved[0].attachment is not None
+
+        event = recorder.events[0]
+        assert event.status == "succeeded"
+        assert event.effect == "observed"
+        assert event.outcome == {
+            "available": True,
+            "source_type": "page_capture",
+            "description_chars": len(payload["description"]),
+            "matched_section": True,
+            "truncated": False,
+        }
+        assert "web_ref_" not in json.dumps(event.recorded_result)
+        attachments = cast(list[dict[str, object]], event.evidence["attachments"])
+        assert len(attachments) == 1
+        attachment = attachments[0]
+        assert str(attachment["attachment_ref"]).startswith("reference_")
+        assert attachment["description"] == payload["description"]
+        assert (tmp_path / f"{attachment['attachment_ref']}.png").read_bytes() == _PNG_BYTES
+
+        async def reject_reference(*_args: object, **_kwargs: object) -> str:
+            return '{"matched":false,"description":"The requested subject is not visible."}'
+
+        monkeypatch.setattr(runtime, "vision_completion", reject_reference)
+        rejected_references = ImageEditReferences.from_input_attachments(
+            (),
+            requires_web_reference=True,
+            attachment_root=tmp_path,
+        )
+        with (
+            llm_chat_web_access_scope(
+                WebAccessLimits(0, 1, 1),
+                allow_reference_capture=True,
+            ),
+            llm_chat_image_edit_scope(rejected_references),
+        ):
+            with pytest.raises(runtime.DeliveryError, match="did not visibly match"):
+                await target(**arguments)
+        assert rejected_references.web_reference_count == 0
+        assert len(list(tmp_path.glob("reference_*.png"))) == 1
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+    _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
+async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_result(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    baseline = _registry_snapshot()
+
+    async with _temporary_plugin(
+        config={
+            "image_generation_model": "image",
+            "image_generation_timeout": 123.0,
+            "image_generation_quality": "high",
+            "tts_enabled": False,
+            "allowed_commands": [],
+            "web_search_enabled": False,
+        },
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        target = _tool_callable(runtime, "edit_image")
+        generate_target = _tool_callable(runtime, "generate_image")
+        source_bytes = _PNG_BYTES
+        reference_bytes = _PNG_BYTES + b"reference"
+        source_attachment = store_agent_attachment(
+            source_bytes,
+            kind="input",
+            source="direct",
+            index=1,
+            root=tmp_path,
+        )
+        reference_attachment = store_agent_attachment(
+            reference_bytes,
+            kind="reference",
+            source="direct_image",
+            index=1,
+            label="Web visual reference",
+            description="Dark braid and muted red period clothing.",
+            root=tmp_path,
+        )
+        references = ImageEditReferences.from_input_attachments(
+            [source_attachment],
+            requires_web_reference=True,
+            attachment_root=tmp_path,
+        )
+        reference_ref = "web_ref_0123456789abcdef01234567"
+        references.add_web_reference(
+            reference_ref,
+            reference_bytes,
+            mime="image/png",
+            description="Dark braid and muted red period clothing.",
+            attachment=reference_attachment,
+        )
+
+        requests: list[dict[str, object]] = []
+        history: list[str] = []
+
+        def resolve_model(channel_id: str) -> SimpleNamespace:
+            assert channel_id == "12345"
+            return SimpleNamespace(
+                name="openai/gpt-image-2",
+                api_key="image-key",
+                base_url="https://images.example.com/v1",
+                extra={"organization": "image-org", "ignored": "value"},
+            )
+
+        async def edit_provider(**kwargs: object) -> SimpleNamespace:
+            requests.append(dict(kwargs))
+            return SimpleNamespace(data=[SimpleNamespace(b64_json=base64.b64encode(_PNG_BYTES).decode("ascii"))])
+
+        async def append_history(_channel: str, _user: str, _name: str, _role: str, content: str) -> None:
+            history.append(content)
+
+        monkeypatch.setattr(runtime.image_edit_context, "resolve_model", resolve_model)
+        monkeypatch.setattr(runtime.image_edit_context, "edit", edit_provider)
+        monkeypatch.setattr(runtime.image_edit_context, "append_history", append_history)
+
+        session = _DeliveryToolSession()
+        state = runtime.DeliveryState()
+        recorder = ToolTraceRecorder()
+        arguments = {
+            "prompt": "Replace only the person while preserving the logo and background.",
+            "source_image_index": 1,
+            "reference_image_refs": [reference_ref],
+            "size": "1024x1024",
+        }
+        call = recorder.start("edit_image", arguments)
+        before = DeliverySnapshot(active=True)
+        with (
+            llm_chat_delivery_scope(state),
+            llm_chat_image_edit_scope(references),
+            llm_chat_tool_trace_scope(recorder),
+            llm_chat_tool_execution_scope(call.execution_ref),
+        ):
+            result = await target(session, **arguments)
+        after = DeliverySnapshot(
+            active=True,
+            attempts=state.delivery_attempts,
+            confirmed=state.confirmed_deliveries,
+            confirmed_media=state.confirmed_media_deliveries,
+        )
+        recorder.finish_success(call, result, before=before, after=after)
+
+        assert len(requests) == 1
+        request = requests[0]
+        assert request["image"] == [source_bytes, reference_bytes]
+        assert request["model"] == "openai/gpt-image-2"
+        assert request["api_base"] == "https://images.example.com/v1"
+        assert request["quality"] == "high"
+        assert request["input_fidelity"] == "high"
+        assert request["response_format"] == "b64_json"
+        assert request["max_retries"] == 0
+        assert "first input image is the source composition" in cast(str, request["prompt"])
+        assert arguments["prompt"] in cast(str, request["prompt"])
+        assert reference_ref not in cast(str, request["prompt"])
+        assert len(session.sent) == 1
+        assert history == ["[发送了图片]"]
+        assert state.confirmed_media_deliveries == 1
+        assert references.edit_confirmed is True
+        assert "Edited image sent successfully" in result
+
+        event = recorder.events[0]
+        assert event.status == "succeeded"
+        assert event.effect == "confirmed"
+        assert event.arguments["reference_count"] == 1
+        assert "web_ref_" not in json.dumps(event.recorded_arguments)
+        assert "web_ref_" not in json.dumps(event.recorded_result)
+        attachments = cast(list[dict[str, object]], event.evidence["attachments"])
+        assert [str(item["attachment_ref"]).split("_", 1)[0] for item in attachments] == [
+            "input",
+            "reference",
+            "output",
+        ]
+        assert [item["label"] for item in attachments] == [
+            "Source image sent to image model",
+            "Web reference 1 sent to image model",
+            "Edited image result",
+        ]
+        output_attachment = attachments[-1]
+        assert (tmp_path / f"{output_attachment['attachment_ref']}.png").read_bytes() == _PNG_BYTES
+
+        blocked_state = runtime.DeliveryState()
+        with llm_chat_delivery_scope(blocked_state), llm_chat_image_edit_scope(references):
+            with pytest.raises(runtime.DeliveryError, match="requires a captured web reference"):
+                await generate_target(session, "Ignore the real reference and invent it")
+        assert blocked_state.delivery_attempts == 0
+
+        forged = ImageEditReferences.from_input_attachments(
+            [source_attachment],
+            requires_web_reference=True,
+            attachment_root=tmp_path,
+        )
+        with llm_chat_delivery_scope(runtime.DeliveryState()), llm_chat_image_edit_scope(forged):
+            with pytest.raises(runtime.DeliveryError, match="not captured in the current generation"):
+                await target(
+                    session,
+                    "Replace the person.",
+                    source_image_index=1,
+                    reference_image_refs=[reference_ref],
+                )
+        assert len(requests) == 1
 
         await harness.dispose()
         _assert_registry_matches(baseline)

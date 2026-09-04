@@ -122,6 +122,13 @@ _WEBPAGE_SCREENSHOT_REQUEST = re.compile(
     r"(?:webpage|web page|page|site|website|url|link)(?:.{0,16}(?:for|to)\s+me)?",
     re.IGNORECASE,
 )
+_WEB_IMAGE_REFERENCE_REQUEST = re.compile(
+    r"(?=.*(?:搜索|搜一下|搜|查找|找一下|寻找|获取|从网上|网上|网页|网络|web))"
+    r"(?=.*(?:图片|照片|立绘|形象|截图|image|picture|photo))"
+    r"(?=.*(?:参考图|作为参考|用作参考|视觉参考|照着|仿照|based on|reference))"
+    r"(?=.*(?:替换|换掉|编辑|修改|重绘|重画|生成|画|edit|replace|redraw|generate))",
+    re.IGNORECASE,
+)
 
 
 def _user_text(content: object) -> str:
@@ -192,6 +199,19 @@ def latest_user_requests_webpage_screenshot(messages: Sequence[ChatMessage]) -> 
         if not text or _WEBPAGE_SCREENSHOT_NEGATION.search(text) or _WEBPAGE_SCREENSHOT_REFERENCE.search(text):
             return False
         return bool(_WEBPAGE_SCREENSHOT_REQUEST.search(text))
+    return False
+
+
+def latest_user_requests_web_image_reference(messages: Sequence[ChatMessage]) -> bool:
+    """Return whether the latest user explicitly requires a web visual reference for image work."""
+
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        text = _user_text(message.get("content")).strip()
+        if not text or _NEGATED_MEDIA_REQUEST.search(text):
+            return False
+        return bool(_WEB_IMAGE_REFERENCE_REQUEST.search(text))
     return False
 
 

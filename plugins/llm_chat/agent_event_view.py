@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 
 from .models import AgentEvent
 from .core.types import JSONType
-from .agent_attachments import is_user_input_attachment
+from .agent_attachments import is_agent_attachment, event_attachment_metadata
 
 _INLINE_OBJECT_CHARS = 8000
 _PREVIEW_CHARS = 400
@@ -398,38 +398,43 @@ def event_engagement(event: AgentEvent, payload: Mapping[str, JSONType]) -> dict
     }
 
 
-def event_input_images(event: AgentEvent, payload: Mapping[str, JSONType]) -> list[dict[str, JSONType]]:
-    """Project private user-input attachments into authenticated WebUI URLs."""
+def event_images(event: AgentEvent, payload: Mapping[str, JSONType]) -> list[dict[str, JSONType]]:
+    """Project event-authorized private images into authenticated WebUI URLs."""
 
-    if event.event_type != "user_input":
-        return []
-    attachments = payload.get("attachments")
-    if not isinstance(attachments, Sequence) or isinstance(attachments, (str, bytes)):
-        return []
     images: list[dict[str, JSONType]] = []
-    for raw in attachments[:_MAX_EVIDENCE_IMAGES]:
-        if not isinstance(raw, Mapping):
-            continue
+    for raw in event_attachment_metadata(cast(Mapping[str, object], payload))[:_MAX_EVIDENCE_IMAGES]:
         attachment_ref = raw.get("attachment_ref")
         mime = raw.get("mime")
-        if not is_user_input_attachment(attachment_ref, mime):
+        if not is_agent_attachment(attachment_ref, mime):
             continue
-        source = raw.get("source")
+        source = str(raw.get("source", "") or "")
         index = raw.get("index")
         ordinal = index if isinstance(index, int) and index > 0 else len(images) + 1
-        quoted = source == "quoted"
-        label = f"{'引用' if quoted else '用户'}图片 {ordinal}"
+        configured_label = raw.get("label")
+        if isinstance(configured_label, str) and configured_label.strip():
+            label = configured_label.strip()
+        elif str(attachment_ref).startswith("reference_"):
+            label = f"网页参考图 {ordinal}"
+        elif str(attachment_ref).startswith("output_"):
+            label = f"生成结果 {ordinal}"
+        else:
+            label = f"{'引用' if source == 'quoted' else '用户'}图片 {ordinal}"
+        description = raw.get("description")
         images.append(
-            {
-                "name": label,
-                "source": "quoted" if quoted else "direct",
-                "mime": cast(str, mime),
-                "bytes": raw.get("bytes") if isinstance(raw.get("bytes"), int) else 0,
-                "url": (
-                    f"{_INPUT_ATTACHMENT_ENDPOINT}/{quote(event.event_ref, safe='')}"
-                    f"/attachments/{quote(cast(str, attachment_ref), safe='')}"
-                ),
-            }
+            cast(
+                dict[str, JSONType],
+                {
+                    "name": label,
+                    "source": source,
+                    "mime": cast(str, mime),
+                    "bytes": raw.get("bytes") if isinstance(raw.get("bytes"), int) else 0,
+                    "text": description if isinstance(description, str) else "",
+                    "url": (
+                        f"{_INPUT_ATTACHMENT_ENDPOINT}/{quote(event.event_ref, safe='')}"
+                        f"/attachments/{quote(cast(str, attachment_ref), safe='')}"
+                    ),
+                },
+            )
         )
     return images
 
@@ -446,6 +451,6 @@ def serialize_event_view(event: AgentEvent, payload: Mapping[str, JSONType]) -> 
         "evidence": event_evidence(payload),
         "persona": event_persona(event, payload),
         "engagement": event_engagement(event, payload),
-        "images": event_input_images(event, payload),
+        "images": event_images(event, payload),
         "payload_chars": len(event.payload_json or ""),
     }

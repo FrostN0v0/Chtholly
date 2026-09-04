@@ -664,6 +664,22 @@ def test_webpage_screenshot_budget_requires_explicit_current_turn_authorization(
         web_access_module.consume_llm_chat_web_access("read_web_page")
 
 
+def test_web_reference_capture_budget_requires_independent_current_turn_authorization(
+    web_access_module: ModuleType,
+) -> None:
+    limits = web_access_module.WebAccessLimits(0, 2, 2)
+
+    with web_access_module.llm_chat_web_access_scope(limits, allow_webpage_screenshots=True):
+        with pytest.raises(web_access_module.WebAccessError, match="explicit web-reference image request"):
+            web_access_module.consume_llm_chat_web_access("capture_web_reference")
+        web_access_module.consume_llm_chat_web_access("screenshot_web_page")
+
+    with web_access_module.llm_chat_web_access_scope(limits, allow_reference_capture=True):
+        web_access_module.consume_llm_chat_web_access("capture_web_reference")
+        with pytest.raises(web_access_module.WebAccessError, match="explicit webpage screenshot request"):
+            web_access_module.consume_llm_chat_web_access("screenshot_web_page")
+
+
 def test_web_access_budget_enforces_specific_and_total_limits(web_access_module: ModuleType) -> None:
     normalized = web_access_module.normalize_web_access_limits(-1, 3, 99)
     assert normalized == web_access_module.WebAccessLimits(0, 3, 3)

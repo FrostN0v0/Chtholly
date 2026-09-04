@@ -51,6 +51,12 @@ async def test_agent_sessions_api_exposes_timeline_context_payload_and_safe_rese
     attachment_ref = "input_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     attachment_bytes = b"private-user-image"
     (tmp_path / f"{attachment_ref}.png").write_bytes(attachment_bytes)
+    reference_ref = "reference_cccccccccccccccccccccccccccccccc"
+    output_ref = "output_dddddddddddddddddddddddddddddddd"
+    reference_bytes = b"private-web-reference"
+    output_bytes = b"private-edit-result"
+    (tmp_path / f"{reference_ref}.png").write_bytes(reference_bytes)
+    (tmp_path / f"{output_ref}.png").write_bytes(output_bytes)
     recorder = AgentTurnRecorder()
     recorder.record_user_input(
         "hello",
@@ -75,6 +81,37 @@ async def test_agent_sessions_api_exposes_timeline_context_payload_and_safe_rese
             "excluded_turn_refs": [],
         },
         model_visible=False,
+    )
+    recorder.append(
+        "tool_result",
+        tool_name="edit_image",
+        execution_ref="exec_edit",
+        status="succeeded",
+        effect="confirmed",
+        payload={
+            "evidence": {
+                "attachments": [
+                    {
+                        "attachment_ref": reference_ref,
+                        "mime": "image/png",
+                        "bytes": len(reference_bytes),
+                        "source": "page_capture",
+                        "index": 1,
+                        "label": "Web reference 1 sent to image model",
+                        "description": "Dark braid and period clothing.",
+                    },
+                    {
+                        "attachment_ref": output_ref,
+                        "mime": "image/png",
+                        "bytes": len(output_bytes),
+                        "source": "image_edit",
+                        "index": 1,
+                        "label": "Edited image result",
+                    },
+                ]
+            }
+        },
+        model_visible=True,
     )
     recorder.record_assistant_output("hi")
     await agent_events.persist_agent_events(turn.id, recorder.events)
@@ -110,6 +147,7 @@ async def test_agent_sessions_api_exposes_timeline_context_payload_and_safe_rese
             assert [event["event_type"] for event in events] == [
                 "user_input",
                 "context_selection",
+                "tool_result",
                 "assistant_output",
             ]
             assert events[0]["images"][0]["url"].endswith(
@@ -124,6 +162,17 @@ async def test_agent_sessions_api_exposes_timeline_context_payload_and_safe_rese
                 f"/api/llm-chat/sessions/events/{events[0]['event_ref']}/attachments/input_cccccccccccccccccccccccccccccccc"
             )
             assert missing_attachment.status_code == 404
+            edit_images = events[2]["images"]
+            assert [image["name"] for image in edit_images] == [
+                "Web reference 1 sent to image model",
+                "Edited image result",
+            ]
+            assert edit_images[0]["text"] == "Dark braid and period clothing."
+            reference = await client.get(edit_images[0]["url"])
+            output = await client.get(edit_images[1]["url"])
+            assert reference.status_code == output.status_code == 200
+            assert reference.content == reference_bytes
+            assert output.content == output_bytes
 
             inspector = (await client.get(f"/api/llm-chat/sessions/turns/{turn.turn_ref}/context")).json()["item"]
             assert inspector["selection"]["estimated_tokens"] == 100

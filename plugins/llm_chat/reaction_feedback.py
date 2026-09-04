@@ -41,6 +41,7 @@ _REACTION_EMOJIS: dict[ReactionStage, str] = {
 }
 _RESEARCH_TOOLS = frozenset(
     {
+        "capture_web_reference",
         "describe_channel_image",
         "describe_channel_participant_avatar",
         "find_channel_participants",
@@ -57,6 +58,7 @@ _RESEARCH_TOOLS = frozenset(
 )
 _MEDIA_TOOLS = frozenset(
     {
+        "edit_image",
         "generate_image",
         "html2pic",
         "jinja2pic",

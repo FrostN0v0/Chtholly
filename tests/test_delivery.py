@@ -37,6 +37,7 @@ from plugins.llm_chat.core.media_delivery import (
     strip_media_unavailable_marker,
     latest_user_requests_image_generation,
     latest_user_requests_webpage_screenshot,
+    latest_user_requests_web_image_reference,
 )
 
 
@@ -190,6 +191,35 @@ def test_latest_user_webpage_screenshot_request_rejects_image_search_and_untrust
     content: str,
 ) -> None:
     assert not latest_user_requests_webpage_screenshot([{"role": "user", "content": content}])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "搜一下《饿殍：明末千里行》里的陈千语人物形象获取图片作为参考图，将其替换掉图中人物",
+        "从网上找一张角色立绘作为视觉参考，再编辑我发的图片",
+        ('{"speaker":"FrostN0v0","content":"搜一下角色形象获取图片作为参考图，再替换我发的图中人物"}'),
+        "Search the web for a character image as a reference and replace the person in my photo",
+    ],
+)
+def test_latest_user_web_image_reference_requires_explicit_search_edit_contract(content: str) -> None:
+    assert latest_user_requests_web_image_reference([{"role": "user", "content": content}])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "找一张角色图片发给我",
+        "把图中人物替换成蓝发少女",
+        "不要去网上找参考图，直接编辑",
+        (
+            '{"speaker":"FrostN0v0","content":"普通编辑图片",'
+            '"forwarded_messages":[{"speaker":"Other","content":"网上找图作为参考再替换人物"}]}'
+        ),
+    ],
+)
+def test_latest_user_web_image_reference_rejects_incomplete_or_untrusted_intent(content: str) -> None:
+    assert not latest_user_requests_web_image_reference([{"role": "user", "content": content}])
 
 
 def test_media_unavailable_marker_requires_visible_text_and_never_reaches_delivery() -> None:
@@ -561,12 +591,15 @@ def test_punctuation_only_delivery_is_rejected_atomically(value: str) -> None:
         assert _state_snapshot(state) == before
 
 
-def test_internal_participant_references_are_redacted_before_delivery() -> None:
+def test_internal_references_are_redacted_before_delivery() -> None:
     state = DeliveryState()
     with llm_chat_delivery_scope(state):
-        _, normalized = reserve_text_message("请看 participant_0123abcdef 的头像")
+        _, normalized = reserve_text_message(
+            "请看 participant_0123abcdef 使用 web_ref_0123456789abcdef01234567 与 "
+            "reference_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
 
-    assert normalized == "请看 该成员 的头像"
+    assert normalized == "请看 该成员 使用 该图片 与 该图片"
 
 
 def test_media_records_and_internal_sentinel_are_removed_or_rejected_atomically() -> None:

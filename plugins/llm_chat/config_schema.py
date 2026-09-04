@@ -37,11 +37,11 @@ _CONFIG_SCHEMA_TEXT = {
     "model_request_timeout": ("主模型请求超时", "普通聊天模型单次请求的超时时间（秒）。"),
     "media_request_timeout": ("媒体请求超时", "用户明确请求媒体时，单次模型请求的超时时间（秒）。"),
     "image_generation_model": (
-        "图片生成模型",
-        "原创图片生成使用的独立模型别名；留空时不注册 generate_image 工具。",
+        "图片生成与编辑模型",
+        "原创图片生成和当前图片编辑使用的独立模型别名；留空时不注册 generate_image 与 edit_image 工具。",
     ),
-    "image_generation_timeout": ("图片生成超时", "单次原创图片生成请求的最长等待时间（秒）。"),
-    "image_generation_quality": ("图片生成质量", "原创图片生成请求使用的固定质量等级。"),
+    "image_generation_timeout": ("图片生成与编辑超时", "单次图片生成或编辑请求的最长等待时间（秒）。"),
+    "image_generation_quality": ("图片生成与编辑质量", "图片生成与编辑请求使用的固定质量等级。"),
     "image_generation_output_format": ("图片输出格式", "原创图片发送前要求供应商返回的图片格式。"),
     "image_generation_output_compression": (
         "图片输出压缩率",

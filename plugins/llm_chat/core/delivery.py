@@ -22,6 +22,10 @@ _MAX_INTERVAL_HARD_CEILING = 5.0
 _STRUCTURED_FINAL_LINE = re.compile(r"^(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|\|)")
 _TRAILING_END_OF_RESPONSE = re.compile(rf"(?:\s*{re.escape(_END_OF_RESPONSE)})+\s*$")
 _INTERNAL_PARTICIPANT_REF = re.compile(r"(?<!\w)participant_[0-9a-f]{10}(?!\w)", re.IGNORECASE)
+_INTERNAL_IMAGE_REF = re.compile(
+    r"(?<!\w)(?:web_ref_[0-9a-f]{24}|(?:input|reference|output)_[0-9a-f]{32})(?!\w)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -189,6 +193,21 @@ def contains_internal_participant_reference(value: object) -> bool:
     return False
 
 
+def contains_internal_image_reference(value: object) -> bool:
+    """Detect opaque image references inside model-authored values."""
+
+    if isinstance(value, str):
+        return _INTERNAL_IMAGE_REF.search(value) is not None
+    if isinstance(value, Mapping):
+        return any(
+            contains_internal_image_reference(key) or contains_internal_image_reference(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(contains_internal_image_reference(item) for item in value)
+    return False
+
+
 def normalize_delivery_text(text: object, *, field: str) -> str:
     """Return model-authored delivery text without internal control records."""
 
@@ -198,6 +217,7 @@ def normalize_delivery_text(text: object, *, field: str) -> str:
         strip_media_unavailable_marker(strip_internal_media_records(text).strip())
     )
     normalized = _INTERNAL_PARTICIPANT_REF.sub("该成员", normalized)
+    normalized = _INTERNAL_IMAGE_REF.sub("该图片", normalized)
     if not has_meaningful_text(normalized):
         raise DeliveryError("Delivery text is empty, punctuation-only, or reserved for internal control")
     return normalized

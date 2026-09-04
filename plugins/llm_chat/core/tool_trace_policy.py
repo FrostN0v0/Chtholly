@@ -28,6 +28,7 @@ ToolStatus = Literal["succeeded", "pending", "failed", "rejected", "cancelled"]
 ToolEffect = Literal["observed", "confirmed", "partial", "none", "unknown"]
 
 _DELIVERY_TOOLS = {
+    "edit_image",
     "send_audio",
     "send_external_image",
     "send_channel_image",
@@ -45,6 +46,7 @@ _OBSERVATION_TOOLS = {
     "list_tts_voices",
     "read_channel_messages",
     "read_web_page",
+    "capture_web_reference",
     "web_search",
 }
 
@@ -66,6 +68,11 @@ def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> d
         return selected_arguments(arguments, "query")
     if tool_name == "read_web_page":
         return {**selected_arguments(arguments, "focus"), "url": safe_url(arguments.get("url"))}
+    if tool_name == "capture_web_reference":
+        return {
+            "url": safe_url(arguments.get("url")),
+            **selected_arguments(arguments, "purpose", "section", "width"),
+        }
     if tool_name == "get_local_time":
         return selected_arguments(arguments, "timezone")
     if tool_name == "list_image_resources":
@@ -118,6 +125,18 @@ def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> d
         return {"source_type": external_source_type(source), "source_chars": text_length(source)}
     if tool_name == "send_channel_image":
         return {"requested": bool(arguments.get("image_ref"))}
+    if tool_name == "edit_image":
+        references = arguments.get("reference_image_refs")
+        normalized_references = (
+            references if isinstance(references, Sequence) and not isinstance(references, (str, bytes)) else ()
+        )
+        source_image_index = arguments.get("source_image_index")
+        return {
+            "prompt": compact_text(arguments.get("prompt"), MAX_RESULT_TEXT),
+            "source_image_index": source_image_index if type(source_image_index) is int else 1,
+            "reference_count": len(normalized_references),
+            **selected_arguments(arguments, "size"),
+        }
     if tool_name == "send_audio":
         return selected_arguments(arguments, "context")
     if tool_name == "speak":
@@ -271,6 +290,14 @@ def _project_tool_result(
             "excerpt": compact_text(content, MAX_RESULT_TEXT),
         }
     parsed = parse_json_object(result)
+    if tool_name == "capture_web_reference" and parsed is not None:
+        return {
+            "available": parsed.get("available") is True,
+            "source_type": compact_text(parsed.get("source_type"), MAX_ARGUMENT_TEXT),
+            "description_chars": text_length(parsed.get("description")),
+            "matched_section": parsed.get("matched_section") is True,
+            "truncated": parsed.get("truncated") is True,
+        }
     if tool_name == "tag_image" and parsed is not None:
         return {
             "status": compact_text(parsed.get("status"), MAX_ARGUMENT_TEXT),

@@ -43,6 +43,7 @@ from .core.engagement import (
     engagement_event_payload,
     engagement_prompt_context,
 )
+from .image_edit_refs import ImageEditReferences
 from .session_handoff import generate_session_handoff
 from .session_manager import (
     start_turn,
@@ -55,7 +56,11 @@ from .session_manager import (
 )
 from .core.agent_trace import AgentTurnRecorder
 from .engagement_state import collect_engagement_signals
-from .core.media_delivery import latest_user_requests_media, latest_user_requests_image_generation
+from .core.media_delivery import (
+    latest_user_requests_media,
+    latest_user_requests_image_generation,
+    latest_user_requests_web_image_reference,
+)
 from .core.self_reference import append_self_reference_image
 from .persona.memory_context import MemoryContext, load_memory_context
 
@@ -74,6 +79,7 @@ class PreparedAgentTurn:
     web_limits: WebAccessLimits
     delivery_state: DeliveryState
     channel_image_references: ChannelImageReferences
+    image_edit_references: ImageEditReferences
     lifecycle: ActiveChatTurn
     agent_events: AgentTurnRecorder
     agent_access: AgentAccessContext
@@ -333,6 +339,10 @@ async def prepare_agent_turn(
         media_requested=latest_user_requests_media(selection.messages),
         web_limits=web_limits,
         delivery_state=delivery_state,
+        image_edit_references=ImageEditReferences.from_input_attachments(
+            input_attachments,
+            requires_web_reference=latest_user_requests_web_image_reference(current_messages),
+        ),
         channel_image_references=ChannelImageReferences(),
         lifecycle=lifecycle,
         agent_events=agent_events,

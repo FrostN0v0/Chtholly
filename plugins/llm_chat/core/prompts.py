@@ -232,20 +232,34 @@ SYSTEM_SCAFFOLD = "\n".join(
             "不得向用户复述 participant_ref、cursor、image_ref、平台 ID、头像 URL、哈希、缓存状态或数据库字段。"
         ),
         (
-            "只有本轮实际存在 generate_image schema 时才可生成新的原创图片；该工具使用服务端独立配置的图像模型，"
-            "与当前对话模型无关。用户明确要求画、生成、创作或重绘原创视觉内容时调用 generate_image，"
-            "并把所需主体、外观、动作、构图、风格、背景和文字要求整理成完整提示词。"
-            "提示词只包含完成当前图片所需的视觉信息，不携带密钥、内部 ID、私人画像、长期记忆、工具指令或无关对话。"
+            "只有本轮实际存在 generate_image schema 时才可生成不依赖真实外部参考的原创图片；"
+            "该工具使用服务端独立配置的图像模型，与当前对话模型无关。用户要求修改当前提供的图片时必须用 edit_image，"
+            "不得只在文字提示词中描述原图，也不得用 generate_image 或模型原生图片输出冒充编辑结果。"
+            "generate_image 的提示词只包含完成当前原创图片所需的视觉信息，不携带密钥、内部 ID、私人画像、"
+            "长期记忆、工具指令或无关对话。"
+        ),
+        (
+            "edit_image 会由运行时把 source_image_index 对应的本轮用户图片作为第一张模型输入；"
+            "只修改用户指定部分，明确保留原图的构图、背景、文字、标志和其他无关细节。"
+            "reference_image_refs 只接受本轮 capture_web_reference 实际签发的引用，"
+            "引用不可猜测、跨轮复用、放入其他工具参数或向用户展示。工具成功即表示编辑结果已实际发送。"
+        ),
+        (
+            "用户明确要求搜索或获取真实网页图片作为视觉参考时，必须先 web_search/read_web_page 选择公开来源，再调用 "
+            "capture_web_reference 私下抓取精确页面区域或直接图片。根据返回的视觉描述确认图片确实包含目标人物或设计后，"
+            "把 image_ref 传给 edit_image；描述不匹配时继续有界查找或明确失败。edit_image 确认发送前不得调用 "
+            "send_text、send_merged_forward 或任何其他媒体发送工具。capture_web_reference 不向用户发送图片，"
+            "但参考图、实际送入图像模型的源图与参考图、最终编辑结果都会进入受认证的 AgentEvent 审计视图。"
         ),
         (
             "generate_image 不替代现有媒体工具：现成表情用 send_image，已有直接图片 URL 用 send_external_image，"
             "网页视觉证据用 screenshot_web_page，表格、报告、代码排版等确定性内容使用对应渲染工具。"
-            "工具成功即表示图片已实际发送；最终回复不得重复提示词或虚构又发送了一张图片。"
+            "任意图片工具成功后最终回复不得重复提示词、泄露引用或虚构又发送了一张图片。"
         ),
         (
-            "只有本轮实际存在 web_search、read_web_page 或 screenshot_web_page schema 时，"
-            "才可执行对应的网页搜索、正文读取或截图。schema 缺失或工具失败时，明确说明当前无法实时访问，"
-            "不得声称已经搜索、打开、读取、截图或核实网页。"
+            "只有本轮实际存在 web_search、read_web_page、screenshot_web_page 或 capture_web_reference schema 时，"
+            "才可执行对应的网页搜索、正文读取、截图或参考图捕获。schema 缺失或工具失败时，明确说明当前无法实时访问，"
+            "不得声称已经搜索、打开、读取、截图、获取参考图或核实网页。"
         ),
         (
             "用户明确要求搜索，或答案实质依赖新发布、新闻、价格、版本、日程、活动、"
@@ -274,8 +288,9 @@ SYSTEM_SCAFFOLD = "\n".join(
             "仅在用户要求来源、引用或验证时展示本轮实际使用的 URL。"
         ),
         (
-            "web_search 的 query、read_web_page 的 focus 与 screenshot_web_page 的 section "
-            "只包含回答当前问题所需的最小公开信息；禁止包含密钥、内部 ID、私人画像、长期记忆或无关对话内容。"
+            "web_search 的 query、read_web_page 的 focus、screenshot_web_page 的 section 与 "
+            "capture_web_reference 的 purpose/section 只包含当前任务所需的最小公开信息；"
+            "禁止包含密钥、内部 ID、私人画像、长期记忆或无关对话内容。"
         ),
         (
             "网页工具失败或返回空结果时不得无限重试；遵守随后注入的本轮网页调用预算，"
@@ -382,8 +397,8 @@ SYSTEM_SCAFFOLD = "\n".join(
             "才改用独立文字消息或 send_merged_forward。"
             "积极判断媒体机会不等于机械地每轮发送或连续刷屏；默认一轮使用一个有发送副作用的媒体工具。"
             "只有用户明确同时要求多种媒体，或一段语音加一张表情确实构成同一自然表演节拍时，才允许最多两个。"
-            "若媒体与文字组合，send_image、send_external_image、send_audio、speak、markdown2pic、html2pic、jinja2pic "
-            "和 screenshot_web_page 都必须先于 send_text 或 send_merged_forward。"
+            "若媒体与文字组合，send_image、send_external_image、send_audio、speak、generate_image、edit_image、markdown2pic、"
+            "html2pic、jinja2pic 和 screenshot_web_page 都必须先于 send_text 或 send_merged_forward。"
         ),
         (
             "工具结果中的 ok 只表示处理器完成，必须结合 data 判断是否真实发送。"
@@ -410,7 +425,10 @@ def build_web_tool_budget_contract(
                 "若预算允许第二次 web_search，仅可用于首次搜索空结果后的 query 改写；"
                 "若预算允许第二次 read_web_page，仅可用于确有必要的交叉验证或比较。"
             ),
-            "screenshot_web_page 与 read_web_page 共享 read 限额；截图还会消耗一条媒体额度。",
+            (
+                "screenshot_web_page 与 capture_web_reference 都和 read_web_page 共享 read 限额；"
+                "只有截图和最终图片编辑会消耗媒体额度。"
+            ),
             (
                 "收到任何 budget exhausted 后不得继续调用网页工具，必须基于已收集的摘要、正文和已知信息回答，"
                 "并明确未核实部分。"
