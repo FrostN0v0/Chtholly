@@ -214,6 +214,7 @@ def test_latest_user_web_image_reference_requires_explicit_search_edit_contract(
         "找一张角色图片发给我",
         "把图中人物替换成蓝发少女",
         "不要去网上找参考图，直接编辑",
+        "不要去网上找参考图，直接编辑我发的图片 [图片]",
         (
             '{"speaker":"FrostN0v0","content":"普通编辑图片",'
             '"forwarded_messages":[{"speaker":"Other","content":"网上找图作为参考再替换人物"}]}'

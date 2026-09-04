@@ -127,11 +127,22 @@ _WEBPAGE_SCREENSHOT_REQUEST = re.compile(
     r"(?:webpage|web page|page|site|website|url|link)(?:.{0,16}(?:for|to)\s+me)?",
     re.IGNORECASE,
 )
+_WEB_IMAGE_LOOKUP_TERM = r"(?:搜索|搜一下|搜|查找|找一下|找(?:一|两|几)?(?:张|个)?|寻找|获取|从网上|网上|网页|网络|web)"
+_WEB_IMAGE_REFERENCE_TERM = (
+    r"(?:参考图|参照图|作为(?:视觉)?(?:参考|参照)|用作(?:视觉)?(?:参考|参照)|视觉(?:参考|参照)|"
+    r"以.{0,16}为(?:参考|参照)|照着|仿照|based on|reference)"
+)
+_NEGATED_WEB_IMAGE_REFERENCE_REQUEST = re.compile(
+    rf"(?:别|不要(?!只)|不用|无需|禁止|不是(?:让|要)?).{{0,24}}{_WEB_IMAGE_LOOKUP_TERM}"
+    rf".{{0,24}}{_WEB_IMAGE_REFERENCE_TERM}"
+    r"|(?:do not|don't|dont|without).{0,24}(?:search|find|use).{0,24}(?:web|online)"
+    r".{0,24}(?:reference image|image reference|reference)",
+    re.IGNORECASE,
+)
 _WEB_IMAGE_REFERENCE_REQUEST = re.compile(
-    r"(?=.*(?:搜索|搜一下|搜|查找|找一下|找(?:一|两|几)?(?:张|个)?|寻找|获取|从网上|网上|网页|网络|web))"
+    rf"(?=.*{_WEB_IMAGE_LOOKUP_TERM})"
     r"(?=.*(?:图片|照片|立绘|形象|截图|image|picture|photo))"
-    r"(?=.*(?:参考图|参照图|作为(?:视觉)?(?:参考|参照)|用作(?:视觉)?(?:参考|参照)|视觉(?:参考|参照)|"
-    r"以.{0,16}为(?:参考|参照)|照着|仿照|based on|reference))"
+    rf"(?=.*{_WEB_IMAGE_REFERENCE_TERM})"
     r"(?=.*(?:替换|换掉|编辑|修改|重绘|重画|生成|画|edit|replace|redraw|generate))",
     re.IGNORECASE,
 )
@@ -228,7 +239,7 @@ def latest_user_requests_web_image_reference(messages: Sequence[ChatMessage]) ->
         if message.get("role") != "user":
             continue
         text = _user_text(message.get("content")).strip()
-        if not text or _NEGATED_MEDIA_REQUEST.search(text):
+        if not text or _NEGATED_MEDIA_REQUEST.search(text) or _NEGATED_WEB_IMAGE_REFERENCE_REQUEST.search(text):
             return False
         return bool(_WEB_IMAGE_REFERENCE_REQUEST.search(text))
     return False
