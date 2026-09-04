@@ -498,6 +498,8 @@ def _install_handler_stubs(
             image_edit_references=ImageEditReferences.from_input_attachments(
                 input_attachments,
                 requires_web_reference=generation_module.latest_user_requests_web_image_reference(messages),
+                requires_image_edit=bool(input_attachments)
+                and generation_module.latest_user_requests_image_edit(messages),
             ),
             lifecycle=lifecycle,
             agent_events=agent_events,
@@ -3332,7 +3334,7 @@ async def test_generation_rejects_native_image_for_required_web_reference_until_
             [
                 {
                     "role": "user",
-                    "content": "搜一下角色人物形象获取图片作为参考图，将其替换掉图中人物 [图片]",
+                    "content": "去搜一下希原夏森，找一张参照图，以此为参照，替换图中的人物。 [图片]",
                 }
             ],
         ),
@@ -3355,6 +3357,54 @@ async def test_generation_rejects_native_image_for_required_web_reference_until_
     assert "上一条候选回复没有通过 edit_image 确认发送合格结果" in requests[1]["system"]
     assert "generate_image 和模型原生图片输出不能满足本轮要求" in requests[1]["system"]
     assert references.requires_web_reference is True
+    assert references.requires_image_edit is True
+    assert references.edit_confirmed is True
+    assert state.confirmed_media_deliveries == 1
+
+
+@pytest.mark.asyncio
+async def test_generation_rejects_native_image_for_required_source_edit_until_edit_is_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[dict[str, Any]] = []
+    state = DeliveryState()
+    references = ImageEditReferences.from_input_attachments(
+        (),
+        requires_web_reference=False,
+        requires_image_edit=True,
+    )
+
+    async def fake_generate(_messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
+        requests.append(kwargs)
+        if len(requests) == 1:
+            response = _handler_response("")
+            response.images = [SimpleNamespace(content=_PNG_BYTES, filepath=None, url=None)]
+            return response
+        references.edit_confirmed = True
+        mark_delivery_success(state, media=True)
+        return _handler_response("[END_OF_RESPONSE]")
+
+    monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
+
+    response = await generation_module.generate_chat_response(
+        cast(list[Any], [{"role": "user", "content": "把图中人物替换成蓝发少女 [图片]"}]),
+        system="system",
+        model="deepseek",
+        channel_id="group",
+        ctx=Contexts(),
+        web_limits=generation_module.WebAccessLimits(0, 0, 0),
+        delivery_state=state,
+        image_edit_references=references,
+        request_timeout=12.5,
+        media_request_timeout=45.0,
+    )
+
+    assert generation_module.response_content(response) == "[END_OF_RESPONSE]"
+    assert generation_module.response_images(response) == ()
+    assert len(requests) == 2
+    assert "当前用户明确要求修改本轮提供的图片" in requests[1]["system"]
+    assert "generate_image 和模型原生图片输出不能冒充源图编辑结果" in requests[1]["system"]
+    assert references.requires_web_reference is False
     assert references.edit_confirmed is True
     assert state.confirmed_media_deliveries == 1
 

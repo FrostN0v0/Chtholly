@@ -58,6 +58,7 @@ from .core.agent_trace import AgentTurnRecorder
 from .engagement_state import collect_engagement_signals
 from .core.media_delivery import (
     latest_user_requests_media,
+    latest_user_requests_image_edit,
     latest_user_requests_image_generation,
     latest_user_requests_web_image_reference,
 )
@@ -342,6 +343,7 @@ async def prepare_agent_turn(
         image_edit_references=ImageEditReferences.from_input_attachments(
             input_attachments,
             requires_web_reference=latest_user_requests_web_image_reference(current_messages),
+            requires_image_edit=bool(input_attachments) and latest_user_requests_image_edit(current_messages),
         ),
         channel_image_references=ChannelImageReferences(),
         lifecycle=lifecycle,

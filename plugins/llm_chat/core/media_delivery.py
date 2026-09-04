@@ -47,6 +47,11 @@ _IMAGE_EDIT_PATTERN = re.compile(
     rf"(?=.{{0,160}}{_IMAGE_OUTPUT_TERM})(?:把|将|帮我|请|给我)?.{{0,100}}{_IMAGE_EDIT_ACTION}.{{0,80}}",
     re.IGNORECASE,
 )
+_NEGATED_IMAGE_EDIT_REQUEST = re.compile(
+    rf"(?:别|不要|不用|无需|禁止|不是(?:让|要)?)\s*(?:再|继续)?\s*(?:把|将)?\s*.{{0,4}}{_IMAGE_EDIT_ACTION}",
+    re.IGNORECASE,
+)
+
 _SELF_IMAGE_REQUEST_PATTERN = re.compile(
     rf"(?=.{{0,160}}(?:你(?:自己|的)?|自己|珂朵莉|chtholly))(?=.{{0,160}}{_IMAGE_OUTPUT_TERM})"
     rf"(?:来|发|传|给我|让我看|想看|看看|看下|瞧瞧|{_IMAGE_EDIT_ACTION}).{{0,160}}"
@@ -123,9 +128,10 @@ _WEBPAGE_SCREENSHOT_REQUEST = re.compile(
     re.IGNORECASE,
 )
 _WEB_IMAGE_REFERENCE_REQUEST = re.compile(
-    r"(?=.*(?:搜索|搜一下|搜|查找|找一下|寻找|获取|从网上|网上|网页|网络|web))"
+    r"(?=.*(?:搜索|搜一下|搜|查找|找一下|找(?:一|两|几)?(?:张|个)?|寻找|获取|从网上|网上|网页|网络|web))"
     r"(?=.*(?:图片|照片|立绘|形象|截图|image|picture|photo))"
-    r"(?=.*(?:参考图|作为参考|用作参考|视觉参考|照着|仿照|based on|reference))"
+    r"(?=.*(?:参考图|参照图|作为(?:视觉)?(?:参考|参照)|用作(?:视觉)?(?:参考|参照)|视觉(?:参考|参照)|"
+    r"以.{0,16}为(?:参考|参照)|照着|仿照|based on|reference))"
     r"(?=.*(?:替换|换掉|编辑|修改|重绘|重画|生成|画|edit|replace|redraw|generate))",
     re.IGNORECASE,
 )
@@ -165,6 +171,19 @@ def latest_user_requests_image_generation(messages: Sequence[ChatMessage]) -> bo
         return any(pattern.search(text) for pattern in _IMAGE_GENERATION_PATTERNS) or bool(
             _SELF_IMAGE_REQUEST_PATTERN.search(text)
         )
+    return False
+
+
+def latest_user_requests_image_edit(messages: Sequence[ChatMessage]) -> bool:
+    """Return whether the latest user explicitly requests editing a supplied image."""
+
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        text = _user_text(message.get("content")).strip()
+        if not text or _NEGATED_IMAGE_EDIT_REQUEST.search(text):
+            return False
+        return bool(_IMAGE_EDIT_PATTERN.search(text))
     return False
 
 

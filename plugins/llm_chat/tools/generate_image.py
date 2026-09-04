@@ -57,13 +57,14 @@ def register_generate_image(
     ) -> str:
         """Generate and send exactly one new image with the server-configured image model.
 
-        Use this only for original visual content that does not require copying a real person or character from a web
-        reference. When the current turn requires a web visual reference, call capture_web_reference and then
-        edit_image instead; this tool is rejected at runtime for that turn. Write a complete visual prompt containing
-        only details needed for the requested image. Do not include secrets, private profile data, internal identifiers,
-        local paths, tool instructions, or unrelated conversation history. Use send_image for existing local reactions,
-        send_external_image for an existing direct image URL, screenshot_web_page for webpage rendering, and the
-        deterministic rendering tools for tables, reports, or code layouts.
+        Use this only for original visual content, never for editing a supplied image. When the current turn asks to
+        modify a user image, call edit_image instead. When it requires a web visual reference, call
+        capture_web_reference before edit_image. This tool is rejected at runtime for either edit path. Write a
+        complete visual prompt containing only details needed for the requested image. Do not include secrets, private
+        profile data, internal identifiers, local paths, tool instructions, or unrelated conversation history. Use
+        send_image for existing local reactions, send_external_image for an existing direct image URL,
+        screenshot_web_page for webpage rendering, and the deterministic rendering tools for tables, reports, or code
+        layouts.
 
         Args:
             prompt (str): Complete standalone prompt for one original image, at most 32000 characters.
@@ -71,12 +72,13 @@ def register_generate_image(
         Returns:
             str: Confirmed delivery status without exposing provider data.
         """
-
         edit_references = current_image_edit_references()
-        if edit_references is not None and edit_references.requires_web_reference:
-            raise DeliveryError(
-                "this turn requires a captured web reference; use capture_web_reference followed by edit_image"
-            )
+        if edit_references is not None and edit_references.requires_image_edit:
+            if edit_references.requires_web_reference:
+                raise DeliveryError(
+                    "this turn requires a captured web reference; use capture_web_reference followed by edit_image"
+                )
+            raise DeliveryError("this turn requires editing the supplied image; use edit_image")
         normalized_prompt = normalize_image_prompt(prompt)
         normalized_size = normalize_image_size(size)
         compression = normalize_output_compression(runtime.output_compression)

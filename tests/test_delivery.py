@@ -35,6 +35,7 @@ from plugins.llm_chat.core.media_delivery import (
     is_media_unavailable_reply,
     latest_user_requests_media,
     strip_media_unavailable_marker,
+    latest_user_requests_image_edit,
     latest_user_requests_image_generation,
     latest_user_requests_webpage_screenshot,
     latest_user_requests_web_image_reference,
@@ -197,6 +198,7 @@ def test_latest_user_webpage_screenshot_request_rejects_image_search_and_untrust
     "content",
     [
         "搜一下《饿殍：明末千里行》里的陈千语人物形象获取图片作为参考图，将其替换掉图中人物",
+        "去搜一下希原夏森，找一张参照图，以此为参照，替换图中的人物。 [图片]",
         "从网上找一张角色立绘作为视觉参考，再编辑我发的图片",
         ('{"speaker":"FrostN0v0","content":"搜一下角色形象获取图片作为参考图，再替换我发的图中人物"}'),
         "Search the web for a character image as a reference and replace the person in my photo",
@@ -220,6 +222,29 @@ def test_latest_user_web_image_reference_requires_explicit_search_edit_contract(
 )
 def test_latest_user_web_image_reference_rejects_incomplete_or_untrusted_intent(content: str) -> None:
     assert not latest_user_requests_web_image_reference([{"role": "user", "content": content}])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "把这张图片里的人物替换成希原夏森 [图片]",
+        '{"speaker":"FrostN0v0","content":"修改我发的图片背景 [图片]"}',
+        "不要去网上找参考图，直接编辑我发的图片 [图片]",
+    ],
+)
+def test_latest_user_image_edit_requires_supplied_image_edit_action(content: str) -> None:
+    assert latest_user_requests_image_edit([{"role": "user", "content": content}])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "不要修改这张图片，只告诉我人物是谁 [图片]",
+        "找一张希原夏森的图片发给我",
+    ],
+)
+def test_latest_user_image_edit_rejects_negated_or_non_edit_request(content: str) -> None:
+    assert not latest_user_requests_image_edit([{"role": "user", "content": content}])
 
 
 def test_media_unavailable_marker_requires_visible_text_and_never_reaches_delivery() -> None:

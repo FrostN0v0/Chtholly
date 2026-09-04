@@ -54,7 +54,7 @@ _ORDERED_DELIVERY_TOOLS = frozenset(
         "speak",
     }
 )
-_REFERENCE_EDIT_BLOCKED_TOOLS = _ORDERED_DELIVERY_TOOLS - {"capture_web_reference", "edit_image"}
+_IMAGE_EDIT_BLOCKED_TOOLS = _ORDERED_DELIVERY_TOOLS - {"capture_web_reference", "edit_image"}
 _DELIVERY_TOOL_LOCK: ContextVar[asyncio.Lock | None] = ContextVar(
     "llm_chat_agno_delivery_tool_lock",
     default=None,
@@ -148,9 +148,9 @@ def _build_agno_tool(name: str) -> Function:
             try:
                 image_edit_references = current_image_edit_references()
                 if (
-                    name in _REFERENCE_EDIT_BLOCKED_TOOLS
+                    name in _IMAGE_EDIT_BLOCKED_TOOLS
                     and image_edit_references is not None
-                    and image_edit_references.requires_web_reference
+                    and image_edit_references.requires_image_edit
                     and not image_edit_references.edit_confirmed
                 ):
                     raise ValueError("This turn requires edit_image before any other delivery tool")
