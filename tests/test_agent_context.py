@@ -194,6 +194,75 @@ async def test_agent_event_rebuild_preserves_tool_pair_and_externalizes_large_so
 
 
 @pytest.mark.asyncio
+async def test_agent_event_rebuild_batches_parallel_tool_calls_before_their_results(
+    agent_store: SimpleNamespace,
+) -> None:
+    _scope, context_session = await _scope_and_session()
+    turn = await session_manager.start_turn(
+        context_session,
+        trigger_message_id="message-parallel",
+        user_id="alice",
+        user_name="Alice",
+        conversation_user_id=None,
+        fresh_context=False,
+    )
+    trace = ToolTraceRecorder()
+    calls = [trace.start("web_search", {"query": f"query-{index}"}) for index in range(3)]
+    for call in reversed(calls):
+        trace.finish_success(
+            call,
+            {"results": [call.arguments["query"]]},
+            before=DeliverySnapshot(),
+            after=DeliverySnapshot(),
+        )
+    recorder = AgentTurnRecorder()
+    recorder.record_user_input("research", user_name="Alice", fresh_context=False)
+    recorder.record_tool_events([replace(event, duration_ms=100) for event in trace.events])
+    recorder.record_assistant_output("Done.")
+    await agent_events.persist_agent_events(turn.id, recorder.events)
+    await session_manager.finish_turn(turn.id, status="completed", final_text="Done.")
+
+    rows = await agent_events.load_turn_events(turn.id, model_visible_only=True)
+    assert [row.event_type for row in rows] == [
+        "user_input",
+        "assistant_tool_call",
+        "assistant_tool_call",
+        "assistant_tool_call",
+        "tool_result",
+        "tool_result",
+        "tool_result",
+        "assistant_output",
+    ]
+    selection = await context_builder.select_session_context(
+        context_session,
+        system="system",
+        current_message={"role": "user", "content": "next"},
+        model_name="test-model",
+        max_input_tokens=100_000,
+        output_reserve_tokens=1000,
+        rollover_ratio=0.9,
+        minimum_recent_turns=1,
+        inline_event_chars=4000,
+        fresh_context=False,
+    )
+
+    assert [message["role"] for message in selection.messages] == [
+        "user",
+        "assistant",
+        "tool",
+        "tool",
+        "tool",
+        "assistant",
+        "user",
+    ]
+    assistant_call = cast(dict[str, Any], selection.messages[1])
+    tool_calls = cast(list[dict[str, Any]], assistant_call["tool_calls"])
+    expected_ids = {call.execution_ref for call in calls}
+    assert {tool_call["id"] for tool_call in tool_calls} == expected_ids
+    assert {cast(dict[str, Any], message)["tool_call_id"] for message in selection.messages[2:5]} == expected_ids
+
+
+@pytest.mark.asyncio
 async def test_context_budget_drops_whole_old_turns_without_orphaning_tool_messages(
     agent_store: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
