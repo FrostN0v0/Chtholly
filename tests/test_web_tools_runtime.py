@@ -1762,6 +1762,8 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
         assert request["response_format"] == "b64_json"
         assert request["max_retries"] == 0
         assert "first input image is the source composition" in cast(str, request["prompt"])
+        assert "headwear, and accessories" in cast(str, request["prompt"])
+        assert "eye-closure" in cast(str, request["prompt"])
         assert arguments["prompt"] in cast(str, request["prompt"])
         assert reference_ref not in cast(str, request["prompt"])
         assert len(session.sent) == 1
