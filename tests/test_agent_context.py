@@ -613,6 +613,7 @@ def test_baseline_and_latest_user_authorization_intents_are_deterministic() -> N
         persona="persona",
         tool_schemas=[{"name": "html2pic", "source_hash": "two"}],
     )
+    assert first.system_version == "agent-context-v2"
     assert first.tool_schema_hash != second.tool_schema_hash
     assert context_builder.requests_fresh_context("别管之前，重新回答") is True
     assert context_builder.requests_archived_context("上次会话里说了什么") is True
