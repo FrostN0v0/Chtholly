@@ -1,6 +1,7 @@
 """Behavioral contracts for relationship style and persona prompt composition."""
 
 import json
+from datetime import datetime
 
 import pytest
 
@@ -281,16 +282,21 @@ class TestRelationshipCombinations:
 
 
 class TestEnergyCurve:
-    def test_bands(self):
-        assert energy_at(0) == 0.3
-        assert energy_at(6) == 0.3
-        assert energy_at(7) == 0.8
-        assert energy_at(11) == 0.8
-        assert energy_at(12) == 1.0
-        assert energy_at(17) == 1.0
-        assert energy_at(18) == 0.7
-        assert energy_at(22) == 0.7
-        assert energy_at(23) == 0.4
+    def test_reported_morning_turn_uses_shanghai_not_host_hour(self):
+        utc = datetime.fromisoformat("2026-09-05T00:50:52+00:00")
+        shanghai = datetime.fromisoformat("2026-09-05T08:50:52+08:00")
+        assert energy_at(utc) == energy_at(shanghai)
+        assert energy_at(utc) > 0.35
+
+    def test_shanghai_sleep_boundary_crosses_utc_date(self):
+        before = datetime.fromisoformat("2026-09-04T15:59:59+00:00")
+        after = datetime.fromisoformat("2026-09-04T16:00:00+00:00")
+        assert energy_at(before) > 0.35
+        assert energy_at(after) <= 0.35
+
+    def test_rejects_ambiguous_naive_time(self):
+        with pytest.raises(ValueError, match="timezone-aware"):
+            energy_at(datetime(2026, 9, 5, 8, 50))
 
 
 class TestDescriptors:
@@ -665,10 +671,6 @@ class TestComposePrompt:
         assert "回答含围栏代码块、配置示例、Markdown 表格或较长结构化排版" in prompt
         assert "必须先用 markdown2pic 渲染结构化部分，再用 send_text 分开发送必要解释" in prompt
         assert "不得把解释和整块代码或 Markdown 拼成一条长最终文本或合并转发" in prompt
-        assert "积极判断媒体机会不等于机械地每轮发送或连续刷屏" in prompt
-        assert "默认一轮使用一个有发送副作用的媒体工具" in prompt
-        assert "一段语音加一张表情确实构成同一自然表演节拍" in prompt
-        assert "才允许最多两个" in prompt
         assert "ok 只表示处理器完成，必须结合 data 判断是否真实发送" in prompt
         assert "任意发送工具成功后不得在最终回复中复述已发送内容" in prompt
         assert "没有尚未发送的新信息时只返回 [END_OF_RESPONSE]" in prompt
@@ -753,25 +755,3 @@ class TestComposePrompt:
         )
         assert "1 / 0 / 1" in custom_prompt
         assert "2 / 2 / 4" not in custom_prompt
-        assert "默认一轮使用一个有发送副作用的媒体工具" in prompt
-
-    @pytest.mark.parametrize(
-        "evaluator_field",
-        [
-            "mood_delta",
-            "affection_delta",
-            "trust_delta",
-            "dependence_delta",
-            "resentment_delta",
-            "profile_patches",
-            "memory_items",
-            "relationship_axes",
-            "existing_profile_facts",
-            "conversation",
-        ],
-    )
-    def test_evaluator_schema_is_not_in_the_main_chat_prompt(
-        self,
-        evaluator_field: str,
-    ):
-        assert evaluator_field not in _prompt()

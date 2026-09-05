@@ -5,14 +5,22 @@ from __future__ import annotations
 import json
 from typing import Any, cast
 from pathlib import Path
+from dataclasses import replace
 
+import pytest
 from arclet.entari.config import EntariConfig
 
 if not hasattr(EntariConfig, "instance"):
     setattr(EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.yml"))
 
 from plugins.llm_chat.models import AgentEvent
-from plugins.llm_chat.core.delivery import DEFAULT_DELIVERY_LIMITS
+from plugins.llm_chat.core.delivery import (
+    DEFAULT_DELIVERY_LIMITS,
+    DeliveryError,
+    DeliveryState,
+    reserve_media_messages,
+    llm_chat_delivery_scope,
+)
 from plugins.llm_chat.core.engagement import (
     EngagementSignals,
     turn_feedback,
@@ -24,6 +32,7 @@ from plugins.llm_chat.core.engagement import (
     engagement_prompt_context,
 )
 from plugins.llm_chat.agent_event_view import serialize_event_view
+from plugins.llm_chat.core.media_delivery import latest_user_requests_media
 
 
 def _signals(**overrides: object) -> EngagementSignals:
@@ -154,6 +163,45 @@ def test_budget_only_tightens_configured_delivery_limits() -> None:
     declined = apply_engagement_budget(DEFAULT_DELIVERY_LIMITS, engagement_budget("declined", DEFAULT_DELIVERY_LIMITS))
     assert declined.max_text_messages == 0
     assert declined.max_media_messages == 0
+
+
+@pytest.mark.parametrize("configured_limit", [2, 6])
+def test_requested_media_preserves_delivery_capacity_despite_low_energy(configured_limit: int) -> None:
+    request = "用html2pic发我，源码用md2pic发我"
+    decision = decide_engagement(_signals(energy=0.3, text=request, is_operator=True))
+    limits = replace(DEFAULT_DELIVERY_LIMITS, max_media_messages=configured_limit)
+    budget = engagement_budget(
+        decision.level,
+        limits,
+        media_requested=latest_user_requests_media([{"role": "user", "content": request}]),
+    )
+    effective = apply_engagement_budget(limits, budget)
+    state = DeliveryState(limits=effective)
+
+    assert decision.level == "brief"
+    assert effective.max_text_chars_per_message < limits.max_text_chars_per_message
+    with llm_chat_delivery_scope(state):
+        reserve_media_messages(2)
+        with pytest.raises(DeliveryError):
+            reserve_media_messages(configured_limit)
+    assert effective.max_media_messages == configured_limit
+
+
+def test_low_energy_casual_media_still_cannot_spam() -> None:
+    budget = engagement_budget("brief", DEFAULT_DELIVERY_LIMITS, media_requested=False)
+    state = DeliveryState(limits=apply_engagement_budget(DEFAULT_DELIVERY_LIMITS, budget))
+    with llm_chat_delivery_scope(state):
+        reserve_media_messages(1)
+        with pytest.raises(DeliveryError):
+            reserve_media_messages(1)
+
+
+def test_requested_media_does_not_override_declined_turn() -> None:
+    budget = engagement_budget("declined", DEFAULT_DELIVERY_LIMITS, media_requested=True)
+    state = DeliveryState(limits=apply_engagement_budget(DEFAULT_DELIVERY_LIMITS, budget))
+    with llm_chat_delivery_scope(state):
+        with pytest.raises(DeliveryError):
+            reserve_media_messages(1)
 
 
 def test_low_energy_shortens_replies_even_for_close_users() -> None:

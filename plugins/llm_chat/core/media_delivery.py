@@ -10,6 +10,7 @@ from .types import ChatMessage
 
 MEDIA_UNAVAILABLE_MARKER = "[MEDIA_UNAVAILABLE]"
 
+_RENDER_TOOL = r"(?:html2pic|markdown2pic|md2pic|jinja2pic)"
 _MEDIA_TERM = r"(?:图|图片|照片|表情包|贴纸|语音|音频|image|picture|photo|sticker|voice|audio)"
 _IMAGE_OUTPUT_TERM = r"(?:图|图片|照片|形象|画面|插画|头像|海报|场景|\[图片\])"
 _MEDIA_GENERATION_ACTION = r"(?:画(?!画)|绘制|生成|创作)"
@@ -18,6 +19,8 @@ _NEGATED_MEDIA_REQUEST = re.compile(
     rf"(?:别|不要|不用|无需|禁止|不是(?:让|要)?).{{0,10}}"
     rf"(?:(?:发|传|贴|补|给|看).{{0,8}}{_MEDIA_TERM}|(?:用|以).{{0,4}}{_MEDIA_TERM})"
     rf"|(?:别|不要|不用|无需|禁止)\s*(?:再|继续)?\s*{_MEDIA_GENERATION_ACTION}\s*{_IMAGE_OUTPUT_TERM}"
+    rf"|(?:别|不要|不用|无需|禁止).{{0,12}}{_RENDER_TOOL}"
+    rf"|(?:do not|don't|dont|no need to).{{0,32}}{_RENDER_TOOL}"
     rf"|(?:do not|don't|dont|no need to|stop).{{0,12}}(?:send|show|share|use).{{0,8}}{_MEDIA_TERM}",
     re.IGNORECASE,
 )
@@ -61,6 +64,15 @@ _SELF_IMAGE_REQUEST_PATTERN = re.compile(
 _MEDIA_REQUEST_PATTERNS = (
     *_IMAGE_GENERATION_PATTERNS,
     _IMAGE_EDIT_PATTERN,
+    re.compile(
+        rf"(?:^|[。！？；;\n，])\s*(?:(?:请|帮我|给我|麻烦你|源码|预览|页面)\s*){{0,2}}"
+        rf"(?:用|使用|通过)\s*{_RENDER_TOOL}\s*(?:发|给我|渲染|生成|展示)"
+        rf"|(?:^|[.!?;\n])\s*(?:please\s+)?(?:send|render|show|convert).{{0,48}}"
+        rf"(?:with|using|via)\s+{_RENDER_TOOL}"
+        r"|(?:^|[。！？；;\n，])\s*(?:请|帮我)?\s*(?:把|将).{0,60}"
+        r"(?:渲染|转成|转为|转换成)\s*(?:图片|图).{0,12}(?:发我|发给我|给我)",
+        re.IGNORECASE,
+    ),
     re.compile(
         r"(?:用|以)\s*(?:语音|音频|声音)\s*(?:说|讲|念|读|回复|回答|告诉)"
         r"|(?:说|讲|念|读)\s*(?:一|两|几)?(?:句|段|下)?\s*(?:语音|音频)"

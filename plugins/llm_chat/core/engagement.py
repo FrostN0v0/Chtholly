@@ -199,16 +199,22 @@ def decide_engagement(signals: EngagementSignals) -> EngagementDecision:
     )
 
 
-def engagement_budget(level: EngagementLevel, limits: DeliveryLimits) -> EngagementBudget:
-    """Derive behaviour allowances that never exceed the configured envelope."""
+def engagement_budget(
+    level: EngagementLevel,
+    limits: DeliveryLimits,
+    *,
+    media_requested: bool = False,
+) -> EngagementBudget:
+    """Keep requested deliverables within configuration, not conversational energy limits."""
 
     if level == "declined":
         return EngagementBudget(0, 0, 0, False, False, False)
+    media_limit = limits.max_media_messages if media_requested else min(1, limits.max_media_messages)
     if level == "reaction_only":
         return EngagementBudget(
             max_text_messages=min(1, limits.max_text_messages),
             max_text_chars_per_message=min(60, limits.max_text_chars_per_message),
-            max_media_messages=min(1, limits.max_media_messages),
+            max_media_messages=media_limit,
             allow_followup_question=False,
             allow_topic_extension=False,
             allow_stickers=True,
@@ -217,7 +223,7 @@ def engagement_budget(level: EngagementLevel, limits: DeliveryLimits) -> Engagem
         return EngagementBudget(
             max_text_messages=min(2, limits.max_text_messages),
             max_text_chars_per_message=min(180, limits.max_text_chars_per_message),
-            max_media_messages=min(1, limits.max_media_messages),
+            max_media_messages=media_limit,
             allow_followup_question=False,
             allow_topic_extension=False,
             allow_stickers=True,

@@ -395,8 +395,10 @@ SYSTEM_SCAFFOLD = "\n".join(
             "不得把解释和整块代码或 Markdown 拼成一条长最终文本或合并转发。"
             "只有用户明确要求可复制源码、代码仅有 1–3 行，或渲染工具缺失或失败时，"
             "才改用独立文字消息或 send_merged_forward。"
-            "积极判断媒体机会不等于机械地每轮发送或连续刷屏；默认一轮使用一个有发送副作用的媒体工具。"
-            "只有用户明确同时要求多种媒体，或一段语音加一张表情确实构成同一自然表演节拍时，才允许最多两个。"
+            "For unsolicited reactions, normally use one media tool; use two only for a natural combined performance. "
+            "For explicitly requested deliverables, use the effective media allowance to complete each requested item. "
+            "An HTML preview plus a source-code image are two separate deliverables, not duplicate content. "
+            "A brief reply or low energy shortens conversational text, not the requested media task. "
             "若媒体与文字组合，send_image、send_external_image、send_audio、speak、generate_image、edit_image、markdown2pic、"
             "html2pic、jinja2pic 和 screenshot_web_page 都必须先于 send_text 或 send_merged_forward。"
         ),
@@ -481,8 +483,10 @@ def build_delivery_tool_contract(limits: DeliveryLimits) -> str:
                 "不得改用 merged forward。"
             ),
             (
-                "若与媒体组合，所有 send_image、send_audio 或 speak 必须先于任何文本或合并转发；"
-                "默认只用一个媒体工具，仅在自然的双媒体表演节拍时才可增加到本轮媒体上限。"
+                "All media must be delivered before text or merged-forward messages. "
+                "Complete explicitly requested media items within the effective allowance above; "
+                "do not replace it with a one-tool or two-image cap. Keep unsolicited reactions restrained. "
+                "When the user says md2pic, use the registered markdown2pic tool. "
             ),
             (
                 "send_text 或 send_merged_forward 成功后，最终输出默认只返回 [END_OF_RESPONSE]；"
