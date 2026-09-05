@@ -24,7 +24,6 @@ from ..core.delivery import (
 )
 from ..core.tool_trace import record_tool_evidence
 from ..artifacts_runtime import ArtifactLinks, WebArtifactService
-from ..core.artifact_access import ArtifactAction, ArtifactAccessError, require_artifact_request
 
 MAX_SOURCE_ZIP_BYTES = 10 * 1024 * 1024
 
@@ -55,16 +54,12 @@ class AuthorizedArtifactAccess:
     raw_user_text: str
 
 
-def require_authorized_access(action: ArtifactAction) -> AuthorizedArtifactAccess:
-    """Bind every tool operation to an active generation and its original speaker."""
+def require_authorized_access() -> AuthorizedArtifactAccess:
+    """Bind model-selected operations to their active generation and trusted owner."""
 
     access = current_agent_access()
     if access is None or current_llm_chat_delivery() is None:
         raise DeliveryError("web artifact tools must run inside an active llm_chat generation")
-    try:
-        require_artifact_request(access.raw_user_text, action)
-    except ArtifactAccessError as exc:
-        raise DeliveryError(f"artifact operation not allowed: {exc}") from None
     if access.scope_id <= 0 or access.turn_id <= 0 or not access.user_id.strip():
         raise DeliveryError("valid current artifact owner and turn are required")
     return AuthorizedArtifactAccess(

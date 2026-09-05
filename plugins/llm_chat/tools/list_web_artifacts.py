@@ -28,15 +28,16 @@ def register_list_web_artifacts(
     async def list_web_artifacts(session: Session, limit: int = 10) -> str:
         """List active artifact revisions in the current scope.
 
-        Use after the current user asks to list their web projects, previews,
-        or versions.  Results contain opaque artifact refs and bounded metadata
-        only; public capability tokens, source content, local paths, and file
+        Find the relevant existing project/version when needed for the user's
+        task, including follow-up changes, without a separate list command.
+        Results contain opaque refs and bounded metadata only; capability tokens,
+        source content, local paths and file
         maps are never returned.  Operators can manage other users only inside
         the current scope.
         """
 
         del session
-        access = require_authorized_access("list")
+        access = require_authorized_access()
         limit_value = normalized_limit(limit, default=10, maximum=10)
         try:
             artifacts = await runtime.service.list_owned(

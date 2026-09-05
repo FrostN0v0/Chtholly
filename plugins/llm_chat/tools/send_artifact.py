@@ -29,8 +29,8 @@ def register_send_artifact(
     async def send_artifact(session: Session, artifact_ref: str) -> str:
         """Send the exact source ZIP for one owned artifact revision.
 
-        Use only after the current user explicitly asks for source, a ZIP,
-        files, or the website deliverable.  Pass an exact opaque
+        Choose source delivery when it helps fulfill the user's task; no
+        separate ZIP command or fixed wording is required.  Pass an exact
         ``artifact_ref`` returned by publish_web_preview or list_web_artifacts;
         never invent one and never pass a local path or URL.  The archive is
         sent as inline Satori File bytes.  If the adapter explicitly reports
@@ -39,7 +39,7 @@ def register_send_artifact(
         not replayed and are reported without claiming delivery.
         """
 
-        access = require_authorized_access("send")
+        access = require_authorized_access()
         if not isinstance(artifact_ref, str) or not artifact_ref.strip():
             raise DeliveryError("artifact_ref is required")
         normalized_ref = artifact_ref.strip()
