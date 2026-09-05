@@ -700,6 +700,7 @@ async def test_prepare_agent_turn_wires_session_context_and_persistence(
         model_name="test-model",
         supports_image_input=False,
         model_text="hello",
+        raw_user_text="hello",
         content="hello",
         current_content=None,
         forwarded_messages=(),

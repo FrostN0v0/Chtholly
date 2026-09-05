@@ -1,0 +1,42 @@
+{
+    admin off
+    servers {
+        protocols h1 h2
+        max_header_size 16KB
+        timeouts {
+            read_header 10s
+            idle 30s
+        }
+    }
+}
+
+{$WEB_ARTIFACT_HOST} {
+    header {
+        -Server
+        Referrer-Policy no-referrer
+        X-Content-Type-Options nosniff
+        X-Robots-Tag "noindex, nofollow, noarchive"
+        Strict-Transport-Security "max-age=31536000"
+    }
+
+    @public {
+        method GET HEAD
+        path /p/*
+    }
+    handle @public {
+        reverse_proxy 127.0.0.1:8131 {
+            header_up -Authorization
+            header_up -Cookie
+            header_up -Proxy-Authorization
+            header_up X-Artifact-Client-IP {http.request.remote.host}
+            transport http {
+                dial_timeout 3s
+                response_header_timeout 15s
+            }
+        }
+    }
+
+    handle {
+        respond "Not found" 404
+    }
+}

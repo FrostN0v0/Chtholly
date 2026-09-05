@@ -44,8 +44,11 @@ _ORDERED_DELIVERY_TOOLS = frozenset(
         "html2pic",
         "jinja2pic",
         "markdown2pic",
+        "publish_web_preview",
+        "revoke_web_preview",
         "screenshot_web_page",
         "send_audio",
+        "send_artifact",
         "send_channel_image",
         "send_external_image",
         "send_image",
@@ -54,7 +57,7 @@ _ORDERED_DELIVERY_TOOLS = frozenset(
         "speak",
     }
 )
-_IMAGE_EDIT_BLOCKED_TOOLS = _ORDERED_DELIVERY_TOOLS - {"capture_web_reference", "edit_image"}
+_IMAGE_EDIT_BLOCKED_TOOLS = _ORDERED_DELIVERY_TOOLS - {"capture_web_reference", "edit_image", "revoke_web_preview"}
 _DELIVERY_TOOL_LOCK: ContextVar[asyncio.Lock | None] = ContextVar(
     "llm_chat_agno_delivery_tool_lock",
     default=None,

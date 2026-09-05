@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Artifact preview</title>
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Web artifact preview</p>
+          <h1 id="artifact-title">Artifact preview</h1>
+          <p class="subtitle" id="artifact-subtitle">Immutable version</p>
+        </div>
+        <nav class="actions" aria-label="Preview actions">
+          <button
+            class="button"
+            type="button"
+            data-viewport="desktop"
+            aria-pressed="true"
+          >
+            Desktop
+          </button>
+          <button
+            class="button"
+            type="button"
+            data-viewport="mobile"
+            aria-pressed="false"
+          >
+            Mobile
+          </button>
+          <button class="button" type="button" id="reload-preview">
+            Reload
+          </button>
+          <a
+            class="download"
+            id="source-download"
+            href="about:blank"
+            rel="noopener noreferrer"
+            >Download source ZIP</a
+          >
+        </nav>
+      </header>
+
+      <section class="preview-card" aria-label="Rendered artifact">
+        <div class="card-bar">
+          <strong id="viewport-label">Desktop · responsive</strong>
+          <span class="status" id="frame-status">Loading</span>
+        </div>
+        <div class="frame-stage">
+          <div class="frame-shell" id="frame-shell">
+            <iframe
+              id="artifact-frame"
+              title="Artifact"
+              sandbox="allow-scripts"
+              referrerpolicy="no-referrer"
+              loading="eager"
+            ></iframe>
+          </div>
+        </div>
+        <div class="details">
+          <span id="artifact-expiry">Expiring preview</span>
+          <span id="artifact-details">Immutable source</span>
+        </div>
+      </section>
+    </main>
+    <script type="application/json" id="artifact-config">
+      $config_json
+    </script>
+    $viewer_style_tag $viewer_script_tag
+  </body>
+</html>

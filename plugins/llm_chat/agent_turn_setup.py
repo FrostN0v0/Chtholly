@@ -63,6 +63,7 @@ from .core.media_delivery import (
     latest_user_requests_web_image_reference,
 )
 from .core.self_reference import append_self_reference_image
+from .core.artifact_access import is_artifact_request
 from .persona.memory_context import MemoryContext, load_memory_context
 
 WarningSink = Callable[[str], None]
@@ -97,6 +98,7 @@ async def prepare_agent_turn(
     model_name: str | None,
     supports_image_input: bool,
     model_text: str,
+    raw_user_text: str,
     content: str,
     current_content: str | list[dict[str, Any]] | None,
     forwarded_messages: Sequence[ForwardedMessage],
@@ -131,8 +133,9 @@ async def prepare_agent_turn(
             current_mentioned_participants=mentioned_participants,
         ),
     )
+    artifact_requested = is_artifact_request(raw_user_text)
     self_reference_attached = False
-    if supports_image_input and latest_user_requests_image_generation(current_messages):
+    if supports_image_input and not artifact_requested and latest_user_requests_image_generation(current_messages):
         self_reference_attached = append_self_reference_image(
             current_messages,
             config.self_reference_image,
@@ -156,7 +159,9 @@ async def prepare_agent_turn(
         config.delivery_max_media_messages_per_generation,
     )
     energy = energy_at(datetime.now(timezone.utc))
-    media_requested = latest_user_requests_media(current_messages)
+    media_requested = (
+        latest_user_requests_media(current_messages) or artifact_requested or is_artifact_request(raw_user_text, "send")
+    )
     signals = await collect_engagement_signals(
         user_id=user_id,
         channel_id=channel_id,
@@ -339,13 +344,16 @@ async def prepare_agent_turn(
         eval_history=eval_history,
         chat_messages=selection.messages,
         system=system,
-        media_requested=latest_user_requests_media(selection.messages),
+        media_requested=media_requested,
         web_limits=web_limits,
         delivery_state=delivery_state,
         image_edit_references=ImageEditReferences.from_input_attachments(
             input_attachments,
-            requires_web_reference=latest_user_requests_web_image_reference(current_messages),
-            requires_image_edit=bool(input_attachments) and latest_user_requests_image_edit(current_messages),
+            requires_web_reference=not artifact_requested
+            and latest_user_requests_web_image_reference(current_messages),
+            requires_image_edit=not artifact_requested
+            and bool(input_attachments)
+            and latest_user_requests_image_edit(current_messages),
         ),
         channel_image_references=ChannelImageReferences(),
         lifecycle=lifecycle,
@@ -358,9 +366,11 @@ async def prepare_agent_turn(
             session_id=context_session.id,
             turn_id=agent_turn.id,
             user_id=user_id,
-            allow_archived_sessions=requests_archived_context(model_text),
-            allow_payload_delivery=requests_tool_payload(model_text),
-            allow_context_pin=requests_context_pin(model_text),
+            allow_archived_sessions=requests_archived_context(raw_user_text),
+            allow_payload_delivery=requests_tool_payload(raw_user_text),
+            allow_context_pin=requests_context_pin(raw_user_text),
+            raw_user_text=raw_user_text,
+            is_operator=is_operator,
         ),
     )
 

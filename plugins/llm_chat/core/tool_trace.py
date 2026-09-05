@@ -159,6 +159,13 @@ class ToolTraceRecorder:
         recorded_result: JSONType,
     ) -> None:
         duration_ms = max(0, round((time.monotonic() - call.started_monotonic) * 1000))
+        evidence = self._evidence.pop(call.execution_ref, {})
+        if (
+            status in {"failed", "cancelled"}
+            and call.tool_name in {"publish_web_preview", "revoke_web_preview"}
+            and evidence.get("artifact_effect") in ("published", "revoked")
+        ):
+            effect = "partial"
         self.events.append(
             ToolTraceEvent(
                 sequence=call.sequence,
@@ -171,7 +178,7 @@ class ToolTraceRecorder:
                 outcome=outcome,
                 recorded_arguments=call.recorded_arguments,
                 recorded_result=recorded_result,
-                evidence=self._evidence.pop(call.execution_ref, {}),
+                evidence=evidence,
                 started_at=call.started_at,
                 duration_ms=duration_ms,
             )

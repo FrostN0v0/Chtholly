@@ -120,6 +120,7 @@ async def _run_chat(
     reaction: MessageReactionFeedback,
 ):
     model_text = session.elements.extract_plain_text().strip()
+    raw_user_text = model_text
     message_images = collect_message_images(session)
     require_text_reply = bool(message_images) and not has_meaningful_text(model_text)
     channel_id = session.channel.id
@@ -189,6 +190,7 @@ async def _run_chat(
             model_name=model_name,
             supports_image_input=supports_image_input,
             model_text=model_text,
+            raw_user_text=raw_user_text,
             content=content,
             current_content=current_content,
             forwarded_messages=forwarded_messages,

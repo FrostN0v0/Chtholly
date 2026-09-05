@@ -42,6 +42,7 @@ from .core.delivery import (
 from .persona.store import append_message
 from .tools.support import audio_mime_type
 from .tools.html2pic import register_html2pic
+from .tools.artifacts import register_artifact_tools
 from .tools.jinja2pic import register_jinja2pic
 from .tools.send_text import SendTextToolContext, register_send_text
 from .tools.tag_image import TagImageToolContext, register_tag_image, cancel_pending_image_collections
@@ -338,6 +339,7 @@ registered_tools.append("read_tool_execution")
 pin_context = register_pin_context(tools)
 registered_tools.append("pin_context")
 registered_tools.extend(register_web_access_tools(tools, config))
+registered_tools.extend(register_artifact_tools(tools, config))
 
 tag_image_context = TagImageToolContext(
     config=config,

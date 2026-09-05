@@ -40,6 +40,14 @@ class LLMChatConfig(BasicConfModel):
     """Maximum archived sessions returned by one model history query."""
     event_payload_delivery_max_chars: int = 12000
     """Maximum stored event payload characters returned by one model history query."""
+    web_artifacts_public_url: str = ""
+    """Dedicated HTTPS preview origin; empty disables web artifact tools."""
+    web_artifacts_capture_url: str = "http://127.0.0.1:8131/internal/capture"
+    """Loopback endpoint of the isolated artifact screenshot service."""
+    web_artifacts_capture_token: str = ""
+    """Private capture credential; inject through an environment reference."""
+    web_artifacts_ttl_hours: int = 24
+    """Lifetime of each immutable public preview and source download, at most seven days."""
     merged_forward_fetch_timeout: float = 15.0
     """Timeout for one OneBot get_forward_msg request."""
     merged_forward_max_messages: int = 200

@@ -7,6 +7,7 @@ from hashlib import sha256
 from collections.abc import Mapping
 
 from .types import JSONType
+from .artifact_records import ARTIFACT_TOOLS, project_artifact_result, project_artifact_arguments
 from .tool_trace_safety import safe_url, sanitize_json, external_source_type
 
 _MAX_RECORDED_TEXT = 50_000
@@ -45,6 +46,8 @@ def _text_descriptor(value: object) -> dict[str, JSONType]:
 def record_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> dict[str, JSONType]:
     """Return the durable, model-readable subset of one tool request."""
 
+    if tool_name in ARTIFACT_TOOLS:
+        return project_artifact_arguments(tool_name, arguments)
     if tool_name == "html2pic":
         html = _exact_text(arguments.get("html"))
         return {"html": html, "width": _safe_integer(arguments.get("width"), 900)}
@@ -139,6 +142,8 @@ def record_tool_result(
 ) -> JSONType:
     """Return the durable, model-readable subset of one tool result."""
 
+    if tool_name in ARTIFACT_TOOLS:
+        return projected_result if projected_result is not None else project_artifact_result(result)
     if tool_name in _PROJECTED_RESULT_TOOLS and projected_result is not None:
         return projected_result
     if tool_name in {"send_external_image", "generate_image", "edit_image"}:

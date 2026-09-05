@@ -17,6 +17,8 @@ class AgentAccessContext:
     allow_archived_sessions: bool = False
     allow_payload_delivery: bool = False
     allow_context_pin: bool = False
+    raw_user_text: str = ""
+    is_operator: bool = False
 
 
 _ACTIVE_AGENT_CONTEXT: ContextVar[AgentAccessContext | None] = ContextVar(
