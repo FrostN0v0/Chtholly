@@ -29,7 +29,11 @@ from .session_manager import (
     seal_scope_sessions,
 )
 from .agent_event_view import serialize_event_view
-from .agent_attachments import is_user_input_attachment, resolve_user_input_attachment
+from .agent_attachments import (
+    is_agent_attachment,
+    resolve_agent_attachment,
+    event_attachment_metadata,
+)
 
 
 class AgentAdminError(ValueError):
@@ -197,23 +201,18 @@ class AgentAdminService:
         }
 
     async def read_event_attachment(self, event_ref: str, attachment_ref: str) -> AgentAttachment:
-        """Resolve one user-input image only when the event payload authorizes it."""
+        """Resolve one private image only when the event payload authorizes it."""
 
         event = await self._event(event_ref)
-        if event.event_type != "user_input":
-            raise AgentAdminError("Event has no user image attachment", code="attachment_not_found", status=404)
         payload = load_event_payload(event)
-        attachments = payload.get("attachments")
-        if not isinstance(attachments, list):
-            raise AgentAdminError("Event has no user image attachment", code="attachment_not_found", status=404)
-        for raw in attachments:
-            if not isinstance(raw, dict) or raw.get("attachment_ref") != attachment_ref:
+        for raw in event_attachment_metadata(payload):
+            if raw.get("attachment_ref") != attachment_ref:
                 continue
             mime = raw.get("mime")
-            if not is_user_input_attachment(attachment_ref, mime):
+            if not is_agent_attachment(attachment_ref, mime):
                 break
             try:
-                path = resolve_user_input_attachment(
+                path = resolve_agent_attachment(
                     attachment_ref,
                     str(mime),
                     root=self.attachment_root,
@@ -223,7 +222,7 @@ class AgentAdminService:
             if path.is_file():
                 return AgentAttachment(path=path, mime=str(mime))
             break
-        raise AgentAdminError("User image attachment is unavailable", code="attachment_not_found", status=404)
+        raise AgentAdminError("Event image attachment is unavailable", code="attachment_not_found", status=404)
 
     async def context_inspector(self, turn_ref: str) -> dict[str, object]:
         turn = await self._turn(turn_ref)

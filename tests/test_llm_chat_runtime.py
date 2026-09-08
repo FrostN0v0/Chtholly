@@ -109,6 +109,7 @@ from plugins.llm_chat.core.engagement import (
     engagement_budget,
 )
 from plugins.llm_chat.core.tool_trace import ToolTraceRecorder, llm_chat_tool_trace_scope
+from plugins.llm_chat.image_edit_refs import ImageEditReferences, llm_chat_image_edit_scope
 from plugins.llm_chat.runtime_context import copy_llm_chat_context, llm_chat_context_scope
 from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
 from plugins.llm_chat.core.image_source import (
@@ -494,6 +495,10 @@ def _install_handler_stubs(
             ),
             delivery_state=delivery_state,
             channel_image_references=ChannelImageReferences(),
+            image_edit_references=ImageEditReferences.from_input_attachments(
+                input_attachments,
+                requires_web_reference=generation_module.latest_user_requests_web_image_reference(messages),
+            ),
             lifecycle=lifecycle,
             agent_events=agent_events,
             engagement=engagement_decision,
@@ -2625,7 +2630,7 @@ async def test_agno_tool_bridge_merges_arguments_and_inherits_context(monkeypatc
 
     assert result == {"ok": True, "data": {"value": "tool-argument", "sentinel": "event-context"}}
     assert failed == {"ok": False, "error": "RuntimeError: token=[REDACTED]"}
-    assert blocked == {"ok": False, "error": "ValueError: Invalid internal participant reference for this tool"}
+    assert blocked == {"ok": False, "error": "ValueError: Invalid internal reference for this tool"}
     assert handled[0][1] is True
     assert handled[0][0]["value"] == "tool-argument"
     assert len(handled) == 2
@@ -2650,6 +2655,61 @@ async def test_agno_tool_bridge_merges_arguments_and_inherits_context(monkeypatc
         ("delete", "314"),
         ("create", "174"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_agno_tool_bridge_blocks_other_delivery_until_reference_edit_is_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handled: list[str] = []
+
+    class FakeSubscriber:
+        __name__ = "send_text"
+        __doc__ = "Send text."
+        params: list[Any] = []
+
+        async def handle(self, context: Contexts, inner: bool = False) -> str:
+            assert inner is True
+            handled.append(cast(str, context["text"]))
+            return "sent"
+
+    monkeypatch.setattr(agno_compat_module, "available_functions", {"send_text": FakeSubscriber()})
+    monkeypatch.setattr(
+        agno_compat_module,
+        "tools",
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_text",
+                    "description": "Send text.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ],
+    )
+    tool = agno_compat_module.build_agno_tools()[0]
+    assert tool.entrypoint is not None
+    references = ImageEditReferences.from_input_attachments((), requires_web_reference=True)
+
+    with agno_compat_module.agno_delivery_tool_scope(), llm_chat_image_edit_scope(references):
+        blocked = json.loads(await tool.entrypoint(text="premature"))
+        references.edit_confirmed = True
+        allowed = json.loads(await tool.entrypoint(text="after edit"))
+        leaked = json.loads(await tool.entrypoint(text="web_ref_0123456789abcdef01234567"))
+
+    assert blocked == {
+        "ok": False,
+        "error": "ValueError: This turn requires edit_image before any other delivery tool",
+    }
+    assert allowed == {"ok": True, "data": "sent"}
+    assert leaked == {"ok": False, "error": "ValueError: Invalid internal reference for this tool"}
+    assert handled == ["after edit"]
 
 
 @pytest.mark.asyncio
@@ -2736,6 +2796,82 @@ async def test_agno_tool_bridge_orders_delivery_tools_without_blocking_reads(
     assert [json.loads(result)["data"] for result in results] == list(names)
     assert state.confirmed_media_deliveries == 1
     assert state.delivered_texts == ["after image"]
+
+
+@pytest.mark.asyncio
+async def test_agno_tool_bridge_orders_reference_capture_before_dependent_image_edit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+    capture_started = asyncio.Event()
+    read_started = asyncio.Event()
+    release_capture = asyncio.Event()
+    reference_ready = False
+
+    class FakeSubscriber:
+        def __init__(self, name: str) -> None:
+            self.__name__ = name
+            self.__doc__ = f"Run {name}."
+            self.params: list[Any] = []
+
+        async def handle(self, _context: Contexts, inner: bool = False) -> str:
+            nonlocal reference_ready
+            assert inner is True
+            order.append(f"{self.__name__}:start")
+            if self.__name__ == "capture_web_reference":
+                capture_started.set()
+                await release_capture.wait()
+                reference_ready = True
+            elif self.__name__ == "edit_image":
+                assert reference_ready is True
+            elif self.__name__ == "web_search":
+                read_started.set()
+            order.append(f"{self.__name__}:end")
+            return self.__name__
+
+    names = ("capture_web_reference", "edit_image", "web_search")
+    monkeypatch.setattr(
+        agno_compat_module,
+        "available_functions",
+        {name: FakeSubscriber(name) for name in names},
+    )
+    monkeypatch.setattr(
+        agno_compat_module,
+        "tools",
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": f"Run {name}.",
+                    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                },
+            }
+            for name in names
+        ],
+    )
+    tools_by_name = {tool.name: tool for tool in agno_compat_module.build_agno_tools()}
+    capture_entrypoint = tools_by_name["capture_web_reference"].entrypoint
+    edit_entrypoint = tools_by_name["edit_image"].entrypoint
+    read_entrypoint = tools_by_name["web_search"].entrypoint
+    assert capture_entrypoint is not None
+    assert edit_entrypoint is not None
+    assert read_entrypoint is not None
+
+    with agno_compat_module.agno_delivery_tool_scope():
+        batch = asyncio.gather(capture_entrypoint(), edit_entrypoint(), read_entrypoint())
+        try:
+            await asyncio.wait_for(capture_started.wait(), timeout=1.0)
+            await asyncio.wait_for(read_started.wait(), timeout=1.0)
+            await asyncio.sleep(0)
+            assert "edit_image:start" not in order
+        finally:
+            release_capture.set()
+            results = await batch
+
+    assert order.index("capture_web_reference:end") < order.index("edit_image:start")
+    assert order.index("web_search:start") < order.index("capture_web_reference:end")
+    assert [json.loads(result)["data"] for result in results] == list(names)
 
 
 @pytest.mark.parametrize(
@@ -3156,6 +3292,71 @@ async def test_generation_authorizes_webpage_screenshot_only_for_explicit_curren
 
     assert generation_module.response_content(response) == "done"
     assert observed == [expected_authorized]
+
+
+@pytest.mark.asyncio
+async def test_generation_rejects_native_image_for_required_web_reference_until_edit_is_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[dict[str, Any]] = []
+    authorization: list[tuple[bool, bool]] = []
+    state = DeliveryState()
+    references = ImageEditReferences.from_input_attachments((), requires_web_reference=False)
+
+    async def fake_generate(_messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
+        requests.append(kwargs)
+        if len(requests) == 1:
+            capture_allowed = True
+            screenshot_allowed = True
+            try:
+                web_policy_module.consume_llm_chat_web_access("capture_web_reference")
+            except web_policy_module.WebAccessError:
+                capture_allowed = False
+            try:
+                web_policy_module.consume_llm_chat_web_access("screenshot_web_page")
+            except web_policy_module.WebAccessError:
+                screenshot_allowed = False
+            authorization.append((capture_allowed, screenshot_allowed))
+            response = _handler_response("")
+            response.images = [SimpleNamespace(content=_PNG_BYTES, filepath=None, url=None)]
+            return response
+        references.edit_confirmed = True
+        mark_delivery_success(state, media=True)
+        return _handler_response("[END_OF_RESPONSE]")
+
+    monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
+
+    response = await generation_module.generate_chat_response(
+        cast(
+            list[Any],
+            [
+                {
+                    "role": "user",
+                    "content": "搜一下角色人物形象获取图片作为参考图，将其替换掉图中人物 [图片]",
+                }
+            ],
+        ),
+        system="system",
+        model="deepseek",
+        channel_id="group",
+        ctx=Contexts(),
+        web_limits=generation_module.WebAccessLimits(1, 2, 3),
+        delivery_state=state,
+        image_edit_references=references,
+        request_timeout=12.5,
+        media_request_timeout=45.0,
+    )
+
+    assert generation_module.response_content(response) == "[END_OF_RESPONSE]"
+    assert generation_module.response_images(response) == ()
+    assert authorization == [(True, False)]
+    assert len(requests) == 2
+    assert all(request["parallel_tool_calls"] is False for request in requests)
+    assert "上一条候选回复没有通过 edit_image 确认发送合格结果" in requests[1]["system"]
+    assert "generate_image 和模型原生图片输出不能满足本轮要求" in requests[1]["system"]
+    assert references.requires_web_reference is True
+    assert references.edit_confirmed is True
+    assert state.confirmed_media_deliveries == 1
 
 
 @pytest.mark.asyncio

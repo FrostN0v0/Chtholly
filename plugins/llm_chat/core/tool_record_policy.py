@@ -12,6 +12,8 @@ from .tool_trace_safety import safe_url, sanitize_json, external_source_type
 _MAX_RECORDED_TEXT = 50_000
 _MAX_GENERIC_TEXT = 16_000
 _PROJECTED_RESULT_TOOLS = {
+    "capture_web_reference",
+    "edit_image",
     "call_plugin",
     "describe_channel_image",
     "describe_channel_participant_avatar",
@@ -106,10 +108,21 @@ def record_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> di
         return _record_selected(arguments, "messages", "delay_seconds")
     if tool_name == "read_web_page":
         return {"url": safe_url(arguments.get("url")), **_record_selected(arguments, "focus")}
+    if tool_name == "capture_web_reference":
+        return {
+            "url": safe_url(arguments.get("url")),
+            **_record_selected(arguments, "purpose", "section", "width"),
+        }
     if tool_name == "web_search":
         return _record_selected(arguments, "query")
     if tool_name == "generate_image":
         return _record_selected(arguments, "prompt", "size")
+    if tool_name == "edit_image":
+        references = arguments.get("reference_image_refs")
+        return {
+            **_record_selected(arguments, "prompt", "source_image_index", "size"),
+            "reference_count": len(references) if isinstance(references, list) else 0,
+        }
     if tool_name == "call_plugin":
         command_line = arguments.get("command_line")
         command = command_line.strip().split(maxsplit=1)[0] if isinstance(command_line, str) else ""
@@ -128,7 +141,7 @@ def record_tool_result(
 
     if tool_name in _PROJECTED_RESULT_TOOLS and projected_result is not None:
         return projected_result
-    if tool_name in {"send_external_image", "generate_image"}:
+    if tool_name in {"send_external_image", "generate_image", "edit_image"}:
         sanitized = sanitize_json(result, max_text=2000)
     else:
         sanitized = sanitize_json(result, max_text=_MAX_GENERIC_TEXT)
