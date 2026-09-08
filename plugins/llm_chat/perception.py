@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Protocol, cast
+from typing import Protocol, TypedDict, cast
 from datetime import datetime
 from collections.abc import Callable
+from typing_extensions import NotRequired
 
 from launart import Launart
 from arclet.entari import Session
@@ -21,8 +22,20 @@ class ParticipantSnapshotLike(Protocol):
     avatar_description: str
 
 
+class MentionedParticipant(TypedDict):
+    """Model-visible identity for a member explicitly mentioned this turn."""
+
+    display_name: str
+    participant_ref: NotRequired[str]
+
+
 class ChannelPerceptionLike(Protocol):
     async def resolve_current_participant(self, session: Session) -> ParticipantSnapshotLike: ...
+    async def resolve_participant_by_platform_user(
+        self,
+        session: Session,
+        platform_user_id: str,
+    ) -> ParticipantSnapshotLike | None: ...
 
     async def refresh_participant(
         self,

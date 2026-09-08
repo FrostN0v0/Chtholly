@@ -633,6 +633,7 @@ async def test_prepare_agent_turn_wires_session_context_and_persistence(
         content="hello",
         current_content=None,
         forwarded_messages=(),
+        mentioned_participants=(),
         input_attachments=[
             {
                 "attachment_ref": "input_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

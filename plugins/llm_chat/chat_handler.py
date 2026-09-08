@@ -18,7 +18,7 @@ from arclet.entari.plugin.model import Plugin
 from entari_plugin_llm.exception import ModelNotFoundError
 
 from .config import LLMChatConfig
-from .identity import resolve_chat_identity
+from .identity import resolve_chat_identity, resolve_mentioned_participants
 from .core.media import has_meaningful_text
 from .generation import response_content, generate_chat_response
 from .core.errors import summarize_exception
@@ -123,7 +123,6 @@ async def _run_chat(
     message_images = collect_message_images(session)
     require_text_reply = bool(message_images) and not has_meaningful_text(model_text)
     channel_id = session.channel.id
-    user_name = str((session.member.nick if session.member else None) or session.user.name or session.user.id).strip()
 
     try:
         forwarded_messages = await resolve_merged_forward_messages(config, session, _LOGGER.warning)
@@ -135,12 +134,27 @@ async def _run_chat(
     if quoted_message is not None:
         forwarded_messages.insert(0, quoted_message)
 
+    if not model_text and not message_images and not forwarded_messages:
+        await reaction.finish("failed")
+        return BLOCK
+
     try:
         model_name = get_model_config(config.model, channel_id).name
     except ModelNotFoundError as exc:
         _LOGGER.warning(f"channel model resolve failed, using global default: {summarize_exception(exc)}")
         model_name = None
     supports_image_input = model_supports_image_input(model_name)
+
+    try:
+        identity = await resolve_chat_identity(session)
+    except Exception as exc:
+        _LOGGER.warning(f"user identity resolve failed: {summarize_exception(exc)}")
+        await session.send(_CHAT_FAILURE_REPLY)
+        await reaction.finish("failed")
+        return BLOCK
+    user_id = identity.user_id
+    user_name = identity.display_name
+    mentioned_participants = await resolve_mentioned_participants(session)
 
     current_content: str | list[dict[str, Any]] | None = None
     if supports_image_input:
@@ -151,6 +165,7 @@ async def _run_chat(
             model_text,
             _LOGGER.warning,
             forwarded_messages=forwarded_messages,
+            mentioned_participants=mentioned_participants,
         )
     else:
         image_notes = await build_image_notes(config, session, _LOGGER.warning)
@@ -161,15 +176,6 @@ async def _run_chat(
     if not content:
         await reaction.finish("failed")
         return BLOCK
-    try:
-        identity = await resolve_chat_identity(session)
-    except Exception as exc:
-        _LOGGER.warning(f"user identity resolve failed: {summarize_exception(exc)}")
-        await session.send(_CHAT_FAILURE_REPLY)
-        await reaction.finish("failed")
-        return BLOCK
-    user_id = identity.user_id
-    user_name = identity.display_name
     input_attachments = await capture_user_input_images(
         session,
         message_images,
@@ -186,6 +192,7 @@ async def _run_chat(
             content=content,
             current_content=current_content,
             forwarded_messages=forwarded_messages,
+            mentioned_participants=mentioned_participants,
             warn=_LOGGER.warning,
             tool_schemas=registered_tool_schemas,
             input_attachments=input_attachments,
