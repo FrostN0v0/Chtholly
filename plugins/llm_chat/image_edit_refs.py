@@ -30,6 +30,7 @@ class ImageEditReferences:
 
     input_attachments: tuple[Mapping[str, object], ...]
     requires_web_reference: bool = False
+    requires_image_edit: bool = False
     attachment_root: Path | None = None
     edit_confirmed: bool = False
     _web_references: dict[str, EditableImage] = field(default_factory=dict)
@@ -40,11 +41,13 @@ class ImageEditReferences:
         attachments: Sequence[Mapping[str, object]],
         *,
         requires_web_reference: bool,
+        requires_image_edit: bool = False,
         attachment_root: Path | None = None,
     ) -> ImageEditReferences:
         return cls(
             input_attachments=tuple(dict(item) for item in attachments),
             requires_web_reference=requires_web_reference,
+            requires_image_edit=requires_image_edit or requires_web_reference,
             attachment_root=attachment_root,
         )
 

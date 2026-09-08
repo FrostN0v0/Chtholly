@@ -40,6 +40,7 @@ from .core.media_delivery import (
     is_media_unavailable_reply,
     latest_user_requests_media,
     strip_media_unavailable_marker,
+    latest_user_requests_image_edit,
     latest_user_requests_webpage_screenshot,
     latest_user_requests_web_image_reference,
 )
@@ -78,6 +79,14 @@ _REFERENCE_EDIT_RECOVERY_SUFFIX = (
     "必须先用 web_search/read_web_page 选择公开来源，再调用 capture_web_reference 私下抓取并检查视觉描述，"
     "确认与目标一致后把返回的 image_ref 传给 edit_image。generate_image 和模型原生图片输出不能满足本轮要求。"
     "若在剩余有界额度内无法取得可靠参考或 edit_image 未确认发送，"
+    "最终普通文本必须以 [MEDIA_UNAVAILABLE] 开头并如实说明失败。"
+)
+_IMAGE_EDIT_RECOVERY_SUFFIX = (
+    "当前用户明确要求修改本轮提供的图片。"
+    "上一条候选回复没有通过 edit_image 确认发送合格结果，因此不可直接交付。"
+    "必须调用 edit_image，把本轮用户图片作为源图，只修改用户指定部分并保留其他构图细节。"
+    "generate_image 和模型原生图片输出不能冒充源图编辑结果。"
+    "若在剩余有界额度内 edit_image 仍未确认发送，"
     "最终普通文本必须以 [MEDIA_UNAVAILABLE] 开头并如实说明失败。"
 )
 _IMAGE_INPUT_REPLY_SUFFIX = (
@@ -370,11 +379,17 @@ async def _recover_requested_media(
     tool_trace: ToolTraceRecorder,
 ) -> GenericResponse[None]:
     reference_required = image_edit_references.requires_web_reference
-    _LOGGER.warning(
-        "required reference image edit was not confirmed; retrying once with tools"
-        if reference_required
-        else "requested media was not confirmed; retrying once with tools"
-    )
+    edit_required = image_edit_references.requires_image_edit
+    if reference_required:
+        warning = "required reference image edit was not confirmed; retrying once with tools"
+        recovery_suffix = _REFERENCE_EDIT_RECOVERY_SUFFIX
+    elif edit_required:
+        warning = "required source image edit was not confirmed; retrying once with tools"
+        recovery_suffix = _IMAGE_EDIT_RECOVERY_SUFFIX
+    else:
+        warning = "requested media was not confirmed; retrying once with tools"
+        recovery_suffix = _MEDIA_RECOVERY_SUFFIX
+    _LOGGER.warning(warning)
     try:
         with agno_tool_call_limit_scope(_MEDIA_RECOVERY_TOOL_CALL_LIMIT):
             response = cast(
@@ -382,10 +397,7 @@ async def _recover_requested_media(
                 await _record_model_attempt(
                     lambda: _generate_with_tools(
                         messages,
-                        system=(
-                            f"{system}\n\n"
-                            f"{_REFERENCE_EDIT_RECOVERY_SUFFIX if reference_required else _MEDIA_RECOVERY_SUFFIX}"
-                        ),
+                        system=f"{system}\n\n{recovery_suffix}",
                         model=model,
                         request_timeout=request_timeout,
                         max_retries=max_retries,
@@ -400,7 +412,7 @@ async def _recover_requested_media(
         if str(exc) == _TOOL_LOOP_EXHAUSTED:
             raise RuntimeError(_MEDIA_RECOVERY_FAILED) from exc
         raise
-    if reference_required:
+    if edit_required:
         if image_edit_references.edit_confirmed:
             _suppress_native_images(response)
             return response
@@ -437,6 +449,7 @@ async def generate_chat_response(
         delivery_state.limits.max_media_messages,
     )
     media_requested = latest_user_requests_media(messages)
+    image_edit_requested = latest_user_requests_image_edit(messages)
     webpage_screenshot_requested = latest_user_requests_webpage_screenshot(messages)
     web_reference_requested = latest_user_requests_web_image_reference(messages)
     generation_timeout = media_request_timeout if media_requested else request_timeout
@@ -450,6 +463,11 @@ async def generate_chat_response(
     )
     active_image_edit_references.requires_web_reference = (
         active_image_edit_references.requires_web_reference or web_reference_requested
+    )
+    active_image_edit_references.requires_image_edit = (
+        active_image_edit_references.requires_image_edit
+        or active_image_edit_references.requires_web_reference
+        or (image_edit_requested and active_image_edit_references.source_image_count > 0)
     )
     with (
         agno_tool_call_limit_scope(tool_call_limit),
@@ -505,7 +523,7 @@ async def generate_chat_response(
                 if media_requested and (
                     delivery_state.confirmed_media_deliveries == 0
                     or (
-                        active_image_edit_references.requires_web_reference
+                        active_image_edit_references.requires_image_edit
                         and not active_image_edit_references.edit_confirmed
                     )
                 ):
@@ -529,7 +547,7 @@ async def generate_chat_response(
             if active_image_edit_references.edit_confirmed:
                 _suppress_native_images(response)
                 native_images = ()
-            elif native_images and active_image_edit_references.requires_web_reference:
+            elif native_images and active_image_edit_references.requires_image_edit:
                 _suppress_native_images(response)
                 return await _recover_requested_media(
                     _without_invalid_tail(transcript),
@@ -547,8 +565,7 @@ async def generate_chat_response(
             if media_requested and (
                 delivery_state.confirmed_media_deliveries == 0
                 or (
-                    active_image_edit_references.requires_web_reference
-                    and not active_image_edit_references.edit_confirmed
+                    active_image_edit_references.requires_image_edit and not active_image_edit_references.edit_confirmed
                 )
             ):
                 return await _recover_requested_media(

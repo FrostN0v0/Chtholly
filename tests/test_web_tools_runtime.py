@@ -1762,6 +1762,8 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
         assert request["response_format"] == "b64_json"
         assert request["max_retries"] == 0
         assert "first input image is the source composition" in cast(str, request["prompt"])
+        assert "headwear, and accessories" in cast(str, request["prompt"])
+        assert "eye-closure" in cast(str, request["prompt"])
         assert arguments["prompt"] in cast(str, request["prompt"])
         assert reference_ref not in cast(str, request["prompt"])
         assert len(session.sent) == 1
@@ -1795,6 +1797,16 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
             with pytest.raises(runtime.DeliveryError, match="requires a captured web reference"):
                 await generate_target(session, "Ignore the real reference and invent it")
         assert blocked_state.delivery_attempts == 0
+
+        source_edit_only = ImageEditReferences.from_input_attachments(
+            [source_attachment],
+            requires_web_reference=False,
+            requires_image_edit=True,
+            attachment_root=tmp_path,
+        )
+        with llm_chat_delivery_scope(runtime.DeliveryState()), llm_chat_image_edit_scope(source_edit_only):
+            with pytest.raises(runtime.DeliveryError, match="requires editing the supplied image"):
+                await generate_target(session, "Invent a replacement instead of editing")
 
         forged = ImageEditReferences.from_input_attachments(
             [source_attachment],

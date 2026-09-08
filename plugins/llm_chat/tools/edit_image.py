@@ -30,11 +30,13 @@ from ..image_edit_refs import MAX_EDIT_REFERENCES, current_image_edit_references
 from ..agent_attachments import store_agent_attachment
 
 _EDIT_INSTRUCTION = (
-    "The first input image is the source composition to edit. Preserve its framing, background, typography, logos, "
-    "and all unrelated visual details unless the requested edit explicitly changes them. Any subsequent input images "
-    "are identity and appearance references only: use their supported visual traits for the requested replacement, "
-    "but do not copy their background, text, framing, watermarks, or unrelated objects. Produce exactly one finished "
-    "image and no explanatory text inside the image unless requested.\n\nRequested edit:\n"
+    "The first input image is the source composition to edit. When replacing a person or character, replace all "
+    "source-specific identity traits, including face, hair, clothing, headwear, and accessories, with traits supported "
+    "by the reference images. Preserve the source's exact pose, hand gestures, expression, gaze and eye-closure "
+    "orientation, framing, background, typography, logos, and all unrelated visual details unless the requested edit "
+    "explicitly changes them. Any subsequent input images are identity and appearance references only: do not copy "
+    "their background, text, framing, watermarks, or unrelated objects. Produce exactly one finished image and no "
+    "explanatory text inside the image unless requested.\n\nRequested edit:\n"
 )
 
 
