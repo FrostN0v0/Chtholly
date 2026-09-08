@@ -37,6 +37,7 @@ from .core.engagement import turn_feedback
 from .forward_context import resolve_merged_forward_messages
 from .agent_turn_setup import prepare_agent_turn
 from .engagement_state import record_declined_turn, persist_turn_feedback
+from .agent_attachments import capture_user_input_images, remove_user_input_attachments
 
 _LOGGER = log.wrapper("[llm_chat]")
 _CHAT_FAILURE_REPLY = "这次回复没有成功，请稍后重试。"
@@ -90,7 +91,8 @@ plugin.collect_disposes(cancel_pending_evaluations)
 @latest_channel_turn
 async def on_chat(session: Session, ctx: Contexts):
     model_text = session.elements.extract_plain_text().strip()
-    require_text_reply = bool(collect_message_images(session)) and not has_meaningful_text(model_text)
+    message_images = collect_message_images(session)
+    require_text_reply = bool(message_images) and not has_meaningful_text(model_text)
     channel_id = session.channel.id
     user_name = str((session.member.nick if session.member else None) or session.user.name or session.user.id).strip()
 
@@ -137,21 +139,31 @@ async def on_chat(session: Session, ctx: Contexts):
         return BLOCK
     user_id = identity.user_id
     user_name = identity.display_name
-    prepared = await prepare_agent_turn(
-        config,
+    input_attachments = await capture_user_input_images(
         session,
-        identity,
-        model_name=model_name,
-        supports_image_input=supports_image_input,
-        model_text=model_text,
-        content=content,
-        current_content=current_content,
-        forwarded_messages=forwarded_messages,
+        message_images,
         warn=_LOGGER.warning,
-        tool_schemas=registered_tool_schemas,
-        requires_media_reply=require_text_reply,
-        is_operator=await _is_operator(session),
     )
+    try:
+        prepared = await prepare_agent_turn(
+            config,
+            session,
+            identity,
+            model_name=model_name,
+            supports_image_input=supports_image_input,
+            model_text=model_text,
+            content=content,
+            current_content=current_content,
+            forwarded_messages=forwarded_messages,
+            warn=_LOGGER.warning,
+            tool_schemas=registered_tool_schemas,
+            input_attachments=input_attachments,
+            requires_media_reply=require_text_reply,
+            is_operator=await _is_operator(session),
+        )
+    except BaseException:
+        remove_user_input_attachments(input_attachments)
+        raise
     memory_context = prepared.memory_context
     eval_history = prepared.eval_history
     chat_messages = prepared.chat_messages

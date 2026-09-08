@@ -41,7 +41,7 @@ from .tools.support import audio_mime_type
 from .tools.html2pic import register_html2pic
 from .tools.jinja2pic import register_jinja2pic
 from .tools.send_text import SendTextToolContext, register_send_text
-from .tools.tag_image import TagImageToolContext, register_tag_image
+from .tools.tag_image import TagImageToolContext, register_tag_image, cancel_pending_image_collections
 from .tools._rendering import RenderToolContext
 from .tools.send_audio import AudioToolContext, register_send_audio
 from .tools.send_image import ImageToolContext, register_send_image
@@ -274,6 +274,7 @@ tag_image_context = TagImageToolContext(
 )
 tag_image = register_tag_image(tools, tag_image_context)
 registered_tools.append("tag_image")
+plugin.collect_disposes(cancel_pending_image_collections)
 
 
 def _tool_schema_identity(name: str) -> dict[str, str]:

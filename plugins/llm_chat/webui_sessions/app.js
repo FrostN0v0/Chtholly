@@ -917,9 +917,11 @@ function renderEventDetail() {
     elements.eventDetail.append(section);
   }
 
-  const images = event.evidence?.images || event.preview?.images;
+  const images = Array.isArray(event.images) && event.images.length
+    ? event.images
+    : event.evidence?.images || event.preview?.images;
   if (Array.isArray(images) && images.length) {
-    const section = detailSection("关联图片");
+    const section = detailSection(event.event_type === "user_input" ? "用户图片" : "关联图片");
     const grid = createElement("div", "thumbs");
     for (const image of images) grid.append(imageThumb(image));
     section.append(grid);

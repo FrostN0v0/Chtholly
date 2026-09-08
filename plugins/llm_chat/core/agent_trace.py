@@ -87,12 +87,22 @@ class AgentTurnRecorder:
         self.events.append(event)
         return event
 
-    def record_user_input(self, content: str, *, user_name: str, fresh_context: bool) -> None:
-        self.append(
-            "user_input",
-            role="user",
-            payload={"content": content, "speaker": user_name, "fresh_context": fresh_context},
-        )
+    def record_user_input(
+        self,
+        content: str,
+        *,
+        user_name: str,
+        fresh_context: bool,
+        attachments: Sequence[Mapping[str, object]] = (),
+    ) -> None:
+        payload: dict[str, object] = {
+            "content": content,
+            "speaker": user_name,
+            "fresh_context": fresh_context,
+        }
+        if attachments:
+            payload["attachments"] = list(attachments)
+        self.append("user_input", role="user", payload=payload)
 
     def record_persona_state(self, payload: Mapping[str, object]) -> AgentEventDraft:
         """Record the persona, relationship, and memory inputs that shaped this turn."""

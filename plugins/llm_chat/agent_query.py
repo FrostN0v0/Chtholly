@@ -186,6 +186,8 @@ async def read_event_payload(
     _authorize_session(current, context_session)
     payload = load_event_payload(event)
     if path:
+        if path.split(".", 1)[0] == "attachments":
+            raise AgentQueryError("Image attachments are not model-readable")
         if not current.allow_payload_delivery:
             raise AgentQueryError("Stored payload access is not allowed for the current user request")
         try:
