@@ -96,21 +96,20 @@ def register_publish_web_preview(
     ) -> str:
         """Create a versioned, isolated web artifact and return expiring links.
 
-        Use only for a current user request to create, design, change, preview,
-        publish, or deliver a webpage/UI/prototype.  ``files`` must contain the
-        complete explicitly supplied source files as path/content/encoding
-        mappings; never invent local paths or read arbitrary files.  Set
-        ``previous_artifact_ref`` only to an exact artifact_ref returned by
-        this tool when the user asks to revise that project, and use
-        ``delete_paths`` only for files the user explicitly wants removed.
-        The source is persisted before optional capture.  A capture or
-        thumbnail transport failure is reported honestly while the source and
-        expiring links remain valid.  Do not send link text automatically;
-        return the exact links from this result through normal final text or
-        call send_artifact when the user explicitly requests the ZIP.
+        Choose this workflow when a working webpage/UI/prototype helps fulfill
+        the user's task, including contextual follow-ups.  No special wording
+        or separate publication command is needed.  ``files`` contains the
+        complete source you generated as path/content/encoding mappings;
+        never read arbitrary local files or publish secrets/private chat data.
+        Use an exact ``previous_artifact_ref`` from the artifact tools for
+        revisions and ``delete_paths`` for inherited files omitted from the
+        new version; existing versions remain unchanged.  Anyone holding the
+        returned links can access the project until expiry or revocation.
+        Capture failures leave the source and links valid.  Deliver exact
+        links through final text and use send_artifact for source delivery.
         """
 
-        access = require_authorized_access("publish")
+        access = require_authorized_access()
         if not isinstance(title, str) or not title.strip():
             raise DeliveryError("artifact title is required")
         if not isinstance(files, list):

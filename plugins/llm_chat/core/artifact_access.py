@@ -1,37 +1,27 @@
-"""Authorize artifact operations from affirmative, unquoted current-user clauses."""
+"""Optional artifact routing hints and explicit destructive-revocation intent."""
 
 from __future__ import annotations
 
 import re
 import json
 from typing import Literal
-from dataclasses import dataclass
 from collections.abc import Mapping
-
-ArtifactAction = Literal["publish", "send", "list", "read", "revoke"]
 
 
 class ArtifactAccessError(ValueError):
-    """The current user has not requested the artifact operation."""
-
-
-@dataclass(frozen=True, slots=True)
-class ArtifactAuthorization:
-    action: ArtifactAction
-    allowed: bool
-    reason: str
+    """The current user has not requested destructive artifact revocation."""
 
 
 _WEB = re.compile(
     r"(?:网页|网站|页面|界面)(?!截图|图片|照片)|前端|原型|导航栏|侧边栏|按钮|标签页|"
-    r"\b(?:ui|html|css|web\s*(?:page|site|app)|website|webpage|prototype|landing\s+page|"
-    r"dashboard|navbar|sidebar|button|modal|tabs?)\b(?!\s+(?:screenshot|image|photo)\b)",
+    r"(?<![a-z0-9_])(?:ui|html|css|web\s*(?:page|site|app)|website|webpage|prototype|landing\s+page|"
+    r"dashboard|navbar|sidebar|button|modal|tabs?)(?![a-z0-9_]|\s+(?:screenshot|image|photo)\b)",
     re.IGNORECASE,
 )
 _ARTIFACT = re.compile(
     r"(?:网页|网站|页面|界面)(?!截图|图片|照片)|前端|原型|预览|源码|源代码|源文件|压缩包|文件|项目|版本|链接|"
-    r"\b(?:ui|html|css|website|webpage|web\s*(?:page|site|app)|prototype|preview|source|zip|"
-    r"archive|file|project|artifact|version|revision|link|url)\b",
+    r"(?<![a-z0-9_])(?:ui|html|css|website|webpage|web\s*(?:page|site|app)|prototype|preview|source|zip|"
+    r"archive|file|project|artifact|version|revision|link|url)(?![a-z0-9_])",
     re.IGNORECASE,
 )
 _OPERATIONS: dict[str, str] = {
@@ -44,8 +34,6 @@ _OPERATIONS: dict[str, str] = {
         r"发送|发(?!布)|传|给我|提供|交付|下载|导出|打包|"
         r"\b(?:send|give|share|provide|deliver|download|export|attach|upload)\b"
     ),
-    "list": r"列出|列一下|列举|查看所有|查看列表|有哪些|有什么|\blist\b|\bshow\s+(?:my|the|all)\b",
-    "read": r"读取|读一下|打开|查看|看看|显示|阅读|检视|给我看|\b(?:read|open|inspect|show|view)\b",
     "revoke": r"撤销|作废|废止|下线|删除|取消|回收|\b(?:revoke|invalidate|disable|delete|unpublish)\b",
 }
 _PATTERNS = {name: re.compile(pattern, re.IGNORECASE) for name, pattern in _OPERATIONS.items()}
@@ -121,37 +109,21 @@ def _negates(clause: str, operation: str) -> bool:
     return False
 
 
-def authorize_artifact_request(raw_user_text: object, action: ArtifactAction) -> ArtifactAuthorization:
-    """Read/list requests never grant publication; ordinary quoted commands grant nothing."""
+def is_artifact_request(raw_user_text: object, action: Literal["publish", "send"] = "publish") -> bool:
+    """Suggest media routing; a false result never denies an artifact tool."""
 
     clauses = _clauses(raw_user_text)
-    if not clauses:
-        return ArtifactAuthorization(action, False, "current unquoted user request is required")
     operations = ("create", "publish") if action == "publish" else (action,)
     if any(_negates(clause, operation) for clause in clauses for operation in operations):
-        return ArtifactAuthorization(action, False, "current user request forbids this artifact operation")
-    creating = any(_requests(clause, "create", web_only=True) for clause in clauses)
-    publishing = any(_requests(clause, "publish") for clause in clauses)
-    if action == "publish":
-        allowed = creating or publishing
-    else:
-        allowed = any(_requests(clause, action) for clause in clauses)
-        if action in {"list", "read", "send"}:
-            allowed = allowed or creating
-        if action in {"list", "read"}:
-            allowed = allowed or publishing
-    return ArtifactAuthorization(
-        action,
-        allowed,
-        "authorized by current user request" if allowed else "current user request does not authorize this operation",
-    )
+        return False
+    return any(_requests(clause, "create", web_only=True) or _requests(clause, action) for clause in clauses)
 
 
-def is_artifact_request(raw_user_text: object, action: ArtifactAction = "publish") -> bool:
-    return authorize_artifact_request(raw_user_text, action).allowed
+def require_artifact_revocation(raw_user_text: object) -> None:
+    """Require an affirmative current-user request before invalidating a link."""
 
-
-def require_artifact_request(raw_user_text: object, action: ArtifactAction) -> None:
-    decision = authorize_artifact_request(raw_user_text, action)
-    if not decision.allowed:
-        raise ArtifactAccessError(decision.reason)
+    clauses = _clauses(raw_user_text)
+    if not clauses or any(_negates(clause, "revoke") for clause in clauses):
+        raise ArtifactAccessError("current user must explicitly request artifact revocation")
+    if not any(_requests(clause, "revoke") for clause in clauses):
+        raise ArtifactAccessError("current user must explicitly request artifact revocation")

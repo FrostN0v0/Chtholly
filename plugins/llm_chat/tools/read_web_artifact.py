@@ -40,16 +40,16 @@ def register_read_web_artifact(
     ) -> str:
         """Read text source or binary metadata from one artifact revision.
 
-        Use after the current user explicitly asks to inspect/read the source
-        or a file.  ``artifact_ref`` must be an exact ref returned by the
-        artifact tools; ``path`` is resolved only against that immutable
+        Inspect source as needed to understand or revise the user's project;
+        no separate read command is required.  ``artifact_ref`` must come from
+        the artifact tools; ``path`` is resolved only against that immutable
         manifest.  Text is returned in bounded character windows with
         ``next_offset`` for continuation.  Binary files return MIME, size, and
         hash metadata only; bytes are never base64 encoded into chat context.
         """
 
         del session
-        access = require_authorized_access("read")
+        access = require_authorized_access()
         if not isinstance(artifact_ref, str) or not artifact_ref.strip():
             raise DeliveryError("artifact_ref is required")
         if not isinstance(path, str) or not path.strip():

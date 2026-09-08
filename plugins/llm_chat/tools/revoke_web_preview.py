@@ -18,6 +18,7 @@ from ..core.types import JSONType
 from ._registration import register_tool
 from ..core.delivery import DeliveryError
 from ..core.tool_trace import record_tool_evidence
+from ..core.artifact_access import ArtifactAccessError, require_artifact_revocation
 
 
 def register_revoke_web_preview(
@@ -36,7 +37,11 @@ def register_revoke_web_preview(
         """
 
         del session
-        access = require_authorized_access("revoke")
+        access = require_authorized_access()
+        try:
+            require_artifact_revocation(access.raw_user_text)
+        except ArtifactAccessError as exc:
+            raise DeliveryError(f"artifact revocation not allowed: {exc}") from None
         if not isinstance(artifact_ref, str) or not artifact_ref.strip():
             raise DeliveryError("artifact_ref is required")
         normalized_ref = artifact_ref.strip()
