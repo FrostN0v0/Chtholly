@@ -31,7 +31,7 @@ from .chat_context import (
 )
 from .core.forward import render_forwarded_storage
 from .tool_runtime import registered_tool_schemas
-from .channel_turns import latest_channel_turn, cancel_active_channel_turns
+from .channel_turns import latest_participant_turn, cancel_active_participant_turns
 from .chat_evaluation import cancel_pending_evaluations, schedule_chat_state_after_delivery
 from .core.engagement import turn_feedback
 from .forward_context import resolve_merged_forward_messages
@@ -82,13 +82,13 @@ config = plugin_config(LLMChatConfig)
 plug = Plugin.current()
 
 
-plugin.collect_disposes(cancel_active_channel_turns)
+plugin.collect_disposes(cancel_active_participant_turns)
 plugin.collect_disposes(cancel_pending_evaluations)
 
 
 @plug.dispatch(MessageCreatedEvent).register(priority=900)
 @enter_if(_should_handle_chat)
-@latest_channel_turn
+@latest_participant_turn
 async def on_chat(session: Session, ctx: Contexts):
     model_text = session.elements.extract_plain_text().strip()
     message_images = collect_message_images(session)
