@@ -48,6 +48,20 @@ uv run entari run
 
 更多框架用法见 [Entari 文档](https://arclet.top/tutorial/entari/)。
 
+## LLM 会话管理
+
+`llm_chat` 使用按聊天范围隔离的 Session、Turn 与 AgentEvent 保存对话、工具调用和确认交付，并按 Token 预算自动续接会话。登录 Entari WebUI 后可在“LLM 会话”页面查看时间线、上下文选择、结构化交接与固定事件。
+
+超管可显式控制当前群会话：
+
+```text
+llmchat new-session
+llmchat rollover-session
+llmchat hard-reset-session CONFIRM
+```
+
+`new-session` 保留关系、画像和长期记忆，但不继承上一话题；`rollover-session` 携带结构化交接；硬重置只封存模型访问路径，不删除审计事件。
+
 ## 💖 感谢
 
 - [Entari](https://github.com/ArcletProject/Entari)：基于 Satori 协议的 IM 框架

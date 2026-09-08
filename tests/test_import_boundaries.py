@@ -16,6 +16,7 @@ def test_domain_and_tts_core_imports_do_not_load_plugin_entrypoints():
         "plugins.llm_chat.core.forward",
         "plugins.llm_chat.core.types",
         "plugins.llm_chat.core.image_source",
+        "plugins.llm_chat.core.agent_trace",
         "plugins.llm_chat.core.native_images",
         "plugins.llm_chat.core.media_delivery",
         "plugins.llm_chat.web",
@@ -49,6 +50,8 @@ def test_domain_and_tts_core_imports_do_not_load_plugin_entrypoints():
         "plugins.llm_chat.meme_store",
         "plugins.llm_chat.generation",
         "plugins.llm_chat.tag_runtime",
+        "plugins.llm_chat.agent_events",
+        "plugins.llm_chat.session_manager",
         "plugins.tts_service",
     ]
     script = f"""
@@ -119,9 +122,13 @@ agno_compat = ModuleType(f"{package_name}.agno_compat")
 agno_compat.install_agno_tool_bridge = lambda: bridge_calls.append("installed")
 tool_runtime = ModuleType(f"{package_name}.tool_runtime")
 tool_runtime.registered_tools = ["sentinel_tool"]
+tool_runtime.registered_tool_schemas = [{"name": "sentinel_tool", "source_hash": "sentinel"}]
 submodules = {
     "agno_compat": agno_compat,
     "chat_handler": ModuleType(f"{package_name}.chat_handler"),
+    "agent_command": ModuleType(f"{package_name}.agent_command"),
+    "agent_runtime": ModuleType(f"{package_name}.agent_runtime"),
+    "agent_webui": ModuleType(f"{package_name}.agent_webui"),
     "tag_runtime": ModuleType(f"{package_name}.tag_runtime"),
     "tool_runtime": tool_runtime,
     "meme_command": ModuleType(f"{package_name}.meme_command"),

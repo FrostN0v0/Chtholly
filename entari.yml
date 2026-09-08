@@ -116,13 +116,20 @@ plugins:
       你的性格温柔、坚韧、体贴，略带倔强和少女式的别扭；亲近时会自然开玩笑、撒娇、害羞或吃醋，受伤或生气时也会明确表达，但不失去分寸。
       保持鲜明情绪和角色口吻，不使用客服腔、模板化客套或刻意堆叠语气词。遇到知识、代码和实际问题时仍给出准确、有用的回答，让人格影响表达方式而不是事实。
     allowed_commands: ["echo", "help"]
-    context_window: 20
+    max_input_tokens: 48000
+    output_reserve_tokens: 8000
+    context_rollover_ratio: 0.75
+    context_min_recent_turns: 4
+    context_inline_event_chars: 4000
+    session_idle_minutes: 360
+    session_max_turns: 40
+    session_handoff_timeout: 45.0
+    session_handoff_source_max_chars: 24000
+    session_handoff_max_chars: 6000
+    archived_session_read_limit: 10
+    event_payload_delivery_max_chars: 12000
     channel_message_max_images: 12
     self_reference_image: "persona/ChthollyHat.png"
-    # Recent tool activity is channel-scoped, bounded, and excluded from persona evaluation.
-    tool_context_max_events: 8
-    tool_context_max_chars: 3500
-    tool_history_max_records_per_channel: 200
     web_search_enabled: true
     web_search_max_calls_per_generation: 16
     web_page_max_calls_per_generation: 24

@@ -16,14 +16,30 @@ from .core.delivery import DEFAULT_DELIVERY_LIMITS
 class LLMChatConfig(BasicConfModel):
     persona: str = DEFAULT_PERSONA
     """Character text ONLY; framework rules live in SYSTEM_SCAFFOLD."""
-    context_window: int = 20
-    """Number of history messages loaded per reply."""
-    tool_context_max_events: int = 8
-    """Maximum recent tool events injected into one chat prompt."""
-    tool_context_max_chars: int = 3500
-    """Maximum serialized characters used by recent tool activity."""
-    tool_history_max_records_per_channel: int = 200
-    """Maximum persisted tool execution rows retained per channel."""
+    max_input_tokens: int = 48000
+    """Maximum input token budget for one chat model request."""
+    output_reserve_tokens: int = 8000
+    """Input space reserved for the model's response."""
+    context_rollover_ratio: float = 0.75
+    """Create a continuation session once retained context reaches this share of the input budget."""
+    context_min_recent_turns: int = 4
+    """Minimum number of complete recent turns retained when a single turn exceeds the normal budget."""
+    context_inline_event_chars: int = 4000
+    """Maximum inline JSON characters per tool arguments or result before an event reference is used."""
+    session_idle_minutes: int = 360
+    """Idle duration that closes the current context session before the next turn."""
+    session_max_turns: int = 40
+    """Maximum completed turns retained in one context session before continuation rollover."""
+    session_handoff_timeout: float = 45.0
+    """Maximum duration for one structured continuation handoff generation."""
+    session_handoff_source_max_chars: int = 24000
+    """Maximum event summary characters exposed to handoff generation."""
+    session_handoff_max_chars: int = 6000
+    """Maximum serialized characters stored in one structured handoff."""
+    archived_session_read_limit: int = 10
+    """Maximum archived sessions returned by one model history query."""
+    event_payload_delivery_max_chars: int = 12000
+    """Maximum stored event payload characters returned by one model history query."""
     merged_forward_fetch_timeout: float = 15.0
     """Timeout for one OneBot get_forward_msg request."""
     merged_forward_max_messages: int = 200

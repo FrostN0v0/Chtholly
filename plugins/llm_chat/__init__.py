@@ -43,11 +43,14 @@ if plug is not None and plug.module.__name__ == __name__:
         role=PluginRole.NORMAL,
         config=LLMChatWebUIConfig,
     )
-    from . import chat_handler as chat_handler  # entari: package
-    from . import tag_runtime as tag_runtime  # entari: package
     from . import tool_runtime as tool_runtime  # entari: package
+    from . import chat_handler as chat_handler  # entari: package
+    from . import agent_command as agent_command  # entari: package
+    from . import agent_runtime as agent_runtime  # entari: package
+    from . import tag_runtime as tag_runtime  # entari: package
     from . import meme_command as meme_command  # entari: package
     from . import meme_webui as meme_webui  # entari: package
+    from . import agent_webui as agent_webui  # entari: package
 
     registered_tools = tool_runtime.registered_tools
     _LOGGER.info(f"registered LLM tools: {', '.join(registered_tools) or '(none)'}")

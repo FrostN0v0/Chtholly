@@ -18,7 +18,7 @@ from entari_plugin_llm.tools.event import LLMToolEvent, tools, available_functio
 
 from .core.errors import summarize_exception
 from .core.delivery import current_llm_chat_delivery, contains_internal_participant_reference
-from .core.tool_trace import current_tool_trace
+from .core.tool_trace import current_tool_trace, llm_chat_tool_execution_scope
 from .runtime_context import copy_llm_chat_context
 from .core.native_images import extract_native_images
 from .core.tool_trace_policy import DeliverySnapshot
@@ -97,7 +97,8 @@ def _build_agno_tool(name: str) -> Function:
                 raise ValueError("Invalid internal participant reference for this tool")
             tool_context = await generate_contexts(LLMToolEvent(), inherit_ctx=copy_llm_chat_context())
             tool_context.update(kwargs)
-            response = await subscriber.handle(tool_context, inner=True)
+            with llm_chat_tool_execution_scope(call.execution_ref if call is not None else ""):
+                response = await subscriber.handle(tool_context, inner=True)
             data = _normalize_tool_data(response)
             if recorder is not None and call is not None:
                 recorder.finish_success(call, data, before=before, after=_delivery_snapshot())
