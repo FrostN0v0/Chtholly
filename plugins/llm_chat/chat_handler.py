@@ -31,13 +31,18 @@ from .chat_context import (
 )
 from .core.forward import render_forwarded_storage
 from .tool_runtime import registered_tool_schemas
-from .channel_turns import latest_participant_turn, cancel_active_participant_turns
+from .channel_turns import (
+    latest_participant_turn,
+    cancel_active_participant_turns,
+    current_participant_turn_superseded,
+)
 from .chat_evaluation import cancel_pending_evaluations, schedule_chat_state_after_delivery
 from .core.engagement import turn_feedback
 from .forward_context import resolve_merged_forward_messages
 from .agent_turn_setup import prepare_agent_turn
 from .engagement_state import record_declined_turn, persist_turn_feedback
 from .agent_attachments import capture_user_input_images, remove_user_input_attachments
+from .reaction_feedback import MessageReactionFeedback, settle_reaction_update, llm_chat_reaction_scope
 
 _LOGGER = log.wrapper("[llm_chat]")
 _CHAT_FAILURE_REPLY = "这次回复没有成功，请稍后重试。"
@@ -90,6 +95,30 @@ plugin.collect_disposes(cancel_pending_evaluations)
 @enter_if(_should_handle_chat)
 @latest_participant_turn
 async def on_chat(session: Session, ctx: Contexts):
+    reaction = MessageReactionFeedback(session, _LOGGER.warning)
+    with llm_chat_reaction_scope(reaction):
+        try:
+            await reaction.set_stage("processing")
+            result = await _run_chat(session, ctx, reaction)
+            if not reaction.terminal:
+                await reaction.finish("failed")
+            return result
+        except asyncio.CancelledError:
+            if current_participant_turn_superseded():
+                await settle_reaction_update(reaction.finish("superseded"))
+            else:
+                await settle_reaction_update(reaction.clear_transient())
+            raise
+        except Exception:
+            await settle_reaction_update(reaction.finish("failed"))
+            raise
+
+
+async def _run_chat(
+    session: Session,
+    ctx: Contexts,
+    reaction: MessageReactionFeedback,
+):
     model_text = session.elements.extract_plain_text().strip()
     message_images = collect_message_images(session)
     require_text_reply = bool(message_images) and not has_meaningful_text(model_text)
@@ -130,12 +159,14 @@ async def on_chat(session: Session, ctx: Contexts):
         content = render_forwarded_storage(model_text, forwarded_messages)
 
     if not content:
+        await reaction.finish("failed")
         return BLOCK
     try:
         identity = await resolve_chat_identity(session)
     except Exception as exc:
         _LOGGER.warning(f"user identity resolve failed: {summarize_exception(exc)}")
         await session.send(_CHAT_FAILURE_REPLY)
+        await reaction.finish("failed")
         return BLOCK
     user_id = identity.user_id
     user_name = identity.display_name
@@ -185,7 +216,9 @@ async def on_chat(session: Session, ctx: Contexts):
         )
         await turn.finalize_agent_turn("declined")
         _LOGGER.info(f"engagement declined reply: {'; '.join(engagement.reasons)}")
+        await reaction.finish("declined")
         return BLOCK
+    await reaction.set_stage("thinking")
     agent_events = prepared.agent_events
     agent_access = prepared.agent_access
     turn_status = "failed"
@@ -211,12 +244,15 @@ async def on_chat(session: Session, ctx: Contexts):
             turn.capture_tool_events()
             turn_status = "partial" if delivery_state.confirmed_deliveries else "cancelled"
             await turn.preserve_and_rollback()
+            if delivery_state.confirmed_deliveries:
+                await settle_reaction_update(reaction.finish("partial"))
             raise
         except Exception as exc:
             turn.capture_tool_events()
             _LOGGER.warning(f"llm generate failed: {summarize_exception(exc)}")
             if delivery_state.delivery_attempts:
                 await turn.preserve_and_rollback()
+                await reaction.finish("partial" if delivery_state.confirmed_deliveries else "failed")
                 return BLOCK
             failure_reply = _MEDIA_FAILURE_REPLY if media_requested else _CHAT_FAILURE_REPLY
             try:
@@ -228,18 +264,22 @@ async def on_chat(session: Session, ctx: Contexts):
             except Exception as delivery_exc:
                 await turn.preserve_and_rollback()
                 _LOGGER.warning(f"generation failure notice delivery failed: {summarize_exception(delivery_exc)}")
+            await reaction.finish("failed")
             return BLOCK
 
         turn.capture_tool_events()
         try:
             if not await turn.deliver_model_images(session, response):
+                await reaction.finish("partial" if delivery_state.confirmed_deliveries else "failed")
                 return BLOCK
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             _LOGGER.warning(f"native image delivery failed: {summarize_exception(exc)}")
+            await reaction.finish("partial" if delivery_state.confirmed_deliveries else "failed")
             return BLOCK
         if not await turn.deliver_model_reply(session, response_content(response)):
+            await reaction.finish("partial" if delivery_state.confirmed_deliveries else "failed")
             return BLOCK
         assistant_reply = await turn.persist_delivered_text()
         turn_status = "completed"
@@ -259,6 +299,7 @@ async def on_chat(session: Session, ctx: Contexts):
             assistant_reply=assistant_reply,
             warn=_LOGGER.warning,
         )
+        await reaction.finish("success")
         return BLOCK
     finally:
         if turn_status not in {"completed", "cancelled"} and delivery_state.confirmed_deliveries:

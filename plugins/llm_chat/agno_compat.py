@@ -20,6 +20,7 @@ from .core.errors import summarize_exception
 from .core.delivery import current_llm_chat_delivery, contains_internal_participant_reference
 from .core.tool_trace import current_tool_trace, llm_chat_tool_execution_scope
 from .runtime_context import copy_llm_chat_context
+from .reaction_feedback import current_reaction_feedback
 from .core.native_images import extract_native_images
 from .core.tool_trace_policy import DeliverySnapshot
 
@@ -129,6 +130,9 @@ def _build_agno_tool(name: str) -> Function:
         async def invoke() -> str:
             nonlocal executing
             executing = True
+            reaction = current_reaction_feedback()
+            if reaction is not None:
+                await reaction.tool_started(name)
             before = _delivery_snapshot()
             try:
                 if unsafe_reference:
@@ -148,6 +152,8 @@ def _build_agno_tool(name: str) -> Function:
             except Exception as exc:
                 if recorder is not None and call is not None:
                     recorder.finish_error(call, exc, before=before, after=_delivery_snapshot())
+                if reaction is not None:
+                    await reaction.tool_failed()
                 return json.dumps({"ok": False, "error": summarize_exception(exc)}, ensure_ascii=False)
 
         lock = _DELIVERY_TOOL_LOCK.get() if name in _ORDERED_DELIVERY_TOOLS else None

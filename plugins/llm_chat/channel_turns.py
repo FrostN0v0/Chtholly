@@ -6,6 +6,7 @@ from typing import Any
 import asyncio
 from functools import wraps
 from contextlib import suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from collections.abc import Callable, Coroutine
 
@@ -21,14 +22,23 @@ _ParticipantTurnScope = tuple[str, str, str, str]
 
 
 @dataclass(slots=True)
+class _ParticipantTurnState:
+    superseded: bool = False
+
+
+@dataclass(slots=True)
 class _ActiveParticipantTurn:
     task: asyncio.Task[object]
     generation: int
-    superseded: bool = False
+    state: _ParticipantTurnState
 
 
 _ACTIVE_PARTICIPANT_TURNS: dict[_ParticipantTurnScope, _ActiveParticipantTurn] = {}
 _PARTICIPANT_TURN_GENERATIONS: dict[_ParticipantTurnScope, int] = {}
+_CURRENT_PARTICIPANT_TURN_STATE: ContextVar[_ParticipantTurnState | None] = ContextVar(
+    "llm_chat_participant_turn_state",
+    default=None,
+)
 
 
 def _participant_turn_scope(session: Session) -> _ParticipantTurnScope:
@@ -38,6 +48,24 @@ def _participant_turn_scope(session: Session) -> _ParticipantTurnScope:
         str(session.channel.id),
         str(session.user.id),
     )
+
+
+def current_participant_turn_superseded() -> bool:
+    state = _CURRENT_PARTICIPANT_TURN_STATE.get()
+    return state.superseded if state is not None else False
+
+
+async def _run_participant_turn(
+    handler: Callable[[Session, Contexts], Coroutine[Any, Any, object]],
+    session: Session,
+    ctx: Contexts,
+    state: _ParticipantTurnState,
+) -> object:
+    token = _CURRENT_PARTICIPANT_TURN_STATE.set(state)
+    try:
+        return await handler(session, ctx)
+    finally:
+        _CURRENT_PARTICIPANT_TURN_STATE.reset(token)
 
 
 def cancel_active_participant_turns() -> None:
@@ -61,7 +89,7 @@ def latest_participant_turn(
 
         previous = _ACTIVE_PARTICIPANT_TURNS.get(scope)
         if previous is not None and not previous.task.done():
-            previous.superseded = True
+            previous.state.superseded = True
             previous.task.cancel()
             try:
                 await previous.task
@@ -73,13 +101,14 @@ def latest_participant_turn(
         if _PARTICIPANT_TURN_GENERATIONS.get(scope) != generation:
             return BLOCK
 
-        task = asyncio.create_task(handler(session, ctx))
-        active = _ActiveParticipantTurn(task=task, generation=generation)
+        state = _ParticipantTurnState()
+        task = asyncio.create_task(_run_participant_turn(handler, session, ctx, state))
+        active = _ActiveParticipantTurn(task=task, generation=generation, state=state)
         _ACTIVE_PARTICIPANT_TURNS[scope] = active
         try:
             return await task
         except asyncio.CancelledError:
-            if active.superseded:
+            if active.state.superseded:
                 return BLOCK
             task.cancel()
             with suppress(asyncio.CancelledError):
