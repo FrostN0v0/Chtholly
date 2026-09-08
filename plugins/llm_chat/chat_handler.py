@@ -32,7 +32,7 @@ from .chat_context import (
 from .core.forward import render_forwarded_storage
 from .tool_runtime import registered_tool_schemas
 from .channel_turns import latest_channel_turn, cancel_active_channel_turns
-from .chat_evaluation import update_chat_state_after_delivery
+from .chat_evaluation import cancel_pending_evaluations, schedule_chat_state_after_delivery
 from .core.engagement import turn_feedback
 from .forward_context import resolve_merged_forward_messages
 from .agent_turn_setup import prepare_agent_turn
@@ -82,6 +82,7 @@ plug = Plugin.current()
 
 
 plugin.collect_disposes(cancel_active_channel_turns)
+plugin.collect_disposes(cancel_pending_evaluations)
 
 
 @plug.dispatch(MessageCreatedEvent).register(priority=900)
@@ -151,8 +152,6 @@ async def on_chat(session: Session, ctx: Contexts):
         requires_media_reply=require_text_reply,
         is_operator=await _is_operator(session),
     )
-    rel = prepared.relation
-    mood = prepared.mood
     memory_context = prepared.memory_context
     eval_history = prepared.eval_history
     chat_messages = prepared.chat_messages
@@ -170,8 +169,6 @@ async def on_chat(session: Session, ctx: Contexts):
         await persist_turn_feedback(
             user_id=user_id,
             channel_id=channel_id,
-            relation=rel,
-            user_mood=mood,
             feedback=feedback,
         )
         await turn.finalize_agent_turn("declined")
@@ -234,9 +231,13 @@ async def on_chat(session: Session, ctx: Contexts):
             return BLOCK
         assistant_reply = await turn.persist_delivered_text()
         turn_status = "completed"
-        await update_chat_state_after_delivery(
+        await persist_turn_feedback(
+            user_id=user_id,
+            channel_id=channel_id,
+            feedback=feedback,
+        )
+        schedule_chat_state_after_delivery(
             config,
-            rel,
             memory_context,
             eval_history,
             user_id=user_id,
@@ -244,15 +245,7 @@ async def on_chat(session: Session, ctx: Contexts):
             channel_id=channel_id,
             user_content=content,
             assistant_reply=assistant_reply,
-            mood=mood,
             warn=_LOGGER.warning,
-        )
-        await persist_turn_feedback(
-            user_id=user_id,
-            channel_id=channel_id,
-            relation=rel,
-            user_mood=mood,
-            feedback=feedback,
         )
         return BLOCK
     finally:

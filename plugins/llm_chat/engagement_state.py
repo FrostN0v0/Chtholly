@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import update
+from sqlalchemy import case, update
 from entari_plugin_database import select, get_session
 
 from .models import BotState, Conversation, UserRelation
 from .core.media import DECLINE_RECORD
-from .core.engagement import TurnFeedback, EngagementSignals, apply_turn_feedback
+from .core.engagement import TurnFeedback, EngagementSignals
 
 
 async def collect_engagement_signals(
@@ -82,36 +82,63 @@ async def persist_turn_feedback(
     *,
     user_id: str,
     channel_id: str,
-    relation: UserRelation,
-    user_mood: float,
     feedback: TurnFeedback,
 ) -> dict[str, float]:
-    """Apply one turn's deterministic drift to stored relationship state."""
+    """Atomically apply one turn's drift to the latest stored state."""
 
-    updated = apply_turn_feedback(
-        irritation=relation.resentment,
-        user_mood=user_mood,
-        familiarity=relation.familiarity,
-        feedback=feedback,
-    )
+    now = datetime.utcnow()
+    resentment = UserRelation.resentment + feedback.irritation_delta
+    familiarity = UserRelation.familiarity + feedback.closeness_delta
+    mood = BotState.mood + feedback.mood_delta
     async with get_session() as session:
-        await session.execute(
+        result = await session.execute(
             update(UserRelation)
             .where(UserRelation.user_id == user_id, UserRelation.channel_id == channel_id)
             .values(
-                resentment=updated["irritation"],
-                familiarity=updated["familiarity"],
-                last_interaction=datetime.utcnow(),
+                resentment=case(
+                    (resentment < 0.0, 0.0),
+                    (resentment > 100.0, 100.0),
+                    else_=resentment,
+                ),
+                familiarity=case(
+                    (familiarity < 0.0, 0.0),
+                    (familiarity > 100.0, 100.0),
+                    else_=familiarity,
+                ),
+                last_interaction=now,
             )
         )
+        if getattr(result, "rowcount", None) == 0:
+            raise LookupError(f"relation not found: {user_id}/{channel_id}")
+
         state = await session.get(BotState, channel_id)
         if state is None:
-            session.add(BotState(channel_id=channel_id, mood=updated["user_mood"]))
+            session.add(BotState(channel_id=channel_id, mood=max(-1.0, min(1.0, feedback.mood_delta))))
         else:
-            state.mood = updated["user_mood"]
-            state.updated_at = datetime.utcnow()
+            await session.execute(
+                update(BotState)
+                .where(BotState.channel_id == channel_id)
+                .values(
+                    mood=case(
+                        (mood < -1.0, -1.0),
+                        (mood > 1.0, 1.0),
+                        else_=mood,
+                    ),
+                    updated_at=now,
+                )
+            )
         await session.commit()
-    return updated
+
+    async with get_session() as session:
+        relation = await session.get(UserRelation, (user_id, channel_id))
+        state = await session.get(BotState, channel_id)
+        if relation is None or state is None:
+            raise LookupError(f"feedback state not found: {user_id}/{channel_id}")
+        return {
+            "irritation": relation.resentment,
+            "user_mood": state.mood,
+            "familiarity": relation.familiarity,
+        }
 
 
 async def record_declined_turn(channel_id: str, user_id: str, user_name: str) -> None:

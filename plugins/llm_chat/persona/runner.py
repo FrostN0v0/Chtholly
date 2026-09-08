@@ -50,7 +50,7 @@ async def run_evaluation(
     except ModelNotFoundError:
         # Stale channel default: fall back to the "$default" scope resolution.
         conf = get_model_config(config.eval_model or config.model)
-    excluded_extra = {"tools", "tool_choice", "response_format", "timeout"}
+    excluded_extra = {"tools", "tool_choice", "response_format", "timeout", "max_retries"}
     extra = {key: value for key, value in conf.extra.items() if key not in excluded_extra}
     response = await litellm.acompletion(
         model=conf.name,
@@ -78,6 +78,7 @@ async def run_evaluation(
         api_key=conf.api_key,
         temperature=0,
         timeout=config.eval_request_timeout,
+        max_retries=0,
         **extra,
     )
     completion = cast(_CompletionLike, response)
