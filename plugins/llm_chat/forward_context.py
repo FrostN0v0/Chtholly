@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 from dataclasses import dataclass
 from collections.abc import Callable, Sequence
 
@@ -112,23 +111,29 @@ async def resolve_merged_forward_messages(
     session: Session,
     warn: Callable[[str], None],
 ) -> list[ForwardedMessage]:
-    """Fetch, normalize, and bound merged-forward context for one user turn."""
+    """Fetch, recursively normalize, and bound merged-forward context for one user turn."""
+
     initial = collect_merged_forward_references(session)
     if not initial:
         return []
 
     max_messages = _normalized_limit(config.merged_forward_max_messages, minimum=1, maximum=500)
     max_chars = _normalized_limit(config.merged_forward_max_chars_per_message, minimum=64, maximum=8000)
-    pending = deque(initial)
     seen: set[str] = set()
     resolved: list[ResolvedEntry] = []
     bundles = 0
     omitted_nodes = 0
+    omitted_nested = 0
 
-    while pending and bundles < _MAX_FORWARD_BUNDLES and len(resolved) < max_messages:
-        reference = pending.popleft()
+    async def resolve_reference(reference: ForwardReference) -> None:
+        nonlocal bundles, omitted_nodes, omitted_nested
+
         if reference.message_id in seen:
-            continue
+            omitted_nested += 1
+            return
+        if bundles >= _MAX_FORWARD_BUNDLES or len(resolved) >= max_messages:
+            omitted_nested += 1
+            return
         seen.add(reference.message_id)
         bundles += 1
         try:
@@ -147,7 +152,7 @@ async def resolve_merged_forward_messages(
                     "source": reference.source,
                 }
             )
-            continue
+            return
         if not nodes:
             resolved.append(
                 {
@@ -156,15 +161,37 @@ async def resolve_merged_forward_messages(
                     "source": reference.source,
                 }
             )
-            continue
+            return
 
-        remaining = max_messages - len(resolved)
-        selected = nodes[:remaining]
-        omitted_nodes += len(nodes) - len(selected)
-        resolved.extend((reference.source, node) for node in selected)
-        if reference.depth < _MAX_NESTED_DEPTH:
-            for nested_id in collect_nested_forward_ids(selected):
-                pending.append(ForwardReference(nested_id, reference.source, reference.depth + 1))
+        for index, node in enumerate(nodes):
+            if len(resolved) >= max_messages:
+                omitted_nodes += len(nodes) - index
+                return
+            resolved.append((reference.source, node))
+            nested_ids = collect_nested_forward_ids((node,))
+            omitted_nested += sum(part.kind == "forward" and not part.source for part in node.parts)
+            if not nested_ids:
+                continue
+            if reference.depth >= _MAX_NESTED_DEPTH:
+                omitted_nested += len(nested_ids)
+                continue
+            for nested_index, nested_id in enumerate(nested_ids):
+                if len(resolved) >= max_messages:
+                    omitted_nested += len(nested_ids) - nested_index
+                    break
+                await resolve_reference(
+                    ForwardReference(
+                        nested_id,
+                        reference.source,
+                        reference.depth + 1,
+                    )
+                )
+
+    for index, reference in enumerate(initial):
+        if len(resolved) >= max_messages:
+            omitted_nested += len(initial) - index
+            break
+        await resolve_reference(reference)
 
     normalized_nodes = [entry[1] for entry in resolved if isinstance(entry, tuple)]
     image_sources = collect_forward_image_sources(normalized_nodes)
@@ -189,8 +216,11 @@ async def resolve_merged_forward_messages(
         else:
             rendered.append(entry)
     rendered, chars_truncated = _limit_total_chars(rendered, config.merged_forward_max_total_chars)
-    if pending or omitted_nodes or chars_truncated:
+    if omitted_nested:
+        warn("merged forward nested content unavailable or exceeded recursion limits")
+    if omitted_nodes or chars_truncated:
         warn("merged forward truncated by configured limits")
+    if omitted_nested or omitted_nodes or chars_truncated:
         rendered.append(
             {
                 "speaker": "Merged forward",

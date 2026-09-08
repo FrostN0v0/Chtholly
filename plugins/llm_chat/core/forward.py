@@ -116,7 +116,10 @@ def _parse_segment(raw: object) -> ForwardPart | None:
     if segment_type == "reply":
         return ForwardPart("reply")
     if segment_type in {"forward", "node"}:
-        return ForwardPart("forward", source=_first_text(data, "id", "message_id") or None)
+        return ForwardPart(
+            "forward",
+            source=_first_text(data, "id", "message_id", "resId", "resid", "m_resid") or None,
+        )
 
     fallback = _compact(_first_text(data, "text", "summary", "name"))
     return ForwardPart("text", text=fallback) if fallback else ForwardPart("unsupported")
