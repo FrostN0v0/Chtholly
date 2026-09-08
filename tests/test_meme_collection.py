@@ -1079,7 +1079,7 @@ def _model_response(
 
 def _install_completion_script(
     monkeypatch: pytest.MonkeyPatch,
-    script: list[litellm.ModelResponse],
+    script: list[litellm.ModelResponse | BaseException],
 ) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
     index = 0
@@ -1089,9 +1089,11 @@ def _install_completion_script(
         payloads.append(payload)
         if index >= len(script):
             raise AssertionError("unexpected extra completion round")
-        response = script[index]
+        outcome = script[index]
         index += 1
-        return response
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
 
     monkeypatch.setattr(llm_service_module.litellm, "acompletion", scripted_acompletion)
     monkeypatch.setattr(
@@ -1106,6 +1108,85 @@ def _install_completion_script(
         ),
     )
     return payloads
+
+
+@pytest.mark.asyncio
+async def test_collection_recovers_from_moderation_empty_choices_without_replaying_history(
+    meme_env: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = _PNG_BYTES + b"moderation-recovery"
+    image = Image.of(url="local://moderation-recovery")
+    session = _RuntimeSession(direct=[image], downloads={"local://moderation-recovery": data})
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            RuntimeError(
+                "litellm.InternalServerError: LiteLLM: provider returned a response with no 'choices'. "
+                "Raw keys: ['id', 'choices', 'moderation', 'usage']"
+            ),
+            _model_response(tool_calls=[_tool_call("tag-recovery", "tag_image", {"image_index": 1})]),
+            _model_response("Collection recovered."),
+        ],
+    )
+    monkeypatch.setattr(persona_store_module, "get_session", meme_env.session_factory)
+    runtime_context = json.dumps(
+        {
+            "user_profile": {"interest": ["RISKY_PROFILE_CONTEXT"]},
+            "relevant_memories": ["RISKY_MEMORY_CONTEXT"],
+            "agent_session": {"handoff": {"topic": "RISKY_SESSION_CONTEXT"}},
+            "reply_intent": {"level": "full"},
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    system = f"meme rules\n<runtime_context>\n{runtime_context}\n</runtime_context>\nread-only boundary"
+    current_content = [
+        {"type": "text", "text": '{"speaker":"Alice","content":"collect this image"}'},
+        {"type": "text", "text": "[Image: reusable reaction]"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,SECRET_PIXELS"}},
+    ]
+
+    async with _temporary_plugin(_MEME_COMMAND_PATH):
+        async with _temporary_plugin(_TOOL_RUNTIME_PATH) as tool_runtime:
+            monkeypatch.setattr(tool_runtime.module.image_catalog, "image_dir", meme_env.image_dir)
+            monkeypatch.setattr(tool_runtime.module.image_catalog, "session_factory", meme_env.session_factory)
+            context = Contexts()
+            context[ITEM_SESSION] = session
+
+            response = await generation_module.generate_chat_response(
+                cast(
+                    list[Any],
+                    [
+                        {"role": "user", "content": "RISKY_HISTORY_CONTEXT"},
+                        {"role": "assistant", "content": "old reply"},
+                        {"role": "user", "content": current_content},
+                    ],
+                ),
+                system=system,
+                model="test-model",
+                channel_id="channel",
+                ctx=context,
+                web_limits=DEFAULT_WEB_ACCESS_LIMITS,
+                delivery_state=DeliveryState(),
+            )
+
+    assert generation_module.response_content(response) == "Collection recovered."
+    assert len(payloads) == 3
+    recovery_payload = json.dumps(payloads[1:], ensure_ascii=False)
+    assert "collect this image" in recovery_payload
+    assert "[Image: reusable reaction]" in recovery_payload
+    assert "image_url" not in recovery_payload
+    assert "SECRET_PIXELS" not in recovery_payload
+    assert "RISKY_HISTORY_CONTEXT" not in recovery_payload
+    assert "RISKY_PROFILE_CONTEXT" not in recovery_payload
+    assert "RISKY_MEMORY_CONTEXT" not in recovery_payload
+    assert "RISKY_SESSION_CONTEXT" not in recovery_payload
+    files = _stored_images(meme_env.meme_dir)
+    rows = await _image_rows(meme_env.session_factory)
+    assert len(files) == len(rows) == 1
+    assert files[0].read_bytes() == data
+    assert rows[0].file_path == "memes/1.png"
 
 
 @pytest.mark.asyncio

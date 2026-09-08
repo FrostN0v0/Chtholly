@@ -73,7 +73,7 @@ from plugins.llm_chat.core.eval import EvalResult
 from plugins.llm_chat.core.media import RECENT_MEME_HISTORY_NOTE
 from plugins.llm_chat.core.types import ChatMessage
 from plugins.llm_chat.perception import MentionedParticipant
-from plugins.llm_chat.core.errors import summarize_exception
+from plugins.llm_chat.core.errors import summarize_exception, is_moderation_empty_choices_error
 from plugins.llm_chat.chat_context import (
     build_image_notes,
     build_chat_messages,
@@ -2736,6 +2736,143 @@ async def test_agno_tool_bridge_orders_delivery_tools_without_blocking_reads(
     assert [json.loads(result)["data"] for result in results] == list(names)
     assert state.confirmed_media_deliveries == 1
     assert state.delivered_texts == ["after image"]
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (
+            "provider returned a response with no 'choices'; Raw keys: ['choices', 'moderation']",
+            True,
+        ),
+        ("provider returned a response with no 'choices'; Raw keys: ['choices', 'usage']", False),
+        ("provider moderation request timed out", False),
+    ],
+)
+def test_moderation_empty_choices_classification_is_narrow(message: str, expected: bool) -> None:
+    assert is_moderation_empty_choices_error(RuntimeError(message)) is expected
+
+
+@pytest.mark.asyncio
+async def test_generation_recovers_moderation_empty_choices_with_isolated_current_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[dict[str, Any]] = []
+    moderation_error = RuntimeError(
+        "litellm.InternalServerError: LiteLLM: provider returned a response with no 'choices'. "
+        "Raw keys: ['id', 'choices', 'moderation', 'usage']"
+    )
+
+    async def fake_generate(messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
+        requests.append(
+            {
+                "messages": json.loads(json.dumps(messages)),
+                **kwargs,
+            }
+        )
+        if len(requests) == 1:
+            raise moderation_error
+        return _handler_response("Recovered current turn.")
+
+    monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
+    runtime_context = json.dumps(
+        {
+            "current_speaker": "Alice",
+            "user_profile": {"interest": ["RISKY_PROFILE_CONTEXT"]},
+            "relevant_memories": ["RISKY_MEMORY_CONTEXT"],
+            "agent_session": {"handoff": {"topic": "RISKY_SESSION_CONTEXT"}},
+            "reply_intent": {"level": "full", "allow_followup_question": True},
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    system = f"trusted rules\n<runtime_context>\n{runtime_context}\n</runtime_context>\nread-only boundary"
+    current_content = [
+        {"type": "text", "text": '{"speaker":"Alice","content":"collect this image"}'},
+        {"type": "text", "text": "[Image: reusable reaction]"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,SECRET_PIXELS"}},
+    ]
+    recorder = AgentTurnRecorder()
+
+    response = await generation_module.generate_chat_response(
+        cast(
+            list[Any],
+            [
+                {"role": "user", "content": "RISKY_HISTORY_CONTEXT"},
+                {"role": "assistant", "content": "old reply"},
+                {"role": "user", "content": current_content},
+            ],
+        ),
+        system=system,
+        model="gpt",
+        channel_id="group",
+        ctx=Contexts(),
+        web_limits=generation_module.WebAccessLimits(0, 0, 0),
+        delivery_state=DeliveryState(),
+        agent_events=recorder,
+        request_timeout=12.5,
+    )
+
+    assert generation_module.response_content(response) == "Recovered current turn."
+    assert len(requests) == 2
+    assert len(requests[0]["messages"]) == 3
+    recovery = requests[1]
+    assert recovery["max_retries"] == 0
+    assert recovery["parallel_tool_calls"] is False
+    assert [message["role"] for message in recovery["messages"]] == ["user"]
+    recovery_payload = json.dumps(recovery, ensure_ascii=False)
+    assert "collect this image" in recovery_payload
+    assert "[Image: reusable reaction]" in recovery_payload
+    assert "image_url" not in recovery_payload
+    assert "SECRET_PIXELS" not in recovery_payload
+    assert "RISKY_HISTORY_CONTEXT" not in recovery_payload
+    assert "RISKY_PROFILE_CONTEXT" not in recovery_payload
+    assert "RISKY_MEMORY_CONTEXT" not in recovery_payload
+    assert "RISKY_SESSION_CONTEXT" not in recovery_payload
+    assert '"reply_intent":{"level":"full","allow_followup_question":true}' in recovery["system"]
+    assert [(event.event_type, event.status) for event in recorder.events] == [
+        ("model_attempt", "failed"),
+        ("model_attempt", "succeeded"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generation_does_not_isolate_retry_after_any_tool_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trace = ToolTraceRecorder()
+    calls = 0
+
+    async def fake_generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        nonlocal calls
+        calls += 1
+        call = trace.start("web_search", {"query": "already executed"})
+        trace.finish_success(
+            call,
+            {"results": []},
+            before=DeliverySnapshot(),
+            after=DeliverySnapshot(),
+        )
+        raise RuntimeError(
+            "LiteLLM: provider returned a response with no 'choices'. Raw keys: ['choices', 'moderation']"
+        )
+
+    monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
+
+    with pytest.raises(RuntimeError, match="provider returned a response with no 'choices'"):
+        await generation_module.generate_chat_response(
+            cast(list[Any], [{"role": "user", "content": "current turn"}]),
+            system="system",
+            model="gpt",
+            channel_id="group",
+            ctx=Contexts(),
+            web_limits=generation_module.WebAccessLimits(0, 0, 0),
+            delivery_state=DeliveryState(),
+            tool_trace=trace,
+            request_timeout=12.5,
+        )
+
+    assert calls == 1
 
 
 @pytest.mark.asyncio
