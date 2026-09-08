@@ -8,8 +8,9 @@ import asyncio
 from contextlib import suppress
 
 from arclet.entari import At, Session, MessageCreatedEvent, plugin, plugin_config
-from arclet.letoderea import BLOCK, enter_if
+from arclet.letoderea import STOP, BLOCK, enter_if
 from arclet.entari.config import EntariConfig
+from arclet.entari.filter import superusers
 from arclet.entari.logger import log
 from arclet.letoderea.context import Contexts
 from entari_plugin_llm.config import get_model_config
@@ -32,12 +33,21 @@ from .core.forward import render_forwarded_storage
 from .tool_runtime import registered_tool_schemas
 from .channel_turns import latest_channel_turn, cancel_active_channel_turns
 from .chat_evaluation import update_chat_state_after_delivery
+from .core.engagement import turn_feedback
 from .forward_context import resolve_merged_forward_messages
 from .agent_turn_setup import prepare_agent_turn
+from .engagement_state import record_declined_turn, persist_turn_feedback
 
 _LOGGER = log.wrapper("[llm_chat]")
 _CHAT_FAILURE_REPLY = "这次回复没有成功，请稍后重试。"
 _MEDIA_FAILURE_REPLY = "这次图片处理没有成功，请重新发送原图后再试。"
+_superuser_check = superusers().check
+
+
+async def _is_operator(session: Session) -> bool:
+    """Operators are always answered regardless of relationship state."""
+
+    return await _superuser_check(session) is not STOP
 
 
 async def _addressed_to_me(session: Session, is_reply_me: bool = False, is_notice_me: bool = False) -> bool:
@@ -138,6 +148,8 @@ async def on_chat(session: Session, ctx: Contexts):
         forwarded_messages=forwarded_messages,
         warn=_LOGGER.warning,
         tool_schemas=registered_tool_schemas,
+        requires_media_reply=require_text_reply,
+        is_operator=await _is_operator(session),
     )
     rel = prepared.relation
     mood = prepared.mood
@@ -150,6 +162,21 @@ async def on_chat(session: Session, ctx: Contexts):
     delivery_state = prepared.delivery_state
     channel_image_references = prepared.channel_image_references
     turn = prepared.lifecycle
+    engagement = prepared.engagement
+    feedback = turn_feedback(prepared.engagement_signals, declined=not engagement.replies)
+    if not engagement.replies:
+        # Deliberate silence is a normal terminal state, not a generation failure.
+        await record_declined_turn(channel_id, user_id, user_name)
+        await persist_turn_feedback(
+            user_id=user_id,
+            channel_id=channel_id,
+            relation=rel,
+            user_mood=mood,
+            feedback=feedback,
+        )
+        await turn.finalize_agent_turn("declined")
+        _LOGGER.info(f"engagement declined reply: {'; '.join(engagement.reasons)}")
+        return BLOCK
     agent_events = prepared.agent_events
     agent_access = prepared.agent_access
     turn_status = "failed"
@@ -219,6 +246,13 @@ async def on_chat(session: Session, ctx: Contexts):
             assistant_reply=assistant_reply,
             mood=mood,
             warn=_LOGGER.warning,
+        )
+        await persist_turn_feedback(
+            user_id=user_id,
+            channel_id=channel_id,
+            relation=rel,
+            user_mood=mood,
+            feedback=feedback,
         )
         return BLOCK
     finally:

@@ -368,6 +368,7 @@ class TestComposePrompt:
             "relevant_memories",
             "agent_session",
             "recent_impression",
+            "reply_intent",
         ]
         assert runtime["current_state"] == {
             "mood": "平静",

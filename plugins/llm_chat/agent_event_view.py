@@ -19,12 +19,31 @@ _MEME_FILE_ENDPOINT = "/api/llm-chat/memes/files"
 
 EVENT_TITLES = {
     "user_input": "用户输入",
+    "engagement_decision": "回应意向",
     "model_attempt": "模型调用",
     "assistant_tool_call": "工具调用",
     "tool_result": "工具结果",
     "assistant_output": "最终回复",
     "context_selection": "上下文选择",
     "persona_state": "人格与记忆",
+}
+ENGAGEMENT_LEVEL_LABELS = {
+    "full": "完整回应",
+    "brief": "简短回应",
+    "reaction_only": "仅轻回应",
+    "declined": "不回应",
+}
+ENGAGEMENT_WARMTH_LABELS = {
+    "cold": "冷淡",
+    "neutral": "平稳",
+    "warm": "亲近",
+    "close": "亲昵",
+}
+ENGAGEMENT_TONES = {
+    "cold": "语气克制冷淡，只回答必要内容",
+    "neutral": "语气平稳自然",
+    "warm": "语气自然亲近，可适度延伸话题",
+    "close": "语气亲昵主动，愿意主动关心",
 }
 _FIELD_LABELS = {
     "affection": "好感",
@@ -345,6 +364,36 @@ def event_persona(event: AgentEvent, payload: Mapping[str, JSONType]) -> dict[st
     }
 
 
+def event_engagement(event: AgentEvent, payload: Mapping[str, JSONType]) -> dict[str, JSONType] | None:
+    """Project one reply-intent decision for the WebUI."""
+
+    if event.event_type != "engagement_decision" or not payload:
+        return None
+    level = _scalar_text(payload.get("level"))
+    warmth = _scalar_text(payload.get("warmth"))
+    budget = payload.get("budget")
+    signals = payload.get("signals")
+    reasons = payload.get("reasons")
+    return {
+        "level": level,
+        "level_label": ENGAGEMENT_LEVEL_LABELS.get(level, level),
+        "warmth": warmth,
+        "warmth_label": ENGAGEMENT_WARMTH_LABELS.get(warmth, warmth),
+        "tone": ENGAGEMENT_TONES.get(warmth, ""),
+        "obligated": payload.get("obligated") is True,
+        "reasons": cast(
+            JSONType,
+            [
+                text
+                for item in (reasons if isinstance(reasons, Sequence) and not isinstance(reasons, (str, bytes)) else ())
+                if (text := _scalar_text(item, 200))
+            ],
+        ),
+        "budget": cast(JSONType, dict(budget) if isinstance(budget, Mapping) else {}),
+        "signals": cast(JSONType, dict(signals) if isinstance(signals, Mapping) else {}),
+    }
+
+
 def serialize_event_view(event: AgentEvent, payload: Mapping[str, JSONType]) -> dict[str, object]:
     """Build the WebUI presentation fields for one durable event."""
 
@@ -356,5 +405,6 @@ def serialize_event_view(event: AgentEvent, payload: Mapping[str, JSONType]) -> 
         "result": _payload_section(payload, "result"),
         "evidence": event_evidence(payload),
         "persona": event_persona(event, payload),
+        "engagement": event_engagement(event, payload),
         "payload_chars": len(event.payload_json or ""),
     }
