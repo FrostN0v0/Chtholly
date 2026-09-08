@@ -14,7 +14,7 @@ from .core.types import ChatMessage
 from .agent_events import load_event_payload, load_session_events
 from .session_manager import BaselineFingerprint
 
-SYSTEM_SCAFFOLD_VERSION = "agent-context-v1"
+SYSTEM_SCAFFOLD_VERSION = "agent-context-v2"
 AGENT_POLICY_VERSION = "agent-events-v1"
 _ARCHIVED_CONTEXT_TERMS = (
     "上次",

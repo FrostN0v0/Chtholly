@@ -21,11 +21,14 @@ def register_markdown2pic(
     async def markdown2pic(session: Session, markdown: str, width: int = DEFAULT_RENDER_WIDTH) -> str:
         """Render self-contained Markdown as one image and send it.
 
-        Use this for Markdown tables, multi-column comparisons, long structured reports, or mixed headings and code
-        that are substantially easier to read as an image. Keep ordinary short replies and copy-critical code as text.
-        The image uses Inter with Noto Sans SC/CJK SC for Chinese fallback. The Markdown must not embed scripts, event
-        handlers, remote or local images, stylesheets, or other resources. This tool sends the image itself and consumes
-        one media delivery; do not repeat the rendered content afterward.
+        Use this for fenced code blocks, configuration examples, Markdown tables, multi-column comparisons, long
+        structured reports, or mixed headings and code. When explanation accompanies rendered material, render the
+        complete code or Markdown first, then send only the necessary explanation as separate text messages; never
+        combine a long code block and prose into one text message or repeat rendered content. Keep code as text only
+        when the user explicitly needs copyable source or the snippet is at most three short lines. The image uses
+        Inter with Noto Sans SC/CJK SC for Chinese fallback. The Markdown must not embed scripts, event handlers,
+        remote or local images, stylesheets, or other resources. This tool sends the image itself and consumes one
+        media delivery.
 
         Args:
             markdown (str): Complete Markdown source to render, including any table syntax.

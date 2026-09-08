@@ -1164,6 +1164,7 @@ async def test_actual_media_tool_schemas_encourage_proactive_expression(
         image_schema = schemas["send_image"]
         speak_schema = schemas["speak"]
         generated_image_schema = schemas["generate_image"]
+        markdown_schema = schemas["markdown2pic"]
         voice_catalog_schema = schemas["list_tts_voices"]
 
         assert "Use proactively for explicit requests and natural emotional reactions" in image_schema["description"]
@@ -1183,6 +1184,11 @@ async def test_actual_media_tool_schemas_encourage_proactive_expression(
             "1536x1024",
             "1024x1536",
         ]
+
+        assert "fenced code blocks, configuration examples" in markdown_schema["description"]
+        assert "complete code or Markdown first" in markdown_schema["description"]
+        assert "separate text messages" in markdown_schema["description"]
+        assert "explicitly needs copyable source" in markdown_schema["description"]
 
         assert voice_catalog_schema["parameters"]["required"] == []
         assert set(voice_catalog_schema["parameters"]["properties"]) == {"refresh"}
