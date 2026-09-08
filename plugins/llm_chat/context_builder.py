@@ -135,81 +135,117 @@ def _compact_payload(value: object, *, event_ref: str, path: str, inline_chars: 
     }
 
 
+def _event_tool_call_id(event: AgentEvent) -> str:
+    return event.tool_call_id or event.execution_ref or event.event_ref
+
+
+def _tool_call_item(event: AgentEvent, *, inline_chars: int) -> dict[str, object]:
+    payload = load_event_payload(event)
+    arguments = _compact_payload(
+        payload.get("arguments", {}),
+        event_ref=event.event_ref,
+        path="arguments",
+        inline_chars=inline_chars,
+    )
+    return {
+        "id": _event_tool_call_id(event),
+        "type": "function",
+        "function": {
+            "name": event.tool_name,
+            "arguments": json.dumps(arguments, ensure_ascii=False, separators=(",", ":")),
+        },
+    }
+
+
+def _tool_result_message(event: AgentEvent, *, inline_chars: int) -> ChatMessage:
+    payload = load_event_payload(event)
+    result = _compact_payload(
+        payload.get("result", {}),
+        event_ref=event.event_ref,
+        path="result",
+        inline_chars=inline_chars,
+    )
+    return {
+        "role": "tool",
+        "tool_call_id": _event_tool_call_id(event),
+        "name": event.tool_name,
+        "content": json.dumps(
+            {
+                "ok": event.status == "succeeded",
+                "status": event.status,
+                "effect": event.effect,
+                "event_ref": event.event_ref,
+                "data": result,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+    }
+
+
 def _turn_messages(
-    turn: AgentTurn,
+    _turn: AgentTurn,
     events: Sequence[AgentEvent],
     *,
     inline_chars: int,
 ) -> list[ChatMessage]:
     messages: list[ChatMessage] = []
-    pending_tool_calls: set[str] = set()
-    for event in events:
+    event_index = 0
+    while event_index < len(events):
+        event = events[event_index]
         payload = load_event_payload(event)
         if event.event_type == "user_input":
             content = payload.get("content")
             if isinstance(content, str) and content:
                 messages.append({"role": "user", "content": content})
+            event_index += 1
             continue
         if event.event_type == "assistant_tool_call":
-            arguments = _compact_payload(
-                payload.get("arguments", {}),
-                event_ref=event.event_ref,
-                path="arguments",
-                inline_chars=inline_chars,
-            )
-            tool_call_id = event.tool_call_id or event.execution_ref or event.event_ref
-            pending_tool_calls.add(tool_call_id)
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": tool_call_id,
-                            "type": "function",
-                            "function": {
-                                "name": event.tool_name,
-                                "arguments": json.dumps(arguments, ensure_ascii=False, separators=(",", ":")),
-                            },
-                        }
-                    ],
-                }
-            )
-            continue
-        if event.event_type == "tool_result":
-            tool_call_id = event.tool_call_id or event.execution_ref or event.event_ref
-            if tool_call_id not in pending_tool_calls:
+            attempt = event.attempt
+            call_events: list[AgentEvent] = []
+            while (
+                event_index < len(events)
+                and events[event_index].event_type == "assistant_tool_call"
+                and events[event_index].attempt == attempt
+            ):
+                call_events.append(events[event_index])
+                event_index += 1
+
+            result_events: list[AgentEvent] = []
+            while (
+                event_index < len(events)
+                and events[event_index].event_type == "tool_result"
+                and events[event_index].attempt == attempt
+            ):
+                result_events.append(events[event_index])
+                event_index += 1
+
+            result_ids = {_event_tool_call_id(result_event) for result_event in result_events}
+            included_ids: set[str] = set()
+            tool_calls: list[dict[str, object]] = []
+            for call_event in call_events:
+                tool_call_id = _event_tool_call_id(call_event)
+                if tool_call_id not in result_ids or tool_call_id in included_ids:
+                    continue
+                included_ids.add(tool_call_id)
+                tool_calls.append(_tool_call_item(call_event, inline_chars=inline_chars))
+            if not tool_calls:
                 continue
-            pending_tool_calls.remove(tool_call_id)
-            result = _compact_payload(
-                payload.get("result", {}),
-                event_ref=event.event_ref,
-                path="result",
-                inline_chars=inline_chars,
-            )
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "name": event.tool_name,
-                    "content": json.dumps(
-                        {
-                            "ok": event.status == "succeeded",
-                            "status": event.status,
-                            "effect": event.effect,
-                            "event_ref": event.event_ref,
-                            "data": result,
-                        },
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                }
-            )
+
+            messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
+            emitted_results: set[str] = set()
+            for result_event in result_events:
+                tool_call_id = _event_tool_call_id(result_event)
+                if tool_call_id not in included_ids or tool_call_id in emitted_results:
+                    continue
+                emitted_results.add(tool_call_id)
+                messages.append(_tool_result_message(result_event, inline_chars=inline_chars))
             continue
         if event.event_type == "assistant_output":
             content = payload.get("content")
             if isinstance(content, str) and content:
                 messages.append({"role": "assistant", "content": content})
+        event_index += 1
     return messages
 
 
