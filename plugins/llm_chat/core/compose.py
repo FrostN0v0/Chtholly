@@ -1,10 +1,14 @@
 """Pure persona composition from independent relationship bands and additive combinations."""
 
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from collections.abc import Mapping
 
 from .prompts import SYSTEM_SCAFFOLD, build_delivery_tool_contract, build_web_tool_budget_contract
 from .delivery import DEFAULT_DELIVERY_LIMITS, DeliveryLimits
+
+_PERSONA_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 def derive_relationship_style(
@@ -91,8 +95,11 @@ def energy_desc(energy: float) -> str:
     return "有点困倦、回复慵懒简短"
 
 
-def energy_at(hour: int) -> float:
-    """Energy as a pure function of local hour (not stored)."""
+def energy_at(moment: datetime) -> float:
+    """Derive energy from Shanghai local time, independent of the host timezone."""
+    if moment.utcoffset() is None:
+        raise ValueError("Persona energy requires a timezone-aware datetime")
+    hour = moment.astimezone(_PERSONA_TIMEZONE).hour
     if 0 <= hour <= 6:
         return 0.3
     if 7 <= hour <= 11:
@@ -162,8 +169,10 @@ def compose_persona_prompt(
         (
             "【本轮回应强度】",
             "runtime_context.reply_intent 是系统已经决定的本轮回应强度，必须服从，不得自行放宽：",
-            "level=full 时按正常节奏回应；level=brief 时只给一到两条短回应；"
-            "level=reaction_only 时只给一条极短回应或一个表情。",
+            "For ordinary chat text, level=full uses the normal rhythm, level=brief uses one or two short replies, "
+            "and level=reaction_only uses one very short reply or an unsolicited reaction. "
+            "These style limits do not remove explicitly requested media deliverables; complete them within the "
+            "effective media allowance in the delivery contract. A preview and its source image are separate items.",
             "allow_followup_question 为 false 时不得反问；allow_topic_extension 为 false 时不得延伸新话题。",
             "tone 描述本轮应有的语气，须自然体现在措辞里；不得复述这些字段，也不得解释或抱怨自己受到限制。",
         )

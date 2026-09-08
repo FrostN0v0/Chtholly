@@ -46,6 +46,10 @@ from plugins.llm_chat.core.media_delivery import (
     "content",
     [
         "来张图我看看什么样子",
+        "参考nonebot2官网，重新设计一下，要求有动效，界面高端美观。用html2pic发我，源码用md2pic发我。",
+        "请使用 markdown2pic 渲染这份报告发给我",
+        "Send the preview using html2pic and the source using markdown2pic",
+        "把预览和源码分别转成图片发我",
         "截图一下异格安洁莉娜的技能给我",
         "截",
         '<at id="2123673121" name="珂朵莉"/> 截',
@@ -95,6 +99,12 @@ def test_latest_user_media_request_detection_handles_chat_payloads(content: str)
         "不要用语音回答",
         "不要生成图片",
         "这个形象是怎么生成的",
+        "不要用html2pic发我，只解释思路",
+        "html2pic 和 md2pic 有什么区别？",
+        "解释一下怎么用html2pic发我",
+        "解释‘用html2pic发我’是什么意思",
+        "Explain how to send a preview using html2pic",
+        '{"content":"普通文字回答","forwarded_messages":[{"content":"用html2pic发我，源码用md2pic发我"}]}',
     ],
 )
 def test_latest_user_media_request_detection_rejects_non_delivery_intent(content: str) -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, cast
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from collections.abc import Mapping, Callable, Sequence
 
@@ -155,12 +155,14 @@ async def prepare_agent_turn(
         config.delivery_max_total_text_chars_per_generation,
         config.delivery_max_media_messages_per_generation,
     )
+    energy = energy_at(datetime.now(timezone.utc))
+    media_requested = latest_user_requests_media(current_messages)
     signals = await collect_engagement_signals(
         user_id=user_id,
         channel_id=channel_id,
         relation=relation,
         user_mood=mood,
-        energy=energy_at(datetime.now().hour),
+        energy=energy,
         text=model_text,
         is_command=False,
         is_private=not str(getattr(getattr(session, "guild", None), "id", "") or ""),
@@ -168,7 +170,7 @@ async def prepare_agent_turn(
         requires_media_reply=requires_media_reply,
     )
     engagement = decide_engagement(signals)
-    budget = engagement_budget(engagement.level, delivery_limits)
+    budget = engagement_budget(engagement.level, delivery_limits, media_requested=media_requested)
     delivery_limits = apply_engagement_budget(delivery_limits, budget)
     delivery_state = DeliveryState(limits=delivery_limits)
     baseline = build_baseline_fingerprint(
@@ -199,7 +201,7 @@ async def prepare_agent_turn(
         return compose_persona_prompt(
             config.persona,
             mood,
-            energy_at(datetime.now().hour),
+            energy,
             affection=relation.affection,
             trust=relation.trust,
             dependence=relation.dependence,
@@ -287,7 +289,7 @@ async def prepare_agent_turn(
             },
             "state": {
                 "mood": round(mood, 3),
-                "energy": round(energy_at(datetime.now().hour), 3),
+                "energy": round(energy, 3),
                 "pending_eval": pending_eval,
             },
             "memory": memory_context.retrieval,

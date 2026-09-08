@@ -469,7 +469,11 @@ def _install_handler_stubs(
             is_operator=is_operator,
         )
         engagement_decision = decide_engagement(engagement_signals)
-        engagement_allowance = engagement_budget(engagement_decision.level, delivery_state.limits)
+        engagement_allowance = engagement_budget(
+            engagement_decision.level,
+            delivery_state.limits,
+            media_requested=latest_user_requests_media(messages),
+        )
         lifecycle = ActiveChatTurn(
             channel_id=session.channel.id,
             user_message_id=user_message_id,

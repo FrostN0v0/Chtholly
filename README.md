@@ -62,6 +62,8 @@ llmchat hard-reset-session CONFIRM
 
 `new-session` 保留关系、画像和长期记忆，但不继承上一话题；`rollover-session` 携带结构化交接；硬重置只封存模型访问路径，不删除审计事件。
 
+人格作息按上海时区计算；低精力会让文字回复简短，但不会减少明确请求的媒体交付额度（默认每轮最多 6 条）。例如可在同一轮请求 `html2pic` 页面预览和 `markdown2pic` 源码图；图片只显示静态帧，动画效果需运行源码查看。
+
 ## 💖 感谢
 
 - [Entari](https://github.com/ArcletProject/Entari)：基于 Satori 协议的 IM 框架
