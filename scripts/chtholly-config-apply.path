@@ -1,0 +1,14 @@
+[Unit]
+Description=Watch Chtholly configuration saves and explicit restart requests
+After=systemd-tmpfiles-setup.service
+
+[Path]
+PathModified=/opt/chtholly/entari.yml
+PathModified=/run/chtholly-config-apply/restart.request
+PathExists=/var/lib/chtholly-config-apply/next.yml
+Unit=chtholly-config-apply.service
+TriggerLimitIntervalSec=60
+TriggerLimitBurst=30
+
+[Install]
+WantedBy=multi-user.target

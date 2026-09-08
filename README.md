@@ -48,6 +48,12 @@ uv run entari run
 
 更多框架用法见 [Entari 文档](https://arclet.top/tutorial/entari/)。
 
+## WebUI 配置应用
+
+Linux 托管部署启用 `webui_config_apply` 后，配置保存会自动触发完整 Bot 重启，页面右下角显示待应用、重连、成功或失败状态。侧栏“配置应用与重启”也提供手动重启入口；只重启 Bot，不重启 LLBot，重复保存未变配置不会重复重启。
+
+分模型的 `api_key`、`base_url` 留空或删除即可继承全局设置。新凭证先写入环境文件，再在表单中使用环境变量引用；非法配置会在写入前明确报错，不再把“保存成功”当作“已经生效”。管理面板继续仅通过回环地址和 SSH 隧道访问。
+
 ## LLM 会话管理
 
 `llm_chat` 使用按聊天范围隔离的 Session、Turn 与 AgentEvent 保存对话、工具调用和确认交付，并按 Token 预算自动续接会话。登录 Entari WebUI 后可在“LLM 会话”页面查看时间线、上下文选择、结构化交接与固定事件。
