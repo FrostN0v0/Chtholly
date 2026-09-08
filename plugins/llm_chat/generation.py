@@ -19,7 +19,7 @@ from entari_plugin_llm.config import get_model_config
 from .core.media import has_meaningful_text, strip_internal_media_records
 from .core.types import ChatMessage
 from .web.policy import WebAccessLimits, llm_chat_web_access_scope
-from .agno_compat import agno_tool_call_limit_scope, recommended_tool_call_limit
+from .agno_compat import agno_delivery_tool_scope, agno_tool_call_limit_scope, recommended_tool_call_limit
 from .agent_context import AgentAccessContext, agent_access_scope
 from .core.delivery import DeliveryState, llm_chat_delivery_scope, strip_trailing_end_of_response
 from .channel_images import (
@@ -162,10 +162,13 @@ async def _generate_with_tools(
     model: str | None,
     request_timeout: float,
     max_retries: int | None = None,
+    parallel_tool_calls: bool | None = None,
 ) -> GenericResponse[None]:
     request_options: dict[str, Any] = {"timeout": request_timeout}
     if max_retries is not None:
         request_options["max_retries"] = max_retries
+    if parallel_tool_calls is not None:
+        request_options["parallel_tool_calls"] = parallel_tool_calls
     return cast(
         GenericResponse[None],
         await llm.generate(
@@ -252,6 +255,7 @@ async def _recover_requested_media(
                         model=model,
                         request_timeout=request_timeout,
                         max_retries=max_retries,
+                        parallel_tool_calls=False,
                     ),
                     recorder=agent_events,
                     tool_trace=tool_trace,
@@ -302,6 +306,7 @@ async def generate_chat_response(
     active_channel_image_references = channel_image_references or ChannelImageReferences()
     with (
         agno_tool_call_limit_scope(tool_call_limit),
+        agno_delivery_tool_scope(),
         llm_chat_web_access_scope(
             web_limits,
             allow_webpage_screenshots=webpage_screenshot_requested,
@@ -322,6 +327,7 @@ async def generate_chat_response(
                         model=model,
                         request_timeout=generation_timeout,
                         max_retries=generation_max_retries,
+                        parallel_tool_calls=False if media_requested else None,
                     ),
                     recorder=agent_events,
                     tool_trace=active_tool_trace,
