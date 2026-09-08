@@ -128,6 +128,11 @@ plugins:
     session_handoff_max_chars: 6000
     archived_session_read_limit: 10
     event_payload_delivery_max_chars: 12000
+    # A separate HTTPS origin serves only expiring artifacts, never Bot administration.
+    web_artifacts_public_url: ${{ env.get('WEB_ARTIFACT_PUBLIC_ORIGIN', '') }}
+    web_artifacts_capture_url: "http://127.0.0.1:8131/internal/capture"
+    web_artifacts_capture_token: ${{ env.get('WEB_ARTIFACT_CAPTURE_TOKEN', '') }}
+    web_artifacts_ttl_hours: 24
     channel_message_max_images: 12
     self_reference_image: "persona/ChthollyHat.png"
     web_search_enabled: true

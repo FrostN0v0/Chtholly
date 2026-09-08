@@ -44,6 +44,7 @@ from .core.media_delivery import (
     latest_user_requests_webpage_screenshot,
     latest_user_requests_web_image_reference,
 )
+from .core.artifact_access import is_artifact_request
 from .core.tool_trace_safety import sanitize_json
 
 GenerationResponse = GenericResponse[None] | litellm.ModelResponse
@@ -449,11 +450,14 @@ async def generate_chat_response(
         delivery_state.limits.max_media_messages,
     )
     media_requested = latest_user_requests_media(messages)
-    image_edit_requested = latest_user_requests_image_edit(messages)
+    raw_user_text = agent_access.raw_user_text if agent_access is not None else ""
+    artifact_requested = is_artifact_request(raw_user_text)
+    delivery_requested = media_requested or artifact_requested or is_artifact_request(raw_user_text, "send")
+    image_edit_requested = not artifact_requested and latest_user_requests_image_edit(messages)
     webpage_screenshot_requested = latest_user_requests_webpage_screenshot(messages)
-    web_reference_requested = latest_user_requests_web_image_reference(messages)
-    generation_timeout = media_request_timeout if media_requested else request_timeout
-    generation_max_retries = 0 if media_requested else None
+    web_reference_requested = not artifact_requested and latest_user_requests_web_image_reference(messages)
+    generation_timeout = media_request_timeout if delivery_requested else request_timeout
+    generation_max_retries = 0 if delivery_requested else None
     tool_loop_exhausted = False
     active_tool_trace = tool_trace or ToolTraceRecorder()
     active_channel_image_references = channel_image_references or ChannelImageReferences()
@@ -496,7 +500,7 @@ async def generate_chat_response(
                         model=model,
                         request_timeout=generation_timeout,
                         max_retries=generation_max_retries,
-                        parallel_tool_calls=False if media_requested else None,
+                        parallel_tool_calls=False if delivery_requested else None,
                     ),
                     recorder=agent_events,
                     tool_trace=active_tool_trace,

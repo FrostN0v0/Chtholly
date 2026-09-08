@@ -385,6 +385,7 @@ def _install_handler_stubs(
         model_name: str | None,
         supports_image_input: bool,
         model_text: str,
+        raw_user_text: str,
         content: str,
         current_content: object,
         forwarded_messages: list[ForwardedMessage],
@@ -510,7 +511,9 @@ def _install_handler_stubs(
             engagement=engagement_decision,
             engagement_budget=engagement_allowance,
             engagement_signals=engagement_signals,
-            agent_access=AgentAccessContext(10, 20, 30, identity.user_id),
+            agent_access=AgentAccessContext(
+                10, 20, 30, identity.user_id, raw_user_text=raw_user_text, is_operator=is_operator
+            ),
         )
 
     def schedule_after_delivery(

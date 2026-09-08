@@ -22,6 +22,30 @@ _CONFIG_SCHEMA_TEXT = {
     "session_handoff_max_chars": ("交接结果字符上限", "持久化结构化会话交接的最大字符数。"),
     "archived_session_read_limit": ("归档会话读取上限", "模型单次查询最多返回的归档会话数量。"),
     "event_payload_delivery_max_chars": ("事件内容返回上限", "模型单次读取已存事件内容时允许返回的最大字符数。"),
+    "web_artifacts_public_url": (
+        "\u7f51\u9875\u4f5c\u54c1\u516c\u7f51\u5730\u5740",
+        "\u72ec\u7acb\u7684 HTTPS \u9884\u89c8\u57df\u540d"
+        "\uff1b\u7559\u7a7a\u65f6\u5173\u95ed\u4f5c\u54c1\u53d1\u5e03\u4e0e\u6e90\u7801\u5de5"
+        "\u5177\uff0c\u4e0d\u5f97\u4f7f\u7528 Bot \u7ba1\u7406\u57df"
+        "\u540d\u3002",
+    ),
+    "web_artifacts_capture_url": (
+        "\u4f5c\u54c1\u622a\u56fe\u5185\u90e8\u63a5\u53e3",
+        "\u72ec\u7acb\u9884\u89c8\u8fdb\u7a0b\u7684\u56de\u73af\u622a\u56fe\u63a5\u53e3\uff0c"
+        "\u4ec5\u4f9b Bot \u8c03\u7528\uff0c\u4e0d\u5bf9\u516c\u7f51"
+        "\u5f00\u653e\u3002",
+    ),
+    "web_artifacts_capture_token": (
+        "\u4f5c\u54c1\u622a\u56fe\u8bbf\u95ee\u5bc6\u94a5",
+        "\u901a\u8fc7\u73af\u5883\u53d8\u91cf\u6ce8\u5165\u5185\u90e8\u622a\u56fe\u5bc6\u94a5"
+        "\uff1b\u4e0d\u8981\u5728\u8868\u5355\u4e2d\u586b\u5199\u660e\u6587\u5bc6\u94a5\u3002",
+    ),
+    "web_artifacts_ttl_hours": (
+        "\u4f5c\u54c1\u94fe\u63a5\u6709\u6548\u671f",
+        "\u6bcf\u4e2a\u7248\u672c\u7684\u9884\u89c8\u4e0e\u6e90\u7801\u4e0b\u8f7d\u6709\u6548"
+        "\u671f\uff0c\u5355\u4f4d\u5c0f\u65f6\uff1b\u9ed8\u8ba4 24\uff0c\u6700"
+        "\u591a 168\u3002",
+    ),
     "merged_forward_fetch_timeout": ("合并转发读取超时", "单次调用 OneBot get_forward_msg 的超时时间（秒）。"),
     "merged_forward_max_messages": ("合并转发节点上限", "单次生成最多读取的合并转发消息节点数。"),
     "merged_forward_max_chars_per_message": ("单节点字符上限", "每个合并转发节点规范化后最多保留的字符数。"),

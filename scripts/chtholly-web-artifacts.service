@@ -1,0 +1,46 @@
+[Unit]
+Description=Chtholly isolated web artifact previews
+After=network.target chtholly.service
+
+[Service]
+Type=simple
+User=chtholly
+Group=chtholly
+WorkingDirectory=/opt/chtholly
+EnvironmentFile=/etc/chtholly/web-artifacts.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/chtholly/.playwright
+ExecStart=/opt/chtholly/.venv/bin/python -m utils.web_artifacts_server --root /srv/chtholly-web-artifacts --host 127.0.0.1 --port 8131 --public-origin ${WEB_ARTIFACT_PUBLIC_ORIGIN}
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivatePIDs=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+IPAddressDeny=any
+IPAddressAllow=localhost
+BindReadOnlyPaths=/opt/chtholly/.chtholly/data/llm_chat/web_artifacts:/srv/chtholly-web-artifacts
+InaccessiblePaths=-/etc/chtholly -/opt/chtholly/.env -/opt/chtholly/entari.yml -/opt/chtholly/data -/opt/llbot -/var/lib/chtholly/backups -/var/lib/chtholly/config-apply
+InaccessiblePaths=-/opt/chtholly/.chtholly -/opt/chtholly/.entari -/opt/chtholly/config -/opt/chtholly/resources
+InaccessiblePaths=-/run/systemd/resolve -/run/dbus
+MemoryMax=1G
+CPUQuota=150%
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

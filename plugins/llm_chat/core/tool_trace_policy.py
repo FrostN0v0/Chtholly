@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 
 from .types import JSONType
 from .errors import summarize_exception
+from .artifact_records import ARTIFACT_TOOLS, project_artifact_result, project_artifact_arguments
 from .tool_trace_safety import (
     MAX_RESULT_TEXT,
     MAX_WEB_SOURCES,
@@ -30,6 +31,7 @@ ToolEffect = Literal["observed", "confirmed", "partial", "none", "unknown"]
 _DELIVERY_TOOLS = {
     "edit_image",
     "send_audio",
+    "send_artifact",
     "send_external_image",
     "send_channel_image",
     "send_image",
@@ -44,6 +46,8 @@ _OBSERVATION_TOOLS = {
     "get_local_time",
     "list_image_resources",
     "list_tts_voices",
+    "list_web_artifacts",
+    "read_web_artifact",
     "read_channel_messages",
     "read_web_page",
     "capture_web_reference",
@@ -64,6 +68,8 @@ class DeliverySnapshot:
 def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> dict[str, JSONType]:
     """Retain only parameters needed for later continuity."""
 
+    if tool_name in ARTIFACT_TOOLS:
+        return project_artifact_arguments(tool_name, arguments)
     if tool_name == "web_search":
         return selected_arguments(arguments, "query")
     if tool_name == "read_web_page":
@@ -175,6 +181,10 @@ def project_tool_success(
         return "failed", "none", outcome
     if tool_name == "call_plugin" and _command_was_rejected(result):
         return "rejected", "none", outcome
+    if tool_name in {"publish_web_preview", "revoke_web_preview"}:
+        if outcome.get("artifact_ref"):
+            return "succeeded", "confirmed", outcome
+        return "failed", "none", outcome
     if tool_name in _DELIVERY_TOOLS:
         effect = delivery_effect(before, after, terminal_status="succeeded")
         if before.active and effect == "none":
@@ -248,7 +258,7 @@ def tool_error_effect(
 ) -> ToolEffect:
     """Return partial delivery only for side-effect tools with confirmed prefixes."""
 
-    if tool_name not in _DELIVERY_TOOLS:
+    if tool_name not in _DELIVERY_TOOLS and tool_name != "publish_web_preview":
         return "none"
     return delivery_effect(before, after, terminal_status=terminal_status)
 
@@ -260,6 +270,12 @@ def _project_tool_result(
     before: DeliverySnapshot,
     after: DeliverySnapshot,
 ) -> dict[str, JSONType]:
+    if tool_name in ARTIFACT_TOOLS:
+        return {
+            **project_artifact_result(result),
+            "confirmed_deliveries": max(0, after.confirmed - before.confirmed),
+            "confirmed_media_deliveries": max(0, after.confirmed_media - before.confirmed_media),
+        }
     if tool_name == "web_search" and isinstance(result, Mapping):
         raw_results = result.get("results")
         result_items = (
