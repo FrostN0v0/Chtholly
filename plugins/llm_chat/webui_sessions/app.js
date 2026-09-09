@@ -60,6 +60,10 @@ function date(value) {
   return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString();
 }
 function number(value) { return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : "未知"; }
+function duration(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "耗时未记录";
+  return value < 1000 ? `${number(value)} ms` : `${(value / 1000).toFixed(value < 10000 ? 2 : 1)} s`;
+}
 function status(message, error = false) {
   $("status").textContent = message;
   $("status").classList.toggle("error", error);
@@ -89,6 +93,18 @@ function section(title, note = "") {
   item.append(node("h3", "", title));
   if (note) item.append(node("p", "muted", note));
   return item;
+}
+function disclosure(title, note = "", className = "") {
+  const item = node("details", `section disclosure ${className}`.trim());
+  item.dataset.detailKey = title;
+  const summary = node("summary", "disclosure-summary");
+  const heading = node("span", "disclosure-heading");
+  heading.append(node("strong", "disclosure-title", title));
+  if (note) heading.append(node("span", "disclosure-note", note));
+  summary.append(heading);
+  const content = node("div", "disclosure-content");
+  item.append(summary, content);
+  return { item, summary, content };
 }
 function rawDetails(title, value) {
   const item = node("details", "raw-details");
@@ -259,6 +275,7 @@ async function selectTurn(turn) {
 function renderWorkspace() {
   const header = $("turn-header");
   header.replaceChildren();
+  $("collapse-details-button").disabled = !state.inspection;
   if (!state.inspection) {
     header.append(node("p", "", state.turn ? "正在读取轮次…" : "请选择一个轮次。"));
     for (const id of ["timeline-view", "context-view", "io-view"]) empty($(id), state.turn ? "正在读取…" : "请选择一个轮次。");
@@ -273,42 +290,52 @@ function renderWorkspace() {
 }
 function callPanel(title, preview, ref, path = "") {
   const panel = node("div", "call-panel");
-  panel.append(node("h4", "", title));
-  panel.append(node("pre", "code preview", !ref ? "本轮未记录" : preview == null ? "摘要未记录" : text(preview)));
-  panel.append(eventButton(ref, `查看${title}详情`, path));
-  panel.append(node("p", "muted", "上方仅为摘要；详情可分段加载。"));
+  const heading = node("div", "call-panel-heading");
+  heading.append(node("h4", "", title), eventButton(ref, "查看完整内容", path));
+  const value = !ref ? "本轮未记录" : preview == null ? "摘要未记录" : text(preview);
+  panel.append(heading, node("pre", `preview ${typeof preview === "object" && preview !== null ? "code" : "prose"}`, value));
   return panel;
 }
 function modelCard(call, index) {
-  const card = section(`模型请求 ${index + 1} · ${call.model || "模型未记录"}`);
-  card.dataset.recordKey = call.request_id || call.request_event_ref || call.response_event_ref;
-  const meta = node("div", "actions");
-  meta.append(badge(call.status), node("span", "muted", `耗时 ${call.duration_ms == null ? "未知" : `${number(call.duration_ms)} ms`} · 尝试 ${call.attempt ?? "未知"} · ${label(call.capture_status)}`));
-  card.append(meta, node("p", "muted", usageText(call.usage)));
+  const { item, summary, content } = disclosure(`模型请求 ${index + 1}`, call.model || "模型未记录", "record-card model-record");
+  item.dataset.recordKey = `model:${call.request_id || call.request_event_ref || call.response_event_ref || index}`;
+  item.dataset.detailKey = "record";
+  const kind = node("span", "record-kind", "M");
+  kind.setAttribute("aria-hidden", "true");
+  summary.prepend(kind);
+  const meta = node("span", "record-meta");
+  meta.append(badge(call.status), node("span", "record-duration", duration(call.duration_ms)));
+  summary.append(meta);
+  content.append(node("p", "muted", `${usageText(call.usage)} · 尝试 ${call.attempt ?? "未知"} · ${label(call.capture_status)}`));
   const panels = node("div", "call-panels");
   panels.append(callPanel("模型输入", call.input_preview, call.request_event_ref), callPanel("模型输出", call.output_preview, call.response_event_ref));
-  card.append(panels, rawDetails("请求标识与统计", { request_id: call.request_id, request_event_ref: call.request_event_ref, response_event_ref: call.response_event_ref, usage: call.usage }));
-  return card;
+  content.append(panels, rawDetails("请求标识与统计", { request_id: call.request_id, request_event_ref: call.request_event_ref, response_event_ref: call.response_event_ref, usage: call.usage }));
+  return item;
 }
-function toolCard(call) {
-  const card = section(`工具 · ${call.tool_name || "工具名未记录"}`);
-  card.dataset.recordKey = call.execution_ref || call.call_event_ref || call.result_event_ref;
-  const meta = node("div", "actions");
-  meta.append(badge(call.status), node("span", "muted", `副作用：${label(call.effect)} · 耗时 ${call.duration_ms == null ? "未知" : `${number(call.duration_ms)} ms`}`));
+function toolCard(call, index) {
+  const { item, summary, content } = disclosure(call.tool_name || "工具名未记录", "工具调用", "record-card tool-record");
+  item.dataset.recordKey = `tool:${call.execution_ref || call.call_event_ref || call.result_event_ref || index}`;
+  item.dataset.detailKey = "record";
+  const kind = node("span", "record-kind", "T");
+  kind.setAttribute("aria-hidden", "true");
+  summary.prepend(kind);
+  const meta = node("span", "record-meta");
+  meta.append(badge(call.status), node("span", "record-duration", duration(call.duration_ms)));
+  summary.append(meta);
+  content.append(node("p", "muted", `交付状态：${label(call.effect)}`));
   const panels = node("div", "call-panels");
   const argumentsPanel = callPanel("调用参数", call.arguments_preview, call.call_event_ref, call.arguments_path || "");
   const resultPanel = callPanel("返回结果", call.result_preview, call.result_event_ref, call.result_path || "");
   argumentsPanel.append(node("p", "muted", `参数捕获：${label(call.arguments_capture_status || "not_recorded")}`));
   resultPanel.append(node("p", "muted", `结果捕获：${label(call.result_capture_status || "not_recorded")}`));
   panels.append(argumentsPanel, resultPanel);
-  card.append(meta, panels);
   const records = node("div", "actions");
   records.append(eventButton(call.call_event_ref, "调用原始记录 / 脱敏说明"), eventButton(call.result_event_ref, "结果原始记录 / 脱敏说明"));
-  card.append(records);
-  if (call.evidence != null) card.append(rawDetails("执行证据摘要", call.evidence));
-  appendImages(card, call);
-  card.append(rawDetails("执行标识", { execution_ref: call.execution_ref, call_event_ref: call.call_event_ref, result_event_ref: call.result_event_ref }));
-  return card;
+  content.append(panels, records);
+  if (call.evidence != null) content.append(rawDetails("执行证据摘要", call.evidence));
+  appendImages(content, call);
+  content.append(rawDetails("执行标识", { execution_ref: call.execution_ref, call_event_ref: call.call_event_ref, result_event_ref: call.result_event_ref }));
+  return item;
 }
 function renderTimeline() {
   const target = $("timeline-view");
@@ -316,9 +343,12 @@ function renderTimeline() {
   const inspection = state.inspection;
   const calls = [
     ...(inspection.model_calls || []).map((call, index) => ({ ref: call.request_event_ref || call.response_event_ref, card: () => modelCard(call, index) })),
-    ...(inspection.tool_calls || []).map((call) => ({ ref: call.call_event_ref || call.result_event_ref, card: () => toolCard(call) })),
+    ...(inspection.tool_calls || []).map((call, index) => ({ ref: call.call_event_ref || call.result_event_ref, card: () => toolCard(call, index) })),
   ];
   calls.sort((a, b) => (eventByRef(a.ref)?.sequence ?? Infinity) - (eventByRef(b.ref)?.sequence ?? Infinity));
+  const overview = node("div", "timeline-overview");
+  overview.append(node("h3", "", "执行记录"), node("p", "muted", `${inspection.model_calls?.length || 0} 次模型请求 · ${inspection.tool_calls?.length || 0} 次工具调用 · 点击记录展开详情`));
+  target.append(overview);
   if (!calls.length) empty(target, "本轮未记录模型请求或工具调用；不以生成尝试推断实际请求。");
   for (const call of calls) target.append(call.card());
   const audit = node("details", "audit-list");
@@ -336,34 +366,35 @@ function renderContext() {
   const context = state.inspection.context;
   if (!context?.captured) return empty(target, "本轮未记录上下文注入快照。旧审计记录无法还原实际请求，不使用当前配置代替。");
   const ref = context.event_ref;
-  const overview = section("实际注入快照", "来自本轮开始时的记录；模型请求详情反映各次调用的后续消息变化。");
-  const links = node("div", "actions");
-  for (const [path, title] of [["system", "完整系统指令"], ["messages", "实际选中消息"], ["persona", "人格快照"], ["", "完整快照"]]) links.append(eventButton(ref, title, path));
+  const overview = section("本轮注入快照", "保留本轮开始时的原始记录，不代表当前配置。修改人格后，请查看新轮次的快照。");
+  const links = node("div", "actions snapshot-links");
+  for (const [path, title] of [["persona", "本轮人格快照"], ["system", "完整系统指令"], ["messages", "实际选中消息"], ["", "完整快照"]]) links.append(eventButton(ref, title, path));
   overview.append(node("p", "", `${personaName(state.inspection.persona)} · ${label(context.capture_status || "not_recorded")}`), links);
   target.append(overview);
-  const budgets = section("记录的上下文预算");
+  const budgets = disclosure("上下文预算", "输入上限、预留额度与实际估算");
   const values = context.budgets;
   if (values && Object.keys(values).length) {
     const list = node("dl", "fields");
     for (const [key, value] of Object.entries(values)) list.append(node("dt", "", label(key)), node("dd", "", text(value)));
-    budgets.append(list);
-  } else budgets.append(node("p", "muted", "本轮未记录"));
-  budgets.append(eventButton(ref, "预算原始记录", "budgets"));
-  target.append(budgets);
-  const selection = section("选中与排除的历史", "查看选中 / 排除轮次证据与输入估算，不以当前历史重算。");
-  selection.append(rawDetails("展开选择证据", context.selection ?? null), eventButton(ref, "完整选择记录", "selection"));
-  target.append(selection);
-  const blocks = section("注入内容", "命名块来自最终系统指令中的实际内容；人格设定与固定规则请查看完整系统指令。");
-  if (!Array.isArray(context.blocks)) blocks.append(node("p", "muted", "本轮未记录命名块"));
-  else if (!context.blocks.length) blocks.append(node("p", "muted", "已记录：无命名注入块"));
+    budgets.content.append(list);
+  } else budgets.content.append(node("p", "muted", "本轮未记录"));
+  budgets.content.append(eventButton(ref, "预算原始记录", "budgets"));
+  target.append(budgets.item);
+  const selection = disclosure("历史选择", "选中与排除的轮次证据，不以当前历史重算");
+  selection.content.append(rawDetails("选择证据", context.selection ?? null), eventButton(ref, "完整选择记录", "selection"));
+  target.append(selection.item);
+  const blockCount = Array.isArray(context.blocks) ? `${context.blocks.length} 个命名块` : "命名块未记录";
+  const blocks = disclosure("注入内容", blockCount);
+  if (!Array.isArray(context.blocks)) blocks.content.append(node("p", "muted", "本轮未记录命名块"));
+  else if (!context.blocks.length) blocks.content.append(node("p", "muted", "已记录：无命名注入块"));
   else for (const [index, block] of context.blocks.entries()) {
     const row = node("div", "block-row");
     row.append(node("strong", "", label(block.name)), node("span", "muted", `${number(block.chars)} 字符`), eventButton(ref, "查看注入内容", `${block.path || `blocks.${index}`}.content`));
     if (block.preview != null) row.append(node("p", "snippet", short(block.preview)));
-    blocks.append(row);
+    blocks.content.append(row);
   }
-  blocks.append(eventButton(ref, "全部注入块", "blocks"));
-  target.append(blocks);
+  blocks.content.append(eventButton(ref, "全部注入块", "blocks"));
+  target.append(blocks.item);
 }
 function appendImages(target, event) {
   if (!event?.images?.length) return;
@@ -390,10 +421,13 @@ function appendImages(target, event) {
   }
   target.append(grid);
 }
-function ioEvent(event, title) {
-  const card = section(title);
-  card.append(node("pre", "code preview", eventPreview(event) ?? "摘要未记录"), eventButton(event.event_ref, "查看完整记录"));
-  appendImages(card, event);
+function ioEvent(event, title, recordKey) {
+  const preview = eventPreview(event);
+  const card = disclosure(title, preview == null ? "摘要未记录" : short(preview, 110), "message-record");
+  card.item.dataset.recordKey = recordKey;
+  card.item.dataset.detailKey = "record";
+  card.content.append(node("pre", "prose preview", preview ?? "摘要未记录"), eventButton(event.event_ref, "查看完整记录"));
+  appendImages(card.content, event);
   return card;
 }
 function renderIO() {
@@ -401,20 +435,16 @@ function renderIO() {
   target.replaceChildren();
   const inputs = state.events.filter((event) => event.event_type === "user_input");
   if (!inputs.length) target.append(section("用户输入", "本轮未记录"));
-  for (const event of inputs) target.append(ioEvent(event, "用户输入"));
+  for (const [index, event] of inputs.entries()) target.append(ioEvent(event, "用户输入", `input:${event.event_ref || index}`).item);
   const outputs = state.inspection.outputs || [];
   if (!outputs.length) target.append(section("确认输出", "本轮没有已确认的输出记录；不把模型响应当作已送达消息。"));
-  for (const output of outputs) {
-    const event = eventByRef(output.event_ref);
-    const card = event ? ioEvent(event, "确认输出") : section("确认输出");
-    if (!event) {
-      card.append(node("pre", "code preview", eventPreview(output) ?? "摘要未记录"), eventButton(output.event_ref, "查看完整记录"));
-      appendImages(card, output);
-    }
-    card.append(rawDetails("送达记录", output));
-    target.append(card);
+  for (const [index, output] of outputs.entries()) {
+    const event = eventByRef(output.event_ref) || output;
+    const card = ioEvent(event, "确认输出", `output:${output.event_ref || index}`);
+    card.content.append(rawDetails("送达记录", output));
+    target.append(card.item);
   }
-  const advanced = node("details");
+  const advanced = node("details", "raw-details");
   advanced.append(node("summary", "", "高级轮次信息"), node("pre", "code", text(state.inspection.turn)));
   target.append(advanced);
 }
@@ -423,12 +453,13 @@ function refreshPanels() {
   const detailKey = (item) => [
     item.closest(".view, #session-detail, #turn-header")?.id,
     item.closest("[data-record-key]")?.dataset.recordKey,
-    item.classList.contains("usage-details") ? "usage" : item.querySelector("summary")?.textContent,
+    item.dataset.detailKey || (item.classList.contains("usage-details") ? "usage" : item.querySelector("summary")?.textContent),
   ].join("|");
   const opened = new Set([...document.querySelectorAll(".workspace details[open]")].map(detailKey));
   const focused = document.activeElement;
   const focusKey = focused?.dataset.focusKey;
   const focusedDetail = focused?.tagName === "SUMMARY" ? detailKey(focused.parentElement) : null;
+  const scrollPositions = [...document.querySelectorAll(".workspace .scroll")].map((item) => [item, item.scrollTop, item.scrollLeft]);
   renderTurns(); renderSession(); renderWorkspace();
   for (const item of document.querySelectorAll(".workspace details")) {
     item.open = opened.has(detailKey(item));
@@ -437,6 +468,10 @@ function refreshPanels() {
   if (focusKey) {
     [...document.querySelectorAll(".workspace [data-focus-key]")]
       .find((item) => item.dataset.focusKey === focusKey)?.focus({ preventScroll: true });
+  }
+  for (const [item, top, left] of scrollPositions) {
+    item.scrollTop = top;
+    item.scrollLeft = left;
   }
 }
 
@@ -622,6 +657,9 @@ $("scope-select").addEventListener("change", () => {
   renderScope(); loadSessions().catch(showError);
 });
 $("refresh-button").addEventListener("click", () => loadScopes().catch(showError));
+$("collapse-details-button").addEventListener("click", () => {
+  for (const item of document.querySelectorAll(".inspector details[open]")) item.open = false;
+});
 $("new-session-button").addEventListener("click", () => confirmRollover(false));
 $("rollover-button").addEventListener("click", () => confirmRollover(true));
 $("hard-reset-button").addEventListener("click", () => {

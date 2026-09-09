@@ -11,7 +11,10 @@
 <body>
   <div class="app">
     <header class="toolbar">
-      <h1>会话检查器</h1>
+      <div class="toolbar-heading">
+        <h1>会话检查器</h1>
+        <p class="muted">先看摘要，按需展开调用与上下文详情。</p>
+      </div>
       <div class="actions">
         <span id="status" role="status" aria-live="polite">正在连接…</span>
         <span id="auto-refresh" class="is-hidden">自动刷新中</span>
@@ -40,10 +43,13 @@
       </section>
       <section class="panel inspector" aria-label="轮次工作区">
         <div id="turn-header" class="turn-header">请选择一个轮次。</div>
+        <div class="inspector-navigation">
         <div class="tabs" role="tablist" aria-label="检查内容">
           <button id="tab-timeline" class="tab is-active" role="tab" aria-selected="true" aria-controls="timeline-view" data-tab="timeline" type="button">调用时间线</button>
           <button id="tab-context" class="tab" role="tab" aria-selected="false" aria-controls="context-view" data-tab="context" tabindex="-1" type="button">上下文注入</button>
           <button id="tab-io" class="tab" role="tab" aria-selected="false" aria-controls="io-view" data-tab="io" tabindex="-1" type="button">输入与输出</button>
+        </div>
+          <button id="collapse-details-button" class="collapse-button" type="button" aria-label="折叠本轮全部详情" disabled>全部折叠</button>
         </div>
         <div class="scroll inspector-body">
           <div id="timeline-view" class="view" role="tabpanel" aria-labelledby="tab-timeline" tabindex="0"></div>

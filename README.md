@@ -58,9 +58,9 @@ Linux 托管部署启用 `webui_config_apply` 后，配置保存会自动触发�
 
 ## LLM 会话管理
 
-`llm_chat` 按聊天范围保存会话、轮次、工具调用和确认交付，并按 Token 预算自动续接。登录 Entari WebUI 后，“LLM 会话”页面提供调用时间线、上下文注入、输入与输出三个视图；每次模型请求和工具参数、返回结果均可展开，较长内容支持分段加载与复制。
+`llm_chat` 按聊天范围保存会话、轮次、工具调用和确认交付，并按 Token 预算自动续接。登录 Entari WebUI 后，“LLM 会话”页面提供调用时间线、上下文注入、输入与输出三个视图；详细内容默认折叠，点击记录展开，支持全部折叠。生成期间自动刷新保留手动展开状态，较长内容按需分段加载与复制。
 
-在 `llm_chat.personas` 下按角色键配置 `name`、`prompt`、`appearance` 和可选的 `reference_image`，用 `default_persona` 指定默认角色。人格、口吻和外观与通用系统规则分离；参考图使用 `resources/image` 下已有文件的安全相对路径。旧 `persona` 移至对应角色的 `prompt`，旧 `self_reference_image` 移至该角色的 `reference_image`。
+在 `llm_chat.personas` 下按角色键配置 `name`、`prompt`、`appearance` 和可选的 `reference_image`，用 `default_persona` 指定默认角色。人格和口吻由所填 `prompt` 定义，不额外附加情景对白或固定说话示例；参考图使用 `resources/image` 下已有文件的安全相对路径。旧 `persona` 移至对应角色的 `prompt`，旧 `self_reference_image` 移至该角色的 `reference_image`。
 
 普通成员可查看当前角色列表、会话与 Token 信息：
 
@@ -69,7 +69,7 @@ llmchat persona
 llmchat session
 ```
 
-Token 信息区分供应商实际用量与上下文估算；缺失数据明确标为未知。历史输入不会根据当前配置重建，凭证、图片像素及内部思考不进入新增调用快照。
+Token 信息区分供应商实际用量与上下文估算；缺失数据明确标为未知。历史注入快照保留当轮记录，不会随当前人格配置变化；修改人格后请查看新轮次。凭证、图片像素及内部思考不进入新增调用快照。
 
 超管可显式控制当前群会话：
 
