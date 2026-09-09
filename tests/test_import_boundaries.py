@@ -46,7 +46,6 @@ def test_domain_and_tts_core_imports_do_not_load_plugin_entrypoints():
     forbidden = [
         "plugins.llm_chat.chat_handler",
         "plugins.llm_chat.tool_runtime",
-        "plugins.llm_chat.meme_command",
         "plugins.llm_chat.meme_store",
         "plugins.llm_chat.generation",
         "plugins.llm_chat.tag_runtime",
@@ -132,7 +131,6 @@ submodules = {
     "agent_webui": ModuleType(f"{package_name}.agent_webui"),
     "tag_runtime": ModuleType(f"{package_name}.tag_runtime"),
     "tool_runtime": tool_runtime,
-    "meme_command": ModuleType(f"{package_name}.meme_command"),
     "meme_webui": ModuleType(f"{package_name}.meme_webui"),
 }
 for suffix, submodule in submodules.items():

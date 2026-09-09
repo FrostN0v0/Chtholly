@@ -5,7 +5,6 @@ from __future__ import annotations
 from arclet.entari import Session, command, plugin_config
 from arclet.letoderea import STOP
 from arclet.entari.filter import superusers
-from arclet.entari.command import Match
 from entari_plugin_llm.config import get_model_config
 
 from .config import LLMChatConfig
@@ -49,7 +48,7 @@ async def _current_session(session: Session):
     return scope, context_session
 
 
-@command.on("llmchat new-session")
+@command.on("llmchat new")
 async def new_session_command(session: Session) -> str:
     """Start a clean topic session while preserving relationship, profile, and long-term memory."""
 
@@ -67,7 +66,7 @@ async def new_session_command(session: Session) -> str:
     return f"已创建新会话（#{created.sequence}），不会继承上一话题。"
 
 
-@command.on("llmchat rollover-session")
+@command.on("llmchat handoff")
 async def rollover_session_command(session: Session) -> str:
     """Close the current session and carry a structured handoff into its continuation."""
 
@@ -92,15 +91,12 @@ async def rollover_session_command(session: Session) -> str:
     return f"已续接新会话（#{created.sequence}），结构化交接已保留。"
 
 
-@command.on("llmchat hard-reset-session {confirmation}")
-async def hard_reset_session_command(session: Session, confirmation: Match[str]) -> str:
-    """Seal all prior sessions after an explicit confirmation token."""
+@command.on("llmchat reset")
+async def hard_reset_session_command(session: Session) -> str:
+    """Seal prior sessions without deleting their audit events."""
 
     if not await _is_superuser(session):
         return "Permission denied: only configured superusers may reset the group session."
-    value = confirmation.result.strip() if confirmation.available else ""
-    if value != "CONFIRM":
-        return "高风险操作未执行。请使用：llmchat hard-reset-session CONFIRM"
     scope = await get_or_create_scope(await resolve_scope_identity(session))
     await seal_scope_sessions(scope.id)
     created = await create_session(scope.id, _baseline(session.channel.id), start_reason="hard_reset")

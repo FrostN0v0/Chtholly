@@ -37,7 +37,6 @@ for child in (
     "model_state_runtime",
     "agent_webui",
     "tag_runtime",
-    "meme_command",
     "meme_webui",
 ):
     sys.modules[f"llm_chat.{{child}}"] = ModuleType(f"llm_chat.{{child}}")

@@ -50,7 +50,6 @@ if plug is not None and plug.module.__name__ == __name__:
     from . import agent_command as agent_command  # entari: package
     from . import agent_runtime as agent_runtime  # entari: package
     from . import tag_runtime as tag_runtime  # entari: package
-    from . import meme_command as meme_command  # entari: package
     from . import meme_webui as meme_webui  # entari: package
     from . import agent_webui as agent_webui  # entari: package
 

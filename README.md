@@ -61,12 +61,14 @@ Linux 托管部署启用 `webui_config_apply` 后，配置保存会自动触发�
 超管可显式控制当前群会话：
 
 ```text
-llmchat new-session
-llmchat rollover-session
-llmchat hard-reset-session CONFIRM
+llmchat new
+llmchat reset
+llmchat handoff
 ```
 
-`new-session` 保留关系、画像和长期记忆，但不继承上一话题；`rollover-session` 携带结构化交接；硬重置只封存模型访问路径，不删除审计事件。
+`new` 保留关系、画像和长期记忆，但不继承上一话题；`reset` 封存旧会话并新建，不删除审计事件，无需额外确认参数；`handoff` 携带结构化交接继续当前任务。以上指令仅限超管，旧长名称不再支持。
+
+表情收藏与标注不再提供聊天指令；人工管理统一使用 WebUI“表情库管理”。模型按需收藏与启动增量标注仍保留。
 
 人格作息按上海时区计算；低精力会让文字回复简短，但不会减少明确请求的媒体交付额度（默认每轮最多 6 条）。静态报告继续使用图片渲染，网页与交互原型使用下面的作品交付流程。
 
