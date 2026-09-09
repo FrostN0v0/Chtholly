@@ -22,7 +22,10 @@ _INPUT_ATTACHMENT_ENDPOINT = "/api/llm-chat/sessions/events"
 EVENT_TITLES = {
     "user_input": "用户输入",
     "engagement_decision": "回应意向",
-    "model_attempt": "模型调用",
+    "model_attempt": "生成尝试（汇总）",
+    "model_request": "模型请求",
+    "model_response": "模型响应",
+    "context_snapshot": "实际上下文快照",
     "assistant_tool_call": "工具调用",
     "tool_result": "工具结果",
     "assistant_output": "最终回复",
@@ -169,6 +172,9 @@ def _collection_text(value: object, limit: int = _DETAIL_VALUE_CHARS) -> str:
 
 
 def _payload_section(payload: Mapping[str, JSONType], key: str) -> JSONType | None:
+    audit = payload.get(f"audit_{key}")
+    if isinstance(audit, Mapping) and "data" in audit:
+        return _payload_section(audit, "data")
     if key not in payload:
         return None
     value = payload[key]
@@ -180,13 +186,19 @@ def _payload_section(payload: Mapping[str, JSONType], key: str) -> JSONType | No
     return value
 
 
-def _preview_source(event: AgentEvent, payload: Mapping[str, JSONType]) -> Mapping[str, JSONType]:
-    if event.event_type == "assistant_tool_call":
-        arguments = payload.get("arguments")
-        return arguments if isinstance(arguments, Mapping) else payload
-    if event.event_type == "tool_result":
-        result = payload.get("result")
-        return result if isinstance(result, Mapping) else payload
+def _preview_source(event: AgentEvent, payload: Mapping[str, JSONType]) -> JSONType | Mapping[str, JSONType]:
+    key = (
+        "arguments"
+        if event.event_type == "assistant_tool_call"
+        else "result"
+        if event.event_type == "tool_result"
+        else ""
+    )
+    if key:
+        audit = payload.get(f"audit_{key}")
+        if isinstance(audit, Mapping) and "data" in audit:
+            return audit["data"]
+        return payload.get(key, payload)
     return payload
 
 
@@ -224,8 +236,11 @@ def event_preview(event: AgentEvent, payload: Mapping[str, JSONType]) -> str:
     if isinstance(result, str) and result.strip():
         return _compact(result, _PREVIEW_CHARS)
     if isinstance(source, Mapping):
-        return _compact(_collection_text(source, _PREVIEW_CHARS), _PREVIEW_CHARS)
-    return ""
+        return _compact(_collection_text(source, _PREVIEW_CHARS), _PREVIEW_CHARS) or _compact(
+            json.dumps(source, ensure_ascii=False, separators=(",", ":")),
+            _PREVIEW_CHARS,
+        )
+    return _compact(json.dumps(source, ensure_ascii=False, separators=(",", ":")), _PREVIEW_CHARS)
 
 
 def event_details(event: AgentEvent, payload: Mapping[str, JSONType]) -> list[dict[str, str]]:

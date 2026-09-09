@@ -9,7 +9,8 @@ from arclet.entari.config.models.pyd import BaseModel
 from .config import LLMChatConfig
 
 _CONFIG_SCHEMA_TEXT = {
-    "persona": ("人格设定", "仅填写角色人格文本；框架规则由系统提示词脚手架维护。"),
+    "default_persona": ("默认角色", "未选择角色或已选角色被删除时使用的角色键，必须存在于角色配置中。"),
+    "personas": ("角色配置", "按唯一角色键配置名称、人格、外观与配套参考图；在聊天中使用 llmchat persona 切换。"),
     "max_input_tokens": ("模型输入 Token 上限", "单次主聊天模型请求允许使用的最大输入 Token 数。"),
     "output_reserve_tokens": ("输出预留 Token", "从输入预算中预留给模型输出的 Token 数。"),
     "context_rollover_ratio": ("会话切换阈值", "当前会话上下文达到可用输入预算的比例后自动生成交接并切换。"),
@@ -55,7 +56,6 @@ _CONFIG_SCHEMA_TEXT = {
         "单次生成最多交给视觉模型描述的合并转发图片数。",
     ),
     "channel_message_max_images": ("频道历史图片上限", "每页频道历史中最多作为本轮引用暴露的图片数。"),
-    "self_reference_image": ("自身参考图片", "用于生成自身主题原生图片的 resources/image 下相对路径。"),
     "model": ("主聊天模型", "会话使用的模型别名；留空时使用 LLM 插件默认模型。"),
     "eval_model": ("关系评估模型", "关系评估使用的模型别名；留空时使用主聊天模型。"),
     "model_request_timeout": ("主模型请求超时", "普通聊天模型单次请求的超时时间（秒）。"),
@@ -157,6 +157,13 @@ _CONFIG_SCHEMA_TEXT = {
     "allowed_commands": ("工具命令白名单", "call_plugin 工具允许调用的插件命令列表。"),
 }
 
+_PERSONA_SCHEMA_TEXT = {
+    "name": ("角色名称", "聊天与会话检查器中展示的角色名称。"),
+    "prompt": ("人格设定", "角色身份、性格、口吻、拒绝表达与媒体偏好；不得覆盖系统安全或工具交付规则。"),
+    "reference_image": ("角色参考图", "resources/image 下已有图片的安全相对路径；无参考图的角色请留空。"),
+    "appearance": ("外观设定", "可选的外观与主要识别特征，只对当前角色生效。"),
+}
+
 
 class LLMChatWebUIConfig(BaseModel):
     """Localized schema adapter used only by Entari WebUI."""
@@ -182,6 +189,22 @@ class LLMChatWebUIConfig(BaseModel):
             title, description = _CONFIG_SCHEMA_TEXT[name]
             property_schema["title"] = title
             property_schema["description"] = description
+        definitions = schema.get("$defs", {})
+        persona_schema = definitions.get("PersonaConfig")
+        if not isinstance(persona_schema, dict):
+            raise TypeError("PersonaConfig schema definition must be an object")
+        persona_properties = persona_schema.get("properties", {})
+        if set(persona_properties) != _PERSONA_SCHEMA_TEXT.keys():
+            raise ValueError("PersonaConfig fields must have matching WebUI translations")
+        for name, property_schema in persona_properties.items():
+            title, description = _PERSONA_SCHEMA_TEXT[name]
+            property_schema["title"] = title
+            property_schema["description"] = description
+        persona_schema["title"] = "角色设定"
+        persona_schema["description"] = "一个独立角色的人格、外观与参考图。"
+        # External dataclass refs are not registered in Pydantic's core-schema graph.
+        properties["personas"]["additionalProperties"] = persona_schema
+        schema.pop("$defs", None)
         schema["title"] = "LLM 聊天配置"
         schema["description"] = "群聊会话、记忆、网页工具、交付、语音与图片能力配置。"
         return schema

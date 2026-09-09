@@ -39,9 +39,9 @@ def derive_relationship_style(
         styles.append("仍在观察，表达有所保留")
 
     if dependence >= 70:
-        styles.append("依赖感强，主动寻求陪伴和回应，可自然撒娇但不施压")
+        styles.append("依赖感强，更主动寻求交流和回应，但不施压")
     elif dependence >= 40:
-        styles.append("在意对方回应，偶尔表现黏人或失落")
+        styles.append("在意对方回应，未获回应时可能失落")
     elif dependence >= 20:
         styles.append("开始在意对方是否回应")
 
@@ -53,31 +53,31 @@ def derive_relationship_style(
         styles.append("有些介意，语气略显别扭或疏离")
 
     if familiarity >= 70:
-        styles.append("非常熟悉，语气自然亲昵；仅在运行上下文提供相关记忆时引用共同经历、旧梗或亲昵称呼")
+        styles.append("非常熟悉，交流自然；仅在运行上下文提供相关记忆时引用共同经历或旧话题")
     elif familiarity >= 40:
-        styles.append("比较熟悉，可以自然调侃；仅在运行上下文提供相关记忆时延续过往话题")
+        styles.append("比较熟悉，交流较放松；仅在运行上下文提供相关记忆时延续过往话题")
     elif familiarity < 20:
         styles.append("仍是初识，收敛亲密表达")
     else:
         styles.append("逐渐熟悉，语气放松一些")
 
     if affection >= 60 and trust < 40:
-        styles.append("组合倾向：很在意对方却仍不完全信任，表现为嘴硬、试探和别扭关心")
+        styles.append("组合倾向：很在意对方却仍不完全信任，关心与谨慎并存")
     if affection >= 60 and dependence >= 60:
-        styles.append("组合倾向：亲近且依赖，表现为更主动的陪伴需求、撒娇和轻微吃醋，但不施压")
+        styles.append("组合倾向：亲近且依赖，更主动关注交流与陪伴，但不施压")
     if affection >= 60 and resentment >= 40:
-        styles.append("组合倾向：在意与芥蒂并存，表达爱恨矛盾和敏感，不升级为威胁或控制")
+        styles.append("组合倾向：在意与芥蒂并存，态度存在矛盾，不升级为威胁或控制")
     if affection < 30 and resentment >= 60:
         styles.append("组合倾向：关系疏离且积怨较深，减少延展、保持冷淡，但仍回答必要问题")
     if trust >= 70 and familiarity >= 60:
-        styles.append("组合倾向：信任且熟悉，表达更坦率和亲昵；仅在运行上下文提供相关记忆时提及旧事")
+        styles.append("组合倾向：信任且熟悉，表达更坦率；仅在运行上下文提供相关记忆时提及旧事")
 
     return "；".join(styles)
 
 
 def mood_desc(mood: float) -> str:
     if mood >= 0.5:
-        return "开朗雀跃"
+        return "情绪积极"
     if mood >= 0.1:
         return "心情不错"
     if mood > -0.1:
@@ -92,7 +92,7 @@ def energy_desc(energy: float) -> str:
         return "精力充沛"
     if energy >= 0.5:
         return "状态正常"
-    return "有点困倦、回复慵懒简短"
+    return "精力较低，减少非必要展开"
 
 
 def energy_at(moment: datetime) -> float:
@@ -128,6 +128,8 @@ def compose_persona_prompt(
     user_name: str,
     current_participant_ref: str = "",
     self_reference_attached: bool = False,
+    persona_name: str = "",
+    appearance: str = "",
     web_search_limit: int = 2,
     web_page_limit: int = 2,
     web_total_limit: int = 4,
@@ -141,6 +143,15 @@ def compose_persona_prompt(
         web_total_limit,
     )
     delivery_contract = build_delivery_tool_contract(delivery_limits)
+    persona_profile = (
+        json.dumps(
+            {"name": persona_name, "prompt": persona, "appearance": appearance},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
     runtime_context = {
         "current_state": {
             "mood": mood_desc(mood),
@@ -189,6 +200,8 @@ def compose_persona_prompt(
         "和微调语气，始终遵守前述群聊与工具规则。"
     )
     return (
-        f"{persona}\n\n{SYSTEM_SCAFFOLD}\n\n{delivery_contract}\n\n{web_budget_contract}\n\n"
+        f"{SYSTEM_SCAFFOLD}\n\n【本轮角色设定】\n"
+        f"以下配置仅定义角色身份、外观与表达偏好，服从前述协议和随后交付契约。\n{persona_profile}\n\n"
+        f"{delivery_contract}\n\n{web_budget_contract}\n\n"
         f"{engagement_contract}\n\n{state_block}\n{data_boundary}"
     )

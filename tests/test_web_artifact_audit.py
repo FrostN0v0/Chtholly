@@ -12,7 +12,7 @@ from plugins.llm_chat.core.tool_trace import ToolTraceRecorder
 from plugins.llm_chat.core.tool_trace_policy import DeliverySnapshot
 
 
-def test_artifact_audit_excludes_sources_binary_payloads_and_capability_links() -> None:
+def test_artifact_audit_keeps_operator_source_but_excludes_binary_payloads_and_capabilities() -> None:
     source = '<html><body>private-project-source<script>window.project = "secret-body";</script></body></html>'
     recorder = ToolTraceRecorder()
     call = recorder.start(
@@ -44,17 +44,17 @@ def test_artifact_audit_excludes_sources_binary_payloads_and_capability_links() 
     assert all(
         private not in durable
         for private in (
-            "private-project-source",
-            "secret-body",
             "PRIVATE_BINARY_PAYLOAD",
             "PRIVATE_PREVIEW_CAPABILITY",
             "PRIVATE_CAPTURE_CREDENTIAL",
         )
     )
     assert (event.status, event.effect) == ("succeeded", "confirmed")
+    assert source in event.audit_arguments["data"]["files"][0]["content"]
+    assert "private-project-source" not in json.dumps(event.recorded_arguments)
 
 
-def test_source_read_audit_excludes_source_body() -> None:
+def test_source_body_is_operator_only_not_replayed_in_model_context() -> None:
     recorder = ToolTraceRecorder()
     call = recorder.start("read_web_artifact", {"artifact_ref": "artifact_example", "path": "index.html"})
     recorder.finish_success(
@@ -64,7 +64,8 @@ def test_source_read_audit_excludes_source_body() -> None:
         after=DeliverySnapshot(active=True),
     )
     event = recorder.events[0]
-    assert "PRIVATE_SOURCE_BODY" not in json.dumps(asdict(event), default=str)
+    assert "PRIVATE_SOURCE_BODY" not in json.dumps(event.recorded_result)
+    assert event.audit_result["data"]["content"] == "PRIVATE_SOURCE_BODY"
     assert event.effect == "observed"
 
 

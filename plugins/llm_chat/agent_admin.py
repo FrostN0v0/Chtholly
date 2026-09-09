@@ -12,6 +12,7 @@ from entari_plugin_llm.config import get_model_config
 
 from .config import LLMChatConfig
 from .models import AgentTurn, ChatScope, AgentEvent, ContextSession
+from .personality import session_persona, persona_scope_lock, resolve_scope_persona, remember_session_persona
 from .agent_events import load_event_payload, select_payload_path
 from .context_builder import build_baseline_fingerprint
 from .session_handoff import generate_session_handoff
@@ -29,10 +30,23 @@ from .session_manager import (
     seal_scope_sessions,
 )
 from .agent_event_view import serialize_event_view
+from .core.personality import ResolvedPersona
 from .agent_attachments import (
     is_agent_attachment,
     resolve_agent_attachment,
     event_attachment_metadata,
+)
+from .session_inspection import (
+    turn_events,
+    session_usage,
+    project_context,
+    project_outputs,
+    summarize_usage,
+    project_tool_calls,
+    project_model_calls,
+    turn_list_summaries,
+    summarize_turn_events,
+    session_context_summary,
 )
 
 
@@ -55,11 +69,11 @@ class AgentAdminService:
     tool_schemas: list[dict[str, str]]
     attachment_root: Path | None = None
 
-    def _baseline(self, channel_id: str):
+    def _baseline(self, channel_id: str, persona: ResolvedPersona):
         model_name = get_model_config(self.config.model, channel_id).name
         return build_baseline_fingerprint(
             model_name=model_name,
-            persona=self.config.persona,
+            persona=persona.baseline_text,
             tool_schemas=self.tool_schemas,
         )
 
@@ -74,6 +88,7 @@ class AgentAdminService:
                 "channel_id": scope.channel_id,
                 "display_name": scope.display_name,
                 "channel_name": self._channel_name(scope),
+                "persona": self._persona_summary(await resolve_scope_persona(self.config, scope.id)),
                 "created_at": scope.created_at.isoformat(),
                 "updated_at": scope.updated_at.isoformat(),
             }
@@ -83,20 +98,23 @@ class AgentAdminService:
     async def list_sessions(self, scope_ref: str, limit: int = 100) -> list[dict[str, object]]:
         scope = await self._scope(scope_ref)
         sessions = await list_scope_sessions(scope.id, limit=max(1, min(500, limit)))
-        return [self._serialize_session(item) for item in sessions]
+        return [await self._session_summary(item) for item in sessions]
 
     async def session_detail(self, session_ref: str) -> dict[str, object]:
         context_session = await self._session(session_ref)
         scope = await self._scope_id(context_session.scope_id)
         anchors = await load_scope_anchors(scope.id)
         return {
-            **self._serialize_session(context_session),
+            **await self._session_summary(context_session),
+            "usage": await session_usage(context_session.id),
+            "context": await session_context_summary(context_session.id),
             "scope": {
                 "scope_ref": scope.scope_ref,
                 "platform": scope.platform,
                 "channel_id": scope.channel_id,
                 "display_name": scope.display_name,
                 "channel_name": self._channel_name(scope),
+                "persona": self._persona_summary(await resolve_scope_persona(self.config, scope.id)),
             },
             "handoff": self._json_object(context_session.handoff_json),
             "anchors": [
@@ -126,34 +144,25 @@ class AgentAdminService:
                 .all()
             )
         turns.reverse()
-        return [
-            {
-                "turn_ref": turn.turn_ref,
-                "sequence": turn.sequence,
-                "user_id": turn.user_id,
-                "user_name": turn.user_name,
-                "status": turn.status,
-                "fresh_context": turn.fresh_context,
-                "final_text": turn.final_text,
-                "created_at": turn.created_at.isoformat(),
-                "finished_at": turn.finished_at.isoformat() if turn.finished_at else None,
-            }
-            for turn in turns
-        ]
+        summaries = await turn_list_summaries([turn.id for turn in turns])
+        return [{**self._serialize_turn(turn), **summaries[turn.id]} for turn in turns]
 
     async def list_events(self, turn_ref: str) -> list[dict[str, object]]:
         turn = await self._turn(turn_ref)
-        async with get_session() as db:
-            events = list(
-                (
-                    await db.execute(
-                        select(AgentEvent).where(AgentEvent.turn_id == turn.id).order_by(AgentEvent.sequence.asc())
-                    )
-                )
-                .scalars()
-                .all()
-            )
-        return [self._serialize_event(event) for event in events]
+        return [self._serialize_event(event) for event in await turn_events(turn.id)]
+
+    async def turn_inspection(self, turn_ref: str) -> dict[str, object]:
+        turn = await self._turn(turn_ref)
+        events = await turn_events(turn.id)
+        return {
+            "turn": {**self._serialize_turn(turn), **summarize_turn_events(events)},
+            "persona": await self._historical_persona(turn.session_id),
+            "usage": summarize_usage(events),
+            "context": project_context(events),
+            "model_calls": project_model_calls(events, turn_status=turn.status),
+            "tool_calls": project_tool_calls(events, turn_status=turn.status),
+            "outputs": project_outputs(events),
+        }
 
     async def read_event_payload(
         self,
@@ -171,32 +180,19 @@ class AgentAdminService:
             except KeyError as exc:
                 raise AgentAdminError("Unknown event payload path", code="unknown_path", status=404) from exc
         maximum = max(256, min(100_000, limit))
-        if isinstance(payload, str):
-            start = max(0, offset)
-            end = min(len(payload), start + maximum)
-            return {
-                "event_ref": event.event_ref,
-                "path": path,
-                "data": payload[start:end],
-                "offset": start,
-                "next_offset": end if end < len(payload) else None,
-                "total_chars": len(payload),
-            }
-        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        if len(serialized) > maximum:
-            return {
-                "event_ref": event.event_ref,
-                "path": path,
-                "stored": True,
-                "chars": len(serialized),
-                "message": "Select a narrower payload path",
-            }
+        serialized = (
+            payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        )
+        start = min(len(serialized), max(0, offset))
+        end = min(len(serialized), start + maximum)
+        whole_json = not isinstance(payload, str) and start == 0 and len(serialized) <= maximum
         return {
             "event_ref": event.event_ref,
             "path": path,
-            "data": payload,
-            "offset": 0,
-            "next_offset": None,
+            "data": payload if whole_json else serialized[start:end],
+            "format": "json" if whole_json else "text",
+            "offset": start,
+            "next_offset": end if end < len(serialized) else None,
             "total_chars": len(serialized),
         }
 
@@ -226,15 +222,7 @@ class AgentAdminService:
 
     async def context_inspector(self, turn_ref: str) -> dict[str, object]:
         turn = await self._turn(turn_ref)
-        async with get_session() as db:
-            selection = (
-                await db.execute(
-                    select(AgentEvent).where(
-                        AgentEvent.turn_id == turn.id,
-                        AgentEvent.event_type == "context_selection",
-                    )
-                )
-            ).scalar_one_or_none()
+        context = project_context(await turn_events(turn.id))
         context_session = await self._session_id(turn.session_id)
         return {
             "turn_ref": turn.turn_ref,
@@ -246,8 +234,8 @@ class AgentAdminService:
                 "tool_schema_hash": context_session.tool_schema_hash,
                 "policy_version": context_session.policy_version,
             },
-            "selection": load_event_payload(selection) if selection is not None else {},
-            "budgets": {
+            **context,
+            "current_limits": {
                 "max_input_tokens": self.config.max_input_tokens,
                 "output_reserve_tokens": self.config.output_reserve_tokens,
                 "rollover_ratio": self.config.context_rollover_ratio,
@@ -258,38 +246,45 @@ class AgentAdminService:
 
     async def rollover(self, scope_ref: str, session_ref: str, *, carry_handoff: bool) -> dict[str, object]:
         scope = await self._scope(scope_ref)
-        context_session = await self._session(session_ref)
-        if context_session.scope_id != scope.id:
-            raise AgentAdminError("Session does not belong to scope", code="scope_mismatch", status=409)
-        if context_session.status != "active":
-            raise AgentAdminError("Only the active session can be rolled over", code="not_active", status=409)
-        handoff = "{}"
-        reason = "webui_new"
-        if carry_handoff:
-            reason = "webui_rollover"
-            handoff = await generate_session_handoff(
+        async with persona_scope_lock(scope.id):
+            context_session = await self._session(session_ref)
+            if context_session.scope_id != scope.id:
+                raise AgentAdminError("Session does not belong to scope", code="scope_mismatch", status=409)
+            if context_session.status != "active":
+                raise AgentAdminError("Only the active session can be rolled over", code="not_active", status=409)
+            persona = await resolve_scope_persona(self.config, scope.id)
+            handoff = "{}"
+            reason = "webui_new"
+            if carry_handoff:
+                reason = "webui_rollover"
+                handoff = await generate_session_handoff(
+                    context_session,
+                    model_name=self.config.model,
+                    channel_id=scope.channel_id,
+                    timeout=self.config.session_handoff_timeout,
+                    source_max_chars=self.config.session_handoff_source_max_chars,
+                    output_max_chars=self.config.session_handoff_max_chars,
+                )
+            created = await rollover_session(
+                scope,
                 context_session,
-                model_name=self.config.model,
-                channel_id=scope.channel_id,
-                timeout=self.config.session_handoff_timeout,
-                source_max_chars=self.config.session_handoff_source_max_chars,
-                output_max_chars=self.config.session_handoff_max_chars,
+                self._baseline(scope.channel_id, persona),
+                reason=reason,
+                handoff_json=handoff,
+                carry_handoff=carry_handoff,
             )
-        created = await rollover_session(
-            scope,
-            context_session,
-            self._baseline(scope.channel_id),
-            reason=reason,
-            handoff_json=handoff,
-            carry_handoff=carry_handoff,
-        )
-        return self._serialize_session(created)
+            await remember_session_persona(created.id, persona)
+        return await self._session_summary(created)
 
     async def hard_reset(self, scope_ref: str) -> dict[str, object]:
         scope = await self._scope(scope_ref)
-        await seal_scope_sessions(scope.id)
-        created = await create_session(scope.id, self._baseline(scope.channel_id), start_reason="webui_hard_reset")
-        return self._serialize_session(created)
+        async with persona_scope_lock(scope.id):
+            persona = await resolve_scope_persona(self.config, scope.id)
+            baseline = self._baseline(scope.channel_id, persona)
+            await seal_scope_sessions(scope.id)
+            created = await create_session(scope.id, baseline, start_reason="webui_hard_reset")
+            await remember_session_persona(created.id, persona)
+        return await self._session_summary(created)
 
     async def pin(self, scope_ref: str, event_ref: str, label: str) -> dict[str, object]:
         scope = await self._scope(scope_ref)
@@ -305,6 +300,46 @@ class AgentAdminService:
         event = await self._event(event_ref)
         changed = await unpin_event(scope.id, event.id)
         return {"event_ref": event.event_ref, "active": not changed}
+
+    @staticmethod
+    def _persona_summary(persona: ResolvedPersona) -> dict[str, object]:
+        return {
+            "key": persona.key,
+            "name": persona.name,
+            "appearance": persona.appearance,
+            "has_reference_image": bool(persona.reference_image),
+        }
+
+    @staticmethod
+    async def _historical_persona(session_id: int) -> dict[str, object] | None:
+        persona = await session_persona(session_id)
+        if persona is None:
+            return None
+        summary: dict[str, object] = {
+            key: persona[key] for key in ("key", "name", "prompt", "appearance") if key in persona
+        }
+        summary["has_reference_image"] = bool(persona.get("reference_image"))
+        return summary
+
+    async def _session_summary(self, item: ContextSession) -> dict[str, object]:
+        return {
+            **self._serialize_session(item),
+            "persona": await self._historical_persona(item.id),
+        }
+
+    @staticmethod
+    def _serialize_turn(turn: AgentTurn) -> dict[str, object]:
+        return {
+            "turn_ref": turn.turn_ref,
+            "sequence": turn.sequence,
+            "user_id": turn.user_id,
+            "user_name": turn.user_name,
+            "status": turn.status,
+            "fresh_context": turn.fresh_context,
+            "final_text": turn.final_text,
+            "created_at": turn.created_at.isoformat(),
+            "finished_at": turn.finished_at.isoformat() if turn.finished_at else None,
+        }
 
     @staticmethod
     def _channel_name(scope: ChatScope) -> str:

@@ -38,6 +38,7 @@ def schedule_chat_state_after_delivery(
     memory_context: MemoryContext,
     eval_history: Sequence[Conversation],
     *,
+    persona_prompt: str,
     user_id: str,
     user_name: str,
     channel_id: str,
@@ -53,6 +54,7 @@ def schedule_chat_state_after_delivery(
                 config,
                 memory_context,
                 eval_history,
+                persona_prompt=persona_prompt,
                 user_id=user_id,
                 user_name=user_name,
                 channel_id=channel_id,
@@ -75,6 +77,7 @@ async def update_chat_state_after_delivery(
     memory_context: MemoryContext,
     eval_history: Sequence[Conversation],
     *,
+    persona_prompt: str,
     user_id: str,
     user_name: str,
     channel_id: str,
@@ -100,7 +103,7 @@ async def update_chat_state_after_delivery(
     try:
         result = await run_evaluation(
             config,
-            config.persona,
+            persona_prompt,
             axes,
             relation.impression,
             memory_context.evaluator_profile_facts,

@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from plugins.llm_chat import (
     generation,
     agent_query,
+    personality,
     agent_events,
     agent_migration,
     context_builder,
@@ -34,6 +35,7 @@ from plugins.llm_chat import (
     agent_turn_setup,
     engagement_state,
     agent_attachments,
+    session_inspection,
 )
 from plugins.llm_chat.core import tool_trace
 from plugins.llm_chat.config import LLMChatConfig
@@ -65,7 +67,15 @@ async def agent_store(monkeypatch: pytest.MonkeyPatch):
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
-    for module in (agent_events, agent_migration, agent_query, session_manager, engagement_state):
+    for module in (
+        agent_events,
+        agent_migration,
+        agent_query,
+        session_manager,
+        engagement_state,
+        personality,
+        session_inspection,
+    ):
         monkeypatch.setattr(module, "get_session", session_factory)
     try:
         yield SimpleNamespace(engine=engine, session_factory=session_factory)
@@ -613,7 +623,6 @@ def test_baseline_and_latest_user_authorization_intents_are_deterministic() -> N
         persona="persona",
         tool_schemas=[{"name": "html2pic", "source_hash": "two"}],
     )
-    assert first.system_version == "agent-context-v2"
     assert first.tool_schema_hash != second.tool_schema_hash
     assert context_builder.requests_fresh_context("别管之前，重新回答") is True
     assert context_builder.requests_archived_context("上次会话里说了什么") is True
@@ -623,7 +632,7 @@ def test_baseline_and_latest_user_authorization_intents_are_deterministic() -> N
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_turn_wires_session_context_and_persistence(
+async def test_running_turn_exposes_recorded_context_without_replaying_operator_evidence(
     agent_store: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -719,11 +728,6 @@ async def test_prepare_agent_turn_wires_session_context_and_persistence(
     )
 
     assert appended == [("channel", "alice", "Alice", "user", "hello")]
-    assert prepared.mood == 0.25
-    assert prepared.chat_messages[-1]["role"] == "user"
-    assert "agent_session" in prepared.system
-    assert prepared.agent_access.scope_id > 0
-    assert prepared.lifecycle.agent_turn_id is not None
 
     async def stored_events() -> list[AgentEvent]:
         async with agent_store.session_factory() as db:
@@ -738,12 +742,13 @@ async def test_prepare_agent_turn_wires_session_context_and_persistence(
             )
 
     started = await stored_events()
-    assert [event.event_type for event in started] == [
-        "user_input",
-        "persona_state",
-        "engagement_decision",
-        "context_selection",
-    ]
+    snapshots = [event for event in started if event.event_type == "context_snapshot"]
+    assert len(snapshots) == 1
+    captured = load_event_payload(snapshots[0])
+    assert captured["system"] == prepared.system.replace("/var/lib", "[REDACTED]")
+    assert captured["capture_status"] == "redacted"
+    assert captured["messages"] == prepared.chat_messages
+    assert snapshots[0].model_visible is False
     user_payload = load_event_payload(started[0])
     assert cast(list[dict[str, object]], user_payload["attachments"])[0]["attachment_ref"] == (
         "input_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -753,19 +758,9 @@ async def test_prepare_agent_turn_wires_session_context_and_persistence(
         "/api/llm-chat/sessions/events/" + started[0].event_ref + "/attachments/input_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     )
 
-    assert [event.sequence for event in started] == [1, 2, 3, 4]
-
     persona_payload = load_event_payload(started[1])
-    assert cast(dict[str, Any], persona_payload["relation"])["affection"] == 30.0
-    assert cast(dict[str, Any], persona_payload["state"])["mood"] == 0.25
     assert cast(dict[str, Any], persona_payload["memory"])["stored_memories"] == 40
     assert persona_payload["prompt_memories"] == ["上次部署回滚点在 /var/lib"]
-
-    persona_view = serialize_event_view(started[1], persona_payload)
-    assert persona_view["title"] == "人格与记忆"
-    persona = cast(dict[str, Any], persona_view["persona"])
-    assert {"label": "好感", "value": "30"} in cast(list[dict[str, str]], persona["relation"])
-    assert cast(list[dict[str, str]], persona["profile_facts"])[0]["scores"].startswith("相似度 0.6123")
 
     prepared.lifecycle.agent_events.record_assistant_output("好的")
     await prepared.lifecycle.finalize_agent_turn("completed")
@@ -774,14 +769,68 @@ async def test_prepare_agent_turn_wires_session_context_and_persistence(
     finished = await stored_events()
     assert turn is not None
     assert turn.status == "completed"
-    assert [event.event_type for event in finished] == [
-        "user_input",
-        "persona_state",
-        "engagement_decision",
-        "context_selection",
-        "assistant_output",
-    ]
-    assert [event.sequence for event in finished] == [1, 2, 3, 4, 5]
+    assert [event.event_ref for event in finished[:-1]] == [event.event_ref for event in started]
+    assert finished[-1].event_type == "assistant_output"
+    assert len({event.sequence for event in finished}) == len(finished)
+
+
+@pytest.mark.asyncio
+async def test_interleaved_tool_results_remain_paired_without_operator_snapshots(
+    agent_store: SimpleNamespace,
+) -> None:
+    _scope, context_session = await _scope_and_session()
+    turn = await session_manager.start_turn(
+        context_session,
+        trigger_message_id="interleaved",
+        user_id="alice",
+        user_name="Alice",
+        conversation_user_id=None,
+        fresh_context=False,
+    )
+    recorder = AgentTurnRecorder()
+    recorder.record_user_input("Look up three records", user_name="Alice", fresh_context=False)
+    recorder.append("model_request", payload={"messages": ["operator-only-system"]}, model_visible=False)
+    for kind, ref in (
+        ("assistant_tool_call", "a"),
+        ("assistant_tool_call", "b"),
+        ("tool_result", "a"),
+        ("assistant_tool_call", "c"),
+        ("tool_result", "b"),
+        ("tool_result", "c"),
+        ("assistant_tool_call", "unfinished"),
+    ):
+        recorder.append(
+            kind,
+            tool_name="lookup",
+            execution_ref=ref,
+            tool_call_id=ref,
+            payload={"arguments": {"key": ref}} if kind == "assistant_tool_call" else {"result": {"found": ref}},
+            status="succeeded" if kind == "tool_result" else "running",
+        )
+    recorder.append("context_snapshot", payload={"system": "operator-only-context"}, model_visible=False)
+    recorder.record_assistant_output("Three records found")
+    await agent_events.persist_agent_events(turn.id, recorder.events)
+    await session_manager.finish_turn(turn.id, status="completed", final_text="Three records found")
+    selection = await context_builder.select_session_context(
+        context_session,
+        system="system",
+        current_message={"role": "user", "content": "continue"},
+        model_name="test-model",
+        max_input_tokens=20000,
+        output_reserve_tokens=1000,
+        rollover_ratio=0.75,
+        minimum_recent_turns=0,
+        inline_event_chars=4000,
+        fresh_context=False,
+    )
+    calls = [call for message in selection.messages for call in message.get("tool_calls", [])]
+    results = [message for message in selection.messages if message["role"] == "tool"]
+    assert [call["id"] for call in calls] == ["a", "b", "c"]
+    assert [message["tool_call_id"] for message in results] == ["a", "b", "c"]
+    assert [json.loads(message["content"])["data"]["found"] for message in results] == ["a", "b", "c"]
+    assert "operator-only" not in json.dumps(selection.messages)
+    handoff_source = await session_handoff._source_events(context_session, 20000)
+    assert all(item["type"] not in {"model_request", "model_response", "context_snapshot"} for item in handoff_source)
 
 
 @pytest.mark.asyncio

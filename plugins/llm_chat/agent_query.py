@@ -12,6 +12,7 @@ from .models import AgentTurn, AgentEvent, ContextSession
 from .agent_events import get_event_by_ref, load_event_payload, select_payload_path
 from .agent_context import AgentAccessContext
 from .session_manager import pin_event, get_session_by_ref, list_scope_sessions
+from .core.model_audit import ADMIN_ONLY_EVENT_TYPES
 
 
 class AgentQueryError(ValueError):
@@ -180,14 +181,16 @@ async def read_event_payload(
     event = await get_event_by_ref(event_ref.strip())
     if event is None:
         raise AgentQueryError("Unknown event_ref")
+    if event.event_type in ADMIN_ONLY_EVENT_TYPES or not event.model_visible:
+        raise AgentQueryError("Private audit events are not model-readable")
     context_session = await _event_session(event.id)
     if context_session is None:
         raise AgentQueryError("Event has no context session")
     _authorize_session(current, context_session)
     payload = load_event_payload(event)
     if path:
-        if path.split(".", 1)[0] == "attachments":
-            raise AgentQueryError("Image attachments are not model-readable")
+        if path.split(".", 1)[0] in {"attachments", "audit_arguments", "audit_result"}:
+            raise AgentQueryError("Private audit payloads are not model-readable")
         if not current.allow_payload_delivery:
             raise AgentQueryError("Stored payload access is not allowed for the current user request")
         try:
@@ -230,6 +233,7 @@ async def read_tool_execution_payload(
                     .where(
                         AgentEvent.execution_ref == execution_ref.strip(),
                         AgentEvent.event_type.in_(("assistant_tool_call", "tool_result")),
+                        AgentEvent.model_visible.is_(True),
                     )
                     .order_by(AgentEvent.sequence.asc())
                 )
@@ -289,6 +293,8 @@ async def pin_context_payload(
     event = await get_event_by_ref(event_ref.strip())
     if event is None:
         raise AgentQueryError("Unknown event_ref")
+    if event.event_type in ADMIN_ONLY_EVENT_TYPES or not event.model_visible:
+        raise AgentQueryError("Private audit events cannot be pinned")
     context_session = await _event_session(event.id)
     if context_session is None or context_session.scope_id != current.scope_id:
         raise AgentQueryError("Event is outside llm_chat scope and is not allowed")

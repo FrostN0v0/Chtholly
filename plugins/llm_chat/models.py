@@ -102,6 +102,20 @@ class ContextSession(Base):
     closed_at: Mapped[datetime | None] = mapped_column(default=None)
 
 
+class ScopePersonaSelection(Base):
+    __tablename__ = "chat_scope_persona_selections"
+    scope_id: Mapped[int] = mapped_column(primary_key=True)
+    persona_key: Mapped[str]
+    updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+
+class SessionPersonaSnapshot(Base):
+    __tablename__ = "chat_session_persona_snapshots"
+    session_id: Mapped[int] = mapped_column(primary_key=True)
+    snapshot_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+
 class AgentTurn(Base):
     __tablename__ = "chat_agent_turns"
     __table_args__ = (

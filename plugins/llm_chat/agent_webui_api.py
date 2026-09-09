@@ -122,6 +122,14 @@ def create_agent_sessions_router(
             return _error_response(exc)
         return {"success": True, "items": items}
 
+    @router.get("/turns/{turn_ref}/inspection", response_model=None)
+    async def turn_inspection(turn_ref: str) -> dict[str, object] | JSONResponse:
+        try:
+            item = await service.turn_inspection(turn_ref)
+        except AgentAdminError as exc:
+            return _error_response(exc)
+        return {"success": True, "item": item}
+
     @router.get("/turns/{turn_ref}/context", response_model=None)
     async def context_inspector(turn_ref: str) -> dict[str, object] | JSONResponse:
         try:

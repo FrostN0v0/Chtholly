@@ -56,17 +56,29 @@ Linux 托管部署启用 `webui_config_apply` 后，配置保存会自动触发�
 
 ## LLM 会话管理
 
-`llm_chat` 使用按聊天范围隔离的 Session、Turn 与 AgentEvent 保存对话、工具调用和确认交付，并按 Token 预算自动续接会话。登录 Entari WebUI 后可在“LLM 会话”页面查看时间线、上下文选择、结构化交接与固定事件。
+`llm_chat` 按聊天范围保存会话、轮次、工具调用和确认交付，并按 Token 预算自动续接。登录 Entari WebUI 后，“LLM 会话”页面提供调用时间线、上下文注入、输入与输出三个视图；每次模型请求和工具参数、返回结果均可展开，较长内容支持分段加载与复制。
+
+在 `llm_chat.personas` 下按角色键配置 `name`、`prompt`、`appearance` 和可选的 `reference_image`，用 `default_persona` 指定默认角色。人格、口吻和外观与通用系统规则分离；参考图使用 `resources/image` 下已有文件的安全相对路径。旧 `persona` 移至对应角色的 `prompt`，旧 `self_reference_image` 移至该角色的 `reference_image`。
+
+普通成员可查看当前角色列表、会话与 Token 信息：
+
+```text
+llmchat persona
+llmchat session
+```
+
+Token 信息区分供应商实际用量与上下文估算；缺失数据明确标为未知。历史输入不会根据当前配置重建，凭证、图片像素及内部思考不进入新增调用快照。
 
 超管可显式控制当前群会话：
 
 ```text
+llmchat persona chtholly
 llmchat new
 llmchat reset
 llmchat handoff
 ```
 
-`new` 保留关系、画像和长期记忆，但不继承上一话题；`reset` 封存旧会话并新建，不删除审计事件，无需额外确认参数；`handoff` 携带结构化交接继续当前任务。以上指令仅限超管，旧长名称不再支持。
+`persona <key>` 只切换当前聊天范围，并创建不继承旧话题的会话；已有轮次和后台评估继续使用各自启动时的人格快照。`new` 保留关系、画像和长期记忆，但不继承上一话题；`reset` 封存旧会话并新建，不删除审计事件；`handoff` 携带结构化交接继续当前任务。以上变更指令仅限超管，关系与长期记忆不会因换角色清空。
 
 表情收藏与标注不再提供聊天指令；人工管理统一使用 WebUI“表情库管理”。模型按需收藏与启动增量标注仍保留。
 

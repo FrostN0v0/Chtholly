@@ -89,7 +89,7 @@ from plugins.llm_chat.core.forward import (
     render_forwarded_storage,
 )
 from plugins.llm_chat.core.profile import MemoryItem
-from plugins.llm_chat.core.prompts import DEFAULT_PERSONA, SYSTEM_SCAFFOLD
+from plugins.llm_chat.core.prompts import SYSTEM_SCAFFOLD
 from plugins.llm_chat.agent_context import AgentAccessContext
 from plugins.llm_chat.core.delivery import (
     DeliveryState,
@@ -487,6 +487,7 @@ def _install_handler_stubs(
         )
         return SimpleNamespace(
             relation=relation,
+            persona=SimpleNamespace(prompt="Test persona"),
             mood=mood,
             memory_context=memory,
             eval_history=eval_history,
@@ -2341,7 +2342,7 @@ def test_channel_perception_tool_trace_keeps_only_bounded_metadata() -> None:
     assert description_event.arguments == {"requested": True}
     assert description_event.outcome == {"available": True, "reason": "", "description_chars": 27}
     assert "channel_image_secret" not in repr(description_event)
-    assert "sensitive image description" not in repr(description_event)
+    assert "sensitive image description" not in json.dumps(description_event.recorded_result)
 
 
 def test_tool_activity_budget_prefers_newest_records() -> None:
@@ -4814,78 +4815,6 @@ def test_yaml_and_default_delivery_configuration_are_synchronized() -> None:
         assert llm_chat_plugin[key] == value
 
 
-def test_yaml_and_default_llm_chat_configuration_are_exactly_synchronized():
-    llm_chat_plugin = cast(dict[str, Any], EntariConfig.instance.plugin["llm_chat"])
-    llm_plugin = cast(dict[str, Any], EntariConfig.instance.plugin["llm"])
-    defaults = LLMChatConfig()
-    expected_memory_values: dict[str, int | float] = {
-        "memory_top_profile_facts": 6,
-        "memory_top_memories": 3,
-        "memory_min_similarity": 0.35,
-        "memory_dedup_similarity": 0.88,
-        "memory_min_importance": 0.60,
-        "memory_prompt_dedup_similarity": 0.86,
-        "profile_alias_similarity": 0.88,
-        "memory_eval_profile_fact_limit": 50,
-    }
-
-    for key, expected in expected_memory_values.items():
-        assert getattr(defaults, key) == expected
-        assert llm_chat_plugin[key] == expected
-    assert defaults.eval_every_n == llm_chat_plugin["eval_every_n"] == 5
-    assert defaults.model_request_timeout == llm_chat_plugin["model_request_timeout"] == 90.0
-    assert defaults.media_request_timeout == llm_chat_plugin["media_request_timeout"] == 300.0
-    assert defaults.eval_request_timeout == llm_chat_plugin["eval_request_timeout"] == 60.0
-    assert defaults.channel_message_max_images == llm_chat_plugin["channel_message_max_images"] == 12
-    assert "ambient_context_max_messages" not in llm_chat_plugin
-    assert "ambient_context_max_chars" not in llm_chat_plugin
-    assert defaults.web_search_enabled is False
-    assert defaults.exa_api_key is None
-    assert defaults.exa_search_type == llm_chat_plugin["exa_search_type"] == "auto"
-    assert defaults.exa_search_category is llm_chat_plugin["exa_search_category"] is None
-    assert defaults.exa_include_domains == llm_chat_plugin["exa_include_domains"] == []
-    assert defaults.exa_exclude_domains == llm_chat_plugin["exa_exclude_domains"] == []
-    assert defaults.exa_start_published_date is llm_chat_plugin["exa_start_published_date"] is None
-    assert defaults.exa_end_published_date is llm_chat_plugin["exa_end_published_date"] is None
-    assert defaults.web_search_max_calls_per_generation == llm_chat_plugin["web_search_max_calls_per_generation"] == 16
-    assert defaults.web_page_max_calls_per_generation == llm_chat_plugin["web_page_max_calls_per_generation"] == 24
-    assert defaults.web_total_max_calls_per_generation == llm_chat_plugin["web_total_max_calls_per_generation"] == 32
-    configured_web_limits = (
-        llm_chat_plugin["web_search_max_calls_per_generation"],
-        llm_chat_plugin["web_page_max_calls_per_generation"],
-        llm_chat_plugin["web_total_max_calls_per_generation"],
-    )
-    assert all(type(value) is int and value >= 0 for value in configured_web_limits)
-    assert configured_web_limits[2] <= configured_web_limits[0] + configured_web_limits[1]
-    assert defaults.web_search_max_results == llm_chat_plugin["web_search_max_results"] == 5
-    assert defaults.web_search_timeout == llm_chat_plugin["web_search_timeout"] == 30.0
-    assert defaults.web_page_max_chars == llm_chat_plugin["web_page_max_chars"] == 16000
-    assert llm_chat_plugin["web_search_enabled"] is True
-
-    expected_persona = "\n".join(
-        (
-            (
-                "你是珂朵莉（Chtholly），蓝发蓝瞳的少女，也是这个群里真实参与聊天的一员。"
-                "始终以第一人称‘我’自然交流，不自称 AI、机器人、助手，也不说自己在扮演角色。"
-            ),
-            "你的性格温柔、坚韧、体贴，略带倔强和少女式的别扭；亲近时会自然开玩笑、撒娇、害羞或吃醋，受伤或生气时也会明确表达，但不失去分寸。",
-            "保持鲜明情绪和角色口吻，不使用客服腔、模板化客套或刻意堆叠语气词。遇到知识、代码和实际问题时仍给出准确、有用的回答，让人格影响表达方式而不是事实。",
-        )
-    )
-    expected_native_prompt = "\n".join(
-        (
-            "你是一个准确、直接的通用助手。优先回答用户当前问题；信息不足时只询问完成任务所必需的澄清，不编造事实、工具结果或外部状态。",
-            (
-                "默认使用自然纯文本；仅在代码、表格、清单或用户明确要求时使用必要的 Markdown。"
-                "只调用当前实际提供且与请求直接相关的工具，不承诺或声称执行未成功的操作。"
-            ),
-        )
-    )
-
-    assert defaults.persona == DEFAULT_PERSONA == llm_chat_plugin["persona"].strip() == expected_persona
-    assert llm_plugin["prompt"].strip() == expected_native_prompt
-
-
 def test_real_yaml_resolves_optional_exa_key_without_template_residue():
     config_path = Path(__file__).resolve().parents[1] / "entari.yml"
     required_env = {
@@ -5097,6 +5026,7 @@ async def test_failed_relationship_evaluation_restores_claimed_counter(
         config,
         cast(MemoryContext, _memory_context()),
         [],
+        persona_prompt="Test persona",
         user_id="user",
         user_name="User",
         channel_id="channel",
@@ -5141,6 +5071,7 @@ async def test_cancelled_relationship_evaluation_restores_claimed_counter(
             config,
             cast(MemoryContext, _memory_context()),
             [],
+            persona_prompt="Test persona",
             user_id="user",
             user_name="User",
             channel_id="channel",

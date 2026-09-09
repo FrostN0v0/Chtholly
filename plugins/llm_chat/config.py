@@ -8,14 +8,45 @@ from arclet.entari import BasicConfModel
 from .core.prompts import (
     DEFAULT_PERSONA,
     DEFAULT_IMAGE_TAG_PROMPT,
+    DEFAULT_PERSONA_APPEARANCE,
     DEFAULT_IMAGE_DESCRIBE_PROMPT,
 )
 from .core.delivery import DEFAULT_DELIVERY_LIMITS
+from .core.personality import validate_personas, validate_persona_definition
 
 
-class LLMChatConfig(BasicConfModel):
-    persona: str = DEFAULT_PERSONA
-    """Character text ONLY; framework rules live in SYSTEM_SCAFFOLD."""
+class PersonaConfig(BasicConfModel, extra="forbid"):
+    name: str
+    """Display name of this persona."""
+    prompt: str
+    """Identity, personality, speaking style and media preferences only."""
+    reference_image: str | None = None
+    """Optional safe relative image path below resources/image."""
+    appearance: str = ""
+    """Optional visual appearance used with this persona's reference image."""
+
+    def __post_init__(self) -> None:
+        validate_persona_definition(self)
+        if self.reference_image is not None:
+            from .core.self_reference import resolve_self_reference_image
+
+            if resolve_self_reference_image(self.reference_image) is None:
+                raise ValueError("Persona reference image must be an existing safe file below resources/image")
+
+
+def _default_personas() -> dict[str, PersonaConfig]:
+    return {"chtholly": PersonaConfig(name="珂朵莉", prompt=DEFAULT_PERSONA, appearance=DEFAULT_PERSONA_APPEARANCE)}
+
+
+class LLMChatConfig(BasicConfModel, extra="forbid"):
+    default_persona: str = "chtholly"
+    """Persona selected when a scope has no valid stored selection."""
+    personas: dict[str, PersonaConfig] = field(default_factory=_default_personas)
+    """Independent persona profiles and their matching reference images."""
+
+    def __post_init__(self) -> None:
+        validate_personas(self)
+
     max_input_tokens: int = 48000
     """Maximum input token budget for one chat model request."""
     output_reserve_tokens: int = 8000
@@ -60,8 +91,6 @@ class LLMChatConfig(BasicConfModel):
     """Maximum forwarded images described through the vision model."""
     channel_message_max_images: int = 12
     """Maximum channel-message images exposed as generation-local references per history page."""
-    self_reference_image: str | None = None
-    """Relative path below resources/image used for self-themed native image generation."""
     model: str | None = None
     """Model alias for conversation; None uses the llm plugin default."""
     eval_model: str | None = None

@@ -51,6 +51,8 @@ async def _source_events(context_session: ContextSession, max_chars: int) -> lis
     used = 2
     for _turn, events in reversed(rows):
         for event in reversed(events):
+            if event.event_type in {"model_request", "model_response", "context_snapshot"}:
+                continue
             item = _event_summary(event)
             size = len(json.dumps(item, ensure_ascii=False, separators=(",", ":"))) + 1
             if used + size > max_chars:

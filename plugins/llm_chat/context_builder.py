@@ -14,7 +14,7 @@ from .core.types import ChatMessage
 from .agent_events import load_event_payload, load_session_events
 from .session_manager import BaselineFingerprint
 
-SYSTEM_SCAFFOLD_VERSION = "agent-context-v2"
+SYSTEM_SCAFFOLD_VERSION = "agent-context-v3"
 AGENT_POLICY_VERSION = "agent-events-v1"
 _ARCHIVED_CONTEXT_TERMS = (
     "上次",
@@ -189,60 +189,54 @@ def _turn_messages(
     *,
     inline_chars: int,
 ) -> list[ChatMessage]:
+    visible_types = {"user_input", "assistant_tool_call", "tool_result", "assistant_output"}
+    events = [event for event in events if event.model_visible and event.event_type in visible_types]
+    result_index = {
+        (event.attempt, event.execution_ref or _event_tool_call_id(event)): (index, event)
+        for index, event in enumerate(events)
+        if event.event_type == "tool_result"
+    }
+    emitted: set[tuple[int, str]] = set()
     messages: list[ChatMessage] = []
     event_index = 0
     while event_index < len(events):
         event = events[event_index]
-        payload = load_event_payload(event)
         if event.event_type == "user_input":
-            content = payload.get("content")
+            content = load_event_payload(event).get("content")
             if isinstance(content, str) and content:
                 messages.append({"role": "user", "content": content})
             event_index += 1
             continue
         if event.event_type == "assistant_tool_call":
             attempt = event.attempt
-            call_events: list[AgentEvent] = []
+            call_events: list[tuple[int, AgentEvent]] = []
             while (
                 event_index < len(events)
                 and events[event_index].event_type == "assistant_tool_call"
                 and events[event_index].attempt == attempt
             ):
-                call_events.append(events[event_index])
+                call_events.append((event_index, events[event_index]))
                 event_index += 1
 
-            result_events: list[AgentEvent] = []
-            while (
-                event_index < len(events)
-                and events[event_index].event_type == "tool_result"
-                and events[event_index].attempt == attempt
-            ):
-                result_events.append(events[event_index])
-                event_index += 1
-
-            result_ids = {_event_tool_call_id(result_event) for result_event in result_events}
-            included_ids: set[str] = set()
+            result_events: list[tuple[int, AgentEvent]] = []
             tool_calls: list[dict[str, object]] = []
-            for call_event in call_events:
-                tool_call_id = _event_tool_call_id(call_event)
-                if tool_call_id not in result_ids or tool_call_id in included_ids:
+            for call_index, call_event in call_events:
+                key = (call_event.attempt, call_event.execution_ref or _event_tool_call_id(call_event))
+                result = result_index.get(key)
+                if key in emitted or result is None or result[0] <= call_index:
                     continue
-                included_ids.add(tool_call_id)
+                emitted.add(key)
                 tool_calls.append(_tool_call_item(call_event, inline_chars=inline_chars))
+                result_events.append(result)
             if not tool_calls:
                 continue
 
             messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
-            emitted_results: set[str] = set()
-            for result_event in result_events:
-                tool_call_id = _event_tool_call_id(result_event)
-                if tool_call_id not in included_ids or tool_call_id in emitted_results:
-                    continue
-                emitted_results.add(tool_call_id)
+            for _index, result_event in sorted(result_events, key=lambda item: item[0]):
                 messages.append(_tool_result_message(result_event, inline_chars=inline_chars))
             continue
         if event.event_type == "assistant_output":
-            content = payload.get("content")
+            content = load_event_payload(event).get("content")
             if isinstance(content, str) and content:
                 messages.append({"role": "assistant", "content": content})
         event_index += 1

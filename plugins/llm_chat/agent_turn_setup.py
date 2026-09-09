@@ -15,6 +15,7 @@ from .identity import ChatIdentity
 from .core.types import ChatMessage
 from .perception import MentionedParticipant
 from .web.policy import WebAccessLimits, normalize_web_access_limits
+from .personality import persona_scope_lock, resolve_scope_persona, remember_session_persona
 from .agent_events import persist_agent_events
 from .chat_context import build_chat_messages, serialize_user_turn, requests_recent_channel_context
 from .core.compose import energy_at, compose_persona_prompt
@@ -55,6 +56,7 @@ from .session_manager import (
     resolve_scope_identity,
 )
 from .core.agent_trace import AgentTurnRecorder
+from .core.personality import ResolvedPersona
 from .engagement_state import collect_engagement_signals
 from .core.media_delivery import (
     latest_user_requests_media,
@@ -64,6 +66,7 @@ from .core.media_delivery import (
 )
 from .core.self_reference import append_self_reference_image
 from .core.artifact_access import is_artifact_request
+from .core.context_snapshot import build_context_snapshot
 from .persona.memory_context import MemoryContext, load_memory_context
 
 WarningSink = Callable[[str], None]
@@ -72,6 +75,7 @@ WarningSink = Callable[[str], None]
 @dataclass(slots=True)
 class PreparedAgentTurn:
     relation: UserRelation
+    persona: ResolvedPersona
     mood: float
     memory_context: MemoryContext
     eval_history: list[Conversation]
@@ -134,13 +138,6 @@ async def prepare_agent_turn(
         ),
     )
     artifact_requested = is_artifact_request(raw_user_text)
-    self_reference_attached = False
-    if supports_image_input and not artifact_requested and latest_user_requests_image_generation(current_messages):
-        self_reference_attached = append_self_reference_image(
-            current_messages,
-            config.self_reference_image,
-            warn,
-        )
 
     web_limits = normalize_web_access_limits(
         config.web_search_max_calls_per_generation,
@@ -178,74 +175,65 @@ async def prepare_agent_turn(
     budget = engagement_budget(engagement.level, delivery_limits, media_requested=media_requested)
     delivery_limits = apply_engagement_budget(delivery_limits, budget)
     delivery_state = DeliveryState(limits=delivery_limits)
-    baseline = build_baseline_fingerprint(
-        model_name=model_name or "default",
-        persona=config.persona,
-        tool_schemas=tool_schemas,
-    )
     scope = await get_or_create_scope(await resolve_scope_identity(session))
-    context_session, rollover_reason = await ensure_active_session(
-        scope,
-        baseline,
-        idle_minutes=config.session_idle_minutes,
-        max_turns=config.session_max_turns,
-    )
-    if rollover_reason is not None:
-        handoff = await _handoff(config, context_session, channel_id)
-        context_session = await rollover_session(
+    async with persona_scope_lock(scope.id):
+        persona = await resolve_scope_persona(config, scope.id)
+        self_reference_attached = False
+        if supports_image_input and not artifact_requested and latest_user_requests_image_generation(current_messages):
+            self_reference_attached = append_self_reference_image(current_messages, persona.reference_image, warn)
+        baseline = build_baseline_fingerprint(
+            model_name=model_name or "default",
+            persona=persona.baseline_text,
+            tool_schemas=tool_schemas,
+        )
+        context_session, rollover_reason = await ensure_active_session(
             scope,
-            context_session,
             baseline,
-            reason=rollover_reason,
-            handoff_json=handoff,
+            idle_minutes=config.session_idle_minutes,
+            max_turns=config.session_max_turns,
         )
+        if rollover_reason is not None:
+            persona_changed = context_session.persona_hash != baseline.persona_hash
+            handoff = "{}" if persona_changed else await _handoff(config, context_session, channel_id)
+            context_session = await rollover_session(
+                scope,
+                context_session,
+                baseline,
+                reason="persona_change" if persona_changed else rollover_reason,
+                handoff_json=handoff,
+                carry_handoff=not persona_changed,
+            )
 
-    anchors = await load_scope_anchors(scope.id)
+        anchors = await load_scope_anchors(scope.id)
 
-    def compose_system() -> str:
-        return compose_persona_prompt(
-            config.persona,
-            mood,
-            energy,
-            affection=relation.affection,
-            trust=relation.trust,
-            dependence=relation.dependence,
-            resentment=relation.resentment,
-            familiarity=relation.familiarity,
-            impression=relation.impression,
-            profile=memory_context.chat_profile,
-            relevant_memories=memory_context.relevant_memories,
-            agent_session=render_session_baseline(context_session, anchors),
-            user_name=user_name,
-            current_participant_ref=identity.participant_ref,
-            self_reference_attached=self_reference_attached,
-            web_search_limit=web_limits.search_limit,
-            web_page_limit=web_limits.read_limit,
-            web_total_limit=web_limits.total_limit,
-            delivery_limits=delivery_limits,
-            engagement=engagement_prompt_context(engagement, budget),
-        )
+        def compose_system() -> str:
+            return compose_persona_prompt(
+                persona.prompt,
+                mood,
+                energy,
+                persona_name=persona.name,
+                appearance=persona.appearance,
+                affection=relation.affection,
+                trust=relation.trust,
+                dependence=relation.dependence,
+                resentment=relation.resentment,
+                familiarity=relation.familiarity,
+                impression=relation.impression,
+                profile=memory_context.chat_profile,
+                relevant_memories=memory_context.relevant_memories,
+                agent_session=render_session_baseline(context_session, anchors),
+                user_name=user_name,
+                current_participant_ref=identity.participant_ref,
+                self_reference_attached=self_reference_attached,
+                web_search_limit=web_limits.search_limit,
+                web_page_limit=web_limits.read_limit,
+                web_total_limit=web_limits.total_limit,
+                delivery_limits=delivery_limits,
+                engagement=engagement_prompt_context(engagement, budget),
+            )
 
-    system = compose_system()
-    fresh_context = requests_fresh_context(model_text) or requests_recent_channel_context(model_text)
-    selection = await _select_context(
-        config,
-        context_session,
-        current_messages[-1],
-        system=system,
-        model_name=model_name,
-        fresh_context=fresh_context,
-    )
-    if selection.rollover_required:
-        handoff = await _handoff(config, context_session, channel_id)
-        context_session = await rollover_session(
-            scope,
-            context_session,
-            baseline,
-            reason="context_budget",
-            handoff_json=handoff,
-        )
         system = compose_system()
+        fresh_context = requests_fresh_context(model_text) or requests_recent_channel_context(model_text)
         selection = await _select_context(
             config,
             context_session,
@@ -254,6 +242,25 @@ async def prepare_agent_turn(
             model_name=model_name,
             fresh_context=fresh_context,
         )
+        if selection.rollover_required:
+            handoff = await _handoff(config, context_session, channel_id)
+            context_session = await rollover_session(
+                scope,
+                context_session,
+                baseline,
+                reason="context_budget",
+                handoff_json=handoff,
+            )
+            system = compose_system()
+            selection = await _select_context(
+                config,
+                context_session,
+                current_messages[-1],
+                system=system,
+                model_name=model_name,
+                fresh_context=fresh_context,
+            )
+        await remember_session_persona(context_session.id, persona)
 
     user_message_id = await append_message(channel_id, user_id, user_name, "user", content)
     event_message = getattr(session.event, "message", None)
@@ -324,6 +331,36 @@ async def prepare_agent_turn(
         },
         model_visible=False,
     )
+    agent_events.append(
+        "context_snapshot",
+        payload=build_context_snapshot(
+            system=system,
+            messages=selection.messages,
+            model=model_name or "default",
+            persona={
+                "key": persona.key,
+                "name": persona.name,
+                "prompt": persona.prompt,
+                "appearance": persona.appearance,
+                "has_reference_image": bool(persona.reference_image),
+            },
+            selection={
+                "estimated_tokens": selection.estimated_tokens,
+                "full_session_tokens": selection.full_session_tokens,
+                "included_turn_refs": list(selection.included_turn_refs),
+                "excluded_turn_refs": list(selection.excluded_turn_refs),
+                "fresh_context": fresh_context,
+            },
+            budgets={
+                "max_input_tokens": max(2048, config.max_input_tokens),
+                "output_reserve_tokens": max(0, config.output_reserve_tokens),
+                "rollover_ratio": config.context_rollover_ratio,
+                "minimum_recent_turns": max(0, config.context_min_recent_turns),
+                "inline_event_chars": max(256, config.context_inline_event_chars),
+            },
+        ),
+        model_visible=False,
+    )
     await _flush_started_events(agent_turn.id, agent_events, warn)
     lifecycle = ActiveChatTurn(
         channel_id=channel_id,
@@ -339,6 +376,7 @@ async def prepare_agent_turn(
     )
     return PreparedAgentTurn(
         relation=relation,
+        persona=persona,
         mood=mood,
         memory_context=memory_context,
         eval_history=eval_history,

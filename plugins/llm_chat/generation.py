@@ -35,6 +35,7 @@ from .image_edit_refs import (
 )
 from .runtime_context import llm_chat_context_scope
 from .core.agent_trace import AgentTurnRecorder
+from .core.model_audit import sanitize_audit_value
 from .core.native_images import extract_native_images
 from .core.media_delivery import (
     is_media_unavailable_reply,
@@ -44,6 +45,7 @@ from .core.media_delivery import (
     latest_user_requests_webpage_screenshot,
     latest_user_requests_web_image_reference,
 )
+from .model_audit_runtime import model_audit_scope, capture_completion
 from .core.artifact_access import is_artifact_request
 from .core.tool_trace_safety import sanitize_json
 
@@ -335,7 +337,8 @@ async def _record_model_attempt(
     tool_trace.set_attempt(attempt)
     started = time.monotonic()
     try:
-        response = await run()
+        with model_audit_scope(recorder):
+            response = await run()
     except asyncio.CancelledError:
         if recorder is not None:
             recorder.record_model_attempt(
@@ -352,7 +355,7 @@ async def _record_model_attempt(
                 model_name=model_name,
                 status="failed",
                 duration_ms=round((time.monotonic() - started) * 1000),
-                error=f"{type(exc).__name__}: {exc}",
+                error=str(sanitize_audit_value(f"{type(exc).__name__}: {exc}")["data"]),
             )
         raise
     if recorder is not None:
@@ -361,7 +364,7 @@ async def _record_model_attempt(
             model_name=model_name,
             status="succeeded",
             duration_ms=round((time.monotonic() - started) * 1000),
-            content=response_content(response),
+            content=str(sanitize_audit_value(response_content(response))["data"]),
             metrics=_response_metrics(response),
         )
     return response
@@ -661,7 +664,8 @@ async def _finalize_without_tools(
     excluded_extra = {"tools", "tool_choice", "response_format", "timeout"}
     extra = {key: value for key, value in conf.extra.items() if key not in excluded_extra}
     response = await _record_model_attempt(
-        lambda: litellm.acompletion(
+        lambda: capture_completion(
+            litellm.acompletion,
             model=conf.name,
             messages=[
                 {"role": "system", "content": f"{system}\n\n{suffix}"},

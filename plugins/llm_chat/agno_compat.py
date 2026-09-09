@@ -10,7 +10,7 @@ from contextvars import ContextVar
 from collections.abc import Iterator
 
 from arclet.entari import plugin
-from agno.tools.function import Function
+from agno.tools.function import Function, FunctionCall
 from arclet.letoderea.context import generate_contexts
 import entari_plugin_llm.service as llm_service_module
 from arclet.letoderea.exceptions import ExitState, _ExitException
@@ -25,8 +25,15 @@ from .core.delivery import (
 from .core.tool_trace import current_tool_trace, llm_chat_tool_execution_scope
 from .image_edit_refs import current_image_edit_references
 from .runtime_context import copy_llm_chat_context
+from .core.model_audit import sanitize_audit_value
 from .reaction_feedback import current_reaction_feedback
 from .core.native_images import extract_native_images
+from .model_audit_runtime import (
+    AuditedLiteLLMClient,
+    model_audit_scope,
+    current_model_audit,
+    install_model_http_audit,
+)
 from .core.tool_trace_policy import DeliverySnapshot
 
 _MIN_TOOL_CALL_LIMIT = 8
@@ -62,6 +69,7 @@ _DELIVERY_TOOL_LOCK: ContextVar[asyncio.Lock | None] = ContextVar(
     "llm_chat_agno_delivery_tool_lock",
     default=None,
 )
+_PROVIDER_TOOL_CALL_ID: ContextVar[str] = ContextVar("llm_chat_provider_tool_call_id", default="")
 
 
 @contextmanager
@@ -133,12 +141,24 @@ def _normalize_tool_data(response: object) -> object:
 def _build_agno_tool(name: str) -> Function:
     subscriber = available_functions[name]
 
+    async def capture_call_id(fc: FunctionCall) -> None:
+        _PROVIDER_TOOL_CALL_ID.set(fc.call_id or "")
+
     async def wrapper(**kwargs: Any) -> str:
         recorder = current_tool_trace()
+        provider_tool_call_id = _PROVIDER_TOOL_CALL_ID.get()
+        _PROVIDER_TOOL_CALL_ID.set("")
         unsafe_reference = (
             name not in _INTERNAL_PARTICIPANT_REFERENCE_TOOLS and contains_internal_participant_reference(kwargs)
         ) or (name not in _INTERNAL_IMAGE_REFERENCE_TOOLS and contains_internal_image_reference(kwargs))
-        call = recorder.start(name, {} if unsafe_reference else kwargs) if recorder is not None else None
+        call = (
+            recorder.start(name, {} if unsafe_reference else kwargs, tool_call_id=provider_tool_call_id)
+            if recorder is not None
+            else None
+        )
+        audit = current_model_audit()
+        if audit is not None and call is not None:
+            audit.record_tool_start(call)
         executing = False
 
         async def invoke() -> str:
@@ -161,11 +181,21 @@ def _build_agno_tool(name: str) -> Function:
                     raise ValueError("Invalid internal reference for this tool")
                 tool_context = await generate_contexts(LLMToolEvent(), inherit_ctx=copy_llm_chat_context())
                 tool_context.update(kwargs)
-                with llm_chat_tool_execution_scope(call.execution_ref if call is not None else ""):
+                with (
+                    llm_chat_tool_execution_scope(call.execution_ref if call is not None else ""),
+                    model_audit_scope(None),
+                ):
                     response = await subscriber.handle(tool_context, inner=True)
                 data = _normalize_tool_data(response)
                 if recorder is not None and call is not None:
-                    recorder.finish_success(call, data, before=before, after=_delivery_snapshot())
+                    audit_value = data if isinstance(response, (ExitState, _ExitException)) else response
+                    recorder.finish_success(
+                        call,
+                        data,
+                        before=before,
+                        after=_delivery_snapshot(),
+                        audit_snapshot=sanitize_audit_value(audit_value),
+                    )
                 return json.dumps({"ok": True, "data": data}, ensure_ascii=False)
             except asyncio.CancelledError:
                 if recorder is not None and call is not None:
@@ -180,6 +210,8 @@ def _build_agno_tool(name: str) -> Function:
 
         lock = _DELIVERY_TOOL_LOCK.get() if name in _ORDERED_DELIVERY_TOOLS else None
         try:
+            if audit is not None:
+                await audit.flush()
             if lock is not None:
                 async with lock:
                     return await invoke()
@@ -189,6 +221,15 @@ def _build_agno_tool(name: str) -> Function:
                 snapshot = _delivery_snapshot()
                 recorder.finish_cancelled(call, before=snapshot, after=snapshot)
             raise
+        finally:
+            if audit is not None and recorder is not None:
+                audit.record_tool_events(recorder.events)
+                task = asyncio.create_task(audit.flush())
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    await task
+                    raise
 
     schema = next(schema["function"] for schema in tools if schema["function"]["name"] == name)
     return Function(
@@ -197,6 +238,7 @@ def _build_agno_tool(name: str) -> Function:
         parameters=schema["parameters"],
         entrypoint=wrapper,
         skip_entrypoint_processing=True,
+        pre_hook=capture_call_id,
     )
 
 
@@ -219,6 +261,10 @@ def _wrap_litellm_model(previous_model: Any) -> Any:
         __llm_chat_compat__ = True
         __llm_chat_original__ = previous_model
 
+        def get_client(self) -> Any:
+            client = super().get_client()
+            return AuditedLiteLLMClient(client) if current_model_audit() is not None else client
+
         def _parse_provider_response(self, response: Any, **kwargs: Any) -> Any:
             model_response = super()._parse_provider_response(response, **kwargs)
             images = extract_native_images(response)
@@ -232,6 +278,7 @@ def _wrap_litellm_model(previous_model: Any) -> Any:
 
 
 def install_agno_tool_bridge() -> None:
+    plugin.collect_disposes(install_model_http_audit())
     previous_tools = llm_service_module.get_agno_tools
     previous_agent = llm_service_module.Agent
     previous_model = llm_service_module.LiteLLM

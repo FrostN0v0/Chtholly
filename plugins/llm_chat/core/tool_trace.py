@@ -13,6 +13,7 @@ from collections.abc import Mapping, Iterator
 
 from .types import JSONType
 from .errors import summarize_exception
+from .model_audit import sanitize_audit_value
 from .tool_trace_policy import (
     ToolEffect,
     ToolStatus,
@@ -37,6 +38,8 @@ class PendingToolCall:
     recorded_arguments: dict[str, JSONType]
     started_at: datetime
     started_monotonic: float
+    tool_call_id: str = ""
+    audit_arguments: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +59,9 @@ class ToolTraceEvent:
     evidence: dict[str, JSONType]
     started_at: datetime
     duration_ms: int
+    tool_call_id: str = ""
+    audit_arguments: dict[str, object] = field(default_factory=dict)
+    audit_result: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -70,7 +76,7 @@ class ToolTraceRecorder:
     def set_attempt(self, attempt: int) -> None:
         self.attempt = max(1, int(attempt))
 
-    def start(self, tool_name: str, arguments: Mapping[str, object]) -> PendingToolCall:
+    def start(self, tool_name: str, arguments: Mapping[str, object], *, tool_call_id: str = "") -> PendingToolCall:
         self._next_sequence += 1
         return PendingToolCall(
             sequence=self._next_sequence,
@@ -81,6 +87,8 @@ class ToolTraceRecorder:
             recorded_arguments=record_tool_arguments(tool_name, arguments),
             started_at=datetime.now(timezone.utc),
             started_monotonic=time.monotonic(),
+            tool_call_id=tool_call_id,
+            audit_arguments=sanitize_audit_value(arguments),
         )
 
     def record_evidence(self, execution_ref: str, payload: Mapping[str, object]) -> None:
@@ -105,6 +113,7 @@ class ToolTraceRecorder:
         *,
         before: DeliverySnapshot,
         after: DeliverySnapshot,
+        audit_snapshot: dict[str, object] | None = None,
     ) -> None:
         status, effect, outcome = project_tool_success(call.tool_name, result, before=before, after=after)
         self._append(
@@ -113,6 +122,7 @@ class ToolTraceRecorder:
             effect=effect,
             outcome=outcome,
             recorded_result=record_tool_result(call.tool_name, result, projected_result=outcome),
+            audit_result=sanitize_audit_value(result) if audit_snapshot is None else audit_snapshot,
         )
 
     def finish_error(
@@ -131,6 +141,7 @@ class ToolTraceRecorder:
             effect=tool_error_effect(call.tool_name, before, after, terminal_status=status),
             outcome=error,
             recorded_result=error,
+            audit_result=sanitize_audit_value(error),
         )
 
     def finish_cancelled(
@@ -147,6 +158,7 @@ class ToolTraceRecorder:
             effect=tool_error_effect(call.tool_name, before, after, terminal_status="cancelled"),
             outcome=error,
             recorded_result=error,
+            audit_result=sanitize_audit_value(error),
         )
 
     def _append(
@@ -157,6 +169,7 @@ class ToolTraceRecorder:
         effect: ToolEffect,
         outcome: dict[str, JSONType],
         recorded_result: JSONType,
+        audit_result: dict[str, object],
     ) -> None:
         duration_ms = max(0, round((time.monotonic() - call.started_monotonic) * 1000))
         evidence = self._evidence.pop(call.execution_ref, {})
@@ -181,6 +194,9 @@ class ToolTraceRecorder:
                 evidence=evidence,
                 started_at=call.started_at,
                 duration_ms=duration_ms,
+                tool_call_id=call.tool_call_id,
+                audit_arguments=call.audit_arguments,
+                audit_result=audit_result,
             )
         )
 

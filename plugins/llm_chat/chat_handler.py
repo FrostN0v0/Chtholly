@@ -303,6 +303,7 @@ async def _run_chat(
             config,
             memory_context,
             eval_history,
+            persona_prompt=prepared.persona.prompt,
             user_id=user_id,
             user_name=user_name,
             channel_id=channel_id,

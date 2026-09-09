@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from datetime import datetime, timedelta
 from dataclasses import field, replace, dataclass
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Callable, Sequence, Awaitable
 
 from .types import JSONType
-from .tool_trace import ToolTraceEvent
+from .tool_trace import ToolTraceEvent, PendingToolCall
 from .tool_trace_safety import sanitize_json
 
 
@@ -31,12 +32,48 @@ class AgentEventDraft:
 
 @dataclass
 class AgentTurnRecorder:
-    """Collect one turn's durable events before a single transactional flush."""
+    """Collect ordered drafts with an optional generation-local durable sink."""
 
     events: list[AgentEventDraft] = field(default_factory=list)
     _next_sequence: int = field(default=0, init=False)
     _attempt: int = field(default=0, init=False)
     _flushed: int = field(default=0, init=False)
+    _inflight: int = field(default=0, init=False)
+    sink: Callable[[Sequence[AgentEventDraft]], Awaitable[object]] | None = field(default=None, repr=False)
+    warn: Callable[[str], object] | None = field(default=None, repr=False)
+    _flush_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _tool_starts: set[str] = field(default_factory=set, init=False)
+    _tool_results: set[str] = field(default_factory=set, init=False)
+
+    async def flush(self) -> bool:
+        """Serialize incremental commits; sink errors never replay tool side effects."""
+        if self.sink is None:
+            return True
+        async with self._flush_lock:
+            pending = self.pending_events()
+            if not pending:
+                return True
+            self._inflight = len(pending)
+            task = asyncio.ensure_future(self.sink(pending))
+            cancelled = False
+            try:
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    cancelled = True
+                    await task
+                self.mark_flushed(len(pending))
+            except Exception as exc:
+                if self.warn is not None:
+                    self.warn(f"agent event persistence failed: {type(exc).__name__}")
+                if cancelled:
+                    raise asyncio.CancelledError from exc
+                return False
+            finally:
+                self._inflight = 0
+            if cancelled:
+                raise asyncio.CancelledError
+            return True
 
     @property
     def attempt(self) -> int:
@@ -138,31 +175,38 @@ class AgentTurnRecorder:
             model_visible=model_visible,
         )
 
+    def record_tool_start(self, event: PendingToolCall | ToolTraceEvent) -> None:
+        if event.execution_ref in self._tool_starts:
+            return
+        self._tool_starts.add(event.execution_ref)
+        self.append(
+            "assistant_tool_call",
+            attempt=event.attempt,
+            role="assistant",
+            tool_call_id=event.tool_call_id or event.execution_ref,
+            execution_ref=event.execution_ref,
+            tool_name=event.tool_name,
+            payload={
+                "arguments": event.recorded_arguments,
+                "context_arguments": event.arguments,
+                "audit_arguments": event.audit_arguments,
+                "provider_tool_call_id": event.tool_call_id,
+            },
+            status="requested",
+            effect="none",
+            created_at=self._tool_started_at(event),
+        )
+
     def record_tool_events(self, events: Sequence[ToolTraceEvent]) -> None:
-        floor = self._earliest_tool_time()
         for event in sorted(events, key=lambda item: item.sequence):
-            started_at = event.started_at.replace(tzinfo=None)
-            if floor is not None and started_at < floor:
-                started_at = floor
-            self.append(
-                "assistant_tool_call",
-                attempt=event.attempt,
-                role="assistant",
-                tool_call_id=event.execution_ref,
-                execution_ref=event.execution_ref,
-                tool_name=event.tool_name,
-                payload={
-                    "arguments": event.recorded_arguments,
-                    "context_arguments": event.arguments,
-                },
-                status="requested",
-                effect="none",
-                model_visible=True,
-                created_at=started_at,
-            )
+            self.record_tool_start(event)
+            if event.execution_ref in self._tool_results:
+                continue
+            self._tool_results.add(event.execution_ref)
             result_payload: dict[str, object] = {
                 "result": event.recorded_result,
                 "context_result": event.outcome,
+                "audit_result": event.audit_result,
             }
             if event.evidence:
                 result_payload["evidence"] = event.evidence
@@ -170,15 +214,14 @@ class AgentTurnRecorder:
                 "tool_result",
                 attempt=event.attempt,
                 role="tool",
-                tool_call_id=event.execution_ref,
+                tool_call_id=event.tool_call_id or event.execution_ref,
                 execution_ref=event.execution_ref,
                 tool_name=event.tool_name,
                 payload=result_payload,
                 status=event.status,
                 effect=event.effect,
                 duration_ms=event.duration_ms,
-                model_visible=True,
-                created_at=started_at + timedelta(milliseconds=event.duration_ms),
+                created_at=self._tool_started_at(event) + timedelta(milliseconds=event.duration_ms),
             )
         self._resequence_chronologically()
 
@@ -193,16 +236,26 @@ class AgentTurnRecorder:
         self._flushed = min(len(self.events), max(self._flushed, self._flushed + max(0, count)))
 
     def _resequence_chronologically(self) -> None:
-        frozen = self.events[: self._flushed]
-        ordered = sorted(self.events[self._flushed :], key=lambda event: (event.created_at, event.sequence))
-        renumbered = [replace(event, sequence=index) for index, event in enumerate(ordered, start=self._flushed + 1)]
+        boundary = self._flushed + self._inflight
+        frozen = self.events[:boundary]
+        ordered = sorted(self.events[boundary:], key=lambda event: (event.created_at, event.sequence))
+        renumbered = [replace(event, sequence=index) for index, event in enumerate(ordered, start=boundary + 1)]
         self.events = frozen + renumbered
         self._next_sequence = len(self.events)
 
-    def _earliest_tool_time(self) -> datetime | None:
-        """Return the floor that keeps tool events after already-recorded turn events."""
-
-        return max((event.created_at for event in self.events), default=None)
+    def _tool_started_at(self, event: PendingToolCall | ToolTraceEvent) -> datetime:
+        """Keep user input and immutable commits first, not later model records."""
+        started_at = event.started_at.replace(tzinfo=None)
+        boundary = self._flushed + self._inflight
+        floor = max(
+            (
+                item.created_at
+                for index, item in enumerate(self.events)
+                if index < boundary or item.event_type == "user_input"
+            ),
+            default=started_at,
+        )
+        return max(started_at, floor)
 
     def record_assistant_output(self, content: str, *, status: str = "confirmed") -> None:
         if content:

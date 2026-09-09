@@ -58,6 +58,17 @@ class ActiveChatTurn:
     _agent_finalize_attempted: bool = field(default=False, init=False)
     _assistant_persist_attempted: bool = field(default=False, init=False)
 
+    def __post_init__(self) -> None:
+        self.agent_events.warn = self.warn
+        if self.agent_turn_id is not None and self.persist_agent_event_rows is not None:
+
+            async def persist(events: Sequence[AgentEventDraft]) -> object:
+                assert self.agent_turn_id is not None
+                assert self.persist_agent_event_rows is not None
+                return await self.persist_agent_event_rows(self.agent_turn_id, events)
+
+            self.agent_events.sink = persist
+
     async def persist_delivered_text(self, *, preserve_original: bool = False) -> str:
         """Persist confirmed text deliveries at most once."""
 
@@ -94,19 +105,7 @@ class ActiveChatTurn:
             return
         self._agent_finalize_attempted = True
         self.capture_tool_events()
-        pending = self.agent_events.pending_events()
-        persisted = True
-        if pending:
-            persisted = False
-            try:
-                await self.persist_agent_event_rows(self.agent_turn_id, pending)
-                self.agent_events.mark_flushed(len(pending))
-                persisted = True
-            except asyncio.CancelledError:
-                self.warn("agent turn persistence cancelled")
-                raise
-            except Exception as exc:
-                self.warn(f"agent event persistence failed: {type(exc).__name__}")
+        persisted = await self.agent_events.flush()
         try:
             await self.finish_agent_turn_row(
                 self.agent_turn_id,
