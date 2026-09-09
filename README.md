@@ -6,7 +6,7 @@
   <p>✨ 基于 <a href="https://github.com/ArcletProject/Entari">Entari</a> 与 <a href="https://satori.js.org/">Satori</a> 的 QQ 娱乐机器人 ✨</p>
 </div>
 <p align="center">
-  <a href="https://raw.githubusercontent.com/FrostN0v0/Chtholly/etr/LICENSE">
+  <a href="https://raw.githubusercontent.com/FrostN0v0/Chtholly/main/LICENSE">
     <img src="https://img.shields.io/github/license/FrostN0v0/Chtholly" alt="license">
   </a>
     <img src="https://img.shields.io/badge/python-3.10+-blue?logo=python&logoColor=edb641" alt="python">
@@ -94,6 +94,6 @@ llmchat handoff
 
 ## 📄 许可证
 
-本项目代码使用 [GNU AGPLv3](https://choosealicense.com/licenses/agpl-3.0/) 作为开源许可证。品牌图稿、可编辑原稿及其衍生图采用独立的 CC BY-NC-SA 4.0；署名、字体许可及作者声明见 [图稿许可](resources/artwork/LICENSE)。
+本项目使用 [GNU AGPLv3](https://choosealicense.com/licenses/agpl-3.0/) 作为开源许可证。
 
 这意味着你可以运行本项目，并向你的用户提供服务，如后续有对本项目源码的修改，你需要向用户公开修改后的此项目的源码。
