@@ -15,7 +15,7 @@
 ## 技术栈与关键依赖
 
 - **Python**: >= 3.10, < 4.0（当前运行时使用 3.10；待协议栈完成 Python 3.14 兼容后再升级）
-- **Bot 框架**: [arclet-entari](https://pypi.org/project/arclet-entari/)（完整安装 `arclet-entari[full]`，含 CLI、YAML、文件监听）
+- **Bot 框架**: [arclet-entari](https://pypi.org/project/arclet-entari/)（当前固定 `0.19.0rc2`，完整安装 `arclet-entari[full]`，含 CLI、YAML、文件监听）。HTMLRender `0.1.0` 的元数据仍限制 Entari `<0.19`，项目仅对已验证的 RC 使用保留 `full,pydantic` extras 的精确 uv override；升级该组合必须验证真实渲染及插件清理，不能只凭依赖解析成功判断兼容。
 - **CLI 工具**: [entari-cli](https://pypi.org/project/entari-cli/) —— `entari init / run / new / add / remove / config / gen_main`
 - **事件总线**: arclet-letoderea（Entari 内建依赖）
 - **命令系统**: arclet-alconna（Entari 内建 `command` 模块）
@@ -25,6 +25,8 @@
 - **配置模型**: `BasicConfModel`（默认，dataclass 风格）/ Pydantic `BaseModel`（`arclet.entari.config.models.pyd`）/ msgspec `Struct`
 - **HTTP 客户端**: httpx；浏览器截图的受控公网出口使用 aiohttp 自定义 resolver 固定已校验公网 IP
 - **JSON 序列化**: orjson（LiteLLM 工具 / MCP 请求路径的显式运行时依赖）
+- **LLM 兼容组合**: `entari-plugin-llm` 固定 Git `1845f1c3c65f9df4493e97f96a4c43938b176320`；Agno 固定在 `<3` 的最新兼容系列，当前为 `2.9.0`，因为上游仍导入 Agno 3 已删除的 schema helper。Python 3.10 的 LiteLLM 限制 `<1.97`，当前为 `1.96.2`；`1.97` 的 response schema 无法完成构建，`1.98+` 另有 `typing.NotRequired` 导入错误。以 `uv.lock` 安装，不修改第三方安装目录。
+- **LLM 工具执行**: 上游 `tools.available_functions` 的 `(Subscriber, Function)` 是 schema 与依赖注入的唯一权威；模型暂停后，由本地 generation-local 边界调用上游 `run_llm_tools` 执行真实 `RunRequirement`，随后继续生成。不再维护第二份 Function/schema。仅本地 generation 的 Agent 开启内存 `cache_session`，以支持上游按 `run_id` 继续无数据库的暂停轮次；授权、跨暂停调用上限、媒体先于文字、只读并发、取消结算、错误脱敏和审计仍由本地边界控制。Entari staged reload 必须保留新工具所有权，失败时恢复仍存活的旧订阅者；旧插件清理不得删除替代工具。pytest 通过 `tests/conftest.py` 将 Letoderea effect 任务绑定到当前测试 loop，禁止通过取消异 loop 清理任务伪装卸载成功。
 - **日志与终端**: rich（Entari 内建 log 使用 loguru；凭证化运行环境必须关闭会展开局部变量的 `rich_error`）
 - **包管理**: uv（`uv sync` / `uv add` / `uv remove`）
 - **代码质量**: Ruff、Pyright（`typeCheckingMode = "standard"`）

@@ -20,6 +20,7 @@ from entari_plugin_database import get_session  # entari: plugin
 import entari_plugin_htmlrender as _htmlrender  # entari: plugin  # noqa: F401
 from entari_plugin_htmlrender import HtmlRenderer
 from entari_plugin_llm.config import get_model_list, get_model_config
+from arclet.entari.plugin.model import PluginDispatcher
 from entari_plugin_llm.exception import ModelNotFoundError
 from entari_plugin_htmlrender.entari import HtmlRenderService
 
@@ -28,10 +29,12 @@ from utils.path import AUDIO_DIR, IMAGE_DIR
 from .config import LLMChatConfig
 from .vision import VISION_DESCRIBE_TIMEOUT, vision_completion
 from .tools.web import register_web_access_tools
+from .core.types import JSONType
 from .image_tags import pick_image
 from .meme_store import import_meme_image
 from .perception import get_channel_perception
 from .tools._tts import TTSServiceLike
+from .agno_compat import register_llm_chat_tool
 from .tools.speak import SpeakToolContext, register_speak
 from .chat_context import collect_message_images
 from .core.delivery import (
@@ -86,7 +89,8 @@ RENDER_TEMPLATE_DIR = Path(__file__).resolve().parent / "render_templates"
 _LOGGER = log.wrapper("[llm_chat]")
 
 config = plugin_config(LLMChatConfig)
-tools = plugin.dispatch(LLMToolEvent)
+tools = cast(PluginDispatcher[JSONType], plugin.dispatch(LLMToolEvent))
+tools.register_hooks.append(register_llm_chat_tool)
 registered_tools: list[str] = []
 
 image_catalog = ImageCatalog(IMAGE_DIR, get_session)

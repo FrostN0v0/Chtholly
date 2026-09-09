@@ -8,7 +8,7 @@ license = { text = "AGPL-3.0" }
 requires-python = ">=3.10, <4.0"
 dependencies = [
     "aiohttp>=3.14.3",
-    "arclet-entari[full]>=0.18.3",
+    "arclet-entari[full]==0.19.0rc2",
     "entari-plugin-browser[jinja2]>=0.6.1",
     "entari-plugin-database>=0.3.3",
     "entari-plugin-htmlrender[playwright]>=0.1.0,<0.2",
@@ -27,8 +27,15 @@ dependencies = [
     "tzdata>=2026.3",
 ]
 
+[tool.uv]
+# HTMLRender 0.1.0 has a conservative Entari upper bound; validate the pinned RC as a unit.
+override-dependencies = ["arclet-entari[full,pydantic]==0.19.0rc2"]
+# The upstream LLM tool bridge still imports helpers removed in Agno 3.
+# LiteLLM 1.97+ breaks Python 3.10 response schemas; 1.98+ also fails at import.
+constraint-dependencies = ["agno<3", "litellm<1.97; python_version < '3.11'"]
+
 [tool.uv.sources]
-entari-plugin_llm = { git = "https://github.com/ArcletProject/entari-plugin-llm"}
+entari-plugin-llm = { git = "https://github.com/ArcletProject/entari-plugin-llm", rev = "1845f1c3c65f9df4493e97f96a4c43938b176320" }
 
 [project.optional-dependencies]
 adapters = [

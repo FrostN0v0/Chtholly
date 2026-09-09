@@ -26,7 +26,10 @@ from arclet.entari.config import EntariConfig
 if not hasattr(EntariConfig, "instance"):
     setattr(EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.yml"))
 from satori import Message
+from agno.run.agent import RunOutput
 from arclet.letoderea import Contexts
+from agno.models.response import ToolExecution
+from agno.run.requirement import RunRequirement
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 import entari_plugin_llm.service as llm_service_module
 from arclet.entari.plugin.model import Plugin, current_plugin
@@ -62,7 +65,8 @@ from plugins.llm_chat.meme_store import (
 from plugins.llm_chat.web.policy import DEFAULT_WEB_ACCESS_LIMITS
 from plugins.llm_chat.agent_context import AgentAccessContext, agent_access_scope
 from plugins.llm_chat.core.delivery import DeliveryState, llm_chat_delivery_scope
-from plugins.llm_chat.core.tool_trace import llm_chat_tool_execution_scope
+from plugins.llm_chat.core.tool_trace import ToolTraceRecorder, llm_chat_tool_trace_scope
+from plugins.llm_chat.runtime_context import llm_chat_context_scope
 from plugins.llm_chat.core.image_source import IMAGE_FETCH_MAX_BYTES
 from plugins.llm_chat.tools._image_catalog import ImageCatalog
 from plugins.llm_chat.core.image_tag_metadata import (
@@ -810,18 +814,34 @@ async def test_tag_image_scope_indexing_privacy_and_background_completion(monkey
         monkeypatch.setattr(harness.module.tag_image_context, "import_image", slow_import)
         monkeypatch.setattr(tag_image_tool_module, "settle_background_tool_result", settle_result)
         harness.module.tag_image_context.timeout_seconds = 0.01
+        recorder = ToolTraceRecorder()
+        requirement = RunRequirement(
+            ToolExecution(
+                tool_call_id="tag-pending",
+                tool_name="tag_image",
+                tool_args={"image_index": 1},
+                external_execution_required=True,
+            )
+        )
+        response = RunOutput(requirements=[requirement])
+        context = Contexts()
+        context[ITEM_SESSION] = session
         with (
             llm_chat_delivery_scope(DeliveryState()),
             agent_access_scope(AgentAccessContext(10, 20, 30, "user")),
-            llm_chat_tool_execution_scope("exec_tag"),
+            llm_chat_tool_trace_scope(recorder),
+            llm_chat_context_scope(context),
         ):
-            pending = await target(session)
-        assert isinstance(pending, dict)
-        assert pending["status"] == "pending"
+            assert await llm_service_module.run_llm_tools(response) is True
+        pending = json.loads(requirement.external_execution_result)
+        assert pending["ok"] is True
+        assert pending["data"]["status"] == "pending"
+        event = recorder.events[0]
+        assert (event.tool_call_id, event.status) == ("tag-pending", "pending")
         release.set()
         await asyncio.wait_for(settled.wait(), timeout=1)
         assert settlement[0]["turn_id"] == 30
-        assert settlement[0]["execution_ref"] == "exec_tag"
+        assert settlement[0]["execution_ref"] == event.execution_ref
         assert settlement[0]["status"] == "succeeded"
         assert settlement[0]["effect"] == "confirmed"
         assert cast(dict[str, object], settlement[0]["result"])["status"] == "created"

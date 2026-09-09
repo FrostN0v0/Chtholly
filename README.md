@@ -42,9 +42,11 @@ Welcome To [💬 斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M
 ```shell
 git clone https://github.com/FrostN0v0/Chtholly.git
 cd Chtholly
-uv sync --all-extras
-uv run entari run
+uv sync --locked --all-extras
+uv run --locked entari run
 ```
+
+`uv.lock` 固定当前兼容组合，包含 Entari RC 与 LLM Git 版本；请按锁文件安装，升级前核验框架、LLM 与渲染插件的兼容性。
 
 更多框架用法见 [Entari 文档](https://arclet.top/tutorial/entari/)。
 
