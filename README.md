@@ -6,7 +6,7 @@
   <p>✨ 基于 <a href="https://github.com/ArcletProject/Entari">Entari</a> 与 <a href="https://satori.js.org/">Satori</a> 的 QQ 娱乐机器人 ✨</p>
 </div>
 <p align="center">
-  <a href="https://raw.githubusercontent.com/FrostN0v0/Chtholly/main/LICENSE">
+  <a href="https://raw.githubusercontent.com/FrostN0v0/Chtholly/master/LICENSE">
     <img src="https://img.shields.io/github/license/FrostN0v0/Chtholly" alt="license">
   </a>
     <img src="https://img.shields.io/badge/python-3.10+-blue?logo=python&logoColor=edb641" alt="python">
