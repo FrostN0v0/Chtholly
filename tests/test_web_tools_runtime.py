@@ -3665,6 +3665,80 @@ async def test_local_generation_exposes_only_original_authorized_external_functi
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("audit_enabled", [False, True])
+async def test_function_wire_schema_preserves_upstream_external_pause_and_continue(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_enabled: bool,
+) -> None:
+    from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
+    from plugins.llm_chat.model_audit_runtime import model_audit_scope
+
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(tool_calls=[_tool_call("wire-call", "wire_probe", {"count": 41})]),
+            _model_response("The upstream tool returned 42."),
+        ],
+    )
+    session = _DeliveryToolSession()
+    invoked_sessions: list[Session] = []
+    paused_requirements: list[RunRequirement] = []
+
+    async def wire_probe(session: Session, count: int) -> int:
+        """Increment the supplied count using the live Entari session."""
+        invoked_sessions.append(session)
+        return count + 1
+
+    async with _temporary_plugin() as harness:
+        wire_probe.__module__ = harness.module.__name__
+        harness.dispatcher(wire_probe)
+        function = available_functions["wire_probe"][1]
+        function.strict = True
+        function.requires_confirmation = False
+        function.approval_type = "audit"
+        saved_function = function.to_dict()
+        runner = llm_service_module.run_llm_tools
+
+        async def observe_pause(response: RunOutput, *args: Any, **kwargs: Any) -> bool:
+            assert response.is_paused
+            assert invoked_sessions == []
+            requirement = response.active_requirements[0]
+            assert requirement.needs_external_execution
+            paused_requirements.append(requirement)
+            return await runner(response, *args, **kwargs)
+
+        with (
+            monkeypatch.context() as pause_patch,
+            llm_chat_context_scope(_tool_context(session)),
+            llm_chat_tool_trace_scope(ToolTraceRecorder()),
+            model_audit_scope(AgentTurnRecorder() if audit_enabled else None),
+        ):
+            pause_patch.setattr(llm_service_module, "run_llm_tools", observe_pause)
+            response = await LLMService().generate("Increment 41.", model="test-model")
+
+        assert function.external_execution is True
+        assert function.to_dict() == saved_function
+        assert invoked_sessions == [session]
+        assert len(paused_requirements) == 1
+        assert response.content == "The upstream tool returned 42."
+        assert len(payloads) == 2
+        for payload in payloads:
+            for tool in payload["tools"]:
+                assert set(tool["function"]) <= {"name", "description", "parameters", "strict"}
+            declaration = next(
+                tool["function"] for tool in payload["tools"] if tool["function"]["name"] == "wire_probe"
+            )
+            assert declaration["parameters"] == function.parameters
+            assert set(declaration["parameters"]["properties"]) == {"count"}
+            assert declaration["strict"] is True
+        result = _tool_messages(payloads[1])[0]
+        assert result["tool_call_id"] == "wire-call"
+        assert json.loads(result["content"]) == {"ok": True, "data": 42}
+        json.dumps(payloads)
+
+
+@pytest.mark.asyncio
 async def test_same_batch_media_finishes_before_text_and_preserves_provider_call_ids(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,

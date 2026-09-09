@@ -46,6 +46,7 @@ _MIN_TOOL_CALL_LIMIT = 8
 _MAX_TOOL_CALL_LIMIT = 64
 _UTILITY_TOOL_CALL_RESERVE = 3
 _READ_ONLY_CONCURRENCY = 4
+_FUNCTION_WIRE_FIELDS = frozenset({"name", "description", "parameters", "strict"})
 _ORDERED_DELIVERY_TOOLS = frozenset(
     {
         "capture_web_reference",
@@ -468,6 +469,21 @@ def _wrap_litellm_model(previous_model: Any) -> Any:
     class NativeImageLiteLLM(previous_model):
         __llm_chat_compat__ = True
         __llm_chat_original__ = previous_model
+
+        def _format_tools(self, tools: list[Function | dict[str, Any]] | None) -> list[dict[str, Any]]:
+            declarations = super()._format_tools(tools)
+            for index, declaration in enumerate(declarations):
+                function = declaration.get("function")
+                if declaration.get("type") != "function" or not isinstance(function, dict):
+                    continue
+                if any(key not in _FUNCTION_WIRE_FIELDS for key in function):
+                    # Agno's persisted Function config includes execution/HITL
+                    # flags. Keep those on the live Function, never on the wire.
+                    declarations[index] = {
+                        **declaration,
+                        "function": {key: value for key, value in function.items() if key in _FUNCTION_WIRE_FIELDS},
+                    }
+            return declarations
 
         def get_client(self) -> Any:
             client = super().get_client()
