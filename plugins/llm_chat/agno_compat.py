@@ -22,6 +22,8 @@ from entari_plugin_llm.tools import _ToolPropagator, available_functions
 import entari_plugin_llm.service as llm_service_module
 from entari_plugin_llm.sessions import SessionInfo
 
+from utils.llm_model_core.snapshot import current_main_model
+
 from .core.errors import summarize_exception
 from .core.delivery import (
     current_llm_chat_delivery,
@@ -506,7 +508,7 @@ def install_agno_tool_bridge() -> None:
     """Install context-scoped upstream delegation, restored on plugin disposal."""
 
     plugin.collect_disposes(install_model_http_audit())
-    names = ("get_agno_tools", "run_llm_tools", "LiteLLM", "Agent")
+    names = ("get_agno_tools", "run_llm_tools", "LiteLLM", "Agent", "get_model_config")
     previous = {name: getattr(llm_service_module, name) for name in names}
     original = {name: getattr(value, "__llm_chat_original__", value) for name, value in previous.items()}
 
@@ -536,11 +538,18 @@ def install_agno_tool_bridge() -> None:
             kwargs["cache_session"] = True
         return original["Agent"](*args, **kwargs)
 
+    @wraps(original["get_model_config"])
+    def scoped_model(model_name: str | None = None, *args: Any, **kwargs: Any) -> Any:
+        # Main attempts pass a resolved name; nested plugins may independently use the global default.
+        snapshot = current_main_model(model_name) if model_name is not None else None
+        return snapshot if snapshot is not None else original["get_model_config"](model_name, *args, **kwargs)
+
     replacements = {
         "get_agno_tools": authorized_tools,
         "run_llm_tools": run_tools,
         "LiteLLM": _wrap_litellm_model(original["LiteLLM"]),
         "Agent": local_agent,
+        "get_model_config": scoped_model,
     }
     for name, replacement in replacements.items():
         setattr(replacement, "__llm_chat_compat__", True)

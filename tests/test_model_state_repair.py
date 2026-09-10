@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from plugins.llm_chat.core.model_state import ConfiguredModel, repair_model_state
-from plugins.llm_chat.core.model_state_store import repair_model_state_file
+from utils.llm_model_core.state import ConfiguredModel, repair_model_state
+from utils.llm_model_core.state_store import InvalidModelState, repair_model_state_file
 
 _MODELS = [
     ConfiguredModel("gpt-5.6-sol", "gpt"),
@@ -159,7 +159,7 @@ def test_file_repair_refuses_to_overwrite_invalid_json(tmp_path):
     original = b"{invalid"
     path.write_bytes(original)
 
-    with pytest.raises(ValueError, match="invalid state JSON"):
+    with pytest.raises(InvalidModelState):
         repair_model_state_file(path, _MODELS)
 
     assert path.read_bytes() == original

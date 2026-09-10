@@ -39,6 +39,7 @@ from arclet.letoderea.context import Contexts
 from satori.adapters.onebot11.message import OneBot11MessageEncoder
 
 from plugins.llm_chat.web.policy import WebAccessLimits, llm_chat_web_access_scope
+from utils.llm_model_core.snapshot import pin_main_model, main_model_scope
 from plugins.llm_chat.core.delivery import llm_chat_delivery_scope
 from plugins.llm_chat.core.tool_trace import (
     ToolTraceRecorder,
@@ -539,6 +540,28 @@ def _install_completion_script(
 
 def _tool_messages(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [message for message in payload["messages"] if message["role"] == "tool"]
+
+
+@pytest.mark.asyncio
+async def test_main_model_snapshot_preserves_implicit_plugin_model_selection(local_modules, monkeypatch):
+    payloads = _install_completion_script(monkeypatch, [_model_response("done"), _model_response("done")])
+    pinned = SimpleNamespace(
+        name="channel-model",
+        alias="channel",
+        api_key="channel-key",
+        base_url="https://channel.invalid/v1",
+        prompt="",
+        extra={},
+    )
+    async with _temporary_plugin():
+        local_modules.agno_compat.install_agno_tool_bridge()
+        with main_model_scope():
+            pin_main_model(pinned)
+            service = LLMService()
+            await service.generate("Independent plugin request")
+            await service.generate("Main turn correction", model="channel-model")
+    assert payloads[0]["model"] == "test-model"
+    assert payloads[1]["model"] == "channel-model"
 
 
 @pytest.mark.asyncio

@@ -7,8 +7,8 @@ from arclet.entari.logger import log
 from entari_plugin_llm.config import _conf
 from arclet.entari.event.lifespan import Ready
 
-from .core.model_state import ConfiguredModel
-from .core.model_state_store import repair_model_state_file
+from utils.llm_model_core.state import ConfiguredModel
+from utils.llm_model_core.state_store import repair_model_state_file
 
 _LOGGER = log.wrapper("[llm_chat]")
 

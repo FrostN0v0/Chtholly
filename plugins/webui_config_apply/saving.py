@@ -2,23 +2,24 @@
 
 from __future__ import annotations
 
-import os
 from copy import deepcopy
 from types import MethodType
 from typing import Any, cast
 from hashlib import sha256
 from pathlib import Path
 from threading import RLock
-from contextlib import ExitStack
-from collections.abc import Mapping
+from collections.abc import Mapping, Callable
 
 from tarina.tools import nest_dict_update, nest_list_update
 from arclet.entari.plugin import find_plugin, get_plugins
 from arclet.entari.config.file import EntariConfig
 
 from utils.webui_config_core import ConfigValidationError, prepare_config, validate_config, validate_candidate
+from utils.webui_config_core.validation import same_config
 
 from .serializer import read_source, render_source
+from .persistence import persist_candidate
+from .model_reload import prepare_model_reload
 
 
 class SaveError(ValueError):
@@ -121,9 +122,17 @@ def _update_section(clone: EntariConfig, section: str, value: Any) -> None:
 
 
 class ConfigSaver:
-    def __init__(self, running_sha256: str | None) -> None:
+    def __init__(self, running_sha256: str | None, restart_available: Callable[[], bool]) -> None:
         self.running_sha256 = running_sha256
+        self.restart_available = restart_available
         self.lock = RLock()
+        self.application_mode = "restart"
+        self.last_application: dict[str, object] = {"result": "applied" if running_sha256 else "unverified"}
+        live = EntariConfig.instance
+        content = live.path.read_bytes()
+        self._running_source = (
+            validate_candidate(content, live.env_vars) if sha256(content).hexdigest() == running_sha256 else None
+        )
 
     def save_plugin(self, plugin_id: str, value: Mapping[str, Any]) -> dict[str, Any]:
         return self._save(plugin_key=_plugin_key(plugin_id), value=value)
@@ -165,35 +174,54 @@ class ConfigSaver:
                     code="external_config_change",
                     status=409,
                 )
-            if changed:
-                # Check all sources and acquire existing files before any live
-                # mutation. File-only ReadWritePaths forbids atomic replacement.
-                with ExitStack() as stack:
-                    streams = {path: stack.enter_context(path.open("r+b")) for path in changed}
-                    for path, (previous, _) in snapshots.items():
-                        if path.read_bytes() != previous:
-                            raise SaveError(
-                                "Configuration changed on disk; reload the page", code="source_changed", status=409
-                            )
-                    live.save_flag = True
-                    for path, stream in streams.items():
-                        stream.seek(0)
-                        stream.write(changed[path])
-                        stream.truncate()
-                        stream.flush()
-                        os.fsync(stream.fileno())
-            # Entari saves once more after unloading plugins on shutdown.
-            # Publish detached persistence state, not existing plug.config
-            # objects or bound model instances, so that flush keeps this save.
-            clone.save_flag = False
-            clone.reload()
-            live._origin_data = clone._origin_data
-            live.plugin = clone.plugin
-            live._records = clone._records
-            live._plugin_names = clone._plugin_names
-            live.plugin_prefixes = clone.plugin_prefixes
-            live.prelude_plugin = clone.prelude_plugin
-            live.plugin_extra_files = clone.plugin_extra_files
+            source = validate_candidate(candidate, live.env_vars)
             digest = sha256(candidate).hexdigest()
-            restart_required = digest != self.running_sha256
-            return {"success": True, "candidate_sha256": digest, "restart_required": restart_required}
+            unchanged = digest == self.running_sha256 or same_config(source, self._running_source)
+            model_reload = None
+            if not unchanged and self._running_source is not None and not clone.plugin_extra_files:
+                model_reload = prepare_model_reload(self._running_source, source, live.env_vars)
+            mode = "unchanged" if unchanged else "hot_reload" if model_reload is not None else "restart"
+            if mode == "restart" and not self.restart_available():
+                self.last_application = {"result": "rejected", "candidate_sha256": digest, "mode": mode}
+                raise SaveError(
+                    "This configuration change requires the managed restart helper",
+                    code="helper_unavailable",
+                    status=503,
+                )
+            try:
+                with persist_candidate(live, clone, snapshots, changed):
+                    if model_reload is not None:
+                        model_reload.apply()
+            except Exception as exc:
+                recovery_failed = isinstance(exc, ConfigValidationError) and exc.code == "config_rollback_failed"
+                self.last_application = {
+                    "result": "rollback_failed" if recovery_failed else "rejected",
+                    "candidate_sha256": digest,
+                    "mode": mode,
+                }
+                if recovery_failed:
+                    self.running_sha256 = None
+                    self._running_source = None
+                if isinstance(exc, (ConfigValidationError, SaveError)):
+                    raise
+                raise SaveError(
+                    "Configuration application failed; the previous saved configuration was restored",
+                    code="config_apply_failed",
+                    status=503,
+                ) from None
+            if mode != "restart":
+                self.running_sha256 = digest
+                self._running_source = deepcopy(dict(source))
+            self.application_mode = mode
+            self.last_application = {
+                "result": "pending" if mode == "restart" else "applied",
+                "candidate_sha256": digest,
+                "mode": mode,
+            }
+            return {
+                "success": True,
+                "candidate_sha256": digest,
+                "restart_required": mode == "restart",
+                "application_mode": mode,
+                "applied": mode != "restart",
+            }

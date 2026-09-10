@@ -8,7 +8,11 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from collections.abc import Sequence
 
-from .model_state import ConfiguredModel, ModelStateRepair, repair_model_state
+from .state import ConfiguredModel, ModelStateRepair, repair_model_state
+
+
+class InvalidModelState(ValueError):
+    """Persisted model selections cannot be decoded safely."""
 
 
 def repair_model_state_file(path: Path, models: Sequence[ConfiguredModel]) -> ModelStateRepair:
@@ -16,13 +20,14 @@ def repair_model_state_file(path: Path, models: Sequence[ConfiguredModel]) -> Mo
         return ModelStateRepair(fallback_model=None)
 
     raw_data: object = {}
-    if path.exists():
-        try:
-            raw_data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as error:
-            raise ValueError(f"invalid state JSON at {path}") from error
+    try:
+        raw_data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        pass
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise InvalidModelState("invalid state JSON") from None
     if not isinstance(raw_data, dict):
-        raise ValueError(f"state root is not an object at {path}")
+        raise InvalidModelState("state root is not an object")
 
     repaired_data, repair = repair_model_state(raw_data, models)
     if repair.changed:
@@ -47,6 +52,10 @@ def _write_json_atomic(path: Path, data: dict[str, object]) -> None:
             temporary.flush()
             os.fsync(temporary.fileno())
         os.replace(temporary_path, path)
-    finally:
+    except BaseException:
         if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise

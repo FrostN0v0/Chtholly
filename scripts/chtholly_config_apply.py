@@ -1,5 +1,5 @@
 #!/opt/chtholly/.venv/bin/python
-"""Apply saved configuration with observable, health-checked process restarts."""
+"""Apply saved configuration with health-checked hot updates or process restarts."""
 
 from __future__ import annotations
 
@@ -67,13 +67,21 @@ def write_config(data: bytes) -> None:
         os.fsync(stream.fileno())
 
 
-def record_status(result: str, candidate: bytes, request_id: str | None, *, reason: str = "") -> None:
+def record_status(
+    result: str,
+    candidate: bytes,
+    request_id: str | None,
+    *,
+    reason: str = "",
+    application_mode: str = "restart",
+) -> None:
     payload = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "result": result,
         "candidate_sha256": digest(candidate),
         "request_id": request_id,
         "reason": reason,
+        "application_mode": application_mode,
     }
     data = json.dumps(payload, separators=(",", ":")).encode()
     atomic_write(STATUS_PATH, data)
@@ -130,7 +138,7 @@ def request_json(path: str) -> Mapping[str, object]:
     return result
 
 
-def health_ready(expected: str, required_plugins: set[str]) -> bool:
+def health_ready(expected: str, required_plugins: set[str], *, require_synced: bool = False) -> bool:
     try:
         if not run_systemctl("is-active", "--quiet"):
             return False
@@ -138,7 +146,18 @@ def health_ready(expected: str, required_plugins: set[str]) -> bool:
             return False
         status = request_json("/api/config-apply/status")
         keys = status.get("loaded_config_keys")
-        return status.get("running_sha256") == expected and isinstance(keys, list) and required_plugins.issubset(keys)
+        if require_synced and (
+            status.get("success") is not True
+            or status.get("saved_sha256") != expected
+            or status.get("in_sync") is not True
+        ):
+            return False
+        return (
+            status.get("running_sha256") == expected
+            and isinstance(keys, list)
+            and all(isinstance(key, str) for key in keys)
+            and required_plugins.issubset(keys)
+        )
     except (OSError, ValueError, urllib.error.URLError):
         return False
 
@@ -147,11 +166,24 @@ def wait_for_health(expected: str, required_plugins: set[str], timeout: float = 
     deadline = time.monotonic() + timeout
     consecutive = 0
     while time.monotonic() < deadline:
+        if digest(CONFIG_PATH.read_bytes()) != expected:
+            return False
         consecutive = consecutive + 1 if health_ready(expected, required_plugins) else 0
         if consecutive >= 5:
             return True
         time.sleep(1)
     return False
+
+
+def already_applied(candidate: bytes, required_plugins: set[str]) -> bool:
+    expected = digest(candidate)
+    # Do not wait out the startup timeout when a normal restart is needed.
+    for check in range(5):
+        if CONFIG_PATH.read_bytes() != candidate or not health_ready(expected, required_plugins, require_synced=True):
+            return False
+        if check < 4:
+            time.sleep(1)
+    return CONFIG_PATH.read_bytes() == candidate
 
 
 def plugin_config(data: Mapping[str, object]) -> Mapping[str, object]:
@@ -207,7 +239,10 @@ def restore_last_good(
     preserve_newer_candidate(failed, last_good)
     write_config(last_good)
     record_status("verifying", failed, request_id, reason=reason)
-    recovered = run_systemctl("start") and wait_for_health(digest(last_good), {"llm", "webui_config_apply"})
+    started = run_systemctl("start")
+    recovered = started and wait_for_health(digest(last_good), {"llm", "webui_config_apply"})
+    if started and CONFIG_PATH.read_bytes() != last_good:
+        return True
     if not recovered:
         record_status("rollback_failed", failed, request_id, reason="Previous configuration did not recover")
         return False
@@ -223,7 +258,11 @@ def apply_candidate(candidate: bytes, last_good: bytes, request_id: str | None, 
     if staged and initial_disk != last_good:
         # A newer live save takes precedence over a recovery-queued candidate.
         candidate = initial_disk
-    if candidate == last_good and not request_id and health_ready(digest(candidate), {"llm", "webui_config_apply"}):
+    if (
+        candidate == last_good
+        and not request_id
+        and health_ready(digest(candidate), {"llm", "webui_config_apply"}, require_synced=True)
+    ):
         NEXT_PATH.unlink(missing_ok=True)
         # Do not erase the previous failure message on our own rollback trigger.
         return True
@@ -233,6 +272,13 @@ def apply_candidate(candidate: bytes, last_good: bytes, request_id: str | None, 
     except ValueError as exc:
         NEXT_PATH.unlink(missing_ok=True)
         return restore_last_good(candidate, last_good, request_id, reason=str(exc), rejected=True)
+    if not request_id and already_applied(candidate, required):
+        atomic_write(LAST_GOOD_PATH, candidate)
+        NEXT_PATH.unlink(missing_ok=True)
+        (STATE_DIR / "pending.yml").unlink(missing_ok=True)
+        record_status("applied", candidate, request_id, application_mode="hot_reload")
+        LOGGER.info("Hot-applied configuration verified at %s", digest(candidate)[:12])
+        return True
     record_status("restarting", candidate, request_id)
     if not run_systemctl("stop"):
         record_status("rollback_failed", candidate, request_id, reason="Bot could not be stopped")
@@ -250,7 +296,13 @@ def apply_candidate(candidate: bytes, last_good: bytes, request_id: str | None, 
     NEXT_PATH.unlink(missing_ok=True)
     atomic_write(STATE_DIR / "pending.yml", candidate)
     record_status("verifying", candidate, request_id)
-    if not (run_systemctl("start") and wait_for_health(digest(candidate), required)):
+    started = run_systemctl("start")
+    verified = started and wait_for_health(digest(candidate), required)
+    if started and CONFIG_PATH.read_bytes() != candidate:
+        # A newer hot save may have changed the runtime digest during verification.
+        # Leave last-good intact and let main verify that new candidate.
+        return True
+    if not verified:
         return restore_last_good(
             candidate,
             last_good,

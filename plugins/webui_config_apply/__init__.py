@@ -1,26 +1,27 @@
-"""Safe WebUI persistence and managed full-process configuration application."""
+"""Safe native WebUI saves with model hot updates and managed restart fallback."""
 
 from __future__ import annotations
 
-from fastapi import FastAPI
 from arclet.entari import plugin, metadata
 from arclet.entari.plugin import PluginRole
-from entari_plugin_server import get_asgi
-from arclet.entari.config.file import EntariConfig
 from arclet.entari.plugin.model import Plugin
-
-from .api import install_api
-from .control import file_digest
-from .serializer import install_dumper
 
 plug = Plugin.current()
 
 if plug is not None:
+    from fastapi import FastAPI
+    from entari_plugin_server import get_asgi
+    from arclet.entari.config.file import EntariConfig
+
+    from .api import install_api
+    from .control import file_digest
+    from .serializer import install_dumper
+
     metadata(
         name="webui_config_apply",
         author=[{"name": "FrostN0v0"}],
         version="0.1.0",
-        description="Safe WebUI saves with health-checked full-process configuration application",
+        description="Safe WebUI saves with atomic model hot updates and verified restart fallback",
         role=PluginRole.UTILITY,
     )
     app = get_asgi()

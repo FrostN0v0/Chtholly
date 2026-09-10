@@ -15,7 +15,9 @@ from arclet.letoderea import Contexts
 from entari_plugin_llm import GenericResponse, llm  # entari: plugin
 from agno.models.message import Message as AgnoMessage
 from arclet.entari.logger import log
-from entari_plugin_llm.config import get_model_config
+from entari_plugin_llm.config import ScopedModel, get_model_config
+
+from utils.llm_model_core.snapshot import current_main_model
 
 from .core.media import has_meaningful_text, strip_internal_media_records
 from .core.types import ChatMessage
@@ -660,7 +662,7 @@ async def _finalize_without_tools(
     agent_events: AgentTurnRecorder | None,
     tool_trace: ToolTraceRecorder,
 ) -> litellm.ModelResponse:
-    conf = get_model_config(model, channel_id)
+    conf = cast(ScopedModel, current_main_model(model)) or get_model_config(model, channel_id)
     excluded_extra = {"tools", "tool_choice", "response_format", "timeout"}
     extra = {key: value for key, value in conf.extra.items() if key not in excluded_extra}
     response = await _record_model_attempt(

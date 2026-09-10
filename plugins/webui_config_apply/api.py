@@ -45,7 +45,13 @@ async def _payload(request: Request, field: str, expected: type | tuple[type, ..
 
 def _error(exc: Exception) -> JSONResponse:
     if isinstance(exc, ConfigValidationError):
-        status, code, message = 400, exc.code, str(exc)
+        status = {
+            "source_changed": 409,
+            "stale_runtime": 409,
+            "config_rollback_failed": 503,
+            "model_state_failed": 503,
+        }.get(exc.code, 400)
+        code, message = exc.code, str(exc)
     elif isinstance(exc, SaveError):
         status, code, message = exc.status, exc.code, str(exc)
     elif isinstance(exc, OSError):
@@ -64,16 +70,12 @@ def _error(exc: Exception) -> JSONResponse:
 
 
 def install_api(app: FastAPI, running_sha256: str | None) -> Callable[[], None]:
-    saver = ConfigSaver(running_sha256)
+    saver = ConfigSaver(running_sha256, restart_available=lambda: read_status()[0])
     router = APIRouter(dependencies=[Depends(require_auth), Depends(require_same_origin)])
 
     @router.put("/api/plugins/{plugin_id}/config")
     async def save_plugin(plugin_id: str, request: Request):
         try:
-            if not read_status()[0]:
-                raise SaveError(
-                    "The automatic configuration helper is unavailable", code="helper_unavailable", status=503
-                )
             value = await _payload(request, "config", dict)
             return JSONResponse(saver.save_plugin(plugin_id, value), headers={"Cache-Control": "no-store"})
         except Exception as exc:
@@ -82,10 +84,6 @@ def install_api(app: FastAPI, running_sha256: str | None) -> Callable[[], None]:
     @router.put("/api/config/{section}")
     async def save_section(section: str, request: Request):
         try:
-            if not read_status()[0]:
-                raise SaveError(
-                    "The automatic configuration helper is unavailable", code="helper_unavailable", status=503
-                )
             value = await _payload(request, "data", (dict, list))
             result = saver.save_section(section, value)
             return JSONResponse({**result, "message": "已保存"}, headers={"Cache-Control": "no-store"})
@@ -96,7 +94,13 @@ def install_api(app: FastAPI, running_sha256: str | None) -> Callable[[], None]:
     async def status():
         try:
             return JSONResponse(
-                status_payload(EntariConfig.instance.path, running_sha256), headers={"Cache-Control": "no-store"}
+                status_payload(
+                    EntariConfig.instance.path,
+                    saver.running_sha256,
+                    application_mode=saver.application_mode,
+                    last_application=saver.last_application,
+                ),
+                headers={"Cache-Control": "no-store"},
             )
         except Exception as exc:
             return _error(exc)

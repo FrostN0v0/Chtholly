@@ -204,6 +204,15 @@ def prepare_config(
     return normalized
 
 
+def same_config(left: object, right: object) -> bool:
+    """Compare values without equating boolean and numeric configuration."""
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        return left.keys() == right.keys() and all(same_config(value, right[key]) for key, value in left.items())
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(same_config(a, b) for a, b in zip(left, right))
+    return type(left) is type(right) and left == right
+
+
 def validate_candidate(data: bytes, env: Mapping[str, str]) -> Mapping[str, object]:
     """Decode YAML/JSON bytes and validate without Entari or plugin imports."""
     try:

@@ -17,6 +17,8 @@ from entari_plugin_llm.config import get_model_config
 from arclet.entari.plugin.model import Plugin
 from entari_plugin_llm.exception import ModelNotFoundError
 
+from utils.llm_model_core.snapshot import pin_main_model, main_model_scope
+
 from .config import LLMChatConfig
 from .identity import resolve_chat_identity, resolve_mentioned_participants
 from .core.media import has_meaningful_text
@@ -97,7 +99,7 @@ plugin.collect_disposes(cancel_pending_evaluations)
 @latest_participant_turn
 async def on_chat(session: Session, ctx: Contexts):
     reaction = MessageReactionFeedback(session, _LOGGER.warning)
-    with delivery_audit_scope(session, _LOGGER.warning), llm_chat_reaction_scope(reaction):
+    with delivery_audit_scope(session, _LOGGER.warning), llm_chat_reaction_scope(reaction), main_model_scope():
         try:
             await reaction.set_stage("processing")
             result = await _run_chat(session, ctx, reaction)
@@ -141,7 +143,7 @@ async def _run_chat(
         return BLOCK
 
     try:
-        model_name = get_model_config(config.model, channel_id).name
+        model_name = pin_main_model(get_model_config(config.model, channel_id)).name
     except ModelNotFoundError as exc:
         _LOGGER.warning(f"channel model resolve failed, using global default: {summarize_exception(exc)}")
         model_name = None

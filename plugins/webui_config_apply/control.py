@@ -12,6 +12,7 @@ from hashlib import sha256
 from pathlib import Path
 from datetime import datetime
 import subprocess
+from collections.abc import Mapping
 
 from arclet.entari.plugin import get_plugins
 
@@ -82,6 +83,9 @@ def _safe_status(raw: Any) -> dict[str, Any]:
     attempt = raw.get("restart_attempt")
     if isinstance(attempt, int) and not isinstance(attempt, bool) and 0 <= attempt <= 100:
         state["restart_attempt"] = attempt
+    mode = raw.get("application_mode")
+    if mode in {"hot_reload", "restart"}:
+        state["application_mode"] = mode
     return state
 
 
@@ -102,7 +106,13 @@ def read_status() -> tuple[bool, dict[str, Any]]:
         return False, {}
 
 
-def status_payload(config_path: Path, running_sha256: str | None) -> dict[str, Any]:
+def status_payload(
+    config_path: Path,
+    running_sha256: str | None,
+    *,
+    application_mode: str,
+    last_application: Mapping[str, object],
+) -> dict[str, Any]:
     available, state = read_status()
     saved = file_digest(config_path)
     return {
@@ -113,6 +123,8 @@ def status_payload(config_path: Path, running_sha256: str | None) -> dict[str, A
         "saved_sha256": saved,
         "in_sync": running_sha256 is not None and saved == running_sha256,
         "loaded_config_keys": sorted({plug._config_key for plug in get_plugins()}),
+        "application_mode": application_mode,
+        "last_application": dict(last_application),
     }
 
 
