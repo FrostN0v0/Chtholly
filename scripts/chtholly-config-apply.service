@@ -9,6 +9,7 @@ Group=root
 WorkingDirectory=/opt/chtholly
 EnvironmentFile=/etc/chtholly/chtholly.env
 Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=/opt/chtholly
 ExecStart=/usr/local/sbin/chtholly-config-apply
 TimeoutStartSec=420
 UMask=0077
