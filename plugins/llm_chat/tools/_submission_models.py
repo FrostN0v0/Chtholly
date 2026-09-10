@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import Field, ConfigDict
+from pydantic import Field, RootModel, ConfigDict, model_validator
 from arclet.entari.config.models.pyd import BaseModel
 
 
@@ -16,14 +16,25 @@ class WebSourceFile(BaseModel):
     encoding: Literal["utf-8", "utf8", "base64"] = "utf-8"
 
 
-class PluginSourceFiles(BaseModel):
-    model_config = ConfigDict(extra="allow", strict=True)
-
-    __pydantic_extra__: dict[str, str] = Field(init=False)
-    entry_source: str = Field(
-        alias="__init__.py",
-        description="Complete package entry source at the root, without a plugin-name directory prefix.",
+class PluginSourceFiles(RootModel[dict[str, str]]):
+    model_config = ConfigDict(
+        strict=True,
+        json_schema_extra={
+            "required": ["__init__.py"],
+            "properties": {
+                "__init__.py": {
+                    "type": "string",
+                    "description": "Complete package entry source at the root, without a plugin-name directory prefix.",
+                }
+            },
+        },
     )
+
+    @model_validator(mode="after")
+    def require_entry(self) -> PluginSourceFiles:
+        if "__init__.py" not in self.root:
+            raise ValueError("Source files must include __init__.py at the package root")
+        return self
 
 
 class PluginCommandCheck(BaseModel):
