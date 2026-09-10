@@ -3784,6 +3784,71 @@ async def test_native_submission_schemas_accept_real_payloads_and_reject_wrong_n
 
 
 @pytest.mark.asyncio
+async def test_contextual_submission_saves_candidate_without_a_repeat_command(
+    local_modules: SimpleNamespace,
+    tmp_path: Path,
+) -> None:
+    from plugins.llm_chat.agent_context import AgentAccessContext, agent_access_scope
+    from plugins.plugin_workshop.config import WorkshopConfig
+    from plugins.plugin_workshop.service import PluginWorkshopService
+    from plugins.llm_chat.tools._workshop import WorkshopToolContext
+    from utils.plugin_workshop_core.models import Actor
+    from plugins.llm_chat.tools.submit_plugin import register_submit_plugin
+
+    class UnavailableSandbox:
+        async def status(self) -> dict[str, object]:
+            return {"available": False}
+
+        async def validate(self, _request: Any) -> Any:
+            raise RuntimeError("Sandbox unavailable")
+
+        async def aclose(self) -> None:
+            return None
+
+    service = PluginWorkshopService(WorkshopConfig(), root=tmp_path, sandbox=UnavailableSandbox())
+    arguments = {
+        "plugin_name": "context_probe",
+        "source_files": {"__init__.py": "VALUE = 42\n"},
+        "manifest": {
+            "title": "Context probe",
+            "description": "Reviewable candidate",
+            "commands": ["probe"],
+            "permissions": [],
+            "data_description": "No stored data",
+            "checks": [{"command": "probe", "expected_contains": "42"}],
+        },
+    }
+    observer = Actor("observer", is_admin=True)
+    try:
+        await service.prepare()
+        await service.restore()
+        async with _temporary_plugin() as harness:
+            register_submit_plugin(harness.dispatcher, WorkshopToolContext(lambda: service, lambda _message: None))
+            with llm_chat_tool_trace_scope(ToolTraceRecorder()):
+                outside = _external_requirement("submit_plugin", arguments, "outside-generation")
+                await llm_service_module.run_llm_tools(RunOutput(requirements=[outside]))
+                assert json.loads(outside.external_execution_result)["ok"] is False
+                assert await service.list_projects(observer) == []
+                with (
+                    agent_access_scope(AgentAccessContext(1, 2, 3, "alice", raw_user_text="That version looks good.")),
+                    llm_chat_delivery_scope(local_modules.delivery.DeliveryState()),
+                ):
+                    submission = _external_requirement("submit_plugin", arguments, "contextual-submission")
+                    await llm_service_module.run_llm_tools(RunOutput(requirements=[submission]))
+                    result = json.loads(submission.external_execution_result)
+                    assert result["ok"] is True, result
+            candidate = json.loads(result["data"])
+            assert candidate["confirmed"] is True
+            assert candidate["validation_status"] == "failed"
+            assert candidate["approved"] is False
+            assert candidate["active"] is False
+            assert await service.source("context_probe", candidate["version"], observer) == arguments["source_files"]
+            assert service.store.active_versions() == []
+    finally:
+        await service.aclose()
+
+
+@pytest.mark.asyncio
 async def test_local_generation_exposes_only_original_authorized_external_functions(
     local_modules: SimpleNamespace,
 ) -> None:

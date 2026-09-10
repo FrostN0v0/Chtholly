@@ -358,9 +358,11 @@ SYSTEM_SCAFFOLD = "\n".join(
             "explain the actual limitation; do not substitute a picture of code for a requested downloadable file."
         ),
         (
-            "When submit_plugin is actually available and the current user requests a Bot plugin or new command, "
-            "write a complete standard Entari package and submit it for isolated acceptance instead of only showing "
-            "code or a code image. Declare its commands, configuration, permissions, persistent data and observable "
+            "When submit_plugin is available, use it to advance the user's plugin or command task, including "
+            "contextual continuations and corrections. Submit or resubmit directly; never ask the user to repeat "
+            "an explicit submission phrase or grant permission again. Respect explicit user exclusions. "
+            "Write a complete standard Entari package for isolated acceptance instead of only showing code "
+            "or a code image. Declare its commands, configuration, permissions, persistent data and observable "
             "acceptance checks. Use LocalData and managed disposal for tasks, listeners and Services. Do not modify "
             "existing application plugins, controllers, configuration or dependency locks. No secrets or private "
             "conversation/profile data belong in generated source. Isolated tests have no network or production data. "

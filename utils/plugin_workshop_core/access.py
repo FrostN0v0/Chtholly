@@ -1,4 +1,4 @@
-"""Current-user intent required before workshop tool side effects."""
+"""Explicit current-user intent for native activation and rollback only."""
 
 from __future__ import annotations
 
@@ -9,15 +9,8 @@ from utils.request_text import request_clauses
 
 from .models import WorkshopError
 
-WorkshopAction = Literal["submit", "activate", "rollback"]
-_PLUGIN = re.compile(r"\u63d2\u4ef6|\u6269\u5c55|\u529f\u80fd|\u547d\u4ee4|\b(?:plugin|extension|bot|command)\b", re.I)
+WorkshopAction = Literal["activate", "rollback"]
 _OPERATIONS = {
-    "submit": re.compile(
-        r"\u63d0\u4ea4|\u7f16\u5199|\u5199|\u751f\u6210|\u5f00\u53d1|\u5236\u4f5c|\u521b\u5efa|"
-        r"\u5b9e\u73b0|\u4fee\u6539|\u66f4\u65b0|\u4fee\u590d|\u5b8c\u6210|\u6dfb\u52a0|\u505a|"
-        r"\b(?:submit|write|generate|develop|build|create|implement|update|revise|fix|add)\b",
-        re.I,
-    ),
     "activate": re.compile(
         r"\u542f\u7528|\u6fc0\u6d3b|\u52a0\u8f7d|\u4e0a\u7ebf|\u90e8\u7f72|\b(?:activate|enable|load|deploy)\b", re.I
     ),
@@ -83,7 +76,7 @@ def require_workshop_request(
     plugin_name: str = "",
     title: str = "",
 ) -> None:
-    """Do not derive authorization from tool parameters, quoted code, or history."""
+    """Require fresh intent for native changes, never for candidate submissions."""
     pattern = _OPERATIONS[action]
     requested = False
     for clause in request_clauses(raw_user_text):
@@ -92,9 +85,7 @@ def require_workshop_request(
         if operation is None:
             continue
         subject = body[: operation.start()] + body[operation.end() :]
-        targeted = action == "submit" and _PLUGIN.search(subject) is not None
-        if action != "submit":
-            targeted = _target_matches(_NEGATIVE.sub("", subject), plugin_name, title)
+        targeted = _target_matches(_NEGATIVE.sub("", subject), plugin_name, title)
         negative = _NEGATIVE.search(body[: operation.start()])
         if negative is not None and (targeted or not subject[negative.end() :].strip()):
             raise WorkshopError(

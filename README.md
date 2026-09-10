@@ -106,7 +106,7 @@ Bot 与独立预览进程共享项目依赖环境；同步依赖或浏览器后�
 
 ## 插件工坊
 
-启用 `plugin_workshop` 与 `llm_chat.plugin_workshop_enabled` 后，可让模型编写标准 Entari 插件，使用 `submit_plugin` 保存完整源码、命令、配置、权限与数据声明，并在无网络、无生产凭证及数据的 Linux Docker 容器中验收。失败报告返回模型修正，每次修订产生新的不可变版本；提交或验收通过均不会自动激活。
+启用 `plugin_workshop` 与 `llm_chat.plugin_workshop_enabled` 后，可让模型编写标准 Entari 插件，使用 `submit_plugin` 保存完整源码、命令、配置、权限与数据声明，并在无网络、无生产凭证及数据的 Linux Docker 容器中验收。模型可承接上下文直接提交、修订或重新提交，不要求当前消息再次说“提交”。失败报告返回模型修正，每次修订产生新的不可变版本；提交或验收通过均不会自动激活。
 
 运行前需安装可用的 Linux Docker Engine（Windows 可使用 Docker Desktop），并由维护者显式构建与当前锁文件一致的验收镜像：
 

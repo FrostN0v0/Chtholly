@@ -8,7 +8,6 @@ from pydantic import ValidationError
 from arclet.letoderea import Subscriber
 from arclet.entari.plugin.model import PluginDispatcher
 
-from utils.plugin_workshop_core.access import require_workshop_request
 from utils.plugin_workshop_core.models import WorkshopError
 
 from ._workshop import WorkshopToolContext, candidate_result, candidate_evidence, authorized_workshop_actor
@@ -25,9 +24,10 @@ def register_submit_plugin(
     async def submit_plugin(plugin_name: str, source_files: PluginSourceFiles, manifest: PluginManifest) -> str:
         """Submit a complete Entari package for isolated acceptance, NEVER native activation.
 
-        Use only when the current user requests creating or changing a Bot plugin/feature. Supply a complete
-        package with __init__.py at its root, not inside a plugin-name directory. Use ordinary Entari commands,
-        configuration, LocalData and managed cleanup;
+        Choose submission or resubmission when it advances the user's plugin task, including contextual follow-ups
+        and fixes to failed acceptance. No explicit submission phrase or renewed current-turn permission is needed.
+        Supply a complete package with __init__.py at its root, not inside a plugin-name directory.
+        Use ordinary Entari commands, configuration, LocalData and managed cleanup;
         never overwrite existing application plugins, controllers, configuration or dependencies. Files use safe
         relative POSIX paths, at most 32 files, 64 KiB per file and 256 KiB total. No secrets or private chat data.
 
@@ -49,9 +49,8 @@ def register_submit_plugin(
         Returns:
             str: Candidate version, digest, acceptance results and correction feedback, not activation confirmation.
         """
-        actor, raw = authorized_workshop_actor()
+        actor, _ = authorized_workshop_actor()
         try:
-            require_workshop_request(raw, "submit")
             try:
                 sources = PluginSourceFiles.model_validate(source_files).model_dump(by_alias=True)
             except ValidationError:
