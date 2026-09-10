@@ -340,7 +340,12 @@ async def _run_local_tools(
             if any(key not in function.parameters.get("properties", {}) for key in arguments) or any(
                 key not in arguments for key in function.parameters.get("required", [])
             ):
-                raise ValueError("Invalid arguments for this tool")
+                required = ", ".join(function.parameters.get("required", [])) or "none"
+                allowed = ", ".join(function.parameters.get("properties", {})) or "none"
+                raise ValueError(
+                    f"Invalid arguments for this tool. Required top-level fields: {required}. "
+                    f"Allowed top-level fields: {allowed}. Pass these fields directly, not inside an arguments wrapper."
+                )
             references = current_image_edit_references()
             if (
                 name in _IMAGE_EDIT_BLOCKED_TOOLS

@@ -6,6 +6,7 @@ from typing import Literal, TypedDict, cast
 import asyncio
 from collections.abc import Mapping
 
+from pydantic import ValidationError
 from arclet.entari import Session
 from arclet.letoderea import Subscriber
 from arclet.entari.plugin.model import PluginDispatcher
@@ -25,6 +26,7 @@ from ..core.types import JSONType
 from ._registration import register_tool
 from ..core.delivery import DeliveryError
 from ..artifacts_runtime import ArtifactCaptureError, ArtifactCaptureUnavailable
+from ._submission_models import WebSourceFile
 
 
 class _ThumbnailResult(TypedDict, total=False):
@@ -89,7 +91,7 @@ def register_publish_web_preview(
     async def publish_web_preview(
         session: Session,
         title: str,
-        source_files: list[dict[str, str]],
+        source_files: list[WebSourceFile],
         entry: str = "index.html",
         previous_artifact_ref: str = "",
         delete_paths: list[str] = cast(list[str], None),
@@ -98,9 +100,11 @@ def register_publish_web_preview(
 
         Choose this workflow when a working webpage/UI/prototype helps fulfill
         the user's task, including contextual follow-ups.  No special wording
-        or separate publication command is needed.  ``source_files`` contains the
-        complete source you generated as path/content/encoding mappings;
-        never read arbitrary local files or publish secrets/private chat data.
+        or separate publication command is needed.  ``source_files`` is an array
+        of objects with the named fields path, content and optional encoding;
+        for example [{"path":"index.html","content":"<h1>Hello</h1>"}].
+        Never use filename-to-content objects here, read arbitrary local files,
+        or publish secrets/private chat data. All arguments are top-level fields.
         Use an exact ``previous_artifact_ref`` from the artifact tools for
         revisions and ``delete_paths`` for inherited files omitted from the
         new version; existing versions remain unchanged.  Anyone holding the
@@ -114,8 +118,13 @@ def register_publish_web_preview(
             raise DeliveryError("artifact title is required")
         if not isinstance(source_files, list):
             raise DeliveryError("artifact files must be a list of explicit file mappings")
-        if any(not isinstance(item, Mapping) for item in source_files):
-            raise DeliveryError("artifact files must be explicit path/content mappings")
+        try:
+            sources = [WebSourceFile.model_validate(item).model_dump() for item in source_files]
+        except ValidationError:
+            raise DeliveryError(
+                "source_files must be an array of objects with string path and content fields plus optional "
+                "encoding (utf-8 or base64), not filename-to-content objects"
+            ) from None
         normalized_deletes: list[str]
         if delete_paths is None:
             normalized_deletes = []
@@ -133,7 +142,7 @@ def register_publish_web_preview(
         artifact = await runtime.service.publish(
             access.owner,
             title,
-            cast(list[Mapping[str, str]], source_files),
+            cast(list[Mapping[str, str]], sources),
             entry=entry,
             previous_ref=normalized_previous,
             ttl_hours=runtime.service.ttl_hours,

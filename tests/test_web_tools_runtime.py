@@ -3727,6 +3727,63 @@ async def test_native_artifact_tools_publish_source_and_deliver_exact_zip(
 
 
 @pytest.mark.asyncio
+async def test_native_submission_schemas_accept_real_payloads_and_reject_wrong_nested_shapes(
+    local_modules: SimpleNamespace,
+    tmp_path: Path,
+) -> None:
+    from jsonschema import Draft202012Validator
+
+    from plugins.llm_chat.tools._workshop import WorkshopToolContext
+    from plugins.llm_chat.tools.artifacts import register_artifact_tools
+    from plugins.llm_chat.artifacts_runtime import WebArtifactService
+    from plugins.llm_chat.tools.submit_plugin import register_submit_plugin
+
+    def unused_service() -> Any:
+        raise AssertionError("Schema validation must not submit a plugin")
+
+    async def append_history(*_args: Any) -> None:
+        return None
+
+    manifest = {
+        "title": "Menu",
+        "description": "Choose dinner",
+        "commands": ["dinner"],
+        "permissions": [],
+        "data_description": "No stored data",
+        "configuration": {"choices": ["soup", "rice"], "count": 2, "enabled": True},
+        "checks": [{"command": "dinner", "expected_contains": "Dinner", "operator": False, "repeatable": True}],
+    }
+    service = WebArtifactService(tmp_path, public_origin="https://preview.example")
+    try:
+        async with _temporary_plugin() as harness:
+            register_submit_plugin(harness.dispatcher, WorkshopToolContext(unused_service, lambda _message: None))
+            register_artifact_tools(
+                harness.dispatcher,
+                local_modules.config.LLMChatConfig(web_artifacts_public_url=service.public_origin),
+                service=service,
+                append_history=append_history,
+            )
+            plugin_schema = Draft202012Validator(available_functions["submit_plugin"][1].parameters)
+            supplied = {"plugin_name": "dinner", "source_files": {"__init__.py": "pass"}, "manifest": manifest}
+            plugin_schema.validate(supplied)
+            assert not plugin_schema.is_valid({**supplied, "source_files": {"dinner/__init__.py": "pass"}})
+            assert not plugin_schema.is_valid(
+                {
+                    **supplied,
+                    "manifest": {**manifest, "checks": [{**manifest["checks"][0], "repeatable": 1}]},
+                }
+            )
+            assert not plugin_schema.is_valid({"arguments": json.dumps(supplied)})
+            preview_schema = Draft202012Validator(available_functions["publish_web_preview"][1].parameters)
+            preview_schema.validate(
+                {"title": "Page", "source_files": [{"path": "index.html", "content": "<h1>Hello</h1>"}]}
+            )
+            assert not preview_schema.is_valid({"title": "Page", "source_files": [{"index.html": "<h1>Hello</h1>"}]})
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_local_generation_exposes_only_original_authorized_external_functions(
     local_modules: SimpleNamespace,
 ) -> None:
