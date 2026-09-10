@@ -7,6 +7,8 @@ _owner = Plugin.current()
 
 def register_password_authentication() -> None:
     import entari_plugin_webui as webui  # entari: plugin
+    from entari_plugin_webui.config import Config
+    from arclet.entari.config.action import Proxy
     from entari_plugin_webui.api.deps import get_session_store
     from entari_plugin_webui.core.security import (
         hash_password,
@@ -23,7 +25,13 @@ def register_password_authentication() -> None:
         if is_local_mode() and get_session_store().count():
             raise RuntimeError("Restart the Bot to invalidate existing passwordless WebUI sessions")
         if not is_hashed_password(password):
-            webui.webui_config.password = hash_password(password)
+            runtime = webui.webui_config
+            if isinstance(runtime, Proxy):
+                # Entari's bound proxy persists assignments; its model owns runtime-only state.
+                runtime = vars(runtime).get("_Proxy__origin")
+            if not isinstance(runtime, Config):
+                raise RuntimeError("Unsupported WebUI runtime configuration binding")
+            runtime.password = hash_password(password)
         set_local_mode(False)
 
     require_password()

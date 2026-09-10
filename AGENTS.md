@@ -38,7 +38,7 @@
 - `utils/plugin_workshop_sandbox` 只通过显式预构建 Linux Docker 镜像运行验收，禁止回退宿主执行、候选构建镜像、挂载 Docker Socket 或生产目录。镜像构建入口 `scripts/build_workshop_sandbox.py` 仅发送固定依赖、vendor wheel 和可信 worker 白名单。容器固定非 root、无网络、只读根目录、drop-all capabilities、no-new-privileges、有界 tmpfs/内存/CPU/PID/输出/时间；取消须等待子进程和容器清理。真实验收覆盖命令、Session 执行、同源码重载、失败替换、服务和任务清理，但候选与验收器同进程，报告不构成安全认证。
 - 三个 generation-local 工具为 `submit_plugin`、`activate_plugin`、`rollback_plugin`，由 `llm_chat.plugin_workshop_enabled` 配置启用。提交只保存并验收；批准只能由已认证 WebUI 或超管 `workshop approve <name> <version>` 授予。激活和回滚还需当前超管原文明确授权，后续否定不能被前一肯定覆盖。审计保留真实已提交副作用与取消部分效果，模型历史只保留限幅版本引用，不重放源码或验收日志；源码不是提示词。
 - 工坊命令统一使用 `workshop help/list/show/approve/activate/rollback/disable`，不得注册会抢先 BLOCK 后续子命令的裸 `workshop` 响应器。注册函数必须绑定当前子模块的原生插件所有者，staged reload 不得查回旧 owner。WebUI `/extension/plugin-workshop` 和 `/api/plugin-workshop` 复用密码会话认证与同源写入，免密模式拒绝管理；上游 iframe 没有 allow-same-origin，页面以内联 nonce 可信资源和原生 `postMessage` API bridge 工作，消息必须验证父窗口与精确 origin。候选源码、HTML、日志始终纯文本显示，不执行候选前端代码，不放宽第三方 iframe sandbox。
-- `webui_auth.py` 在工坊注册时以及 WebUI 的 Startup 之后启用配置密码的真实验证，保持回环监听；无密码或已有免密会话时拒绝加载并要求完整重启，禁止提升旧免密 Cookie。生产通过 Bot 用户的 rootless Docker 与 `DOCKER_HOST` 使用验收器，不授予 rootful Docker 组权限；Socket 放在 systemd 既有可访问的受限路径，内存、CPU、PID 与只读根目录限制必须以真实容器验证。
+- `webui_auth.py` 在工坊注册时以及 WebUI 的 Startup 之后启用配置密码的真实验证，保持回环监听；无密码或已有免密会话时拒绝加载并要求完整重启，禁止提升旧免密 Cookie。密码哈希只能更新受类型检查的 WebUI 运行时模型，不能对 Entari 的 bound Proxy 赋值触发 YAML 保存；生产配置保护器必须继续拒绝明文或哈希凭证写入。生产通过 Bot 用户的 rootless Docker 与 `DOCKER_HOST` 使用验收器，不授予 rootful Docker 组权限；Socket 放在 systemd 既有可访问的受限路径，内存、CPU、PID 与只读根目录限制必须以真实容器验证。
 
 ## 目录结构（目标形态）
 
