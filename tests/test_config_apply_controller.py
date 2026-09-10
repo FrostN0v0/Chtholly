@@ -88,6 +88,7 @@ def controller(tmp_path, monkeypatch):
         return status
 
     monkeypatch.setattr(module, "atomic_write", atomic_write)
+    state.real_request_json = module.request_json
     monkeypatch.setattr(module, "run_systemctl", systemctl)
     monkeypatch.setattr(module, "request_json", request_json)
     monkeypatch.setattr(module.time, "sleep", state.sleeps.append)
@@ -237,3 +238,71 @@ def test_hot_save_during_restart_verification_never_rolls_back_newer_runtime(con
     assert module.LAST_GOOD_PATH.read_bytes() == state.newer
     assert state.operations.count("stop") == 1
     assert json.loads(module.STATUS_PATH.read_bytes())["application_mode"] == "hot_reload"
+
+
+def test_controller_authenticates_secure_loopback_cookie_and_renews_after_restart(controller, monkeypatch):
+    from threading import Thread
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    from urllib.error import URLError
+
+    module = controller.module
+    monkeypatch.setenv("CONTROLLER_TEST_PASSWORD", "controller-test-password")
+    config = json.dumps(
+        {"plugins": {"entari_plugin_webui": {"password": "${{ env.CONTROLLER_TEST_PASSWORD }}"}}}
+    ).encode()
+    module.CONFIG_PATH.write_bytes(config)
+    state = {"session": "a" * 32, "logins": 0}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_arguments):
+            pass
+
+        def reply(self, status, data, **headers):
+            encoded = json.dumps(data).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            for name, value in headers.items():
+                self.send_header(name.replace("_", "-"), value)
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def do_GET(self):
+            if self.path == "/redirect":
+                self.reply(302, {}, Location="http://untrusted.invalid/status")
+            elif self.headers.get("Cookie") != "webui_sid=" + state["session"]:
+                self.reply(401, {})
+            else:
+                self.reply(200, {"running_sha256": "verified-runtime"})
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if (
+                self.path != "/api/auth/login"
+                or body != {"password": "controller-test-password"}
+                or self.headers.get("Origin") != module.API_URL
+            ):
+                self.reply(401, {})
+                return
+            state["logins"] += 1
+            self.reply(200, {"success": True}, Set_Cookie=f"webui_sid={state['session']}; Secure; HttpOnly; Path=/")
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    monkeypatch.setattr(module, "API_URL", f"http://127.0.0.1:{server.server_port}")
+    thread.start()
+    try:
+        request = controller.real_request_json
+        assert request("/api/config-apply/status")["running_sha256"] == "verified-runtime"
+        assert request("/api/config-apply/status")["running_sha256"] == "verified-runtime"
+        assert state["logins"] == 1
+        state["session"] = "b" * 32
+        assert request("/api/config-apply/status")["running_sha256"] == "verified-runtime"
+        assert state["logins"] == 2
+        with pytest.raises(URLError, match="redirects are not allowed"):
+            request("/redirect")
+        assert module.CONFIG_PATH.read_bytes() == config
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

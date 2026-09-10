@@ -15,11 +15,13 @@ import logging
 from pathlib import Path
 from datetime import datetime, timezone
 import subprocess
+from http.cookies import SimpleCookie
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
 
 from utils.webui_config_core import validate_candidate
+from utils.webui_config_core.templates import expand_environment_template
 
 CONFIG_PATH = Path("/opt/chtholly/entari.yml")
 STATE_DIR = Path("/var/lib/chtholly-config-apply")
@@ -33,6 +35,15 @@ LOCK_PATH = RUNTIME_DIR / "apply.lock"
 SERVICE_NAME = "chtholly.service"
 API_URL = "http://127.0.0.1:8120"
 LOGGER = logging.getLogger("chtholly-config-apply")
+_WEBUI_SESSION = ""
+
+
+class _NoApiRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.URLError("Controller API redirects are not allowed")
+
+
+_API_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoApiRedirects())
 
 
 def digest(data: bytes) -> str:
@@ -130,9 +141,49 @@ def run_systemctl(*arguments: str) -> bool:
     return result.returncode == 0
 
 
-def request_json(path: str) -> Mapping[str, object]:
-    with urllib.request.urlopen(API_URL + path, timeout=2) as response:
+def _authenticate_webui() -> str:
+    config = plugin_config(validate_candidate(CONFIG_PATH.read_bytes(), os.environ))
+    webui = config.get("entari_plugin_webui", config.get("webui"))
+    reference = webui.get("password") if isinstance(webui, Mapping) else None
+    password = expand_environment_template(reference, os.environ) if isinstance(reference, str) else None
+    if not password:
+        raise ValueError("Controller requires the configured WebUI password environment reference")
+    request = urllib.request.Request(
+        API_URL + "/api/auth/login",
+        data=json.dumps({"password": password}).encode(),
+        headers={"Content-Type": "application/json", "Origin": API_URL},
+        method="POST",
+    )
+    with _API_OPENER.open(request, timeout=3) as response:
         result = json.load(response)
+        cookie = SimpleCookie()
+        for header in response.headers.get_all("Set-Cookie", []):
+            cookie.load(header)
+    session = cookie.get("webui_sid")
+    if not isinstance(result, dict) or result.get("success") is not True or session is None:
+        raise ValueError("WebUI authentication did not establish a session")
+    if re.fullmatch(r"[A-Za-z0-9_-]{16,128}", session.value) is None:
+        raise ValueError("WebUI returned an invalid session identifier")
+    return session.value
+
+
+def request_json(path: str) -> Mapping[str, object]:
+    global _WEBUI_SESSION
+
+    def fetch():
+        # The fixed loopback API uses Secure cookies; non-browser cookie jars omit them on HTTP.
+        headers = {"Cookie": f"webui_sid={_WEBUI_SESSION}"} if _WEBUI_SESSION else {}
+        request = urllib.request.Request(API_URL + path, headers=headers)
+        with _API_OPENER.open(request, timeout=2) as response:
+            return json.load(response)
+
+    try:
+        result = fetch()
+    except urllib.error.HTTPError as error:
+        if error.code != 401:
+            raise
+        _WEBUI_SESSION = _authenticate_webui()
+        result = fetch()
     if not isinstance(result, dict):
         raise ValueError("API response must be an object")
     return result
