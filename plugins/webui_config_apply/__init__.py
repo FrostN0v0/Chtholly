@@ -9,7 +9,6 @@ from entari_plugin_server import get_asgi
 from arclet.entari.config.file import EntariConfig
 from arclet.entari.plugin.model import Plugin
 
-from . import ui
 from .api import install_api
 from .control import file_digest
 from .serializer import install_dumper
@@ -30,4 +29,3 @@ if plug is not None:
     running_sha256 = file_digest(EntariConfig.instance.path)
     plugin.collect_disposes(install_dumper())
     plugin.collect_disposes(install_api(app, running_sha256))
-    ui.install_ui(app, plug)
