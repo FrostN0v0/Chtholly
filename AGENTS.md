@@ -29,6 +29,7 @@
 - **LLM 工具执行**: 上游 `tools.available_functions` 的 `(Subscriber, Function)` 是 schema 与依赖注入的唯一权威；模型暂停后，由本地 generation-local 边界调用上游 `run_llm_tools` 执行真实 `RunRequirement`，随后继续生成。不再维护第二份 Function/schema。仅本地 generation 的 Agent 开启内存 `cache_session`，以支持上游按 `run_id` 继续无数据库的暂停轮次；授权、跨暂停调用上限、媒体先于文字、只读并发、取消结算、错误脱敏和审计仍由本地边界控制。Entari staged reload 必须保留新工具所有权，失败时恢复仍存活的旧订阅者；旧插件清理不得删除替代工具。pytest 通过 `tests/conftest.py` 将 Letoderea effect 任务绑定到当前测试 loop，禁止通过取消异 loop 清理任务伪装卸载成功。
 - **LLM 工具线上声明**: Agno `Function.to_dict()` 同时用于组件持久化，包含 `external_execution`、`requires_confirmation` 和 `approval_type` 等本地执行标志，不能直接作为供应商工具声明。`agno_compat.py` 的 LiteLLM `_format_tools` 仅在传输边界保留 `name`、`description`、`parameters` 与 `strict`，不修改上游 Function 或停用外部工具执行；验证必须覆盖真实模型请求、工具暂停与携带结果继续生成，不能只验证模型无工具回复或服务健康。
 - `publish_web_preview` 与 `submit_plugin` 的模型源码参数固定使用 `source_files`；禁止用 Agno 媒体保留参数名 `files`，否则上游会将必需业务参数从 schema 移除，形成缺参注入失败与补参校验拒绝。继续以原生 `LLMToolEvent` / `run_llm_tools` 执行和上游 schema 为权威，不补第二套声明或关闭参数检查；网页发布回归必须经过真实工具桥并核对交付 ZIP 的原始字节。
+- 受密码保护的 WebUI 扩展必须兼容上游不含 `allow-same-origin` 的 opaque iframe：会话页与工坊以内联 nonce 加载可信静态资源，通过原生父页面 `postMessage` API bridge 携带会话认证，响应严格校验父窗口与精确 origin。会话附件通过同一桥获取经 MIME/6 MiB 校验的 Blob，切换轮次或关闭页面时释放 URL 与请求等待；不得通过匿名资源路由、CORS 通配或关闭 iframe sandbox 恢复功能。
 - **日志与终端**: rich（Entari 内建 log 使用 loguru；凭证化运行环境必须关闭会展开局部变量的 `rich_error`）
 - **包管理**: uv（`uv sync` / `uv add` / `uv remove`）
 - **代码质量**: Ruff、Pyright（`typeCheckingMode = "standard"`）

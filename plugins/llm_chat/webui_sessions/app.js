@@ -83,14 +83,110 @@ function status(message, error = false) {
 function showError(error) {
   if (error?.name !== "AbortError") status(error instanceof Error ? error.message : "操作失败", true);
 }
-async function request(path, options = {}) {
-  const response = await fetch(`${apiBase}${path}`, {
-    credentials: "same-origin", cache: "no-store", ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+const bridgeOrigin = new URL(document.URL).origin;
+const inFrame = window.parent !== window;
+const bridgeRequests = new Map();
+let bridgeReady = !inFrame;
+let pageActive = true;
+let pageController = new AbortController();
+let navigationController = new AbortController();
+
+function abortError() { return new DOMException("读取已停止", "AbortError"); }
+function apiUrl(path) {
+  if (typeof path !== "string" || !path.startsWith("/")) throw new Error("无效会话请求路径");
+  const url = new URL(`${apiBase}${path}`, bridgeOrigin);
+  if (url.origin !== bridgeOrigin || !url.pathname.startsWith(`${apiBase}/`) || url.hash) throw new Error("无效会话请求路径");
+  return url.pathname + url.search;
+}
+window.addEventListener("message", (event) => {
+  if (!inFrame || event.source !== window.parent || event.origin !== bridgeOrigin) return;
+  const message = event.data;
+  if (!message || typeof message !== "object") return;
+  if (message.type === "webui.ready") {
+    bridgeReady = true;
+    for (const pending of bridgeRequests.values()) pending.send();
+    return;
+  }
+  const pending = bridgeRequests.get(message.id);
+  if (!pending || !pending.sent) return;
+  if (Object.hasOwn(message, "error")) pending.finish(new Error(String(message.error)));
+  else if (Object.hasOwn(message, "result")) pending.finish(null, message.result);
+});
+function bridgeApi(url, options, signal) {
+  if (signal.aborted || !pageActive) return Promise.reject(abortError());
+  if (bridgeRequests.size >= 64) return Promise.reject(new Error("读取请求过多，请稍后重试。"));
+  const id = crypto.randomUUID();
+  const timeout = options.method === "GET" ? 30000 : 320000;
+  return new Promise((resolve, reject) => {
+    const onAbort = () => pending.finish(abortError());
+    const pending = {
+      sent: false,
+      finish(error, result) {
+        if (!bridgeRequests.delete(id)) return;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        if (error) reject(error); else resolve(result);
+      },
+      send() {
+        if (pending.sent || !bridgeReady || !bridgeRequests.has(id)) return;
+        if (signal.aborted || !pageActive) return pending.finish(abortError());
+        pending.sent = true;
+        try {
+          window.parent.postMessage({ id, method: "api", payload: {
+            url, method: options.method, timeout,
+            headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+            ...(options.body != null ? { data: JSON.parse(options.body) } : {}),
+            ...(options.responseType === "blob" ? { responseType: "blob" } : {}),
+          } }, bridgeOrigin);
+        } catch (error) { pending.finish(error); }
+      },
+    };
+    const timer = setTimeout(() => pending.finish(new Error(options.method === "GET"
+      ? "WebUI 读取超时，请刷新后重试。"
+      : "WebUI 操作等待超时；操作可能已执行，请刷新检查结果，不要重复提交。")), timeout + 10000);
+    bridgeRequests.set(id, pending);
+    signal.addEventListener("abort", onAbort, { once: true });
+    pending.send();
   });
-  const data = await response.json().catch(() => ({ success: false, message: "服务器响应无法解析" }));
-  if (!response.ok || data.success === false) throw new Error(data.message || `请求失败（${response.status}）`);
+}
+async function request(path, options = {}) {
+  const url = apiUrl(path);
+  const method = (options.method || "GET").toUpperCase();
+  if (!["GET", "POST", "DELETE"].includes(method)) throw new Error("不支持的会话请求方法");
+  const signal = AbortSignal.any([
+    pageController.signal, ...(method === "GET" ? [navigationController.signal] : []),
+    ...(options.signal ? [options.signal] : []),
+  ]);
+  if (!pageActive || signal.aborted) throw abortError();
+  let data;
+  if (inFrame) data = await bridgeApi(url, { ...options, method }, signal);
+  else {
+    const response = await fetch(url, {
+      credentials: "same-origin", cache: "no-store", ...options, method, signal,
+      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    });
+    if (options.responseType === "blob" && response.ok) data = await response.blob();
+    else {
+      data = await response.json().catch(() => ({ success: false, message: "服务器响应无法解析" }));
+      if (!response.ok) throw new Error(data.message || `请求失败（${response.status}）`);
+    }
+  }
+  if (signal.aborted || !pageActive) throw abortError();
+  if (options.responseType === "blob") {
+    if (!(data instanceof Blob)) throw new Error("服务器未返回图片附件");
+  } else if (!data || typeof data !== "object" || data.success === false) {
+    throw new Error(data?.message || "服务器响应无法解析");
+  }
   return data;
+}
+function beginNavigation() {
+  ++state.navigation;
+  navigationController.abort();
+  navigationController = new AbortController();
+  disposePayload();
+  if ($("payload-dialog").open) $("payload-dialog").close();
+  disposeAttachments();
+  return state.navigation;
 }
 function badge(value) {
   const item = node("span", "badge", label(value));
@@ -210,7 +306,7 @@ function renderSessions() {
 }
 async function selectSession(session) {
   stopPolling();
-  const generation = ++state.navigation;
+  const generation = beginNavigation();
   state.session = session;
   state.detail = null;
   state.turn = null;
@@ -272,7 +368,7 @@ async function fetchTurn(turnRef) {
 }
 async function selectTurn(turn) {
   stopPolling();
-  const generation = ++state.navigation;
+  const generation = beginNavigation();
   state.turn = turn;
   state.inspection = null;
   state.events = [];
@@ -416,28 +512,127 @@ function renderContext() {
   blocks.content.append(eventButton(ref, "全部注入块", "blocks"));
   target.append(blocks.item);
 }
+const attachmentCache = new Map();
+const attachmentQueue = new Set();
+const attachmentConsumers = new WeakMap();
+const imageTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+const maxImageBytes = 6 * 1024 * 1024;
+let attachmentLoads = 0;
+const attachmentVisibility = new IntersectionObserver((entries) => {
+  for (const { target, isIntersecting } of entries) {
+    if (!isIntersecting) continue;
+    attachmentVisibility.unobserve(target);
+    const entry = attachmentConsumers.get(target);
+    if (entry && attachmentCache.get(entry.path) === entry && !entry.url && !entry.error && !entry.loading) attachmentQueue.add(entry);
+  }
+  pumpAttachments();
+}, { rootMargin: "200px" });
+const attachmentRemoval = new MutationObserver(() => {
+  for (const entry of attachmentCache.values()) {
+    for (const thumb of entry.consumers.keys()) {
+      if (!thumb.isConnected) {
+        attachmentVisibility.unobserve(thumb);
+        entry.consumers.delete(thumb);
+      }
+    }
+    if (!entry.consumers.size) releaseAttachment(entry);
+  }
+});
+attachmentRemoval.observe(document.body, { childList: true, subtree: true });
+
+function releaseAttachment(entry) {
+  attachmentCache.delete(entry.path);
+  attachmentQueue.delete(entry);
+  entry.controller.abort();
+  for (const thumb of entry.consumers.keys()) attachmentVisibility.unobserve(thumb);
+  entry.consumers.clear();
+  if (entry.url) {
+    if ($("image-preview").getAttribute("src") === entry.url) {
+      $("image-preview").removeAttribute("src");
+      if ($("image-dialog").open) $("image-dialog").close();
+    }
+    URL.revokeObjectURL(entry.url);
+    entry.url = null;
+  }
+}
+function disposeAttachments() {
+  for (const entry of attachmentCache.values()) releaseAttachment(entry);
+}
+function renderAttachment(entry, thumb, img) {
+  thumb.disabled = !entry.url || entry.error;
+  if (entry.error) img.replaceWith(node("span", "muted", "图片不可用"));
+  else if (entry.url) img.src = entry.url;
+}
+async function loadAttachment(entry) {
+  try {
+    const blob = await request(entry.path, { responseType: "blob", signal: entry.controller.signal });
+    if (!blob.size || blob.size > maxImageBytes || !imageTypes.has(blob.type)) throw new Error("无效图片附件");
+    const bytes = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
+    const prefix = String.fromCharCode(...bytes);
+    const mime = prefix.startsWith("\x89PNG\r\n\x1a\n") ? "image/png"
+      : bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255 ? "image/jpeg"
+      : prefix.startsWith("GIF87a") || prefix.startsWith("GIF89a") ? "image/gif"
+      : prefix.startsWith("RIFF") && prefix.slice(8, 12) === "WEBP" ? "image/webp" : "";
+    if (mime !== blob.type) throw new Error("图片附件类型不匹配");
+    if (!pageActive || entry.controller.signal.aborted || attachmentCache.get(entry.path) !== entry) return;
+    entry.url = URL.createObjectURL(blob);
+  } catch (error) {
+    if (attachmentCache.get(entry.path) !== entry || error?.name === "AbortError") return;
+    entry.error = true;
+  }
+  for (const [thumb, img] of entry.consumers) if (thumb.isConnected) renderAttachment(entry, thumb, img);
+}
+function pumpAttachments() {
+  while (pageActive && attachmentLoads < 4 && attachmentQueue.size) {
+    const entry = attachmentQueue.values().next().value;
+    attachmentQueue.delete(entry);
+    if (attachmentCache.get(entry.path) !== entry || entry.loading || entry.url || entry.error) continue;
+    entry.loading = true;
+    ++attachmentLoads;
+    loadAttachment(entry).finally(() => {
+      entry.loading = false;
+      --attachmentLoads;
+      pumpAttachments();
+    });
+  }
+}
 function appendImages(target, event) {
-  if (!event?.images?.length) return;
+  if (!event?.images?.length || typeof event.event_ref !== "string") return;
   const grid = node("div", "images");
   for (const image of event.images) {
     let source;
     try {
-      source = new URL(image.url, location.origin);
-      if (source.origin !== location.origin || !source.pathname.startsWith(`${apiBase}/events/`) || !source.pathname.includes("/attachments/")) continue;
+      if (typeof image.url !== "string") continue;
+      source = new URL(image.url, document.URL);
+      const prefix = `${apiBase}/events/${encodeURIComponent(event.event_ref)}/attachments/`;
+      if (source.origin !== bridgeOrigin || source.username || source.password || source.search || source.hash
+        || !source.pathname.startsWith(prefix) || !/^(?:input|reference|output)_[0-9a-f]{32}$/.test(source.pathname.slice(prefix.length))) continue;
+      if (image.bytes > maxImageBytes || (image.mime && !imageTypes.has(image.mime))) continue;
     } catch { continue; }
+    const path = source.pathname.slice(apiBase.length);
+    let entry = attachmentCache.get(path);
+    if (!entry) {
+      entry = { path, controller: new AbortController(), consumers: new Map(), url: null, error: false, loading: false };
+      attachmentCache.set(path, entry);
+    }
     const imageLabel = image.name || image.label || image.meaning || "事件关联图片";
     const thumb = button("", () => {
+      if (!entry.url || entry.error || attachmentCache.get(path) !== entry || !thumb.isConnected) return;
       $("image-title").textContent = imageLabel;
-      $("image-preview").src = source.href;
+      $("image-preview").src = entry.url;
       $("image-preview").alt = imageLabel;
       $("image-caption").textContent = image.text || image.meaning || "";
       $("image-dialog").showModal();
     }, "image-button");
     thumb.dataset.focusKey = `image:${target.closest("[data-record-key]")?.dataset.recordKey || ""}:${source.pathname}`;
     const img = node("img");
-    img.src = source.href; img.alt = imageLabel; img.loading = "lazy";
-    img.addEventListener("error", () => img.replaceWith(node("span", "muted", "图片不可用")));
+    img.alt = imageLabel; img.loading = "lazy";
+    img.addEventListener("error", () => { thumb.disabled = true; img.replaceWith(node("span", "muted", "图片不可用")); });
     thumb.append(img, node("span", "muted", short(imageLabel, 40)));
+    entry.consumers.set(thumb, img);
+    attachmentConsumers.set(thumb, entry);
+    renderAttachment(entry, thumb, img);
+    if (!entry.url && !entry.error) attachmentVisibility.observe(thumb);
     grid.append(thumb);
   }
   target.append(grid);
@@ -688,7 +883,7 @@ for (const [index, tab] of tabs.entries()) {
 }
 $("scope-select").addEventListener("change", () => {
   ++state.scopeLoad;
-  ++state.navigation;
+  beginNavigation();
   state.scope = state.scopes.find((scope) => scope.scope_ref === $("scope-select").value) || null;
   state.session = null;
   renderScope(); loadSessions().catch(showError);
@@ -739,4 +934,19 @@ $("pin-event-button").addEventListener("click", () => {
   } });
 });
 document.addEventListener("visibilitychange", () => document.hidden ? stopPolling() : startPolling());
+window.addEventListener("pagehide", () => {
+  pageActive = false;
+  stopPolling();
+  pageController.abort();
+  beginNavigation();
+  attachmentVisibility.disconnect();
+  attachmentRemoval.disconnect();
+});
+window.addEventListener("pageshow", (event) => {
+  if (!event.persisted) return;
+  pageActive = true;
+  pageController = new AbortController();
+  attachmentRemoval.observe(document.body, { childList: true, subtree: true });
+  loadScopes().catch(showError);
+});
 loadScopes().catch(showError);

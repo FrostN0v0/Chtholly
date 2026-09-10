@@ -64,6 +64,8 @@ uv run --locked entari run
 
 「输入与输出」直接按真实发送顺序展示确认送达的文字和图片，渲染、生图等工具卡片也可查看关联的交付图片并点击放大。语音、文件和视频保留交付类型提示，不提供媒体播放或文件内容预览。新轮次的总耗时从接收输入开始，到最后一条消息确认发送为止；旧轮次仅显示明确标注的生命周期估算，未留存的历史图片不能恢复，也不会重新渲染后冒充原图。
 
+会话页通过原生 WebUI 的已认证父页面读取 API 和图片附件，兼容隔离 iframe 与密码登录；源码脚本和样式以内联 nonce 加载。切换轮次会停止旧的分页读取并释放临时图片地址，不关闭认证，也不放宽 iframe 的同源隔离。
+
 在 `llm_chat.personas` 下按角色键配置 `name`、`prompt`、`appearance` 和可选的 `reference_image`，用 `default_persona` 指定默认角色。人格和口吻由所填 `prompt` 定义，不额外附加情景对白或固定说话示例；参考图使用 `resources/image` 下已有文件的安全相对路径。旧 `persona` 移至对应角色的 `prompt`，旧 `self_reference_image` 移至该角色的 `reference_image`。
 
 普通成员可查看当前角色列表、会话与 Token 信息：
