@@ -28,7 +28,9 @@ EVENT_TITLES = {
     "context_snapshot": "实际上下文快照",
     "assistant_tool_call": "工具调用",
     "tool_result": "工具结果",
-    "assistant_output": "最终回复",
+    "assistant_output": "旧版回复摘要（送达记录不完整）",
+    "message_delivery": "确认送达消息",
+    "turn_timing": "用户输入接收时间",
     "context_selection": "上下文选择",
     "persona_state": "人格与记忆",
 }
@@ -413,7 +415,9 @@ def event_engagement(event: AgentEvent, payload: Mapping[str, JSONType]) -> dict
     }
 
 
-def event_images(event: AgentEvent, payload: Mapping[str, JSONType]) -> list[dict[str, JSONType]]:
+def event_images(
+    event: AgentEvent, payload: Mapping[str, JSONType], *, output_only: bool = False
+) -> list[dict[str, JSONType]]:
     """Project event-authorized private images into authenticated WebUI URLs."""
 
     images: list[dict[str, JSONType]] = []
@@ -421,6 +425,8 @@ def event_images(event: AgentEvent, payload: Mapping[str, JSONType]) -> list[dic
         attachment_ref = raw.get("attachment_ref")
         mime = raw.get("mime")
         if not is_agent_attachment(attachment_ref, mime):
+            continue
+        if (output_only or event.event_type == "message_delivery") and not str(attachment_ref).startswith("output_"):
             continue
         source = str(raw.get("source", "") or "")
         index = raw.get("index")

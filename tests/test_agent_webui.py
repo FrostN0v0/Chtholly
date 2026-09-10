@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from pathlib import Path
+from datetime import datetime, timezone, timedelta
 
 import httpx
 import pytest
@@ -19,7 +20,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from plugins.llm_chat import agent_admin, personality, agent_events, session_manager, session_inspection
 from plugins.llm_chat.config import LLMChatConfig
-from plugins.llm_chat.models import AgentEvent
+from plugins.llm_chat.models import AgentTurn, AgentEvent
 from plugins.llm_chat.agent_admin import AgentAdminService
 from plugins.llm_chat.agent_webui_api import create_agent_sessions_router
 from plugins.llm_chat.session_manager import ScopeIdentity, BaselineFingerprint
@@ -191,7 +192,12 @@ async def test_agent_sessions_api_exposes_timeline_context_payload_and_safe_rese
             assert inspection["usage"]["total_tokens"] is None
             assert inspection["usage"]["source"] == "not_recorded"
             assert inspection["tool_calls"][0]["result_event_ref"] == events[2]["event_ref"]
-            assert inspection["outputs"][0]["event_ref"] == events[3]["event_ref"]
+            assert [output["event_ref"] for output in inspection["outputs"]] == [
+                events[2]["event_ref"],
+                events[3]["event_ref"],
+            ]
+            assert all(output["source"] == "legacy_incomplete" for output in inspection["outputs"])
+            assert [image["url"] for image in inspection["outputs"][0]["images"]] == [edit_images[1]["url"]]
             detail = (await client.get(f"/api/llm-chat/sessions/sessions/{context_session.session_ref}")).json()["item"]
             assert detail["context"]["estimated_tokens"] == 100
             assert detail["context"]["max_input_tokens"] is None
@@ -379,3 +385,219 @@ def test_terminal_turn_does_not_label_missing_call_results_as_running() -> None:
     assert session_inspection.project_tool_calls([tool], turn_status="completed")[0]["status"] == "not_recorded"
     assert session_inspection.project_model_calls([request], turn_status="running")[0]["status"] == "running"
     assert session_inspection.project_tool_calls([tool], turn_status="running")[0]["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_confirmed_delivery_inspection_preserves_prefix_and_receipt_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    for module in (agent_admin, agent_events, session_manager, session_inspection, personality):
+        monkeypatch.setattr(module, "get_session", session_factory)
+    scope = await session_manager.get_or_create_scope(ScopeIdentity("test", "bot", "guild", "delivery", "Delivery"))
+    context_session = await session_manager.create_session(
+        scope.id,
+        BaselineFingerprint("test", "persona", "system", "tools", "policy"),
+        start_reason="initial",
+    )
+    turn = await session_manager.start_turn(
+        context_session,
+        trigger_message_id="input",
+        user_id="alice",
+        user_name="Alice",
+        conversation_user_id=None,
+        fresh_context=False,
+    )
+    received = datetime(2026, 9, 10, 12, tzinfo=timezone.utc)
+    output_ref = "output_" + "a" * 32
+    reference_ref = "reference_" + "b" * 32
+    image_bytes = b"private-confirmed-render"
+    (tmp_path / f"{output_ref}.png").write_bytes(image_bytes)
+    (tmp_path / f"{reference_ref}.png").write_bytes(b"private-input-reference")
+    recorder = AgentTurnRecorder()
+    recorder.append(
+        "turn_timing",
+        payload={
+            "received_at": received.isoformat(),
+            "timing_source": "received_to_confirmed_delivery",
+        },
+        model_visible=False,
+        created_at=received,
+    )
+    tool = recorder.append(
+        "tool_result",
+        tool_name="markdown2pic",
+        execution_ref="render",
+        status="succeeded",
+        effect="unknown",
+        payload={"evidence": {"attachments": [{"attachment_ref": reference_ref, "mime": "image/png"}]}},
+    )
+    image_delivery = recorder.append(
+        "message_delivery",
+        role="assistant",
+        execution_ref="render",
+        status="confirmed",
+        effect="confirmed",
+        duration_ms=3000,
+        model_visible=False,
+        created_at=received + timedelta(seconds=3),
+        payload={
+            "content": "",
+            "attachments": [{"attachment_ref": output_ref, "mime": "image/png"}],
+            "capture_status": "captured",
+            "received_at": received.isoformat(),
+            "confirmed_at": (received + timedelta(seconds=3)).isoformat(),
+        },
+    )
+    text_delivery = recorder.append(
+        "message_delivery",
+        role="assistant",
+        status="confirmed",
+        effect="confirmed",
+        duration_ms=7000,
+        model_visible=False,
+        created_at=received + timedelta(seconds=7),
+        payload={
+            "content": "<script>alert('literal text')</script>\nDelivered prefix.",
+            "attachments": [],
+            "capture_status": "captured",
+            "received_at": received.isoformat(),
+            "confirmed_at": (received + timedelta(seconds=7)).isoformat(),
+            "media": [
+                {
+                    "kind": "audio",
+                    "label": "Voice message",
+                    "capture_status": "not_recorded",
+                    "url": "https://must-not-project.invalid",
+                    "path": "/must-not-project",
+                }
+            ],
+        },
+    )
+    recorder.append(
+        "message_delivery",
+        role="assistant",
+        status="failed",
+        effect="unknown",
+        duration_ms=9000,
+        payload={"content": "Undelivered suffix"},
+        model_visible=False,
+    )
+    recorder.append(
+        "model_response",
+        payload={"request_id": "late", "content": "Model finalizer is not delivery"},
+        created_at=received + timedelta(seconds=40),
+        duration_ms=40000,
+        model_visible=False,
+    )
+    recorder.record_assistant_output("Summary must not replace confirmed prefix or invent suffix.")
+    await agent_events.persist_agent_events(turn.id, recorder.events)
+    await session_manager.finish_turn(turn.id, status="partial", final_text="Legacy summary")
+    async with session_factory() as db:
+        stored_turn = await db.get(AgentTurn, turn.id)
+        assert stored_turn is not None
+        stored_turn.created_at = (received + timedelta(seconds=2)).replace(tzinfo=None)
+        stored_turn.finished_at = (received + timedelta(seconds=50)).replace(tzinfo=None)
+        await db.commit()
+    service = AgentAdminService(LLMChatConfig(), [], attachment_root=tmp_path)
+    app = FastAPI()
+    app.include_router(
+        create_agent_sessions_router(
+            service,
+            asset_dir=Path(__file__).resolve().parents[1] / "plugins" / "llm_chat" / "webui_sessions",
+        )
+    )
+    persisted = {event.sequence: event for event in await agent_events.load_turn_events(turn.id)}
+    image_event = persisted[image_delivery.sequence]
+    text_event = persisted[text_delivery.sequence]
+    tool_event = persisted[tool.sequence]
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            inspection = (await client.get(f"/api/llm-chat/sessions/turns/{turn.turn_ref}/inspection")).json()["item"]
+            turns = (await client.get(f"/api/llm-chat/sessions/sessions/{context_session.session_ref}/turns")).json()[
+                "items"
+            ]
+            for summary in (inspection["turn"], turns[0]):
+                assert summary["duration_ms"] == 7000
+                assert summary["duration_source"] == "received_to_confirmed_delivery"
+                assert summary["received_at"] == received.isoformat()
+                assert summary["last_delivery_at"] == (received + timedelta(seconds=7)).isoformat()
+            outputs = inspection["outputs"]
+            assert [output["event_ref"] for output in outputs] == [image_event.event_ref, text_event.event_ref]
+            assert outputs[1]["content"] == "<script>alert('literal text')</script>\nDelivered prefix."
+            assert outputs[1]["media"] == [
+                {"kind": "audio", "label": "Voice message", "capture_status": "not_recorded"}
+            ]
+            linked = inspection["tool_calls"][0]["deliveries"]
+            assert [delivery["event_ref"] for delivery in linked] == [image_event.event_ref]
+            image_url = linked[0]["images"][0]["url"]
+            assert image_url == f"/api/llm-chat/sessions/events/{image_event.event_ref}/attachments/{output_ref}"
+            assert outputs[0]["images"][0]["url"] == image_url
+            image = await client.get(image_url)
+            assert image.content == image_bytes
+            assert image.headers["cache-control"] == "private, no-store"
+            for event_ref, attachment_ref in (
+                (tool_event.event_ref, output_ref),
+                (image_event.event_ref, reference_ref),
+            ):
+                denied = await client.get(f"/api/llm-chat/sessions/events/{event_ref}/attachments/{attachment_ref}")
+                assert denied.status_code == 404
+    finally:
+        await engine.dispose()
+
+
+def test_turn_timing_distinguishes_unknown_legacy_running_and_no_delivery() -> None:
+    started = datetime.now(timezone.utc) - timedelta(seconds=10)
+    turn = AgentTurn(status="completed", created_at=None, finished_at=None)
+    timing = session_inspection.project_turn_timing(turn, [])
+    assert timing["duration_ms"] is None
+    assert timing["duration_source"] == "not_recorded"
+    turn.created_at = started.replace(tzinfo=None)
+    assert session_inspection.project_turn_timing(turn, [])["duration_ms"] is None
+    turn.finished_at = (started + timedelta(seconds=5)).replace(tzinfo=None)
+    legacy = session_inspection.project_turn_timing(turn, [])
+    assert (legacy["duration_ms"], legacy["duration_source"]) == (5000, "legacy_lifecycle")
+    assert legacy["received_at"] is legacy["last_delivery_at"] is None
+    event = AgentEvent(
+        event_type="turn_timing", sequence=1, payload_json=json.dumps({"received_at": started.isoformat()})
+    )
+    no_delivery = session_inspection.project_turn_timing(turn, [event])
+    assert no_delivery["duration_ms"] is None
+    assert no_delivery["duration_source"] == "not_delivered"
+    assert (
+        session_inspection.project_outputs(
+            [
+                event,
+                AgentEvent(
+                    event_type="assistant_output",
+                    sequence=2,
+                    effect="confirmed",
+                    payload_json='{"content":"not a receipt"}',
+                ),
+            ]
+        )
+        == []
+    )
+    turn.status = "running"
+    running = session_inspection.project_turn_timing(turn, [event])
+    assert running["duration_ms"] is None
+    assert running["duration_source"] == "running"
+    assert running["elapsed_ms"] >= 10000
+    receipt = AgentEvent(
+        event_type="message_delivery",
+        sequence=2,
+        status="confirmed",
+        effect="confirmed",
+        duration_ms=None,
+        created_at=None,
+        payload_json='{"received_at":"invalid","confirmed_at":"invalid"}',
+    )
+    turn.status = "completed"
+    unknown = session_inspection.project_turn_timing(turn, [receipt])
+    assert unknown["duration_ms"] is None
+    assert unknown["duration_source"] == "not_recorded"
+    assert unknown["received_at"] is unknown["last_delivery_at"] is None

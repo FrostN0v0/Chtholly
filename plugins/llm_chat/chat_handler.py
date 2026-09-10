@@ -36,6 +36,7 @@ from .channel_turns import (
     cancel_active_participant_turns,
     current_participant_turn_superseded,
 )
+from .delivery_audit import delivery_audit_scope, current_delivery_audit
 from .chat_evaluation import cancel_pending_evaluations, schedule_chat_state_after_delivery
 from .core.engagement import turn_feedback
 from .forward_context import resolve_merged_forward_messages
@@ -96,7 +97,7 @@ plugin.collect_disposes(cancel_pending_evaluations)
 @latest_participant_turn
 async def on_chat(session: Session, ctx: Contexts):
     reaction = MessageReactionFeedback(session, _LOGGER.warning)
-    with llm_chat_reaction_scope(reaction):
+    with delivery_audit_scope(session, _LOGGER.warning), llm_chat_reaction_scope(reaction):
         try:
             await reaction.set_stage("processing")
             result = await _run_chat(session, ctx, reaction)
@@ -204,6 +205,9 @@ async def _run_chat(
     except BaseException:
         remove_user_input_attachments(input_attachments)
         raise
+    delivery_audit = current_delivery_audit()
+    if delivery_audit is not None:
+        delivery_audit.bind(prepared.agent_events)
     memory_context = prepared.memory_context
     eval_history = prepared.eval_history
     chat_messages = prepared.chat_messages
@@ -316,7 +320,13 @@ async def _run_chat(
     finally:
         if turn_status not in {"completed", "cancelled"} and delivery_state.confirmed_deliveries:
             turn_status = "partial"
-        finalize_task = asyncio.create_task(turn.finalize_agent_turn(turn_status))
+
+        async def finalize_with_delivery_audit() -> None:
+            if delivery_audit is not None:
+                await delivery_audit.drain()
+            await turn.finalize_agent_turn(turn_status)
+
+        finalize_task = asyncio.create_task(finalize_with_delivery_audit())
         try:
             await asyncio.shield(finalize_task)
         except asyncio.CancelledError:

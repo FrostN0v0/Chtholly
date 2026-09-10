@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from collections.abc import Mapping, Sequence
 
 from sqlalchemy import JSON, case, func, select, type_coerce
@@ -70,8 +71,61 @@ def summarize_turn_events(events: Sequence[AgentEvent]) -> dict[str, object]:
     }
 
 
-async def turn_list_summaries(turn_ids: Sequence[int]) -> dict[int, dict[str, object]]:
+def _timestamp(value: object) -> datetime | None:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def project_turn_timing(turn: AgentTurn, events: Sequence[AgentEvent]) -> dict[str, object]:
+    """Keep receipt-to-delivery measurements separate from lifecycle estimates."""
+    timing = next((event for event in events if event.event_type == "turn_timing"), None)
+    deliveries = [
+        event
+        for event in events
+        if event.event_type == "message_delivery" and event.status == event.effect == "confirmed"
+    ]
+    last = max(deliveries, key=lambda event: event.sequence or 0) if deliveries else None
+    timing_payload = load_event_payload(timing) if timing is not None else {}
+    last_payload = load_event_payload(last) if last is not None else {}
+    received = _timestamp(timing_payload.get("received_at")) or _timestamp(last_payload.get("received_at"))
+    confirmed = (
+        (_timestamp(last_payload.get("confirmed_at")) or _timestamp(last.created_at)) if last is not None else None
+    )
+    measured = last.duration_ms if last is not None else None
+    measured = measured if isinstance(measured, int) and not isinstance(measured, bool) and measured >= 0 else None
+    audited = timing is not None or any(event.event_type == "message_delivery" for event in events)
+    source = "received_to_confirmed_delivery" if measured is not None else "not_recorded"
+    elapsed = None
+    if turn.status == "running":
+        source = "running"
+        started = received or _timestamp(turn.created_at)
+        if started is not None:
+            elapsed = max(0, int((datetime.now(timezone.utc) - started).total_seconds() * 1000))
+    elif audited and last is None:
+        source = "not_delivered"
+    elif not audited:
+        started, finished = _timestamp(turn.created_at), _timestamp(turn.finished_at)
+        if started is not None and finished is not None and finished >= started:
+            measured = int((finished - started).total_seconds() * 1000)
+            source = "legacy_lifecycle"
+    return {
+        "duration_ms": measured,
+        "duration_source": source,
+        "received_at": received.isoformat() if received is not None else None,
+        "last_delivery_at": confirmed.isoformat() if confirmed is not None else None,
+        "elapsed_ms": elapsed,
+    }
+
+
+async def turn_list_summaries(turns: Sequence[AgentTurn]) -> dict[int, dict[str, object]]:
     """Fetch only lightweight call metadata and bounded input snippets for a page."""
+    turn_ids = [turn.id for turn in turns]
     if not turn_ids:
         return {}
     payload = type_coerce(AgentEvent.payload_json, JSON)
@@ -83,6 +137,18 @@ async def turn_list_summaries(turn_ids: Sequence[int]) -> dict[int, dict[str, ob
                     AgentEvent.event_ref,
                     AgentEvent.event_type,
                     AgentEvent.execution_ref,
+                    AgentEvent.sequence,
+                    AgentEvent.status,
+                    AgentEvent.effect,
+                    AgentEvent.duration_ms,
+                    AgentEvent.created_at,
+                    case(
+                        (
+                            AgentEvent.event_type.in_(("turn_timing", "message_delivery")),
+                            payload["received_at"].as_string(),
+                        )
+                    ),
+                    case((AgentEvent.event_type == "message_delivery", payload["confirmed_at"].as_string())),
                     payload["request_id"].as_string(),
                     payload["model"].as_string(),
                     case((AgentEvent.event_type == "user_input", func.substr(payload["content"].as_string(), 1, 401))),
@@ -97,6 +163,8 @@ async def turn_list_summaries(turn_ids: Sequence[int]) -> dict[int, dict[str, ob
                             "assistant_tool_call",
                             "tool_result",
                             "context_snapshot",
+                            "turn_timing",
+                            "message_delivery",
                         )
                     ),
                 )
@@ -104,19 +172,49 @@ async def turn_list_summaries(turn_ids: Sequence[int]) -> dict[int, dict[str, ob
             )
         ).all()
     grouped: dict[int, list[AgentEvent]] = {turn_id: [] for turn_id in turn_ids}
-    for turn_id, event_ref, event_type, execution_ref, request_id, model, content in rows:
+    for (
+        turn_id,
+        event_ref,
+        event_type,
+        execution_ref,
+        sequence,
+        status,
+        effect,
+        duration_ms,
+        created_at,
+        received_at,
+        confirmed_at,
+        request_id,
+        model,
+        content,
+    ) in rows:
         grouped[turn_id].append(
             AgentEvent(
                 turn_id=turn_id,
                 event_ref=event_ref,
                 event_type=event_type,
                 execution_ref=execution_ref,
+                sequence=sequence,
+                status=status,
+                effect=effect,
+                duration_ms=duration_ms,
+                created_at=created_at,
                 payload_json=json.dumps(
-                    {"request_id": request_id, "model": model, "content": content}, ensure_ascii=False
+                    {
+                        "request_id": request_id,
+                        "model": model,
+                        "content": content,
+                        "received_at": received_at,
+                        "confirmed_at": confirmed_at,
+                    },
+                    ensure_ascii=False,
                 ),
             )
         )
-    return {turn_id: summarize_turn_events(events) for turn_id, events in grouped.items()}
+    return {
+        turn.id: {**summarize_turn_events(grouped[turn.id]), **project_turn_timing(turn, grouped[turn.id])}
+        for turn in turns
+    }
 
 
 def summarize_usage(events: Sequence[AgentEvent]) -> dict[str, object]:
@@ -258,6 +356,12 @@ def project_model_calls(events: Sequence[AgentEvent], *, turn_status: str = "run
 
 def project_tool_calls(events: Sequence[AgentEvent], *, turn_status: str = "running") -> list[dict[str, object]]:
     groups: dict[str, dict[str, AgentEvent]] = {}
+    audited = any(event.event_type in {"turn_timing", "message_delivery"} for event in events)
+    deliveries: dict[str, list[dict[str, object]]] = {}
+    for output in project_outputs(events):
+        execution_ref = output.get("execution_ref")
+        if output["source"] == "message_delivery" and isinstance(execution_ref, str) and execution_ref:
+            deliveries.setdefault(execution_ref, []).append(output)
     for event in events:
         if event.event_type in {"assistant_tool_call", "tool_result"}:
             groups.setdefault(event.execution_ref or event.event_ref, {})[event.event_type] = event
@@ -316,23 +420,60 @@ def project_tool_calls(events: Sequence[AgentEvent], *, turn_status: str = "runn
                 else "not_recorded",
                 "evidence": event_evidence(result_payload),
                 "images": event_images(event, result_payload),
+                "deliveries": deliveries.get(event.execution_ref, []),
+                "delivery_source": "message_delivery" if audited else "legacy_incomplete",
             }
         )
     return calls
 
 
 def project_outputs(events: Sequence[AgentEvent]) -> list[dict[str, object]]:
-    return [
-        {
-            "event_ref": event.event_ref,
-            "status": event.status,
-            "effect": event.effect,
-            "preview": event_preview(event, load_event_payload(event)),
-            "images": event_images(event, load_event_payload(event)),
-        }
-        for event in events
-        if event.event_type == "assistant_output" and event.effect == "confirmed"
-    ]
+    """Prefer receipts, including a confirmed prefix when the rest of a turn failed."""
+    ordered = sorted(events, key=lambda event: event.sequence or 0)
+    audited = any(event.event_type in {"turn_timing", "message_delivery"} for event in ordered)
+    outputs: list[dict[str, object]] = []
+    for event in ordered:
+        confirmed = event.event_type == "message_delivery" and event.status == event.effect == "confirmed"
+        if audited and not confirmed:
+            continue
+        if not audited and not (
+            (event.event_type == "assistant_output" and event.effect == "confirmed")
+            or (event.event_type == "tool_result" and (event.effect == "confirmed" or event.status == "succeeded"))
+        ):
+            continue
+        payload = load_event_payload(event)
+        images = event_images(event, payload, output_only=True)
+        if not audited and event.event_type == "tool_result" and not images:
+            continue
+        content = payload.get("content")
+        media = payload.get("media")
+        outputs.append(
+            {
+                "event_ref": event.event_ref,
+                "event_type": event.event_type,
+                "sequence": event.sequence,
+                "execution_ref": event.execution_ref or None,
+                "status": event.status,
+                "effect": event.effect,
+                "model_visible": False if confirmed else event.model_visible,
+                "source": "message_delivery" if confirmed else "legacy_incomplete",
+                "content": content if isinstance(content, str) else "",
+                "preview": event_preview(event, payload),
+                "images": images,
+                "media": [
+                    {key: value[key] for key in ("kind", "label", "capture_status") if isinstance(value.get(key), str)}
+                    for value in media
+                    if isinstance(value, Mapping)
+                ]
+                if isinstance(media, list)
+                else [],
+                "capture_status": payload.get("capture_status", "not_recorded") if confirmed else "legacy_incomplete",
+                "received_at": payload.get("received_at") if confirmed else None,
+                "confirmed_at": payload.get("confirmed_at") if confirmed else None,
+                "duration_ms": event.duration_ms if confirmed else None,
+            }
+        )
+    return outputs
 
 
 async def turn_events(turn_id: int) -> list[AgentEvent]:

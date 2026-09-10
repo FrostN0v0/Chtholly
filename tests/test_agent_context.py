@@ -808,6 +808,14 @@ async def test_interleaved_tool_results_remain_paired_without_operator_snapshots
             status="succeeded" if kind == "tool_result" else "running",
         )
     recorder.append("context_snapshot", payload={"system": "operator-only-context"}, model_visible=False)
+    recorder.append("turn_timing", payload={"received_at": "operator-only-start"}, model_visible=False)
+    recorder.append(
+        "message_delivery",
+        payload={"content": "operator-only-delivery", "attachments": [{"attachment_ref": "output_private"}]},
+        status="confirmed",
+        effect="confirmed",
+        model_visible=False,
+    )
     recorder.record_assistant_output("Three records found")
     await agent_events.persist_agent_events(turn.id, recorder.events)
     await session_manager.finish_turn(turn.id, status="completed", final_text="Three records found")
@@ -830,7 +838,20 @@ async def test_interleaved_tool_results_remain_paired_without_operator_snapshots
     assert [json.loads(message["content"])["data"]["found"] for message in results] == ["a", "b", "c"]
     assert "operator-only" not in json.dumps(selection.messages)
     handoff_source = await session_handoff._source_events(context_session, 20000)
-    assert all(item["type"] not in {"model_request", "model_response", "context_snapshot"} for item in handoff_source)
+    assert all(
+        item["type"] not in {"model_request", "model_response", "context_snapshot", "turn_timing", "message_delivery"}
+        for item in handoff_source
+    )
+    access = AgentAccessContext(
+        _scope.id, context_session.id, turn.id, "alice", allow_payload_delivery=True, allow_context_pin=True
+    )
+    for private_event in await agent_events.load_turn_events(turn.id):
+        if private_event.event_type not in {"turn_timing", "message_delivery"}:
+            continue
+        with pytest.raises(agent_query.AgentQueryError, match="Private audit events"):
+            await agent_query.read_event_payload(access, event_ref=private_event.event_ref, max_chars=1000)
+        with pytest.raises(agent_query.AgentQueryError, match="Private audit events"):
+            await agent_query.pin_context_payload(access, event_ref=private_event.event_ref, label="Private output")
 
 
 @pytest.mark.asyncio

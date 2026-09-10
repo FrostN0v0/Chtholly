@@ -228,6 +228,11 @@ pre { margin: 0; }
 .images { display: flex; flex-wrap: wrap; gap: 12px; }
 .image-button { display: flex; flex-direction: column; align-items: center; gap: 7px; padding: 9px; }
 .image-button img { width: 120px; height: 100px; object-fit: contain; }
+.delivery-record { border-left: 3px solid var(--success); background: var(--surface); }
+.delivery-record.legacy-output { border-left-color: var(--border); }
+.delivery-text { padding: 12px 14px; border-radius: 9px; background: var(--soft); }
+.delivery-record .image-button img { width: min(280px, 55vw); height: 200px; }
+.turn-duration { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
 .image-preview { display: block; max-width: 100%; max-height: 70dvh; object-fit: contain; margin: 0 auto; }
 .modal { padding: 0; width: min(760px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 13px; box-shadow: var(--shadow); }
 .modal::backdrop { background: #10182780; backdrop-filter: blur(3px); }

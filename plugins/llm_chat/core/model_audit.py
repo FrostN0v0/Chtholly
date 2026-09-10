@@ -9,7 +9,9 @@ from typing import Any
 from dataclasses import field, dataclass
 from collections.abc import Mapping
 
-ADMIN_ONLY_EVENT_TYPES = frozenset({"model_request", "model_response", "context_snapshot"})
+ADMIN_ONLY_EVENT_TYPES = frozenset(
+    {"model_request", "model_response", "context_snapshot", "turn_timing", "message_delivery"}
+)
 _SECRET_KEY = re.compile(
     r"(?:api[_-]?key|authorization|password|passwd|secret|credential|cookie|headers?|(?:access|refresh|capture)[_-]?token|bearer|private[_-]?key)",
     re.I,
@@ -26,7 +28,7 @@ _ASSIGNMENT = re.compile(
     r"(?i)(\b(?:api[_-]?key|password|passwd|secret|authorization|(?:access|refresh|capture)[_-]?token|cookie)[\"']?\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;&}]+)"
 )
 _PRIVATE_TEXT = re.compile(
-    r"(?is)<(?:think|thinking|analysis|reasoning)\b[^>]*>.*?</(?:think|thinking|analysis|reasoning)\s*>|data:[^\s\"'<>]+|(?:file|base64|attachment|local)://[^\s\"'<>]+|[A-Za-z]:[\\/][^\s\"'<>]+|https?://[^\s\"'<>]*(?:multimedia\.nt\.qq\.com|gchat\.qpic\.cn|c2cpicdw\.qpic\.cn)[^\s\"'<>]*"
+    r"(?is)<(?:think|thinking|analysis|reasoning)\b[^>]*>.*?</(?:think|thinking|analysis|reasoning)\s*>|(?:data|internal):[^\s\"'<>]+|(?:file|base64|attachment|local)://[^\s\"'<>]+|(?<![\w])[A-Za-z]:[\\/][^\s\"'<>]+|https?://[^\s\"'<>]*(?:multimedia\.nt\.qq\.com|gchat\.qpic\.cn|c2cpicdw\.qpic\.cn)[^\s\"'<>]*"
 )
 _LOCAL_PATH = re.compile(r"(?<![\w:/])/(?:home|root|tmp|var|opt|Users|mnt|etc|private|workspace|data)/[^\s\"'<>]+")
 _BASE64_TEXT = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{256,}={0,2}(?![A-Za-z0-9+/])")

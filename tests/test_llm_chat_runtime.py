@@ -3461,16 +3461,8 @@ async def test_on_chat_persists_current_tool_trace_as_agent_event(
 
         assert result is BLOCK
         assert captured_sessions == [{}]
-        event_types = [event.event_type for event in records.agent_events]
-        assert event_types == [
-            "user_input",
-            "context_selection",
-            "assistant_tool_call",
-            "tool_result",
-            "assistant_output",
-        ]
-        call_event = records.agent_events[2]
-        result_event = records.agent_events[3]
+        (call_event,) = (event for event in records.agent_events if event.event_type == "assistant_tool_call")
+        (result_event,) = (event for event in records.agent_events if event.event_type == "tool_result")
         assert (call_event.tool_name, call_event.status, call_event.effect) == (
             "web_search",
             "requested",
@@ -4207,7 +4199,8 @@ async def test_on_chat_exposes_non_bot_mentions_as_structured_model_context(
         }
         assert records.mentioned_participants == mentioned
         assert records.appended[0][4] == "Who is she?"
-        event_content = cast(str, records.agent_events[0].payload["content"])
+        (user_event,) = (event for event in records.agent_events if event.event_type == "user_input")
+        event_content = cast(str, user_event.payload["content"])
         assert json.loads(event_content)["mentioned_participants"] == mentioned
         assert "user-2" not in json.dumps(observed_payload)
         assert session.sent == ["You mentioned Huangdoufen Card."]

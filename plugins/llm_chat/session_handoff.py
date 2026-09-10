@@ -11,6 +11,7 @@ from entari_plugin_llm.config import get_model_config
 
 from .models import ContextSession
 from .agent_events import load_event_payload, load_session_events
+from .core.model_audit import ADMIN_ONLY_EVENT_TYPES
 
 _HANDOFF_KEYS = (
     "topic",
@@ -51,7 +52,7 @@ async def _source_events(context_session: ContextSession, max_chars: int) -> lis
     used = 2
     for _turn, events in reversed(rows):
         for event in reversed(events):
-            if event.event_type in {"model_request", "model_response", "context_snapshot"}:
+            if event.event_type in ADMIN_ONLY_EVENT_TYPES:
                 continue
             item = _event_summary(event)
             size = len(json.dumps(item, ensure_ascii=False, separators=(",", ":"))) + 1

@@ -12,7 +12,9 @@ const labels = {
   idle: "空闲超时", turn_limit: "轮次上限", runtime_change: "运行时变更",
   hard_reset: "硬重置", webui_new: "新会话", webui_rollover: "续接会话",
   webui_hard_reset: "硬重置", legacy_import: "历史导入", persona_change: "切换人格",
-  user_input: "用户输入", assistant_output: "确认输出", assistant_tool_call: "工具调用",
+  user_input: "用户输入", assistant_output: "旧版回复摘要", assistant_tool_call: "工具调用",
+  message_delivery: "确认送达消息", turn_timing: "用户输入接收时间",
+  legacy_incomplete: "旧版记录（送达审计不完整）", not_delivered: "尚无确认送达",
   tool_result: "工具结果", model_attempt: "生成尝试（非单次请求）", model_request: "模型请求",
   model_response: "模型响应", context_snapshot: "上下文注入快照", context_selection: "上下文选择",
   persona_state: "人格与记忆快照", engagement: "回应意向",
@@ -63,6 +65,16 @@ function number(value) { return typeof value === "number" && Number.isFinite(val
 function duration(value) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "耗时未记录";
   return value < 1000 ? `${number(value)} ms` : `${(value / 1000).toFixed(value < 10000 ? 2 : 1)} s`;
+}
+function turnDuration(turn) {
+  if (turn.duration_source === "received_to_confirmed_delivery") return `总耗时 ${duration(turn.duration_ms)}（接收输入 → 最后确认送达）`;
+  if (turn.duration_source === "legacy_lifecycle") return `旧版生命周期估算 ${duration(turn.duration_ms)}（不含完整准备阶段，非送达耗时）`;
+  if (turn.duration_source === "running") {
+    const basis = turn.received_at ? "接收输入起" : "旧版生命周期起";
+    const delivered = turn.duration_ms == null ? "尚无确认送达计时" : `最后确认送达 ${duration(turn.duration_ms)}`;
+    return `运行中已过 ${duration(turn.elapsed_ms)}（${basis}，非最终耗时） · ${delivered}`;
+  }
+  return turn.duration_source === "not_delivered" ? "总耗时未知（尚无确认送达）" : "总耗时未记录";
 }
 function status(message, error = false) {
   $("status").textContent = message;
@@ -249,6 +261,7 @@ function renderTurns() {
     item.append(heading, node("p", "snippet", turn.input_preview == null ? "用户输入摘要未记录" : short(turn.input_preview, 180)));
     item.append(node("p", "muted", date(turn.created_at)));
     item.append(node("p", "muted", `${turn.model || "模型未记录"} · 请求 ${number(turn.model_call_count)} · 工具 ${number(turn.tool_call_count)}`));
+    item.append(node("p", "muted turn-duration", turnDuration(turn)));
     $("turn-list").append(item);
   }
 }
@@ -286,6 +299,7 @@ function renderWorkspace() {
   heading.append(node("h2", "", `${inspection.turn.user_name || "用户"} · ${date(inspection.turn.created_at)}`), badge(inspection.turn.status));
   const models = [...new Set((inspection.model_calls || []).map((call) => call.model).filter(Boolean))];
   header.append(heading, node("p", "muted", `${personaName(inspection.persona)} · ${models.length ? models.join(" / ") : inspection.turn.model || "模型未记录"}`), usageDetails(inspection.usage));
+  header.append(node("p", "turn-duration", turnDuration(inspection.turn)));
   renderTimeline(); renderContext(); renderIO();
 }
 function callPanel(title, preview, ref, path = "") {
@@ -313,7 +327,10 @@ function modelCard(call, index) {
   return item;
 }
 function toolCard(call, index) {
-  const { item, summary, content } = disclosure(call.tool_name || "工具名未记录", "工具调用", "record-card tool-record");
+  const deliveries = call.deliveries || [];
+  const imageCount = deliveries.reduce((count, delivery) => count + (delivery.images?.length || 0), 0);
+  const deliveryNote = deliveries.length ? `已确认送达 ${deliveries.length} 条消息${imageCount ? ` · ${imageCount} 张图片` : ""}` : "工具调用";
+  const { item, summary, content } = disclosure(call.tool_name || "工具名未记录", deliveryNote, "record-card tool-record");
   item.dataset.recordKey = `tool:${call.execution_ref || call.call_event_ref || call.result_event_ref || index}`;
   item.dataset.detailKey = "record";
   const kind = node("span", "record-kind", "T");
@@ -322,7 +339,9 @@ function toolCard(call, index) {
   const meta = node("span", "record-meta");
   meta.append(badge(call.status), node("span", "record-duration", duration(call.duration_ms)));
   summary.append(meta);
-  content.append(node("p", "muted", `交付状态：${label(call.effect)}`));
+  content.append(node("p", "muted", `工具效果记录：${label(call.effect)}（与实际送达凭据分开）`));
+  for (const delivery of deliveries) content.append(deliveryCard(delivery, `tool-delivery:${delivery.event_ref}`));
+  if (call.delivery_source === "legacy_incomplete") content.append(node("p", "muted", "旧记录没有独立送达凭据；未留存的历史输出图片无法还原，不重新渲染历史 Markdown。"));
   const panels = node("div", "call-panels");
   const argumentsPanel = callPanel("调用参数", call.arguments_preview, call.call_event_ref, call.arguments_path || "");
   const resultPanel = callPanel("返回结果", call.result_preview, call.result_event_ref, call.result_path || "");
@@ -333,6 +352,7 @@ function toolCard(call, index) {
   records.append(eventButton(call.call_event_ref, "调用原始记录 / 脱敏说明"), eventButton(call.result_event_ref, "结果原始记录 / 脱敏说明"));
   content.append(panels, records);
   if (call.evidence != null) content.append(rawDetails("执行证据摘要", call.evidence));
+  if (call.images?.length) content.append(node("p", "muted", "工具附件（可能含输入 / 参考图，不等同于已送达图片）"));
   appendImages(content, call);
   content.append(rawDetails("执行标识", { execution_ref: call.execution_ref, call_event_ref: call.call_event_ref, result_event_ref: call.result_event_ref }));
   return item;
@@ -413,6 +433,7 @@ function appendImages(target, event) {
       $("image-caption").textContent = image.text || image.meaning || "";
       $("image-dialog").showModal();
     }, "image-button");
+    thumb.dataset.focusKey = `image:${target.closest("[data-record-key]")?.dataset.recordKey || ""}:${source.pathname}`;
     const img = node("img");
     img.src = source.href; img.alt = imageLabel; img.loading = "lazy";
     img.addEventListener("error", () => img.replaceWith(node("span", "muted", "图片不可用")));
@@ -430,6 +451,24 @@ function ioEvent(event, title, recordKey) {
   appendImages(card.content, event);
   return card;
 }
+function deliveryCard(output, recordKey) {
+  const confirmed = output.source === "message_delivery";
+  const legacyTool = !confirmed && output.event_type === "tool_result";
+  const card = section(confirmed ? "确认送达消息" : legacyTool ? "工具输出附件（旧版记录）" : "旧版回复摘要（审计不完整）");
+  card.classList.add("delivery-record");
+  if (!confirmed) card.classList.add("legacy-output");
+  card.dataset.recordKey = recordKey;
+  const content = typeof output.content === "string" && output.content ? output.content : confirmed ? "" : eventPreview(output);
+  if (content) card.append(node("pre", "prose delivery-text", content));
+  appendImages(card, output);
+  for (const media of output.media || []) card.append(node("p", "muted", `${media.label || media.kind || "媒体"} · ${label(media.capture_status)}`));
+  const legacyNote = legacyTool && output.effect !== "confirmed"
+    ? "工具输出附件，送达状态未记录。生成成功不代表发送成功；未捕获的历史图片不可查看。"
+    : "仅有旧版摘要 / 工具效果记录，缺少独立送达凭据，不能完整还原实际发送消息；未捕获的历史图片不可查看。";
+  card.append(node("p", "muted", confirmed ? `${label(output.status)} · 捕获：${label(output.capture_status)} · ${date(output.confirmed_at)}` : legacyNote));
+  card.append(eventButton(output.event_ref, "查看完整记录"), rawDetails(confirmed ? "送达记录" : "旧版输出记录", output));
+  return card;
+}
 function renderIO() {
   const target = $("io-view");
   target.replaceChildren();
@@ -437,12 +476,10 @@ function renderIO() {
   if (!inputs.length) target.append(section("用户输入", "本轮未记录"));
   for (const [index, event] of inputs.entries()) target.append(ioEvent(event, "用户输入", `input:${event.event_ref || index}`).item);
   const outputs = state.inspection.outputs || [];
-  if (!outputs.length) target.append(section("确认输出", "本轮没有已确认的输出记录；不把模型响应当作已送达消息。"));
+  if (!outputs.length) target.append(section("确认输出", "本轮没有独立确认输出记录；不把模型响应当作已送达消息。未捕获的历史图片无法还原。"));
   for (const [index, output] of outputs.entries()) {
-    const event = eventByRef(output.event_ref) || output;
-    const card = ioEvent(event, "确认输出", `output:${output.event_ref || index}`);
-    card.content.append(rawDetails("送达记录", output));
-    target.append(card.item);
+    const event = { ...eventByRef(output.event_ref), ...output };
+    target.append(deliveryCard(event, `output:${output.event_ref || index}`));
   }
   const advanced = node("details", "raw-details");
   advanced.append(node("summary", "", "高级轮次信息"), node("pre", "code", text(state.inspection.turn)));

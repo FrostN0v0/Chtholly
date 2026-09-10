@@ -32,9 +32,11 @@ if plug is not None and plug.module.__name__ == __name__:
     _configure_litellm_logging()
     from .agno_compat import install_agno_tool_bridge  # entari: package
     from .protocol_compat import install_entari_internal_bridge  # entari: package
+    from .delivery_audit import install_delivery_audit  # entari: package
 
     install_agno_tool_bridge()
     plugin.collect_disposes(install_entari_internal_bridge())
+    plugin.collect_disposes(install_delivery_audit())
     from .config_schema import LLMChatWebUIConfig  # entari: package
 
     metadata(

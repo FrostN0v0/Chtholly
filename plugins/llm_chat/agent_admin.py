@@ -44,6 +44,7 @@ from .session_inspection import (
     summarize_usage,
     project_tool_calls,
     project_model_calls,
+    project_turn_timing,
     turn_list_summaries,
     summarize_turn_events,
     session_context_summary,
@@ -144,7 +145,7 @@ class AgentAdminService:
                 .all()
             )
         turns.reverse()
-        summaries = await turn_list_summaries([turn.id for turn in turns])
+        summaries = await turn_list_summaries(turns)
         return [{**self._serialize_turn(turn), **summaries[turn.id]} for turn in turns]
 
     async def list_events(self, turn_ref: str) -> list[dict[str, object]]:
@@ -155,7 +156,11 @@ class AgentAdminService:
         turn = await self._turn(turn_ref)
         events = await turn_events(turn.id)
         return {
-            "turn": {**self._serialize_turn(turn), **summarize_turn_events(events)},
+            "turn": {
+                **self._serialize_turn(turn),
+                **summarize_turn_events(events),
+                **project_turn_timing(turn, events),
+            },
             "persona": await self._historical_persona(turn.session_id),
             "usage": summarize_usage(events),
             "context": project_context(events),
@@ -337,7 +342,7 @@ class AgentAdminService:
             "status": turn.status,
             "fresh_context": turn.fresh_context,
             "final_text": turn.final_text,
-            "created_at": turn.created_at.isoformat(),
+            "created_at": turn.created_at.isoformat() if turn.created_at else None,
             "finished_at": turn.finished_at.isoformat() if turn.finished_at else None,
         }
 
