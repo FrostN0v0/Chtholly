@@ -112,7 +112,9 @@ uv run --locked python scripts/build_workshop_sandbox.py --tag chtholly-workshop
 
 构建只打包固定依赖、Entari wheel 和可信验收器，不发送项目配置、资源或 `.env`；模型提交不会构建或拉取镜像。Docker、镜像或版本前提不满足时明确显示不可用，不回退到宿主验收。
 
-在已通过密码认证的 Entari WebUI「插件工坊」审阅功能、源码差异、不可变配置、数据影响、验收报告与 SHA-256，确认后批准精确版本，再激活。免密本地 WebUI 即使带 Cookie 也不能管理；必须使用真正启用密码认证的部署，并保持回环监听及 SSH 隧道。页面复用原生隔离 iframe 的 API 消息桥，不放宽 iframe sandbox、同源写入或会话认证。
+生产推荐由 Bot 用户运行 rootless Docker，并通过 `DOCKER_HOST` 指向受限 Unix Socket；不要为方便调用而将 Bot 加入可控制宿主 root 的 Docker 组。rootless daemon 必须支持 cgroup v2 的内存、CPU 与 PID 限制，不能因安装模式改变而放宽验收边界。
+
+在 Entari WebUI「插件工坊」审阅功能、源码差异、不可变配置、数据影响、验收报告与 SHA-256，确认后批准精确版本，再激活。工坊要求预先配置 WebUI 密码，并在回环监听时同样启用真实密码认证；若热加载前已有免密会话，必须完整重启以使旧 Cookie 失效，不把免密 Cookie 升格为管理员会话。管理端口继续保持回环监听及 SSH 隧道。页面复用原生隔离 iframe 的 API 消息桥，不放宽 iframe sandbox、同源写入或会话认证。
 
 超管也可使用同一审批契约的原生命令：
 

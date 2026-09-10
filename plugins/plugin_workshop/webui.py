@@ -11,6 +11,7 @@ from starlette.routing import BaseRoute
 from utils.plugin_workshop_core.models import WorkshopAPI
 
 from .webui_api import create_workshop_router  # entari: package
+from .webui_auth import register_password_authentication  # entari: package
 
 
 def _remove_routes(app: FastAPI, registered: tuple[BaseRoute, ...]) -> None:
@@ -20,6 +21,8 @@ def _remove_routes(app: FastAPI, registered: tuple[BaseRoute, ...]) -> None:
 def register_webui(service: WorkshopAPI) -> None:
     import entari_plugin_webui as webui_plugin  # entari: plugin
     from entari_plugin_server import get_asgi
+
+    register_password_authentication()
 
     app = get_asgi()
     if not isinstance(app, FastAPI):
