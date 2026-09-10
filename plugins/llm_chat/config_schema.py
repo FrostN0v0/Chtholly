@@ -136,6 +136,10 @@ _CONFIG_SCHEMA_TEXT = {
         "单轮媒体消息上限",
         "单次生成在文字交付前最多允许发送的媒体消息数。",
     ),
+    "plugin_workshop_enabled": (
+        "\u542f\u7528\u63d2\u4ef6\u5de5\u574a\u5de5\u5177",
+        "\u9700\u5148\u52a0\u8f7d\u5de5\u574a\uff1b\u539f\u751f\u6fc0\u6d3b\u9700\u8d85\u7ba1\u6279\u51c6\u3002",
+    ),
     "tts_enabled": ("启用语音合成", "安装 tts_service 插件时，是否启用语音合成工具。"),
     "tts_max_chars": ("语音合成字符上限", "speak 工具单次合成最多保留的字符数，优先在句子边界截断。"),
     "image_tags_enabled": ("启用图片标注", "启动时是否使用视觉模型为本地图片生成检索标签。"),

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>插件工坊</title>
+  <!-- WORKSHOP_STYLES -->
+</head>
+<body>
+  <div class="app">
+    <header class="toolbar">
+      <div><p class="eyebrow">NATIVE PLUGIN WORKSHOP</p><h1>插件工坊</h1><p class="muted">隔离验收 · 不可变版本 · 人工授权 · 原生生命周期</p></div>
+      <div class="actions"><span id="connection" class="badge" role="status">正在连接</span><button id="refresh" type="button">刷新</button><button id="new-candidate" class="primary" type="button">新建候选</button></div>
+    </header>
+    <section class="readiness panel" aria-label="运行前提">
+      <div><span id="service-status" class="badge">服务：尚未读取</span><span id="sandbox-status" class="badge">隔离环境：尚未读取</span></div>
+      <p id="prerequisites" class="muted">正在读取真实后端状态。未验证的前提不会被标记为就绪。</p>
+      <details><summary>后端状态与环境指纹</summary><pre id="backend-detail" class="code compact" tabindex="0"></pre></details>
+    </section>
+    <aside class="warning"><strong>人工审批是信任边界，不是安全认证。</strong> 原生插件激活后拥有机器人进程的完整权限，可访问凭据、网络和数据。权限声明并非沙箱限制；隔离验收报告由候选同进程产生，可能被篡改。停用或代码回滚不会撤回已发送消息、网络请求或数据修改。</aside>
+    <p id="notice" class="notice" role="status" aria-live="polite">正在加载插件工坊…</p>
+    <main class="workspace">
+      <aside class="panel sidebar">
+        <div class="panel-head"><h2>项目</h2><span id="project-count" class="muted"></span></div>
+        <nav id="projects" class="list scroll" aria-label="项目列表"></nav>
+        <button id="more-projects" class="more" type="button" hidden>加载更多项目</button>
+        <div class="panel-head"><h2>不可变版本</h2><span id="version-count" class="muted"></span></div>
+        <nav id="versions" class="list scroll" aria-label="版本列表"></nav>
+        <button id="more-versions" class="more" type="button" hidden>加载更多版本</button>
+      </aside>
+      <section class="panel review" aria-label="版本审阅">
+        <div id="empty-selection" class="empty">选择一个项目和版本，审阅源码与验收结果。</div>
+        <div id="review-content" hidden>
+          <header class="review-head"><div><h2 id="version-title"></h2><p id="version-meta" class="muted"></p></div><button id="draft-from-version" type="button">基于此版本修订</button></header>
+          <div class="digest"><span>审阅 / 授权 SHA-256</span><code id="source-hash"></code></div>
+          <div class="tabs" role="tablist" aria-label="版本审阅面板">
+            <button id="tab-summary" type="button" role="tab" aria-selected="true" aria-controls="summary-view" data-tab="summary">声明与配置</button>
+            <button id="tab-source" type="button" role="tab" aria-selected="false" aria-controls="source-view" data-tab="source" tabindex="-1">源码与差异</button>
+            <button id="tab-report" type="button" role="tab" aria-selected="false" aria-controls="report-view" data-tab="report" tabindex="-1">验收报告</button>
+          </div>
+          <div id="summary-view" class="view" role="tabpanel" aria-labelledby="tab-summary">
+            <h3>插件说明</h3><p id="description" class="preserve"></p>
+            <h3>声明命令</h3><div id="commands" class="chips"></div>
+            <h3>权限声明 <span class="muted">仅供人工审阅，不限制原生能力</span></h3><ul id="permissions"></ul>
+            <h3>数据与外部副作用声明</h3><p id="data-description" class="preserve"></p>
+            <h3>不可变配置</h3><p class="muted">配置、命令验收或任何文件变更都必须创建新版本并重新验收、批准。</p><pre id="configuration" class="code compact" tabindex="0"></pre>
+            <h3>命令验收契约</h3><div id="declared-checks" class="check-list"></div>
+          </div>
+          <div id="source-view" class="view" role="tabpanel" aria-labelledby="tab-source" hidden>
+            <div class="source-controls"><label>文件<select id="source-file"></select></label><label>差异基线<select id="compare-version"></select></label></div>
+            <p id="source-meta" class="muted"></p><p class="muted">所有文件仅作为纯文本显示，不预览或执行候选 HTML、JavaScript 或 Python。</p>
+            <div class="source-grid"><section><h3>候选原文</h3><pre id="source-code" class="code source-code" tabindex="0"></pre></section><section><h3>与基线的差异</h3><pre id="source-diff" class="code source-code" tabindex="0"></pre></section></div>
+          </div>
+          <div id="report-view" class="view" role="tabpanel" aria-labelledby="tab-report" hidden>
+            <div id="report-summary" class="report-summary"></div><p class="muted">这是隔离容器中的功能验收，不是对恶意原生代码的安全认证。失败、不可用或缺少报告均不可批准。</p>
+            <div id="report-checks" class="check-list"></div><h3>报告环境</h3><pre id="report-environment" class="code compact" tabindex="0"></pre>
+            <h3>有界验收日志（不可信纯文本）</h3><pre id="report-log" class="code report-log" tabindex="0"></pre>
+          </div>
+          <footer class="approval">
+            <label class="ack"><input id="acknowledge-native" type="checkbox"><span>我已审阅上方精确哈希对应的源码、配置、权限、数据影响与报告，并明确允许此不可变版本以机器人进程的完整原生权限运行。</span></label>
+            <div class="actions"><button id="validate" type="button">重新验收</button><button id="approve" type="button">批准精确版本</button><button id="activate" class="primary" type="button">激活</button><button id="rollback" type="button">回滚到此版本</button><button id="disable" class="danger" type="button">停用项目</button></div>
+            <ul id="action-reasons" class="muted reasons"></ul>
+          </footer>
+        </div>
+      </section>
+    </main>
+  </div>
+  <dialog id="candidate-dialog" aria-labelledby="candidate-title">
+    <form id="candidate-form" class="dialog-body">
+      <header class="dialog-head"><div><h2 id="candidate-title">提交新的不可变候选</h2><p class="muted">提交只保存并隔离验收，不批准、不激活；修复失败候选须创建新版本。</p></div><button id="close-candidate" type="button">关闭</button></header>
+      <label>项目名<input id="candidate-name" required pattern="[a-z][a-z0-9_]{2,39}" maxlength="40" autocomplete="off" placeholder="例如 weather_helper"></label>
+      <p class="muted">3–40 个 ASCII 字符；小写字母开头，仅小写字母、数字、下划线。模块名由服务器生成。</p>
+      <label>Manifest JSON<textarea id="candidate-manifest" class="code editor" rows="12" required spellcheck="false"></textarea></label>
+      <p class="muted">必需 title、description、commands、permissions、data_description、checks；configuration 为 JSON 对象。每个命令须有 expected_contains 验收，至少一条 repeatable=true。operator 标记验收身份；修改数据的初始化检查应显式 repeatable=false。</p>
+      <div class="file-toolbar"><label>候选文件<select id="candidate-file"></select></label><label>新增相对路径<input id="new-file-path" autocomplete="off" placeholder="helpers.py"></label><button id="add-file" type="button">添加文件</button><button id="remove-file" class="danger" type="button">移除文件</button></div>
+      <label id="editor-label" for="candidate-source">文件内容</label><textarea id="candidate-source" class="code editor" rows="16" spellcheck="false"></textarea>
+      <p id="candidate-size" class="muted"></p><p class="muted">最多 32 个文件，每个 64 KiB，总计 256 KiB；必须包含 __init__.py。禁止路径穿越、依赖安装与已有项目覆盖。服务器执行完整规则校验。</p>
+      <p id="candidate-error" class="error" role="alert"></p>
+      <footer class="dialog-foot"><span id="candidate-progress" role="status" aria-live="polite"></span><button id="submit-candidate" class="primary" type="submit">保存新版本并隔离验收</button></footer>
+    </form>
+  </dialog>
+  <dialog id="operation-dialog" aria-labelledby="operation-title">
+    <section class="dialog-body">
+      <h2 id="operation-title">Confirm reviewed operation</h2>
+      <pre id="operation-summary" class="preserve"></pre>
+      <div class="actions">
+        <button id="operation-cancel" type="button">Cancel</button>
+        <button id="operation-confirm" class="primary" type="button">Confirm exact operation</button>
+      </div>
+    </section>
+  </dialog>
+  <!-- WORKSHOP_SCRIPT -->
+</body>
+</html>

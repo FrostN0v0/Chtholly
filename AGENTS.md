@@ -15,7 +15,7 @@
 ## 技术栈与关键依赖
 
 - **Python**: >= 3.10, < 4.0（当前运行时使用 3.10；待协议栈完成 Python 3.14 兼容后再升级）
-- **Bot 框架**: [arclet-entari](https://pypi.org/project/arclet-entari/)（基于官方 `0.19.0rc2`，当前安装仓库内的 `0.19.0rc2+chtholly.1` 补丁 wheel，完整保留 `arclet-entari[full]`，含 CLI、YAML、文件监听）。补丁修复 staged reload 的对象所有权、重复更新的 Scope 冲突、失败模块绑定恢复和子插件/Service 清理；`patches/entari-0.19.0rc2-staged-rollback.patch` 与 `scripts/build_entari_patch.py` 可从 SHA-256 固定的官方 wheel 重建 `vendor/entari` 制品，不直接修改第三方安装目录。HTMLRender `0.1.0` 的元数据仍限制 Entari `<0.19`，项目保留 `full,pydantic` extras 的精确 uv override；升级该组合必须验证真实渲染及失败更新、重复替换和最终卸载，不能只凭依赖解析成功判断兼容。
+- **Bot 框架**: [arclet-entari](https://pypi.org/project/arclet-entari/)（基于官方 `0.19.0rc2`，当前安装仓库内的 `0.19.0rc2+chtholly.2` 补丁 wheel，完整保留 `arclet-entari[full]`，含 CLI、YAML、文件监听）。补丁修复 staged reload 的对象所有权、重复更新的 Scope 冲突、失败模块绑定恢复、子插件/Service 清理及同源码重复替换后的命令目录残留；失败候选须恢复旧订阅者持有的真实 Alconna 解析器和 formatter 条目，卸载后公开命令帮助不得继续列出旧命令。`patches/entari-0.19.0rc2-staged-rollback.patch` 与 `scripts/build_entari_patch.py` 可从 SHA-256 固定的官方 wheel 重建 `vendor/entari` 制品，不直接修改第三方安装目录。HTMLRender `0.1.0` 的元数据仍限制 Entari `<0.19`，项目保留 `full,pydantic` extras 的精确 uv override；升级该组合必须验证真实渲染及失败更新、重复替换和最终卸载，不能只凭依赖解析成功判断兼容。
 - **CLI 工具**: [entari-cli](https://pypi.org/project/entari-cli/) —— `entari init / run / new / add / remove / config / gen_main`
 - **事件总线**: arclet-letoderea（Entari 内建依赖）
 - **命令系统**: arclet-alconna（Entari 内建 `command` 模块）
@@ -31,6 +31,13 @@
 - **日志与终端**: rich（Entari 内建 log 使用 loguru；凭证化运行环境必须关闭会展开局部变量的 `rich_error`）
 - **包管理**: uv（`uv sync` / `uv add` / `uv remove`）
 - **代码质量**: Ruff、Pyright（`typeCheckingMode = "standard"`）
+
+### 原生插件工坊
+
+- `plugins/plugin_workshop` 是可信宿主，`utils/plugin_workshop_core` 为 import-safe 不可变源码、manifest、SHA-256、审批、操作日志和崩溃恢复边界，持久化路径来自 LocalData。生成源码只能发布到工坊命名空间，不修改应用源码、配置或依赖；任何文件、命令检查或配置变化都必须成为新版本。原生生命周期通过单一 Service 串行管理，重启只恢复已批准且启用的提交状态，停用和代码回滚不回滚外部数据。
+- `utils/plugin_workshop_sandbox` 只通过显式预构建 Linux Docker 镜像运行验收，禁止回退宿主执行、候选构建镜像、挂载 Docker Socket 或生产目录。镜像构建入口 `scripts/build_workshop_sandbox.py` 仅发送固定依赖、vendor wheel 和可信 worker 白名单。容器固定非 root、无网络、只读根目录、drop-all capabilities、no-new-privileges、有界 tmpfs/内存/CPU/PID/输出/时间；取消须等待子进程和容器清理。真实验收覆盖命令、Session 执行、同源码重载、失败替换、服务和任务清理，但候选与验收器同进程，报告不构成安全认证。
+- 三个 generation-local 工具为 `submit_plugin`、`activate_plugin`、`rollback_plugin`，由 `llm_chat.plugin_workshop_enabled` 配置启用。提交只保存并验收；批准只能由已认证 WebUI 或超管 `workshop approve <name> <version>` 授予。激活和回滚还需当前超管原文明确授权，后续否定不能被前一肯定覆盖。审计保留真实已提交副作用与取消部分效果，模型历史只保留限幅版本引用，不重放源码或验收日志；源码不是提示词。
+- 工坊命令统一使用 `workshop help/list/show/approve/activate/rollback/disable`，不得注册会抢先 BLOCK 后续子命令的裸 `workshop` 响应器。注册函数必须绑定当前子模块的原生插件所有者，staged reload 不得查回旧 owner。WebUI `/extension/plugin-workshop` 和 `/api/plugin-workshop` 复用密码会话认证与同源写入，免密模式拒绝管理；上游 iframe 没有 allow-same-origin，页面以内联 nonce 可信资源和原生 `postMessage` API bridge 工作，消息必须验证父窗口与精确 origin。候选源码、HTML、日志始终纯文本显示，不执行候选前端代码，不放宽第三方 iframe sandbox。
 
 ## 目录结构（目标形态）
 

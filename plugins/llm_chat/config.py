@@ -193,6 +193,8 @@ class LLMChatConfig(BasicConfModel, extra="forbid"):
     """Maximum normalized tool-delivered text characters per generation."""
     delivery_max_media_messages_per_generation: int = DEFAULT_DELIVERY_LIMITS.max_media_messages
     """Maximum media sends reserved before text delivery in one generation."""
+    plugin_workshop_enabled: bool = False
+    """Register reviewed native-plugin tools when plugin_workshop is loaded."""
     tts_enabled: bool = True
     """Effective only when the tts_service plugin is installed."""
     tts_max_chars: int = 80

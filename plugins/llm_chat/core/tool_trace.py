@@ -14,6 +14,7 @@ from collections.abc import Mapping, Iterator
 from .types import JSONType
 from .errors import summarize_exception
 from .model_audit import sanitize_audit_value
+from .workshop_records import WORKSHOP_TOOLS
 from .tool_trace_policy import (
     ToolEffect,
     ToolStatus,
@@ -177,6 +178,12 @@ class ToolTraceRecorder:
             status in {"failed", "cancelled"}
             and call.tool_name in {"publish_web_preview", "revoke_web_preview"}
             and evidence.get("artifact_effect") in ("published", "revoked")
+        ):
+            effect = "partial"
+        if (
+            status in {"failed", "cancelled"}
+            and call.tool_name in WORKSHOP_TOOLS
+            and evidence.get("workshop_effect") in {"candidate_saved", "activated", "rolled_back"}
         ):
             effect = "partial"
         self.events.append(

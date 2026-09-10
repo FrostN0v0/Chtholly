@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from .types import JSONType
 from .errors import summarize_exception
 from .artifact_records import ARTIFACT_TOOLS, project_artifact_result, project_artifact_arguments
+from .workshop_records import WORKSHOP_TOOLS, project_workshop_result, project_workshop_arguments
 from .tool_trace_safety import (
     MAX_RESULT_TEXT,
     MAX_WEB_SOURCES,
@@ -70,6 +71,8 @@ def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> d
 
     if tool_name in ARTIFACT_TOOLS:
         return project_artifact_arguments(tool_name, arguments)
+    if tool_name in WORKSHOP_TOOLS:
+        return project_workshop_arguments(tool_name, arguments)
     if tool_name == "web_search":
         return selected_arguments(arguments, "query")
     if tool_name == "read_web_page":
@@ -177,6 +180,12 @@ def project_tool_success(
     """Normalize one handler return into execution and effect semantics."""
 
     outcome = _project_tool_result(tool_name, result, before=before, after=after)
+    if tool_name in WORKSHOP_TOOLS:
+        if tool_name == "submit_plugin":
+            if outcome.get("validation_status") == "passed":
+                return "succeeded", "confirmed", outcome
+            return "failed", "partial" if outcome.get("confirmed") is True else "none", outcome
+        return ("succeeded", "confirmed", outcome) if outcome.get("confirmed") is True else ("failed", "none", outcome)
     if tool_name == "list_tts_voices" and outcome.get("available") is False:
         return "failed", "none", outcome
     if tool_name == "call_plugin" and _command_was_rejected(result):
@@ -276,6 +285,8 @@ def _project_tool_result(
             "confirmed_deliveries": max(0, after.confirmed - before.confirmed),
             "confirmed_media_deliveries": max(0, after.confirmed_media - before.confirmed_media),
         }
+    if tool_name in WORKSHOP_TOOLS:
+        return project_workshop_result(result)
     if tool_name == "web_search" and isinstance(result, Mapping):
         raw_results = result.get("results")
         result_items = (

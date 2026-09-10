@@ -46,7 +46,7 @@ uv sync --locked --all-extras
 uv run --locked entari run
 ```
 
-`uv.lock` 固定当前兼容组合，包含 Entari 补丁包与 LLM Git 版本；请按锁文件安装，升级前核验框架、LLM 与渲染插件的兼容性。Entari 的 `0.19.0rc2+chtholly.1` 修复热更新失败后的旧插件丢失和重复更新的监听器清理问题，wheel 随仓库提供；维护者可用 `python scripts/build_entari_patch.py` 从固定的官方 wheel 和仓库补丁重建，不手改 `.venv`。
+`uv.lock` 固定当前兼容组合，包含 Entari 补丁包与 LLM Git 版本；请按锁文件安装，升级前核验框架、LLM 与渲染插件的兼容性。Entari 的 `0.19.0rc2+chtholly.2` 修复热更新失败后的旧插件丢失、重复更新的监听器清理和命令目录残留；失败候选不会夺走旧命令的解析器与帮助信息。wheel 随仓库提供，维护者可用 `python scripts/build_entari_patch.py` 从固定的官方 wheel 和仓库补丁重建，不手改 `.venv`。
 
 更多框架用法见 [Entari 文档](https://arclet.top/tutorial/entari/)。
 
@@ -99,6 +99,36 @@ llmchat handoff
 预览仅支持静态前端交互，不运行服务端代码、不安装项目依赖，也不连接真实支付、登录或 Bot API。作品的截图与源码文件先于说明文字发送，并计入同一轮媒体额度。
 
 配置 `llm_chat.web_artifacts_public_url` 为独立 HTTPS 域名后启用；留空则不注册作品工具。`web_artifacts_capture_url` 必须指向回环截图接口，`web_artifacts_capture_token` 通过环境变量注入，`web_artifacts_ttl_hours` 控制有效期（最多 168 小时）。独立服务与仅公开作品路由的代理示例位于 `scripts/chtholly-web-artifacts.service` 和 `scripts/web-artifacts.Caddyfile`；管理面板端口不得对公网开放。
+
+## 插件工坊
+
+启用 `plugin_workshop` 与 `llm_chat.plugin_workshop_enabled` 后，可让模型编写标准 Entari 插件，使用 `submit_plugin` 保存完整源码、命令、配置、权限与数据声明，并在无网络、无生产凭证及数据的 Linux Docker 容器中验收。失败报告返回模型修正，每次修订产生新的不可变版本；提交或验收通过均不会自动激活。
+
+运行前需安装可用的 Linux Docker Engine（Windows 可使用 Docker Desktop），并由维护者显式构建与当前锁文件一致的验收镜像：
+
+```shell
+uv run --locked python scripts/build_workshop_sandbox.py --tag chtholly-workshop:local
+```
+
+构建只打包固定依赖、Entari wheel 和可信验收器，不发送项目配置、资源或 `.env`；模型提交不会构建或拉取镜像。Docker、镜像或版本前提不满足时明确显示不可用，不回退到宿主验收。
+
+在已通过密码认证的 Entari WebUI「插件工坊」审阅功能、源码差异、不可变配置、数据影响、验收报告与 SHA-256，确认后批准精确版本，再激活。免密本地 WebUI 即使带 Cookie 也不能管理；必须使用真正启用密码认证的部署，并保持回环监听及 SSH 隧道。页面复用原生隔离 iframe 的 API 消息桥，不放宽 iframe sandbox、同源写入或会话认证。
+
+超管也可使用同一审批契约的原生命令：
+
+```text
+workshop help
+workshop list
+workshop show counter_demo 1
+workshop approve counter_demo 1
+workshop activate counter_demo 1
+workshop rollback counter_demo 1
+workshop disable counter_demo
+```
+
+`activate_plugin` 与 `rollback_plugin` 仅在当前超管明确请求且指定版本已获批准时执行，模型不能自行批准。失败更新保留旧版；重启恢复最后批准且启用的版本，停用状态也会保留。源码与版本存储由 LocalData 管理，配置变更同样需要新版本、重新验收和批准。
+
+**批准原生代码是人工信任决定，不是安全认证。** 激活后插件拥有 Bot 进程的全部权限，权限清单只是声明；验收器与候选同进程，功能报告可能被恶意代码伪造。代码回滚与停用不会撤回消息、外部请求或数据修改。不要批准未经审阅的源码，也不要把 Docker Socket、宿主凭证或生产数据挂入验收容器。
 
 ## 💖 感谢
 

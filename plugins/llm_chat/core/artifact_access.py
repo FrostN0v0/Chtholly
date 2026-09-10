@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import re
-import json
 from typing import Literal
-from collections.abc import Mapping
+
+from utils.request_text import request_clauses
 
 
 class ArtifactAccessError(ValueError):
@@ -49,32 +49,8 @@ _NEGATION = re.compile(
     r"\b(?:never|without|do\s+not|don't|dont|no\s+need\s+to|stop)\b(?!\s+just\b)",
     re.IGNORECASE,
 )
-_QUOTES = re.compile(
-    r"```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`|\"[^\"\n]*\"|“[^”\n]*”|‘[^’\n]*’|"
-    r"「[^」\n]*」|『[^』\n]*』|(?<!\w)'[^'\n]*'(?!\w)|^\s*>[^\n]*",
-    re.MULTILINE,
-)
-_WRAPPER = re.compile(
-    r"^\s*(?:引用|转发|quoted?|forwarded?|history)\s*[:：]|<\s*/?\s*(?:quote|forward|history)\b",
-    re.IGNORECASE,
-)
-_CLAUSES = re.compile(r"[，,。；;！!？?\n]+|但是|但|而是|不过|\b(?:but|however)\b", re.IGNORECASE)
 _EMPTY_OBJECT = re.compile(r"^(?:\s|了|吧|它|这个|那个|再|\b(?:it|this|that|them|again)\b)*$", re.IGNORECASE)
-_URL = re.compile(r"https?://[^\s，,。；;！!？?]+", re.IGNORECASE)
 _PUBLICATION_NOUN = re.compile(r"\b(?:publishing|publication|hosting|deployment|deploying|previewing)\b", re.IGNORECASE)
-
-
-def _clauses(raw: object) -> list[str]:
-    if not isinstance(raw, str) or _WRAPPER.search(raw):
-        return []
-    try:
-        structured = json.loads(raw)
-    except (TypeError, ValueError):
-        structured = None
-    if isinstance(structured, (Mapping, list)):
-        return []
-    unquoted = _URL.sub(" ", _QUOTES.sub(" ", raw))
-    return [part.strip() for part in _CLAUSES.split(unquoted) if part.strip()]
 
 
 def _requests(clause: str, operation: str, *, web_only: bool = False) -> bool:
@@ -112,7 +88,7 @@ def _negates(clause: str, operation: str) -> bool:
 def is_artifact_request(raw_user_text: object, action: Literal["publish", "send"] = "publish") -> bool:
     """Suggest media routing; a false result never denies an artifact tool."""
 
-    clauses = _clauses(raw_user_text)
+    clauses = request_clauses(raw_user_text)
     operations = ("create", "publish") if action == "publish" else (action,)
     if any(_negates(clause, operation) for clause in clauses for operation in operations):
         return False
@@ -122,7 +98,7 @@ def is_artifact_request(raw_user_text: object, action: Literal["publish", "send"
 def require_artifact_revocation(raw_user_text: object) -> None:
     """Require an affirmative current-user request before invalidating a link."""
 
-    clauses = _clauses(raw_user_text)
+    clauses = request_clauses(raw_user_text)
     if not clauses or any(_negates(clause, "revoke") for clause in clauses):
         raise ArtifactAccessError("current user must explicitly request artifact revocation")
     if not any(_requests(clause, "revoke") for clause in clauses):

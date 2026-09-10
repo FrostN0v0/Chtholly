@@ -45,6 +45,7 @@ from .core.delivery import (
 from .persona.store import append_message
 from .tools.support import audio_mime_type
 from .tools.html2pic import register_html2pic
+from .tools.workshop import register_workshop_tools
 from .tools.artifacts import register_artifact_tools
 from .tools.jinja2pic import register_jinja2pic
 from .tools.send_text import SendTextToolContext, register_send_text
@@ -344,6 +345,7 @@ pin_context = register_pin_context(tools)
 registered_tools.append("pin_context")
 registered_tools.extend(register_web_access_tools(tools, config))
 registered_tools.extend(register_artifact_tools(tools, config))
+registered_tools.extend(register_workshop_tools(tools, enabled=config.plugin_workshop_enabled))
 
 tag_image_context = TagImageToolContext(
     config=config,
