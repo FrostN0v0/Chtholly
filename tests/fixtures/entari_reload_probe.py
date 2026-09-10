@@ -16,7 +16,7 @@ import tempfile
 import importlib
 import traceback
 
-SCENARIOS = ("single", "repeated", "package", "subplugin", "replacement", "service")
+SCENARIOS = ("single", "repeated", "catalogue", "package", "subplugin", "replacement", "service")
 
 
 def write_plugin(relative: str, source: str) -> None:
@@ -92,13 +92,64 @@ async def reject_candidate(name: str, label: str, *, subplugin: bool = False) ->
 
 
 async def unload_tree(root: str, names: list[str], commands: list[str]) -> None:
+    from arclet.alconna import command_manager
     from arclet.entari.plugin import find_plugin, unload_plugin_async
 
     assert await unload_plugin_async(root) is True
     for name in names:
         assert find_plugin(name) is None, name
     await assert_behavior(dict.fromkeys(commands))
+    advertised = command_manager.all_command_help()
+    for name in commands:
+        assert all(key.rsplit("::", 1)[-1] != name for key in advertised), advertised
     assert await unload_plugin_async(root) is False
+
+
+async def catalogue_reload() -> None:
+    from datetime import datetime, timezone
+
+    from satori import EventType, ChannelType
+    from satori.model import User, Event, Login, Channel, MessageObject
+    from arclet.entari import command
+    from arclet.alconna import command_manager
+    from arclet.entari.plugin import load_plugin, reload_plugin, unload_plugin_async
+    from arclet.entari.session import Session, EntariProtocol
+    from satori.client.account import Account, ApiInfo
+    from arclet.entari.event.base import MessageCreatedEvent
+
+    account = Account(Login(sn=0, platform="probe", user=User("bot")), ApiInfo(), [], EntariProtocol)
+    event = Event(
+        EventType.MESSAGE_CREATED,
+        datetime.now(timezone.utc),
+        account.self_info,
+        channel=Channel("channel", ChannelType.TEXT),
+        user=User("user"),
+        message=MessageObject("message", "catalogue_probe"),
+    )
+    session: Session = Session(account, MessageCreatedEvent(account, event))
+    source = "from arclet.entari import command\n@command.on('catalogue_probe')\ndef answer():\n    return 'pong'\n"
+    name = "reload_catalogue"
+    path = f"{name}/__init__.py"
+    baseline = set(command_manager.all_command_help())
+    try:
+        write_plugin(path, source)
+        assert load_plugin(name, config={}) is not None
+        for _ in range(2):
+            assert await command.execute("catalogue_probe", session) == "pong"
+            write_plugin(path, source)
+            assert await reload_plugin(name) is True
+        write_plugin(path, source + failure("catalogue"))
+        await reject_candidate(name, "catalogue")
+        assert await command.execute("catalogue_probe", session) == "pong"
+        write_plugin(path, source)
+        assert await reload_plugin(name) is True
+        assert await command.execute("catalogue_probe", session) == "pong"
+        assert await unload_plugin_async(name) is True
+        assert await command.execute("catalogue_probe", session) is None
+        assert set(command_manager.all_command_help()) == baseline
+    finally:
+        await unload_plugin_async(name)
+        await account.protocol.session.close()
 
 
 async def single(*, repeated: bool = False) -> None:
@@ -359,6 +410,8 @@ async def run(scenario: str, config_path: Path) -> None:
         await single()
     elif scenario == "repeated":
         await single(repeated=True)
+    elif scenario == "catalogue":
+        await catalogue_reload()
     elif scenario == "package":
         await package_reload()
     elif scenario == "subplugin":

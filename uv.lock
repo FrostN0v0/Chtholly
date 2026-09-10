@@ -11,7 +11,7 @@ constraints = [
     { name = "agno", specifier = "<3" },
     { name = "litellm", marker = "python_full_version < '3.11'", specifier = "<1.97" },
 ]
-overrides = [{ name = "arclet-entari", extras = ["full", "pydantic"], path = "vendor/entari/arclet_entari-0.19.0rc2+chtholly.1-py3-none-any.whl" }]
+overrides = [{ name = "arclet-entari", extras = ["full", "pydantic"], path = "vendor/entari/arclet_entari-0.19.0rc2+chtholly.2-py3-none-any.whl" }]
 
 [[package]]
 name = "agno"
@@ -318,8 +318,8 @@ wheels = [
 
 [[package]]
 name = "arclet-entari"
-version = "0.19.0rc2+chtholly.1"
-source = { path = "vendor/entari/arclet_entari-0.19.0rc2+chtholly.1-py3-none-any.whl" }
+version = "0.19.0rc2+chtholly.2"
+source = { path = "vendor/entari/arclet_entari-0.19.0rc2+chtholly.2-py3-none-any.whl" }
 dependencies = [
     { name = "arclet-alconna" },
     { name = "arclet-alconna-tools" },
@@ -330,7 +330,7 @@ dependencies = [
     { name = "simpleeval" },
 ]
 wheels = [
-    { filename = "arclet_entari-0.19.0rc2+chtholly.1-py3-none-any.whl", hash = "sha256:ff45303be2d443d306c11a1cf0086ff0a87edaf207b3ecb7afdb2a1062cb23f4" },
+    { filename = "arclet_entari-0.19.0rc2+chtholly.2-py3-none-any.whl", hash = "sha256:8649475cbc55fffe93f167522c1ea81c2eac9cc32a9c2dd1317e2f509366593b" },
 ]
 
 [package.optional-dependencies]
@@ -760,7 +760,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.14.3" },
-    { name = "arclet-entari", extras = ["full"], path = "vendor/entari/arclet_entari-0.19.0rc2+chtholly.1-py3-none-any.whl" },
+    { name = "arclet-entari", extras = ["full"], path = "vendor/entari/arclet_entari-0.19.0rc2+chtholly.2-py3-none-any.whl" },
     { name = "entari-plugin-browser", extras = ["jinja2"], specifier = ">=0.6.1" },
     { name = "entari-plugin-database", specifier = ">=0.3.3" },
     { name = "entari-plugin-htmlrender", extras = ["playwright"], specifier = ">=0.1.0,<0.2" },

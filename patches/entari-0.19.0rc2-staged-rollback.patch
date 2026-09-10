@@ -136,7 +136,7 @@
      for sid in plugin.subplugins:
          if sid not in plugin_service.plugins or sid not in plugin_service._subplugined:
              continue
-@@ -359,6 +365,26 @@
+@@ -359,6 +365,39 @@
      return ids
  
  
@@ -149,21 +149,34 @@
 +
 +
 +def _restore_reload(records: list[_ReloadRecord]) -> None:
++    from arclet.alconna import command_manager
++    from ..command.provider import AlconnaSuppiler
++
++    commands = {}
 +    for plugin, children, bindings in records:
 +        plugin.subplugins[:] = children
 +        plugin_service.bindings[plugin.id] = bindings
 +        sys.modules[plugin.module.__name__] = plugin.proxy()
++        for slot in plugin._scope.subscribers:
++            try:
++                cmd = slot.subscriber.get_propagator(AlconnaSuppiler).cmd
++            except ValueError:
++                continue
++            commands[id(cmd)] = cmd
 +    for plugin, _, _ in records:
 +        parent_name, _, name = plugin.module.__name__.rpartition(".")
 +        parent = sys.modules.get(parent_name)
 +        if parent is not None:
 +            setattr(parent, name, plugin.module)
++    for cmd in commands.values():
++        command_manager.register(cmd)
++        cmd.formatter.add(cmd)
 +
 +
  async def reload_plugin(path: str, conf: dict | None = None) -> bool:
      """原子重载：导入失败时旧插件继续运行；成功后处理依赖方"""
      path = path.replace("::", "arclet.entari.builtins.")
-@@ -370,11 +396,13 @@
+@@ -370,11 +409,13 @@
          return False
      _conf = conf if conf is not None else plugin.config.copy()
      old_subplugins = _collect_subtree(plugin)
@@ -177,7 +190,7 @@
          return False
      if tasks := plugin.dispose(replacing=True):
          await asyncio.wait(tasks)
-@@ -413,9 +441,18 @@
+@@ -413,9 +454,18 @@
          log.plugin.debug(f"parent <y>{parent_id!r}</y> uses <y>{path!r}</y> at module level, full tree reload")
          return await reload_plugin(parent_id, parent.config.copy())
      _conf = conf if conf is not None else plugin.config.copy()
@@ -197,3 +210,33 @@
          return False
      if tasks := plugin.dispose(replacing=True):
          await asyncio.wait(tasks)
+--- a/arclet/entari/command/__init__.py
++++ b/arclet/entari/command/__init__.py
+@@ -148,6 +148,9 @@
+                         _command.formatter.add(_command)
+                 except ValueError:
+                     pass
++                # Equal parser registrations can retain an empty shared formatter
++                # after rejected replacements. Its entry is required for disposal.
++                _command.formatter.add(_command)
+                 key = _command.name + "".join(
+                     f" {arg.value.target}" for arg in _command.args if isinstance(arg.value, DirectPattern)
+                 )
+@@ -186,6 +189,7 @@
+             _command = cast(Alconna, cmd)
+             if not isinstance(cmd.command, str):
+                 raise TypeError("Command name must be a string.")
++            _command.formatter.add(_command)
+             keys = []
+             if not _command.prefixes:
+                 keys.append(_command.command)
+--- a/arclet/entari/command/plugin.py
++++ b/arclet/entari/command/plugin.py
+@@ -57,6 +57,7 @@
+     def __init__(self, plugin: Plugin, command: Alconna, need_reply_me: bool = False, need_notice_me: bool = False, use_config_prefix: bool = True, block: bool = True, skip_for_unmatch: bool = True):  # noqa: E501
+         plugin._extra.setdefault("commands", []).append((command.prefixes, command.command))
+         self.cache: "LRU[str, asyncio.Future]" = LRU(10)  # noqa: UP037
++        command.formatter.add(command)
+         self.supplier = AlconnaSuppiler(command, self.cache, block, skip_for_unmatch)
+         super().__init__(plugin, MessageCreatedEvent, command.path)
+         plugin.collect(

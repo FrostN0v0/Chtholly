@@ -10,7 +10,7 @@ import pytest
 
 @pytest.mark.parametrize(
     "scenario",
-    ["single", "repeated", "package", "subplugin", "replacement", "service"],
+    ["single", "repeated", "catalogue", "package", "subplugin", "replacement", "service"],
 )
 def test_entari_reload_lifecycle(scenario: str, tmp_path: Path) -> None:
     probe = Path(__file__).parent / "fixtures" / "entari_reload_probe.py"

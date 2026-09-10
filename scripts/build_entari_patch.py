@@ -19,7 +19,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 UPSTREAM_VERSION = "0.19.0rc2"
-PATCHED_VERSION = "0.19.0rc2+chtholly.1"
+PATCHED_VERSION = "0.19.0rc2+chtholly.2"
 UPSTREAM_URL = (
     "https://files.pythonhosted.org/packages/60/9d/"
     "77b1d45b57f02dc8ac88d025c92c52060e5ad0b7ce8e0db5102cd8455fd0/"

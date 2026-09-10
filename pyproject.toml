@@ -36,7 +36,7 @@ constraint-dependencies = ["agno<3", "litellm<1.97; python_version < '3.11'"]
 
 [tool.uv.sources]
 entari-plugin-llm = { git = "https://github.com/ArcletProject/entari-plugin-llm", rev = "1845f1c3c65f9df4493e97f96a4c43938b176320" }
-arclet-entari = { path = "vendor/entari/arclet_entari-0.19.0rc2+chtholly.1-py3-none-any.whl" }
+arclet-entari = { path = "vendor/entari/arclet_entari-0.19.0rc2+chtholly.2-py3-none-any.whl" }
 
 [project.optional-dependencies]
 adapters = [
