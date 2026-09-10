@@ -46,7 +46,7 @@ uv sync --locked --all-extras
 uv run --locked entari run
 ```
 
-`uv.lock` 固定当前兼容组合，包含 Entari RC 与 LLM Git 版本；请按锁文件安装，升级前核验框架、LLM 与渲染插件的兼容性。
+`uv.lock` 固定当前兼容组合，包含 Entari 补丁包与 LLM Git 版本；请按锁文件安装，升级前核验框架、LLM 与渲染插件的兼容性。Entari 的 `0.19.0rc2+chtholly.1` 修复热更新失败后的旧插件丢失和重复更新的监听器清理问题，wheel 随仓库提供；维护者可用 `python scripts/build_entari_patch.py` 从固定的官方 wheel 和仓库补丁重建，不手改 `.venv`。
 
 更多框架用法见 [Entari 文档](https://arclet.top/tutorial/entari/)。
 

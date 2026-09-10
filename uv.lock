@@ -11,7 +11,7 @@ constraints = [
     { name = "agno", specifier = "<3" },
     { name = "litellm", marker = "python_full_version < '3.11'", specifier = "<1.97" },
 ]
-overrides = [{ name = "arclet-entari", extras = ["full", "pydantic"], specifier = "==0.19.0rc2" }]
+overrides = [{ name = "arclet-entari", extras = ["full", "pydantic"], path = "vendor/entari/arclet_entari-0.19.0rc2+chtholly.1-py3-none-any.whl" }]
 
 [[package]]
 name = "agno"
@@ -318,8 +318,8 @@ wheels = [
 
 [[package]]
 name = "arclet-entari"
-version = "0.19.0rc2"
-source = { registry = "https://pypi.org/simple" }
+version = "0.19.0rc2+chtholly.1"
+source = { path = "vendor/entari/arclet_entari-0.19.0rc2+chtholly.1-py3-none-any.whl" }
 dependencies = [
     { name = "arclet-alconna" },
     { name = "arclet-alconna-tools" },
@@ -329,9 +329,8 @@ dependencies = [
     { name = "satori-python-core" },
     { name = "simpleeval" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d4/b0/d32ff5f5db779268ffab87b5c30508ce94d980ded73f16efc13cb51e71d5/arclet_entari-0.19.0rc2.tar.gz", hash = "sha256:20b05f945121b822ac399309011887751ea217bafa4de3c7ecac331e63dc76bf", size = 113748, upload-time = "2026-08-20T09:15:20.215Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/60/9d/77b1d45b57f02dc8ac88d025c92c52060e5ad0b7ce8e0db5102cd8455fd0/arclet_entari-0.19.0rc2-py3-none-any.whl", hash = "sha256:f6c1a568d63034ab32ddf83d8500cb3e8fdadff3f629f15a04aa74f63f7aa7b5", size = 138684, upload-time = "2026-08-20T09:15:19.093Z" },
+    { filename = "arclet_entari-0.19.0rc2+chtholly.1-py3-none-any.whl", hash = "sha256:ff45303be2d443d306c11a1cf0086ff0a87edaf207b3ecb7afdb2a1062cb23f4" },
 ]
 
 [package.optional-dependencies]
@@ -345,6 +344,32 @@ full = [
 pydantic = [
     { name = "pydantic" },
 ]
+
+[package.metadata]
+requires-dist = [
+    { name = "arclet-alconna", specifier = ">=1.8.44,<2.0.0" },
+    { name = "arclet-alconna-tools", specifier = ">=0.7.3" },
+    { name = "arclet-letoderea", specifier = ">=0.22.0,<0.23.0" },
+    { name = "croniter", marker = "extra == 'cron'", specifier = ">=5.0.1" },
+    { name = "croniter", marker = "extra == 'full'", specifier = ">=5.0.1" },
+    { name = "entari-cli", marker = "extra == 'cli'", specifier = ">=0.1.0" },
+    { name = "entari-cli", marker = "extra == 'full'", specifier = ">=0.1.0" },
+    { name = "msgspec", marker = "extra == 'msgspec'", specifier = ">=0.19.0" },
+    { name = "nonestorage", specifier = ">=0.1.0" },
+    { name = "pydantic", marker = "extra == 'pydantic'", specifier = ">=2.10.6" },
+    { name = "python-dotenv", marker = "extra == 'dotenv'", specifier = ">=1.0.1" },
+    { name = "python-dotenv", marker = "extra == 'full'", specifier = ">=1.0.1" },
+    { name = "rich", marker = "extra == 'rich'", specifier = ">=14.1.0" },
+    { name = "ruamel-yaml", marker = "extra == 'full'", specifier = ">=0.18.10" },
+    { name = "ruamel-yaml", marker = "extra == 'yaml'", specifier = ">=0.18.10" },
+    { name = "satori-python-client", specifier = ">=1.3.2,<1.4.0" },
+    { name = "satori-python-core", specifier = ">=1.3.5,<1.4.0" },
+    { name = "simpleeval", specifier = ">=1.0.3" },
+    { name = "tomlkit", marker = "extra == 'toml'", specifier = ">=0.13.3" },
+    { name = "watchfiles", marker = "extra == 'full'", specifier = ">=1.0.3" },
+    { name = "watchfiles", marker = "extra == 'reload'", specifier = ">=1.0.3" },
+]
+provides-extras = ["yaml", "cron", "reload", "dotenv", "full", "pydantic", "msgspec", "toml", "cli", "rich"]
 
 [[package]]
 name = "arclet-letoderea"
@@ -735,7 +760,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.14.3" },
-    { name = "arclet-entari", extras = ["full"], specifier = "==0.19.0rc2" },
+    { name = "arclet-entari", extras = ["full"], path = "vendor/entari/arclet_entari-0.19.0rc2+chtholly.1-py3-none-any.whl" },
     { name = "entari-plugin-browser", extras = ["jinja2"], specifier = ">=0.6.1" },
     { name = "entari-plugin-database", specifier = ">=0.3.3" },
     { name = "entari-plugin-htmlrender", extras = ["playwright"], specifier = ">=0.1.0,<0.2" },

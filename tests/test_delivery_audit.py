@@ -389,9 +389,12 @@ async def test_remote_capture_budget_keeps_inline_images_and_never_uses_arbitrar
     transport, tmp_path, monkeypatch
 ):
     calls = []
+    # Inline disk scheduling must not exhaust the intentionally tiny remote timeout.
+    clock = [0.0]
 
     async def remote(source):
         calls.append(source)
+        clock[0] = 1.0
         await asyncio.Event().wait()
 
     async def forbidden_download(*_args, **_kwargs):
@@ -399,6 +402,7 @@ async def test_remote_capture_budget_keeps_inline_images_and_never_uses_arbitrar
 
     monkeypatch.setattr(delivery_audit, "_fetch_public_direct_image", remote)
     monkeypatch.setattr(delivery_audit, "_REMOTE_CAPTURE_SECONDS", 0.01)
+    monkeypatch.setattr(delivery_audit, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     monkeypatch.setattr(Session, "download", forbidden_download)
     recorder = AgentTurnRecorder()
     with delivery_audit.delivery_audit_scope(transport.session, lambda _: None, attachment_root=tmp_path) as audit:

@@ -15,7 +15,7 @@
 ## 技术栈与关键依赖
 
 - **Python**: >= 3.10, < 4.0（当前运行时使用 3.10；待协议栈完成 Python 3.14 兼容后再升级）
-- **Bot 框架**: [arclet-entari](https://pypi.org/project/arclet-entari/)（当前固定 `0.19.0rc2`，完整安装 `arclet-entari[full]`，含 CLI、YAML、文件监听）。HTMLRender `0.1.0` 的元数据仍限制 Entari `<0.19`，项目仅对已验证的 RC 使用保留 `full,pydantic` extras 的精确 uv override；升级该组合必须验证真实渲染及插件清理，不能只凭依赖解析成功判断兼容。
+- **Bot 框架**: [arclet-entari](https://pypi.org/project/arclet-entari/)（基于官方 `0.19.0rc2`，当前安装仓库内的 `0.19.0rc2+chtholly.1` 补丁 wheel，完整保留 `arclet-entari[full]`，含 CLI、YAML、文件监听）。补丁修复 staged reload 的对象所有权、重复更新的 Scope 冲突、失败模块绑定恢复和子插件/Service 清理；`patches/entari-0.19.0rc2-staged-rollback.patch` 与 `scripts/build_entari_patch.py` 可从 SHA-256 固定的官方 wheel 重建 `vendor/entari` 制品，不直接修改第三方安装目录。HTMLRender `0.1.0` 的元数据仍限制 Entari `<0.19`，项目保留 `full,pydantic` extras 的精确 uv override；升级该组合必须验证真实渲染及失败更新、重复替换和最终卸载，不能只凭依赖解析成功判断兼容。
 - **CLI 工具**: [entari-cli](https://pypi.org/project/entari-cli/) —— `entari init / run / new / add / remove / config / gen_main`
 - **事件总线**: arclet-letoderea（Entari 内建依赖）
 - **命令系统**: arclet-alconna（Entari 内建 `command` 模块）

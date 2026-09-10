@@ -1,0 +1,199 @@
+--- a/arclet/entari/plugin/model.py
++++ b/arclet/entari/plugin/model.py
+@@ -287,9 +287,10 @@
+         uid_index = self.id.rfind("@")
+         self.path = self.id[:uid_index] if uid_index != -1 else self.id
+         self.uid = self.id[uid_index + 1 :] if uid_index != -1 else None
+-        if self.id in plugin_service.plugins and not self.id.startswith("."):
+-            # 原子重载暂存：id 冲突时注册进 _staged，scope 用唯一 id 并置 disabled
+-            self._scope = _make_scope(self).of(f"{self.id}@staging")
++        staged = getattr(self.module.__loader__, "staged", False)
++        if not self.id.startswith(".") and (staged or self.id in plugin_service.plugins):
++            # Candidate-only subplugins must remain disabled until promotion too.
++            self._scope = _make_scope(self).of()
+             self._scope.disable()
+             plugin_service._staged[self.id] = self  # type: ignore
+         else:
+@@ -449,7 +450,12 @@
+                     yield from _gen(serv)
+             yield service
+ 
+-        _services = [s for serv in self._services.values() for s in _gen(serv)]
++        _services = [
++            item
++            for service in self._services.values()
++            if manager.components.get(service.id) is service
++            for item in _gen(service)
++        ]
+         if not _services:
+             return
+ 
+@@ -480,41 +486,42 @@
+         """
+         if not is_cleanup and self.is_static:
+             return  # static plugin can only be disposed in cleanup phase
+-        plugin_service._unloaded.add(self.id)
+         if self._is_disposed:
+             return
+         if not self.id.startswith(".") and self.id not in plugin_service._subplugined:
+             log.plugin.debug(f"disposing plugin <y>{self.id}</y>")
+-        _was_staged = self.id in plugin_service._staged
++        _was_staged = plugin_service._staged.get(self.id) is self
++        if not _was_staged and not replacing:
++            plugin_service._unloaded.add(self.id)
+         self._is_disposed = True
+         tasks = set()
+         if (t := self._clean_service()) is not None:
+             t.add_done_callback(tasks.discard)
+             tasks.add(t)
+         self._services.clear()
+-        sys.modules.pop(self.module.__name__, None)
++        current_module = sys.modules.get(self.module.__name__)
++        if getattr(current_module, "__plugin__", None) is self:
++            sys.modules.pop(self.module.__name__, None)
+         delattr(self.module, "__plugin__")
+         if self.subplugins:
+             subplugs = [i.removeprefix(self.id)[1:] for i in self.subplugins]
+             subplugs = (subplugs[:3] + ["..."]) if len(subplugs) > 3 else subplugs
+             log.plugin.trace(f"disposing sub-plugin <r>{', '.join(subplugs)}</r> of <y>{self.id}</y>")
+-            for subplug in self.subplugins:
+-                if subplug not in plugin_service.plugins:
+-                    if subplug in plugin_service._staged:
+-                        tasks.update(
+-                            plugin_service._staged[subplug].dispose(is_cleanup=is_cleanup, replacing=replacing)
+-                        )
+-                    else:
+-                        plugin_service._subplugined.pop(subplug, None)
++            registry = plugin_service._staged if _was_staged else plugin_service.plugins
++            for subplug in tuple(self.subplugins):
++                child = registry.get(subplug)
++                if child is None:
+                     continue
+                 try:
+-                    tasks.update(plugin_service.plugins[subplug].dispose(is_cleanup=is_cleanup, replacing=replacing))
+-                    plugin_service._subplugined.pop(subplug, None)
++                    tasks.update(child.dispose(is_cleanup=is_cleanup, replacing=replacing) or ())
+                 except Exception as e:
+                     log.plugin.error(f"failed to dispose sub-plugin <r>{subplug}</r> caused by {e!r}")
+-                    plugin_service.plugins.pop(subplug, None)
++                    if registry.get(subplug) is child:
++                        registry.pop(subplug)
++                if subplug not in plugin_service.plugins and subplug not in plugin_service._staged:
++                    plugin_service._subplugined.pop(subplug, None)
+             self.subplugins.clear()
+-        if not is_cleanup and not _was_staged:
++        if not is_cleanup and not _was_staged and not replacing:
+             publish(PluginUnloaded(self.id))
+         if not is_cleanup and not _was_staged and not replacing:
+             for ref in plugin_service.references.pop(self.path):
+@@ -552,10 +559,12 @@
+                 tasks.update(plugin_service.plugins[ret].disable())
+         tasks.update(self._scope.dispose())
+         self._scope.propagators.clear()
+-        if self.id in plugin_service.plugins:
+-            del plugin_service.plugins[self.id]
+-        else:
+-            plugin_service._staged.pop(self.id, None)
++        if plugin_service.plugins.get(self.id) is self:
++            plugin_service.plugins.pop(self.id)
++        if plugin_service._staged.get(self.id) is self:
++            plugin_service._staged.pop(self.id)
++        if self.id not in plugin_service.plugins and self.id not in plugin_service._staged:
++            plugin_service._subplugined.pop(self.id, None)
+         del self.module
+         del self._inspect
+         return tasks
+--- a/arclet/entari/plugin/loader.py
++++ b/arclet/entari/plugin/loader.py
+@@ -324,15 +324,21 @@
+     子插件按加载顺序已记入父插件 subplugins 列表；
+     父属性写回（插件导入链）使模块中的属性指向新模块对象。
+     """
+-    for sid in [plugin.id, *plugin.subplugins]:
+-        if staged := plugin_service._staged.pop(sid, None):
+-            plugin_service.plugins[sid] = staged
+-            if sid != plugin.id:
+-                plugin_service._subplugined[sid] = plugin.id
+-            staged.check_disable()
+-            if plugin_service.status.blocking:
+-                publish(Ready(), staged._scope)
+-    plugin_service._unloaded.discard(plugin.id)
++    pending = [plugin]
++    promoted = []
++    while pending:
++        candidate = pending.pop()
++        if plugin_service._staged.get(candidate.id) is not candidate:
++            continue
++        pending.extend(child for sid in candidate.subplugins if (child := plugin_service._staged.get(sid)) is not None)
++        plugin_service._staged.pop(candidate.id)
++        plugin_service.plugins[candidate.id] = candidate
++        plugin_service._unloaded.discard(candidate.id)
++        promoted.append(candidate)
++    for candidate in promoted:
++        candidate.check_disable()
++        if plugin_service.status.blocking:
++            publish(Ready(), candidate._scope)
+     for sid in plugin.subplugins:
+         if sid not in plugin_service.plugins or sid not in plugin_service._subplugined:
+             continue
+@@ -359,6 +365,26 @@
+     return ids
+ 
+ 
++_ReloadRecord = tuple[Plugin, list[str], dict[str, tuple[str, str | None]]]
++
++
++def _remember_reload(plugin: Plugin) -> list[_ReloadRecord]:
++    plugins = [plugin, *(plugin_service.plugins[sid] for sid in _collect_subtree(plugin))]
++    return [(item, item.subplugins.copy(), item.bindings.copy()) for item in plugins]
++
++
++def _restore_reload(records: list[_ReloadRecord]) -> None:
++    for plugin, children, bindings in records:
++        plugin.subplugins[:] = children
++        plugin_service.bindings[plugin.id] = bindings
++        sys.modules[plugin.module.__name__] = plugin.proxy()
++    for plugin, _, _ in records:
++        parent_name, _, name = plugin.module.__name__.rpartition(".")
++        parent = sys.modules.get(parent_name)
++        if parent is not None:
++            setattr(parent, name, plugin.module)
++
++
+ async def reload_plugin(path: str, conf: dict | None = None) -> bool:
+     """原子重载：导入失败时旧插件继续运行；成功后处理依赖方"""
+     path = path.replace("::", "arclet.entari.builtins.")
+@@ -370,11 +396,13 @@
+         return False
+     _conf = conf if conf is not None else plugin.config.copy()
+     old_subplugins = _collect_subtree(plugin)
++    previous = _remember_reload(plugin)
+     for name in old_subplugins:
+         sys.modules.pop(name, None)
+     log.plugin.debug(f"staged loading <y>{path!r}</y>, old plugin keeps running until swap")
+     if not (new_plugin := load_plugin(path, _conf, staged=True)):
+         log.plugin.error(f"failed to load staged plugin <blue>{path!r}</blue>, old plugin keeps running")
++        _restore_reload(previous)
+         return False
+     if tasks := plugin.dispose(replacing=True):
+         await asyncio.wait(tasks)
+@@ -413,9 +441,18 @@
+         log.plugin.debug(f"parent <y>{parent_id!r}</y> uses <y>{path!r}</y> at module level, full tree reload")
+         return await reload_plugin(parent_id, parent.config.copy())
+     _conf = conf if conf is not None else plugin.config.copy()
++    previous = _remember_reload(plugin)
++    parent_children = parent.subplugins.copy() if parent is not None else None
+     log.plugin.debug(f"staged loading sub-plugin <y>{path!r}</y>, old sub-plugin keeps running until swap")
+-    if not (mod := import_plugin(path, config=_conf, staged=True)):
++    try:
++        mod = import_plugin(path, config=_conf, staged=True)
++    except ImportError:
++        mod = None
++    if not mod:
+         log.plugin.error(f"failed to load staged sub-plugin <blue>{path!r}</blue>, old sub-plugin keeps running")
++        _restore_reload(previous)
++        if parent is not None and parent_children is not None:
++            parent.subplugins[:] = parent_children
+         return False
+     if tasks := plugin.dispose(replacing=True):
+         await asyncio.wait(tasks)
