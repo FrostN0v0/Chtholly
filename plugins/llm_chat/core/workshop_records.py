@@ -32,7 +32,7 @@ def project_workshop_arguments(tool_name: str, arguments: Mapping[str, object]) 
         if key in arguments
     }
     if tool_name == "submit_plugin":
-        files = arguments.get("files")
+        files = arguments.get("source_files")
         if isinstance(files, Mapping):
             result["file_count"] = len(files)
             result["source_chars"] = sum(len(value) for value in files.values() if isinstance(value, str))

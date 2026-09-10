@@ -19,7 +19,7 @@ def test_artifact_audit_keeps_operator_source_but_excludes_binary_payloads_and_c
         "publish_web_preview",
         {
             "title": "Dashboard",
-            "files": [
+            "source_files": [
                 {"path": "index.html", "content": source},
                 {"path": "logo.png", "encoding": "base64", "content": "PRIVATE_BINARY_PAYLOAD"},
             ],
@@ -50,7 +50,7 @@ def test_artifact_audit_keeps_operator_source_but_excludes_binary_payloads_and_c
         )
     )
     assert (event.status, event.effect) == ("succeeded", "confirmed")
-    assert source in event.audit_arguments["data"]["files"][0]["content"]
+    assert source in event.audit_arguments["data"]["source_files"][0]["content"]
     assert "private-project-source" not in json.dumps(event.recorded_arguments)
 
 
@@ -72,7 +72,7 @@ def test_source_body_is_operator_only_not_replayed_in_model_context() -> None:
 @pytest.mark.parametrize("cancelled", [False, True])
 def test_committed_publication_survives_delivery_failure_as_partial_audit(cancelled: bool) -> None:
     recorder = ToolTraceRecorder()
-    call = recorder.start("publish_web_preview", {"title": "Dashboard", "files": []})
+    call = recorder.start("publish_web_preview", {"title": "Dashboard", "source_files": []})
     recorder.record_evidence(
         call.execution_ref,
         {"artifact_effect": "published", "artifact": {"artifact_ref": "artifact_example", "version": 1}},

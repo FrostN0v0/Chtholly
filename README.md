@@ -100,6 +100,8 @@ llmchat handoff
 
 配置 `llm_chat.web_artifacts_public_url` 为独立 HTTPS 域名后启用；留空则不注册作品工具。`web_artifacts_capture_url` 必须指向回环截图接口，`web_artifacts_capture_token` 通过环境变量注入，`web_artifacts_ttl_hours` 控制有效期（最多 168 小时）。独立服务与仅公开作品路由的代理示例位于 `scripts/chtholly-web-artifacts.service` 和 `scripts/web-artifacts.Caddyfile`；管理面板端口不得对公网开放。
 
+Bot 与独立预览进程共享项目依赖环境；同步依赖或浏览器后，必须同时重启 `chtholly.service` 与 `chtholly-web-artifacts.service`。仅健康接口成功不能证明截图可用，需用一次真实作品验证隔离截图返回 PNG；不要关闭 Chromium sandbox 或网络隔离来绕过失败。
+
 ## 插件工坊
 
 启用 `plugin_workshop` 与 `llm_chat.plugin_workshop_enabled` 后，可让模型编写标准 Entari 插件，使用 `submit_plugin` 保存完整源码、命令、配置、权限与数据声明，并在无网络、无生产凭证及数据的 Linux Docker 容器中验收。失败报告返回模型修正，每次修订产生新的不可变版本；提交或验收通过均不会自动激活。

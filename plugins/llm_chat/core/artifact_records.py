@@ -44,7 +44,7 @@ def project_artifact_arguments(tool_name: str, arguments: Mapping[str, object]) 
     """Keep references and bounded descriptors, never model-generated source or base64."""
 
     if tool_name == "publish_web_preview":
-        supplied = arguments.get("files")
+        supplied = arguments.get("source_files")
         files = supplied if isinstance(supplied, list) else []
         source_chars = sum(
             len(item["content"]) for item in files if isinstance(item, Mapping) and isinstance(item.get("content"), str)

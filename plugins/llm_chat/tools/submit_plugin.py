@@ -20,7 +20,7 @@ def register_submit_plugin(
     dispatcher: PluginDispatcher[JSONType],
     runtime: WorkshopToolContext,
 ) -> Subscriber[JSONType]:
-    async def submit_plugin(plugin_name: str, files: dict[str, str], manifest: dict[str, Any]) -> str:
+    async def submit_plugin(plugin_name: str, source_files: dict[str, str], manifest: dict[str, Any]) -> str:
         """Submit a complete Entari package for isolated acceptance, NEVER native activation.
 
         Use only when the current user requests creating or changing a Bot plugin/feature. Supply a complete
@@ -41,7 +41,7 @@ def register_submit_plugin(
 
         Args:
             plugin_name (str): Stable ASCII key, e.g. random_menu. Do not include workshop_ or a path.
-            files (dict[str, str]): Complete relative filename-to-source mapping, including __init__.py.
+            source_files (dict[str, str]): Complete relative filename-to-source mapping, including __init__.py.
             manifest (dict[str, Any]): Required command, configuration, permission, data and acceptance declarations.
         Returns:
             str: Candidate version, digest, acceptance results and correction feedback, not activation confirmation.
@@ -51,7 +51,7 @@ def register_submit_plugin(
             require_workshop_request(raw, "submit")
             record = await runtime.get_service().submit(
                 plugin_name,
-                files,
+                source_files,
                 manifest,
                 actor,
                 on_created=candidate_evidence,

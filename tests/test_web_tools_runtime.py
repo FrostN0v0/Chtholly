@@ -3661,6 +3661,72 @@ def _external_requirement(name: str, arguments: dict[str, Any], call_id: str) ->
 
 
 @pytest.mark.asyncio
+async def test_native_artifact_tools_publish_source_and_deliver_exact_zip(
+    local_modules: SimpleNamespace,
+    tmp_path: Path,
+) -> None:
+    from io import BytesIO
+    from zipfile import ZipFile
+
+    from arclet.entari import File
+
+    from plugins.llm_chat.agent_context import AgentAccessContext, agent_access_scope
+    from plugins.llm_chat.tools.artifacts import register_artifact_tools
+    from plugins.llm_chat.artifacts_runtime import WebArtifactService
+
+    sources = {
+        "index.html": '<link rel="stylesheet" href="theme.css"><h1>Native preview</h1>',
+        "theme.css": "h1{color:teal}",
+    }
+    service = WebArtifactService(tmp_path, public_origin="https://preview.example")
+    session = _DeliveryToolSession()
+    state = local_modules.delivery.DeliveryState()
+
+    async def append_history(*_args: Any) -> None:
+        return None
+
+    try:
+        async with _temporary_plugin() as harness:
+            register_artifact_tools(
+                harness.dispatcher,
+                local_modules.config.LLMChatConfig(web_artifacts_public_url=service.public_origin),
+                service=service,
+                append_history=append_history,
+            )
+            with (
+                agent_access_scope(AgentAccessContext(1, 2, 3, "alice")),
+                llm_chat_context_scope(_tool_context(session)),
+                llm_chat_delivery_scope(state),
+                llm_chat_tool_trace_scope(ToolTraceRecorder()),
+            ):
+                publication = _external_requirement(
+                    "publish_web_preview",
+                    {
+                        "title": "Native preview",
+                        "source_files": [{"path": path, "content": content} for path, content in sources.items()],
+                    },
+                    "publish-source",
+                )
+                await llm_service_module.run_llm_tools(RunOutput(requirements=[publication]))
+                result = json.loads(publication.external_execution_result)
+                assert result["ok"] is True, result
+                artifact = json.loads(result["data"])
+                delivery = _external_requirement(
+                    "send_artifact", {"artifact_ref": artifact["artifact_ref"]}, "send-source"
+                )
+                await llm_service_module.run_llm_tools(RunOutput(requirements=[delivery]))
+                delivered = json.loads(delivery.external_execution_result)
+                assert delivered["ok"] is True, delivered
+                assert json.loads(delivered["data"])["mode"] == "file"
+
+            data_url = session.sent[0][File][0].src
+            with ZipFile(BytesIO(base64.b64decode(data_url.partition(",")[2]))) as archive:
+                assert {name: archive.read(name).decode() for name in archive.namelist()} == sources
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_local_generation_exposes_only_original_authorized_external_functions(
     local_modules: SimpleNamespace,
 ) -> None:

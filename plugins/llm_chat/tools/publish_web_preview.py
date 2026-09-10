@@ -89,7 +89,7 @@ def register_publish_web_preview(
     async def publish_web_preview(
         session: Session,
         title: str,
-        files: list[dict[str, str]],
+        source_files: list[dict[str, str]],
         entry: str = "index.html",
         previous_artifact_ref: str = "",
         delete_paths: list[str] = cast(list[str], None),
@@ -98,7 +98,7 @@ def register_publish_web_preview(
 
         Choose this workflow when a working webpage/UI/prototype helps fulfill
         the user's task, including contextual follow-ups.  No special wording
-        or separate publication command is needed.  ``files`` contains the
+        or separate publication command is needed.  ``source_files`` contains the
         complete source you generated as path/content/encoding mappings;
         never read arbitrary local files or publish secrets/private chat data.
         Use an exact ``previous_artifact_ref`` from the artifact tools for
@@ -112,9 +112,9 @@ def register_publish_web_preview(
         access = require_authorized_access()
         if not isinstance(title, str) or not title.strip():
             raise DeliveryError("artifact title is required")
-        if not isinstance(files, list):
+        if not isinstance(source_files, list):
             raise DeliveryError("artifact files must be a list of explicit file mappings")
-        if any(not isinstance(item, Mapping) for item in files):
+        if any(not isinstance(item, Mapping) for item in source_files):
             raise DeliveryError("artifact files must be explicit path/content mappings")
         normalized_deletes: list[str]
         if delete_paths is None:
@@ -133,7 +133,7 @@ def register_publish_web_preview(
         artifact = await runtime.service.publish(
             access.owner,
             title,
-            cast(list[Mapping[str, str]], files),
+            cast(list[Mapping[str, str]], source_files),
             entry=entry,
             previous_ref=normalized_previous,
             ttl_hours=runtime.service.ttl_hours,
