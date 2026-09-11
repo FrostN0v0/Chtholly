@@ -1,17 +1,17 @@
 [Unit]
-Description=Chtholly public WebUI OIDC gateway
-After=network-online.target chtholly-webui-sessions.service
-Wants=network-online.target
-Requires=chtholly-webui-sessions.service
+Description=Chtholly private WebUI session store
+Before=chtholly-webui-oidc.service
 
 [Service]
-Type=simple
-DynamicUser=yes
-EnvironmentFile=/etc/chtholly/webui-oidc.env
-ExecStart=/usr/local/libexec/chtholly-oauth2-proxy --config=/etc/chtholly-webui/oauth2-proxy.cfg
+Type=notify
+User=redis
+Group=redis
+ExecStart=/usr/bin/redis-server /etc/chtholly-webui/redis.conf --supervised systemd
 Restart=on-failure
-RestartSec=5
-TimeoutStopSec=15
+RestartSec=3
+TimeoutStopSec=30
+StateDirectory=chtholly-webui-sessions
+StateDirectoryMode=0700
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
@@ -22,16 +22,14 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
-ProtectHostname=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
 CapabilityBoundingSet=
 MemoryMax=256M
-TasksMax=128
+TasksMax=32
 
 [Install]
 WantedBy=multi-user.target

@@ -34,12 +34,16 @@ class Sessions:
 
 def application():
     store = Sessions()
-    authority = {"available": True}
+    authority = {"available": True, "revoked": False}
 
     def verify(request: httpx.Request) -> httpx.Response:
         if not authority["available"]:
             raise httpx.ConnectError("unavailable", request=request)
-        return httpx.Response(202 if request.headers.get("cookie") == f"{SSO_COOKIE}=verified" else 401)
+        valid = request.headers.get("cookie") == f"{SSO_COOKIE}=verified" and not authority["revoked"]
+        if request.url.path == "/oauth2/sign_out":
+            authority["revoked"] = True
+            return httpx.Response(302, headers={"Location": "/"})
+        return httpx.Response(202 if valid else 401)
 
     sessions = SsoSessions(
         public_origin=PUBLIC,
@@ -119,6 +123,22 @@ async def test_public_logout_requires_same_origin_and_revokes_both_login_layers(
         assert client.cookies.get("webui_sid") is None
         assert store.get(native) is None
         assert (await client.get("/private")).status_code == 401
+        client.cookies.set(SSO_COOKIE, "verified", domain="manage.example", path="/")
+        assert (await client.get("/private")).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_gateway_logout_never_claims_durable_revocation():
+    app, store, _, authority = application()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=PUBLIC) as client:
+        client.cookies.set(SSO_COOKIE, "verified")
+        assert (await client.get("/private")).status_code == 200
+        native = client.cookies.get("webui_sid")
+        authority["available"] = False
+        response = await client.post("/api/auth/logout", headers={"Origin": PUBLIC})
+        assert response.status_code == 503
+        assert response.json()["success"] is False
+        assert store.get(native) is not None
 
 
 def test_websocket_uses_real_native_session_and_rejects_cross_origin():

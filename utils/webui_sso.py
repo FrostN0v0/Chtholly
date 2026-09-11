@@ -87,7 +87,7 @@ class SsoSessions:
         url = connection.url
         return url.scheme in ("https", "wss") and url.hostname == self._host and (url.port or 443) == self._port
 
-    async def verify(self, cookies: dict[str, str]) -> bool:
+    async def verify(self, cookies: dict[str, str], *, logout: bool = False) -> bool:
         selected = [f"{name}={value}" for name, value in cookies.items() if _COOKIE_NAME.fullmatch(name)]
         cookie = "; ".join(selected)
         if not cookie or len(cookie) > 16384 or "\r" in cookie or "\n" in cookie:
@@ -97,11 +97,13 @@ class SsoSessions:
                 timeout=3.0, trust_env=False, follow_redirects=False, transport=self._transport
             ) as client:
                 async with client.stream(
-                    "GET", self._auth_url, headers={"Cookie": cookie, "X-Forwarded-Proto": "https"}
+                    "GET",
+                    self._auth_url.rsplit("/", 1)[0] + "/sign_out" if logout else self._auth_url,
+                    headers={"Cookie": cookie, "X-Forwarded-Proto": "https"},
                 ) as response:
                     if response.status_code >= 500:
                         raise ProxyUnavailable
-                    return response.status_code == 202
+                    return response.status_code == (302 if logout else 202)
         except httpx.HTTPError:
             raise ProxyUnavailable from None
 
@@ -119,7 +121,17 @@ class SsoSessions:
         response.set_cookie(NATIVE_COOKIE, sid, max_age=self._ttl, secure=True, httponly=True, samesite="lax", path="/")
         return next(value for key, value in response.raw_headers if key == b"set-cookie")
 
-    def logout(self, connection: HTTPConnection) -> Response:
+    async def logout(self, connection: HTTPConnection) -> Response:
+        try:
+            revoked = await self.verify(connection.cookies, logout=True)
+        except ProxyUnavailable:
+            revoked = False
+        if not revoked:
+            return JSONResponse(
+                {"success": False, "code": "sso_unavailable"},
+                status_code=503,
+                headers={"Cache-Control": "private, no-store"},
+            )
         sid = connection.cookies.get(NATIVE_COOKIE)
         if sid:
             self._store().destroy(sid)
@@ -184,7 +196,8 @@ class WebUISsoMiddleware:
                     )
                 return
         if scope["type"] == "http" and scope.get("method") == "POST" and scope["path"] == "/api/auth/logout":
-            await self.sessions.logout(connection)(scope, receive, send)
+            response = await self.sessions.logout(connection)
+            await response(scope, receive, send)
             return
         sid, created = self.sessions.session(connection)
         if not created:
