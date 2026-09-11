@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 from typing import Annotated
 from pathlib import Path
+from secrets import token_urlsafe
 from urllib.parse import quote
 from collections.abc import Mapping, Callable
 
 from fastapi import File, Form, Query, Depends, Request, APIRouter, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .meme_admin import MemeAdminError, MemeAdminService
 from .meme_catalog import MemeCatalogItem, MemeCatalogSort, MemeCatalogFilter
@@ -22,10 +23,7 @@ _ASSET_FILES = {
 }
 _PAGE_HEADERS = {
     "Cache-Control": "no-store",
-    "Content-Security-Policy": (
-        "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; "
-        "connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'"
-    ),
+    "X-Content-Type-Options": "nosniff",
 }
 AuthDependency = Callable[..., object]
 
@@ -75,14 +73,28 @@ def create_meme_admin_router(
     router = APIRouter(prefix=_API_PREFIX, tags=["meme-admin"], dependencies=dependencies)
 
     @router.get("/page", include_in_schema=False, response_model=None)
-    async def page() -> FileResponse | JSONResponse:
-        path = asset_dir / "index.html"
-        if not path.is_file():
+    async def page() -> HTMLResponse | JSONResponse:
+        nonce = token_urlsafe(24)
+        try:
+            document = (asset_dir / "index.html").read_text(encoding="utf-8")
+            stylesheet = (asset_dir / "app.css").read_text(encoding="utf-8")
+            script = (asset_dir / "app.js").read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
             return JSONResponse(
                 {"success": False, "code": "page_unavailable", "message": "Meme manager page is unavailable"},
                 status_code=503,
+                headers=_PAGE_HEADERS,
             )
-        return FileResponse(path, media_type="text/html; charset=utf-8", headers=_PAGE_HEADERS)
+        # Sandboxed native WebUI frames cannot load authenticated external assets.
+        document = document.replace("<!-- MEME_STYLES -->", f'<style nonce="{nonce}">{stylesheet}</style>')
+        document = document.replace("<!-- MEME_SCRIPT -->", f'<script nonce="{nonce}">{script}</script>')
+        headers = dict(_PAGE_HEADERS)
+        headers["Content-Security-Policy"] = (
+            f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; "
+            "connect-src 'self'; img-src 'self' blob:; base-uri 'none'; object-src 'none'; "
+            "frame-ancestors 'self'; form-action 'none'"
+        )
+        return HTMLResponse(document, headers=headers)
 
     @router.get("/assets/{asset_name}", include_in_schema=False, response_model=None)
     async def asset(asset_name: str) -> FileResponse | JSONResponse:

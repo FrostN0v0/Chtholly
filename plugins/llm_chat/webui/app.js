@@ -1,6 +1,18 @@
 "use strict";
 
 const API_ROOT = "/api/llm-chat/memes";
+const IMAGE_MAX_BYTES = 6 * 1024 * 1024;
+const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+const bridgeOrigin = new URL(document.URL).origin;
+const inFrame = window.parent !== window;
+const bridgeRequests = new Map();
+let bridgeReady = !inFrame;
+let pageActive = true;
+let pageController = new AbortController();
+let navigationController = new AbortController();
+let editController = new AbortController();
+let uploadController = null;
+const imageResources = new Map();
 const STATUS_LABELS = {
   indexed: "已索引",
   unindexed: "待标注",
@@ -87,7 +99,6 @@ const state = {
   selected: null,
   deleteTarget: null,
   uploads: [],
-  listController: null,
 };
 
 const elements = {
@@ -153,24 +164,152 @@ function showToast(title, message = "", error = false) {
   window.setTimeout(() => toast.remove(), 4200);
 }
 
-async function request(path = "", options = {}) {
-  const method = (options.method || "GET").toUpperCase();
-  const headers = new Headers(options.headers || {});
-  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
-    headers.set("X-Requested-With", "meme-webui");
+function abortError() { return new DOMException("读取已停止", "AbortError"); }
+
+function apiUrl(path) {
+  const url = new URL(`${API_ROOT}${path}`, bridgeOrigin);
+  if (url.origin !== bridgeOrigin || (url.pathname !== API_ROOT && !url.pathname.startsWith(`${API_ROOT}/`)) || url.hash) {
+    throw new Error("无效表情请求路径");
   }
-  const response = await fetch(`${API_ROOT}${path}`, {
-    ...options,
-    method,
-    headers,
-    credentials: "same-origin",
+  return url.pathname + url.search;
+}
+
+window.addEventListener("message", (event) => {
+  if (!inFrame || event.source !== window.parent || event.origin !== bridgeOrigin) return;
+  const message = event.data;
+  if (!message || typeof message !== "object") return;
+  if (message.type === "webui.ready") {
+    bridgeReady = true;
+    for (const pending of bridgeRequests.values()) pending.send();
+    return;
+  }
+  const pending = bridgeRequests.get(message.id);
+  if (!pending || !pending.sent) return;
+  if (Object.hasOwn(message, "error")) pending.finish(new Error(String(message.error)));
+  else if (Object.hasOwn(message, "result")) pending.finish(null, message.result);
+});
+
+function bridgeApi(url, options, signal) {
+  if (signal.aborted || !pageActive) return Promise.reject(abortError());
+  if (bridgeRequests.size >= 64) return Promise.reject(new Error("读取请求过多，请稍后重试。"));
+  const id = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => pending.finish(abortError());
+    const pending = {
+      sent: false,
+      finish(error, result) {
+        if (!bridgeRequests.delete(id)) return;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        if (error) reject(error); else resolve(result);
+      },
+      send() {
+        if (pending.sent || !bridgeReady || !bridgeRequests.has(id)) return;
+        if (signal.aborted || !pageActive) return pending.finish(abortError());
+        pending.sent = true;
+        try {
+          window.parent.postMessage({ id, method: "api", payload: {
+            url, method: options.method, timeout: options.timeout, headers: options.headers,
+            ...(options.body != null ? { data: options.body } : {}),
+            ...(options.responseType === "blob" ? { responseType: "blob" } : {}),
+          } }, bridgeOrigin);
+        } catch (error) { pending.finish(error); }
+      },
+    };
+    const timer = setTimeout(() => pending.finish(new Error(options.method === "GET"
+      ? "WebUI 读取超时，请刷新后重试。"
+      : "WebUI 操作等待超时；操作可能已执行，请刷新检查结果，不要重复提交。")), options.timeout + 10000);
+    bridgeRequests.set(id, pending);
+    signal.addEventListener("abort", onAbort, { once: true });
+    pending.send();
   });
-  const contentType = response.headers.get("content-type") || "";
-  const payload = contentType.includes("application/json") ? await response.json() : null;
-  if (!response.ok || payload?.success === false) {
-    throw new Error(ERROR_MESSAGES[payload?.code] || payload?.message || `请求失败，状态码 ${response.status}`);
+}
+
+async function request(path = "", options = {}) {
+  const url = apiUrl(path);
+  const method = (options.method || "GET").toUpperCase();
+  if (!["GET", "POST", "PATCH", "DELETE"].includes(method)) throw new Error("不支持的表情请求方法");
+  const timeout = method === "GET" ? 30000 : 320000;
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), timeout + 10000);
+  const signal = AbortSignal.any([
+    pageController.signal, deadline.signal,
+    ...(method === "GET" ? [navigationController.signal] : []),
+    ...(options.signal ? [options.signal] : []),
+  ]);
+  try {
+    if (!pageActive || signal.aborted) throw abortError();
+    const headers = new Headers(options.headers || {});
+    if (method !== "GET") headers.set("X-Requested-With", "meme-webui");
+    let body = options.body;
+    if (inFrame && body instanceof FormData) {
+      // Response generates the multipart boundary and preserves binary file bytes.
+      const multipart = new Response(body);
+      headers.set("Content-Type", multipart.headers.get("Content-Type"));
+      body = await multipart.blob();
+    } else if (inFrame && typeof body === "string" && headers.get("Content-Type")?.includes("application/json")) {
+      body = JSON.parse(body);
+    }
+    if (signal.aborted || !pageActive) throw abortError();
+    let payload;
+    if (inFrame) {
+      payload = await bridgeApi(url, {
+        method, timeout, headers: Object.fromEntries(headers), body, responseType: options.responseType,
+      }, signal);
+    } else {
+      const response = await fetch(url, {
+        method, headers, body, signal, credentials: "same-origin", cache: "no-store",
+      });
+      if (options.responseType === "blob" && response.ok) payload = await response.blob();
+      else {
+        payload = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(ERROR_MESSAGES[payload?.code] || payload?.message || `请求失败，状态码 ${response.status}`);
+      }
+    }
+    if (signal.aborted || !pageActive) throw abortError();
+    if (options.responseType === "blob") {
+      if (!(payload instanceof Blob) || !IMAGE_TYPES.has(payload.type.toLowerCase().split(";")[0]) || payload.size > IMAGE_MAX_BYTES || !payload.size) {
+        throw new Error(ERROR_MESSAGES.image_unavailable);
+      }
+    } else if (!payload || typeof payload !== "object" || payload.success === false) {
+      throw new Error(ERROR_MESSAGES[payload?.code] || payload?.message || "服务器响应无法解析");
+    }
+    return payload;
+  } catch (error) {
+    if (deadline.signal.aborted) throw new Error(method === "GET"
+      ? "WebUI 读取超时，请刷新后重试。"
+      : "WebUI 操作等待超时；操作可能已执行，请刷新检查结果，不要重复提交。");
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-  return payload;
+}
+
+function releaseImage(image) {
+  const resource = imageResources.get(image);
+  if (!resource) return;
+  imageResources.delete(image);
+  resource.signal.removeEventListener("abort", resource.dispose);
+  if (resource.url) URL.revokeObjectURL(resource.url);
+  image.removeAttribute("src");
+}
+
+async function loadImage(image, path, signal, onError) {
+  releaseImage(image);
+  const resource = { signal, url: null, dispose: () => releaseImage(image) };
+  imageResources.set(image, resource);
+  signal.addEventListener("abort", resource.dispose, { once: true });
+  try {
+    if (!path.startsWith(`${API_ROOT}/files/`)) throw new Error(ERROR_MESSAGES.image_unavailable);
+    const blob = await request(path.slice(API_ROOT.length), { responseType: "blob", signal });
+    if (signal.aborted || imageResources.get(image) !== resource || !pageActive) return;
+    resource.url = URL.createObjectURL(blob);
+    image.src = resource.url;
+  } catch (error) {
+    if (imageResources.get(image) !== resource) return;
+    releaseImage(image);
+    if (error.name !== "AbortError") onError();
+  }
 }
 
 function formatBytes(value) {
@@ -359,13 +498,15 @@ function renderCard(item) {
   const media = createElement("div", "meme-media");
   if (item.image_url) {
     const image = createElement("img");
-    image.src = item.image_url;
     image.alt = `${item.file_name} 的预览图`;
     image.loading = "lazy";
-    image.addEventListener("error", () => {
+    const onError = () => {
+      releaseImage(image);
       image.remove();
       media.append(missingPreview());
-    }, { once: true });
+    };
+    image.addEventListener("error", onError, { once: true });
+    loadImage(image, item.image_url, navigationController.signal, onError);
     media.append(image);
   } else {
     media.append(missingPreview());
@@ -395,6 +536,7 @@ function renderCard(item) {
 }
 
 function renderCatalog() {
+  elements.grid.querySelectorAll("img").forEach(releaseImage);
   elements.grid.replaceChildren(...state.items.map(renderCard));
   elements.resultCount.textContent = String(state.total || 0);
   elements.pageLabel.textContent = `第 ${state.page} / ${state.pages} 页`;
@@ -411,9 +553,13 @@ function renderStats(stats) {
 }
 
 async function loadCatalog({ resetPage = false } = {}) {
+  if (!pageActive) return;
   if (resetPage) state.page = 1;
-  if (state.listController) state.listController.abort();
-  state.listController = new AbortController();
+  navigationController.abort();
+  navigationController = new AbortController();
+  const controller = navigationController;
+  if (elements.editDialog.open) elements.editDialog.close();
+  editController.abort();
   elements.loading.hidden = false;
   elements.grid.hidden = true;
   elements.empty.hidden = true;
@@ -425,7 +571,8 @@ async function loadCatalog({ resetPage = false } = {}) {
   });
   if (state.query) params.set("q", state.query);
   try {
-    const payload = await request(`?${params}`, { signal: state.listController.signal });
+    const payload = await request(`?${params}`, { signal: controller.signal });
+    if (controller.signal.aborted) return;
     state.items = payload.items || [];
     state.total = payload.total || 0;
     state.page = payload.page || 1;
@@ -437,12 +584,16 @@ async function loadCatalog({ resetPage = false } = {}) {
       showToast("表情库加载失败", error.message, true);
     }
   } finally {
-    elements.loading.hidden = true;
-    elements.grid.hidden = false;
+    if (navigationController === controller && pageActive) {
+      elements.loading.hidden = true;
+      elements.grid.hidden = false;
+    }
   }
 }
 
 function openEdit(item) {
+  editController.abort();
+  editController = new AbortController();
   state.selected = item;
   elements.editFileName.textContent = item.file_name;
   renderMetadataEditor(elements.editMetadata, item.metadata);
@@ -451,7 +602,9 @@ function openEdit(item) {
   elements.retagCurrent.disabled = item.status === "missing";
   if (item.image_url) {
     elements.editImage.hidden = false;
-    elements.editImage.src = item.image_url;
+    loadImage(elements.editImage, item.image_url, editController.signal, () => {
+      elements.editImage.hidden = true;
+    });
   } else {
     elements.editImage.hidden = true;
     elements.editImage.removeAttribute("src");
@@ -531,18 +684,17 @@ function clearUploads() {
 }
 
 function addUploadFiles(files) {
-  const acceptedTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
   const existingKeys = new Set(
     state.uploads.map((entry) => `${entry.file.name}:${entry.file.size}:${entry.file.lastModified}`),
   );
   Array.from(files).forEach((file) => {
     const key = `${file.name}:${file.size}:${file.lastModified}`;
     if (existingKeys.has(key)) return;
-    if (!acceptedTypes.has(file.type)) {
+    if (!IMAGE_TYPES.has(file.type)) {
       showToast("不支持的图片格式", file.name, true);
       return;
     }
-    if (file.size > 6 * 1024 * 1024) {
+    if (file.size > IMAGE_MAX_BYTES) {
       showToast("图片超过 6 MiB", file.name, true);
       return;
     }
@@ -585,10 +737,13 @@ function renderUploadQueue() {
 
 async function uploadSelected(event) {
   event.preventDefault();
+  if (uploadController || !pageActive) return;
   if (!state.uploads.length) {
     showToast("请至少选择一张图片", "当前没有待上传文件。", true);
     return;
   }
+  const queue = state.uploads.filter((entry) => entry.status === "待上传");
+  if (!queue.length) return;
   let sharedTags;
   try {
     sharedTags = readMetadataEditor(elements.uploadMetadata, { optional: true });
@@ -601,8 +756,12 @@ async function uploadSelected(event) {
     return;
   }
   setBusy(elements.startUpload, true, "上传中");
+  const controller = new AbortController();
+  uploadController = controller;
   let failures = 0;
-  for (const entry of state.uploads) {
+  for (const entry of queue) {
+    if (controller.signal.aborted || !pageActive) break;
+    if (!state.uploads.includes(entry)) continue;
     entry.status = "上传中";
     entry.statusClass = "";
     renderUploadQueue();
@@ -611,10 +770,11 @@ async function uploadSelected(event) {
     form.append("tags", sharedTags);
     form.append("auto_tag", String(elements.autoTag.checked));
     try {
-      const payload = await request("", { method: "POST", body: form });
+      const payload = await request("", { method: "POST", body: form, signal: controller.signal });
       entry.status = payload.status === "duplicate" ? "已存在" : "已添加";
       entry.statusClass = "is-success";
     } catch (error) {
+      if (error.name === "AbortError") break;
       failures += 1;
       entry.status = error.message;
       entry.statusClass = "is-error";
@@ -622,12 +782,15 @@ async function uploadSelected(event) {
     renderUploadQueue();
   }
   setBusy(elements.startUpload, false);
+  if (uploadController === controller) uploadController = null;
+  if (controller.signal.aborted || !pageActive) return;
   await loadCatalog({ resetPage: true });
   if (failures) {
     showToast("上传完成，但有文件失败", `${failures} 个文件未能导入。`, true);
   } else {
-    showToast("上传完成", `已处理 ${state.uploads.length} 个文件。`);
+    showToast("上传完成", `已处理 ${queue.length} 个文件。`);
     window.setTimeout(() => {
+      if (controller.signal.aborted || !pageActive || uploadController || state.uploads.some((entry) => !queue.includes(entry))) return;
       elements.uploadDialog.close();
       clearUploads();
       renderMetadataEditor(elements.uploadMetadata);
@@ -697,7 +860,31 @@ function bindEvents() {
   });
   elements.dropZone.addEventListener("drop", (event) => addUploadFiles(event.dataTransfer.files));
   elements.uploadDialog.addEventListener("close", () => {
-    if (!state.uploads.some((entry) => entry.status === "Uploading")) clearUploads();
+    uploadController?.abort();
+    clearUploads();
+  });
+  elements.editDialog.addEventListener("close", () => {
+    editController.abort();
+    releaseImage(elements.editImage);
+  });
+  elements.editImage.addEventListener("error", () => {
+    releaseImage(elements.editImage);
+    elements.editImage.hidden = true;
+  });
+  window.addEventListener("pagehide", () => {
+    pageActive = false;
+    pageController.abort();
+    navigationController.abort();
+    editController.abort();
+    uploadController?.abort();
+    for (const image of imageResources.keys()) releaseImage(image);
+    clearUploads();
+  });
+  window.addEventListener("pageshow", (event) => {
+    if (!event.persisted) return;
+    pageActive = true;
+    pageController = new AbortController();
+    loadCatalog();
   });
 }
 

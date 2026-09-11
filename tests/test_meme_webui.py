@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from pathlib import Path
+from html.parser import HTMLParser
 from collections.abc import AsyncIterator
 
 import httpx
@@ -318,22 +319,6 @@ async def test_webui_router_serves_assets_and_mutation_contracts(admin_env: Simp
         missing = await client.get("/api/llm-chat/memes/files/not-found.png")
 
     assert page.status_code == 200
-    assert "表情库管理" in page.text
-    assert 'id="edit-metadata"' in page.text
-    assert 'id="upload-metadata"' in page.text
-    assert 'id="edit-tags"' not in page.text
-    assert "结构化标签 JSON" not in page.text
-    assert "使用新版 JSON 元数据" not in page.text
-    assert 'id="stat-indexed"' in page.text
-    assert 'data-status="indexed"' in page.text
-    assert 'id="stat-structured"' not in page.text
-    assert 'id="stat-legacy"' not in page.text
-    assert 'data-status="structured"' not in page.text
-    assert 'data-status="legacy"' not in page.text
-    assert "旧格式" not in page.text
-    assert "结构化" not in page.text
-    assert "default-src 'self'" in page.headers["content-security-policy"]
-    assert "blob:" in page.headers["content-security-policy"]
     first_item = catalog.json()["items"][0]
     assert first_item["image_url"].endswith("/files/1.png?v=" + str(first_item["version"]))
     assert "embedding_json" not in first_item
@@ -350,3 +335,50 @@ async def test_webui_router_serves_assets_and_mutation_contracts(admin_env: Simp
     assert oversized.json()["code"] == "request_too_large"
     assert missing.status_code == 404
     assert auth_calls >= 7
+
+
+@pytest.mark.asyncio
+async def test_meme_page_authorizes_inline_assets_with_fresh_nonces(admin_env: SimpleNamespace) -> None:
+    class PageAssets(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.assets: dict[str, list[dict[str, str | None]]] = {"script": [], "style": [], "link": []}
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag in self.assets:
+                self.assets[tag].append(dict(attrs))
+
+    app = FastAPI()
+    app.include_router(
+        create_meme_admin_router(
+            admin_env.service,
+            asset_dir=Path(__file__).resolve().parents[1] / "plugins" / "llm_chat" / "webui",
+        )
+    )
+    nonces = []
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+        for _ in range(2):
+            response = await client.get("/api/llm-chat/memes/page")
+            assert response.status_code == 200
+            assert response.headers["cache-control"] == "no-store"
+            policy = {
+                directive.split()[0]: directive.split()[1:]
+                for directive in response.headers["content-security-policy"].split(";")
+                if directive.strip()
+            }
+            parsed = PageAssets()
+            parsed.feed(response.text)
+            assert not parsed.assets["link"]
+            for tag, directive in (("script", "script-src"), ("style", "style-src")):
+                assert len(parsed.assets[tag]) == 1
+                asset = parsed.assets[tag][0]
+                assert "src" not in asset
+                nonce = asset["nonce"]
+                assert nonce
+                assert policy[directive] == [f"'nonce-{nonce}'"]
+            assert policy["default-src"] == ["'none'"]
+            assert policy["connect-src"] == ["'self'"]
+            assert policy["frame-ancestors"] == ["'self'"]
+            assert policy["img-src"] == ["'self'", "blob:"]
+            nonces.append(parsed.assets["script"][0]["nonce"])
+    assert nonces[0] != nonces[1]

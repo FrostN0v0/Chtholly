@@ -74,6 +74,23 @@
 			}
 			respond "Not found" 404
 		}
+		@signed_out {
+			method GET
+			path /signed-out
+		}
+		handle @signed_out {
+			header Content-Type "text/html; charset=utf-8"
+			header Content-Security-Policy "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+			respond `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Signed out</title><h1>Signed out</h1><p>Your WebUI session has ended.</p><a href="/oauth2/start">Sign in with Casdoor</a></html>` 200
+		}
+
+		@password_login {
+			method GET
+			path /login
+		}
+		handle @password_login {
+			redir / 302
+		}
 
 		@oidc {
 			method GET
@@ -85,7 +102,7 @@
 
 		@navigation {
 			method GET
-			path / /login /settings /config /plugins /market /logs /chat /extension/llm-chat-sessions /extension/llm-chat-memes /extension/plugin-workshop
+			path / /settings /config /plugins /market /logs /chat /extension/llm-chat-sessions /extension/llm-chat-memes /extension/plugin-workshop
 		}
 		handle @navigation {
 			rewrite * /
@@ -102,7 +119,7 @@
 
 		@read_api {
 			method GET
-			path_regexp read_api ^/api/(auth/check|health|menus|stats|extensions/manifest|config(?:/[^/]+(?:/schema)?)?|plugins(?:/[^/]+)?|market/(?:plugins(?:/[^/]+)?|tasks/[^/]+)|config-apply/status|llm-chat/sessions/(?:page|scopes|scopes/[^/]+/sessions|sessions/[^/]+(?:/turns)?|turns/[^/]+/(?:events|inspection|context)|events/[^/]+/(?:payload|attachments/[^/]+)|assets/(?:app\.css|app\.js))|llm-chat/memes(?:/page|/assets/(?:app\.css|app\.js)|/files/[^/]+)?|plugin-workshop/(?:page|status|projects(?:/[^/]+/versions(?:/[^/]+(?:/source)?)?)?|assets/(?:app\.css|app\.js)))$
+			path_regexp read_api ^/api/(auth/check|webui-sso/client\.js|health|menus|stats|extensions/manifest|config(?:/[^/]+(?:/schema)?)?|plugins(?:/[^/]+)?|market/(?:plugins(?:/[^/]+)?|tasks/[^/]+)|config-apply/status|llm-chat/sessions/(?:page|scopes|scopes/[^/]+/sessions|sessions/[^/]+(?:/turns)?|turns/[^/]+/(?:events|inspection|context)|events/[^/]+/(?:payload|attachments/[^/]+)|assets/(?:app\.css|app\.js))|llm-chat/memes(?:/page|/assets/(?:app\.css|app\.js)|/files/[^/]+)?|plugin-workshop/(?:page|status|projects(?:/[^/]+/versions(?:/[^/]+(?:/source)?)?)?|assets/(?:app\.css|app\.js)))$
 		}
 		handle @read_api {
 			import webui_oidc_gateway
