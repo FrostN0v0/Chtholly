@@ -31,7 +31,7 @@
 - `publish_web_preview` 与 `submit_plugin` 的模型源码参数固定使用 `source_files`；禁止用 Agno 媒体保留参数名 `files`，否则上游会将必需业务参数从 schema 移除，形成缺参注入失败与补参校验拒绝。继续以原生 `LLMToolEvent` / `run_llm_tools` 执行和上游 schema 为权威，不补第二套声明或关闭参数检查；网页发布回归必须经过真实工具桥并核对交付 ZIP 的原始字节。
 - 网页文件与工坊提交的嵌套字段由 `tools/_submission_models.py` 的严格 Pydantic 输入模型生成上游 schema，并在工具边界校验，随后继续执行存储层既有权限、路径和容量规则。不得将 `dict[str, Any]` 直接用作工坊 manifest：当前 Agno 会把其值错误声明为空对象；必须明确标题、命令、配置、验收检查和布尔字段，并在文件映射 schema 中要求根级 `__init__.py`。验证既要覆盖原生 schema 接受合法载荷、拒绝错误结构，也要使用真实生产模型完成生成、提交与隔离验收，不能只向工具传入人工构造的正确参数。
 - 受密码保护的 WebUI 扩展必须兼容上游不含 `allow-same-origin` 的 opaque iframe：会话页与工坊以内联 nonce 加载可信静态资源，通过原生父页面 `postMessage` API bridge 携带会话认证，响应严格校验父窗口与精确 origin。会话附件通过同一桥获取经 MIME/6 MiB 校验的 Blob，切换轮次或关闭页面时释放 URL 与请求等待；不得通过匿名资源路由、CORS 通配或关闭 iframe sandbox 恢复功能。
-- 公网 SSO 是独立部署能力：`scripts/chtholly-webui-oidc.service` 运行 OAuth2 Proxy，`scripts/webui-oauth2.cfg` 对接 Casdoor OIDC，`scripts/webui.Caddyfile` 只发布管理路径。禁止在 `llm_chat` 实现通用登录、SSO 或网关。按用户决定，该 Casdoor 应用已认证账号均可进入网关，不额外限制管理员邮箱/组；原 WebUI 会话登录仍保留。凭证只进 root-owned 环境文件，OAuth token 不转发到 Bot。OIDC 网关在聊天/工坊插件未加载或本地免密模式错误时仍是独立的公网认证边界；其不可用不得降级直连8120。
+- 公网 SSO 是独立部署能力：`scripts/chtholly-webui-oidc.service` 运行 OAuth2 Proxy，`scripts/webui-oauth2.cfg` 对接 Casdoor OIDC，`scripts/webui.Caddyfile` 只发布管理路径。管理域名通过 Caddy 的 `WEBUI_HOST` 与 `ACME_EMAIL` 配置，Let's Encrypt 签发失败时允许使用 ZeroSSL 正式证书，不放宽 TLS 验证或更改其他站点。禁止在 `llm_chat` 实现通用登录、SSO 或网关。按用户决定，该 Casdoor 应用已认证账号均可进入网关，不额外限制管理员邮箱/组；原 WebUI 会话登录仍保留。凭证只进 root-owned 环境文件，OAuth token 不转发到 Bot。OIDC 网关在聊天/工坊插件未加载或本地免密模式错误时仍是独立的公网认证边界；其不可用不得降级直连8120。
 - **日志与终端**: rich（Entari 内建 log 使用 loguru；凭证化运行环境必须关闭会展开局部变量的 `rich_error`）
 - **包管理**: uv（`uv sync` / `uv add` / `uv remove`）
 - **代码质量**: Ruff、Pyright（`typeCheckingMode = "standard"`）

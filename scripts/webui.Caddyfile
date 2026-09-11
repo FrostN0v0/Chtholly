@@ -1,4 +1,4 @@
-# Import this file alongside the existing preview site. Set WEBUI_HOST in Caddy's service environment.
+# Import beside the preview site. Set WEBUI_HOST and ACME_EMAIL in Caddy's service environment.
 (webui_oidc_gateway) {
 	reverse_proxy 127.0.0.1:4180 {
 		header_up Host {$WEBUI_HOST}
@@ -23,6 +23,13 @@
 }
 
 {$WEBUI_HOST} {
+	tls {
+		issuer acme
+		issuer acme https://acme.zerossl.com/v2/DV90 {
+			email {$ACME_EMAIL}
+		}
+	}
+
 	header {
 		-Server
 		-Access-Control-Allow-Origin
