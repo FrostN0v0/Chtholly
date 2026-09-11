@@ -56,7 +56,15 @@ uv run --locked entari run
 
 工具集合、其他插件、基础配置及适配器等变更仍交给 Linux 后台控制器执行完整 Bot 重启、健康检查和失败回滚，只重启 Bot、不重启 LLBot。控制器使用既有环境引用密码登录受保护的健康状态接口，Bot 重启或会话失效后重新认证；不会为探测放开匿名管理权限。已热生效的配置会跳过重复重启；未安装控制器时，不支持的变更会在写入前明确拒绝。模型热更新失败会回滚原配置文件，无法确认恢复时明确报错，不把失败显示为保存成功。
 
-分模型的 `api_key`、`base_url` 留空或删除即可继承全局设置。凭证使用环境变量引用，不在表单中填写新密钥明文；新增或轮换进程环境变量仍需先重启使其进入运行环境。管理面板继续仅通过回环地址和 SSH 隧道访问。
+分模型的 `api_key`、`base_url` 留空或删除即可继承全局设置。凭证使用环境变量引用，不在表单中填写新密钥明文；新增或轮换进程环境变量仍需先重启使其进入运行环境。Bot 管理端口保持回环监听；可通过 SSH 隧道或下述独立 SSO 网关访问。
+
+## 公网管理登录
+
+公网入口使用独立 HTTPS 域名，经 Caddy 和 OAuth2 Proxy 接入 Casdoor OIDC，再进入原有 WebUI 登录。SSO 属于部署与认证层，不写入 `llm_chat`；聊天会话、表情与工坊页面只负责各自业务。当前策略允许该 Casdoor 应用正常认证的账号进入入口，不额外限制邮箱或组；仍校验 issuer、audience、签名、nonce 和 PKCE。
+
+部署配置位于 `scripts/webui.Caddyfile`、`scripts/webui-oauth2.cfg` 和 `scripts/chtholly-webui-oidc.service`。Caddy 的 `WEBUI_HOST` 指向管理域名，Casdoor 应用回调须为该域名的 `/oauth2/callback`；OIDC client ID、secret、issuer、redirect URL 与随机 cookie secret 只保存在 root-owned `0600` 环境文件，通过 `OAUTH2_PROXY_*` 注入，不放到前端、Bot 配置或仓库。网关不可用时公网入口失败关闭，SSH 隧道仍可应急访问。
+
+Caddy 只代理明确的管理页面、API 与两个管理 WebSocket；Satori/OneBot、自动 API 文档和未知路径一律拒绝。跨站 Origin 和不带正确 Origin 的写请求在入口拒绝，管理内容禁用共享缓存。DNS 建议保持仅 DNS，以保留工坊最长 330 秒的请求窗口；如启用 CDN 代理，需另行确认超时与真实客户端 IP 配置。
 
 ## LLM 会话管理
 

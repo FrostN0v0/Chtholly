@@ -21,7 +21,7 @@
 - **命令系统**: arclet-alconna（Entari 内建 `command` 模块）
 - **服务管理**: launart（`Service` 基类用于跨插件依赖注入）
 - **协议适配器**: `satori-python-adapter-onebot11`（默认）；`entari-plugin-server` 使用 `direct_adapter: true` 与 Entari 直连，此模式不得再配置 `basic.network`。官方 QQ 沙箱群聊与单聊事件必须在 `@qq.websocket` 的 `intent.c2c_group_at_messages` 下启用；写在适配器顶层会被配置模型忽略。QQ WebSocket 的 `token` 字段已废弃，不得配置。当前协议栈仍以 Python 3.10 运行，待 Python 3.14 兼容性确认后升级
-- **Satori 服务鉴权**: `server.token` 只校验 Satori 事件 WebSocket 的 Identify token；当前锁定的 Satori Server HTTP action API 不校验该 token，因此 HTTP API 与 Entari WebUI 都必须保持 `127.0.0.1` 监听并通过 IAP SSH 隧道访问。OneBot 适配器的 `access_token` 只保护对应适配器连接，三者不得混用。
+- **Satori 服务鉴权**: `server.token` 只校验 Satori 事件 WebSocket 的 Identify token；当前锁定的 Satori Server HTTP action API 不校验该 token，因此共享的 Satori/WebUI 后端必须保持 `127.0.0.1` 监听。公网管理只能通过独立 HTTPS/OIDC 网关与明确的管理路由白名单进入，不得直接反代整个端口；Satori/OneBot 和自动 API 文档不得公开。SSH 隧道保留应急访问。OneBot 适配器的 `access_token` 只保护对应适配器连接，三者不得混用。
 - **配置模型**: `BasicConfModel`（默认，dataclass 风格）/ Pydantic `BaseModel`（`arclet.entari.config.models.pyd`）/ msgspec `Struct`
 - **HTTP 客户端**: httpx；浏览器截图的受控公网出口使用 aiohttp 自定义 resolver 固定已校验公网 IP
 - **JSON 序列化**: orjson（LiteLLM 工具 / MCP 请求路径的显式运行时依赖）
@@ -31,6 +31,7 @@
 - `publish_web_preview` 与 `submit_plugin` 的模型源码参数固定使用 `source_files`；禁止用 Agno 媒体保留参数名 `files`，否则上游会将必需业务参数从 schema 移除，形成缺参注入失败与补参校验拒绝。继续以原生 `LLMToolEvent` / `run_llm_tools` 执行和上游 schema 为权威，不补第二套声明或关闭参数检查；网页发布回归必须经过真实工具桥并核对交付 ZIP 的原始字节。
 - 网页文件与工坊提交的嵌套字段由 `tools/_submission_models.py` 的严格 Pydantic 输入模型生成上游 schema，并在工具边界校验，随后继续执行存储层既有权限、路径和容量规则。不得将 `dict[str, Any]` 直接用作工坊 manifest：当前 Agno 会把其值错误声明为空对象；必须明确标题、命令、配置、验收检查和布尔字段，并在文件映射 schema 中要求根级 `__init__.py`。验证既要覆盖原生 schema 接受合法载荷、拒绝错误结构，也要使用真实生产模型完成生成、提交与隔离验收，不能只向工具传入人工构造的正确参数。
 - 受密码保护的 WebUI 扩展必须兼容上游不含 `allow-same-origin` 的 opaque iframe：会话页与工坊以内联 nonce 加载可信静态资源，通过原生父页面 `postMessage` API bridge 携带会话认证，响应严格校验父窗口与精确 origin。会话附件通过同一桥获取经 MIME/6 MiB 校验的 Blob，切换轮次或关闭页面时释放 URL 与请求等待；不得通过匿名资源路由、CORS 通配或关闭 iframe sandbox 恢复功能。
+- 公网 SSO 是独立部署能力：`scripts/chtholly-webui-oidc.service` 运行 OAuth2 Proxy，`scripts/webui-oauth2.cfg` 对接 Casdoor OIDC，`scripts/webui.Caddyfile` 只发布管理路径。禁止在 `llm_chat` 实现通用登录、SSO 或网关。按用户决定，该 Casdoor 应用已认证账号均可进入网关，不额外限制管理员邮箱/组；原 WebUI 会话登录仍保留。凭证只进 root-owned 环境文件，OAuth token 不转发到 Bot。OIDC 网关在聊天/工坊插件未加载或本地免密模式错误时仍是独立的公网认证边界；其不可用不得降级直连8120。
 - **日志与终端**: rich（Entari 内建 log 使用 loguru；凭证化运行环境必须关闭会展开局部变量的 `rich_error`）
 - **包管理**: uv（`uv sync` / `uv add` / `uv remove`）
 - **代码质量**: Ruff、Pyright（`typeCheckingMode = "standard"`）

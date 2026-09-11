@@ -1,0 +1,138 @@
+# Import this file alongside the existing preview site. Set WEBUI_HOST in Caddy's service environment.
+(webui_oidc_gateway) {
+	reverse_proxy 127.0.0.1:4180 {
+		header_up Host {$WEBUI_HOST}
+		header_up X-Forwarded-Host {$WEBUI_HOST}
+		header_up X-Forwarded-Proto https
+		header_up X-Forwarded-For {http.request.remote.host}
+		header_up X-Real-IP {http.request.remote.host}
+		header_up -Forwarded
+		header_up -Authorization
+		header_up -Proxy-Authorization
+		header_up -X-Forwarded-User
+		header_up -X-Forwarded-Email
+		header_up -X-Forwarded-Groups
+		header_up -X-Forwarded-Access-Token
+		header_up -X-Auth-Request-*
+		transport http {
+			dial_timeout 3s
+			response_header_timeout 330s
+		}
+		stream_timeout 1h
+	}
+}
+
+{$WEBUI_HOST} {
+	header {
+		-Server
+		-Access-Control-Allow-Origin
+		-Access-Control-Allow-Credentials
+		-Access-Control-Allow-Methods
+		-Access-Control-Allow-Headers
+		-Access-Control-Expose-Headers
+		Cache-Control "private, no-store"
+		Referrer-Policy no-referrer
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		X-Robots-Tag "noindex, nofollow, noarchive"
+		Strict-Transport-Security "max-age=31536000"
+	}
+	request_body {
+		max_size 8MB
+	}
+
+	route {
+		@cross_origin {
+			header Origin *
+			not header Origin https://{$WEBUI_HOST}
+		}
+		respond @cross_origin "Forbidden" 403
+
+		@unsafe_origin {
+			not method GET HEAD
+			not header Origin https://{$WEBUI_HOST}
+		}
+		respond @unsafe_origin "Forbidden" 403
+
+		@upgrade header Upgrade *
+		handle @upgrade {
+			@webui_websocket {
+				method GET
+				path /ws/logs /api/chat
+				header Upgrade websocket
+				header Origin https://{$WEBUI_HOST}
+			}
+			handle @webui_websocket {
+				import webui_oidc_gateway
+			}
+			respond "Not found" 404
+		}
+
+		@oidc {
+			method GET
+			path /oauth2/start /oauth2/callback /oauth2/sign_in /oauth2/sign_out /oauth2/static/*
+		}
+		handle @oidc {
+			import webui_oidc_gateway
+		}
+
+		@navigation {
+			method GET
+			path / /login /settings /config /plugins /market /logs /chat /extension/llm-chat-sessions /extension/llm-chat-memes /extension/plugin-workshop
+		}
+		handle @navigation {
+			rewrite * /
+			import webui_oidc_gateway
+		}
+
+		@assets {
+			method GET HEAD
+			path /assets/* /favicon.ico /favicon.svg
+		}
+		handle @assets {
+			import webui_oidc_gateway
+		}
+
+		@read_api {
+			method GET
+			path_regexp read_api ^/api/(auth/check|health|menus|stats|extensions/manifest|config(?:/[^/]+(?:/schema)?)?|plugins(?:/[^/]+)?|market/(?:plugins(?:/[^/]+)?|tasks/[^/]+)|config-apply/status|llm-chat/sessions/(?:page|scopes|scopes/[^/]+/sessions|sessions/[^/]+(?:/turns)?|turns/[^/]+/(?:events|inspection|context)|events/[^/]+/(?:payload|attachments/[^/]+)|assets/(?:app\.css|app\.js))|llm-chat/memes(?:/page|/assets/(?:app\.css|app\.js)|/files/[^/]+)?|plugin-workshop/(?:page|status|projects(?:/[^/]+/versions(?:/[^/]+(?:/source)?)?)?|assets/(?:app\.css|app\.js)))$
+		}
+		handle @read_api {
+			import webui_oidc_gateway
+		}
+
+		@post_api {
+			method POST
+			path_regexp post_api ^/api/(auth/(?:login|logout)|plugins/[^/]+/(?:toggle|reload)|market/(?:install|uninstall)|config-apply/restart|llm-chat/sessions/scopes/[^/]+/(?:sessions/[^/]+/rollover|hard-reset|events/[^/]+/pin)|llm-chat/memes(?:/[^/]+/retag)?|plugin-workshop/projects/[^/]+/(?:versions(?:/[^/]+/(?:validate|approve|activate|rollback))?|disable))$
+		}
+		handle @post_api {
+			import webui_oidc_gateway
+		}
+
+		@put_api {
+			method PUT
+			path_regexp put_api ^/api/(auth/password|config/[^/]+|plugins/[^/]+/config)$
+		}
+		handle @put_api {
+			import webui_oidc_gateway
+		}
+
+		@patch_api {
+			method PATCH
+			path_regexp patch_api ^/api/llm-chat/memes/[^/]+$
+		}
+		handle @patch_api {
+			import webui_oidc_gateway
+		}
+
+		@delete_api {
+			method DELETE
+			path_regexp delete_api ^/api/llm-chat/(memes/[^/]+|sessions/scopes/[^/]+/events/[^/]+/pin)$
+		}
+		handle @delete_api {
+			import webui_oidc_gateway
+		}
+
+		respond "Not found" 404
+	}
+}
