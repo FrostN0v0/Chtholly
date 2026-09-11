@@ -64,9 +64,11 @@ uv run --locked entari run
 
 部署配置位于 `scripts/webui.Caddyfile`、`scripts/webui-oauth2.cfg` 和 `scripts/chtholly-webui-oidc.service`。Caddy 的 `WEBUI_HOST` 指向管理域名，`ACME_EMAIL` 提供证书联系邮箱；该域名优先使用 Let's Encrypt，签发失败时使用 ZeroSSL 备用签发，不影响其他站点。Casdoor 应用回调须为该域名的 `/oauth2/callback`；OIDC client ID、secret、issuer、redirect URL 与随机 cookie secret 只保存在 root-owned `0600` 环境文件，通过 `OAUTH2_PROXY_*` 注入，不放到前端、Bot 配置或仓库。网关不可用时公网入口失败关闭，SSH 隧道仍可应急访问。
 
-在既有空前缀插件加载列表中加入 `webui_sso`，并设置它的 `public_origin` 为管理域名的 HTTPS origin；`auth_url` 默认固定指向 `http://127.0.0.1:4180/oauth2/auth`。插件只向该回环网关验证本轮请求的 SSO Cookie，然后复用原生 SessionStore；不接受伪造身份头，不修改第三方安装文件。退出会清除两层会话 Cookie 并停在退出页，登录过期则回到 Casdoor，不显示原生密码页；Casdoor 自身的登录态不被其他应用的退出操作连带清除。
+会话使用独立回环 Redis（`scripts/chtholly-webui-sessions.service`、`scripts/webui-redis.conf`）：刷新令牌只保留在加密的服务端会话中，浏览器仅持有签名票据。网关请求 `offline_access`，每 5 分钟按需刷新，Cookie 窗口为 12 小时；Casdoor 刷新令牌到期、撤销或账号权限失效时仍须重新登录。Redis 密码通过同一受限环境文件的 `OAUTH2_PROXY_REDIS_PASSWORD` 注入，ACL 仅保存密码哈希；默认 Redis 服务不启用，也不开放公网端口。旧 Cookie 会话切换到服务端存储时须重新登录一次。
 
-Caddy 只代理明确的管理页面、API 与两个管理 WebSocket；Satori/OneBot、自动 API 文档和未知路径一律拒绝。跨站 Origin 和不带正确 Origin 的写请求在入口拒绝，管理内容禁用共享缓存。DNS 建议保持仅 DNS，以保留工坊最长 330 秒的请求窗口；如启用 CDN 代理，需另行确认超时与真实客户端 IP 配置。
+在既有空前缀插件加载列表中加入 `webui_sso`，并设置它的 `public_origin` 为管理域名的 HTTPS origin；`auth_url` 默认固定指向 `http://127.0.0.1:4180/oauth2/auth`。插件只向该回环网关验证本轮请求的 SSO Cookie，然后复用原生 SessionStore；不接受伪造身份头，不修改第三方安装文件。退出先通过回环网关删除服务端会话，再清除两层 Cookie 并停在退出页，旧票据不可重放。后台标签页失效时不抢先打开登录页，回到前台后才重新访问当前管理页面，并优先复用其他标签页已续期的会话；浏览器返回缓存也会重新检查。登录流程的 CSRF Cookie 有效期为一小时；Casdoor 自身登录态不随此处退出连带清除。
+
+Caddy 只代理明确的管理页面、API 与两个管理 WebSocket；Satori/OneBot、自动 API 文档和未知路径一律拒绝。API、静态脚本和图标未认证时统一返回 401，不分别启动 OAuth 流程。跨站 Origin 和不带正确 Origin 的写请求在入口拒绝，管理内容禁用共享缓存。DNS 建议保持仅 DNS，以保留工坊最长 330 秒的请求窗口；如启用 CDN 代理，需另行确认超时与真实客户端 IP 配置。
 
 ## LLM 会话管理
 
