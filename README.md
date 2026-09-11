@@ -60,9 +60,11 @@ uv run --locked entari run
 
 ## 公网管理登录
 
-公网入口使用独立 HTTPS 域名，经 Caddy 和 OAuth2 Proxy 接入 Casdoor OIDC，再进入原有 WebUI 登录。SSO 属于部署与认证层，不写入 `llm_chat`；聊天会话、表情与工坊页面只负责各自业务。当前策略允许该 Casdoor 应用正常认证的账号进入入口，不额外限制邮箱或组；仍校验 issuer、audience、签名、nonce 和 PKCE。
+公网入口使用独立 HTTPS 域名，经 Caddy 和 OAuth2 Proxy 接入 Casdoor OIDC。启用独立 `webui_sso` 后，Casdoor 认证会自动换取原生 WebUI 管理会话，不再输入第二次 WebUI 密码；SSH 隧道仍保留原密码登录。该 Casdoor 应用允许认证的账号均获得 WebUI 管理权限，不额外限制邮箱或组；网关使用签名 `sub` 作为身份，不要求账号填写或验证邮箱，但继续校验 issuer、audience、签名、nonce 和 PKCE。SSO 不写入 `llm_chat`，也不把后端切成全局免密模式。
 
 部署配置位于 `scripts/webui.Caddyfile`、`scripts/webui-oauth2.cfg` 和 `scripts/chtholly-webui-oidc.service`。Caddy 的 `WEBUI_HOST` 指向管理域名，`ACME_EMAIL` 提供证书联系邮箱；该域名优先使用 Let's Encrypt，签发失败时使用 ZeroSSL 备用签发，不影响其他站点。Casdoor 应用回调须为该域名的 `/oauth2/callback`；OIDC client ID、secret、issuer、redirect URL 与随机 cookie secret 只保存在 root-owned `0600` 环境文件，通过 `OAUTH2_PROXY_*` 注入，不放到前端、Bot 配置或仓库。网关不可用时公网入口失败关闭，SSH 隧道仍可应急访问。
+
+在既有空前缀插件加载列表中加入 `webui_sso`，并设置它的 `public_origin` 为管理域名的 HTTPS origin；`auth_url` 默认固定指向 `http://127.0.0.1:4180/oauth2/auth`。插件只向该回环网关验证本轮请求的 SSO Cookie，然后复用原生 SessionStore；不接受伪造身份头，不修改第三方安装文件。退出会清除两层会话 Cookie 并停在退出页，登录过期则回到 Casdoor，不显示原生密码页；Casdoor 自身的登录态不被其他应用的退出操作连带清除。
 
 Caddy 只代理明确的管理页面、API 与两个管理 WebSocket；Satori/OneBot、自动 API 文档和未知路径一律拒绝。跨站 Origin 和不带正确 Origin 的写请求在入口拒绝，管理内容禁用共享缓存。DNS 建议保持仅 DNS，以保留工坊最长 330 秒的请求窗口；如启用 CDN 代理，需另行确认超时与真实客户端 IP 配置。
 
@@ -96,7 +98,7 @@ llmchat handoff
 
 `persona <key>` 只切换当前聊天范围，并创建不继承旧话题的会话；已有轮次和后台评估继续使用各自启动时的人格快照。`new` 保留关系、画像和长期记忆，但不继承上一话题；`reset` 封存旧会话并新建，不删除审计事件；`handoff` 携带结构化交接继续当前任务。以上变更指令仅限超管，关系与长期记忆不会因换角色清空。
 
-表情收藏与标注不再提供聊天指令；人工管理统一使用 WebUI“表情库管理”。模型按需收藏与启动增量标注仍保留。
+表情收藏与标注不再提供聊天指令；人工管理统一使用 WebUI“表情库管理”。页面的脚本与样式以内联 nonce 加载，列表、图片、上传与修改都通过已认证父页面的 API bridge 工作，兼容隔离 iframe。图片使用受限 Blob URL，翻页或关闭时释放；上传保留原始 multipart 边界，不开放匿名文件接口或放宽沙箱。模型按需收藏与启动增量标注仍保留。
 
 人格作息按上海时区计算；低精力会让文字回复简短，但不会减少明确请求的媒体交付额度（默认每轮最多 6 条）。静态报告继续使用图片渲染，网页与交互原型使用下面的作品交付流程。
 

@@ -89,7 +89,7 @@
 			path /login
 		}
 		handle @password_login {
-			redir / 302
+			redir * / 302
 		}
 
 		@oidc {
