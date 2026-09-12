@@ -66,6 +66,8 @@ uv run --locked entari run
 
 会话使用独立回环 Redis（`scripts/chtholly-webui-sessions.service`、`scripts/webui-redis.conf`）：刷新令牌只保留在加密的服务端会话中，浏览器仅持有签名票据。网关请求 `offline_access`，每 5 分钟按需刷新，Cookie 窗口为 12 小时；Casdoor 刷新令牌到期、撤销或账号权限失效时仍须重新登录。Redis 密码通过同一受限环境文件的 `OAUTH2_PROXY_REDIS_PASSWORD` 注入，ACL 仅保存密码哈希；默认 Redis 服务不启用，也不开放公网端口。旧 Cookie 会话切换到服务端存储时须重新登录一次。
 
+Casdoor 应用的「授权类型」必须同时启用 `authorization_code` 和 `refresh_token`；只请求 `offline_access`、保存刷新令牌或设置刷新有效期都不能代替该配置。缺少 `refresh_token` 时，首次登录仍可能成功，但标准令牌端点会在后续刷新时返回 `unsupported_grant_type`，管理页随之无法续期。验收必须覆盖真实刷新，不能只检查登录成功或 `/ready`；不要改用 Casdoor 的独立刷新路由绕过应用授权类型检查。
+
 在既有空前缀插件加载列表中加入 `webui_sso`，并设置它的 `public_origin` 为管理域名的 HTTPS origin；`auth_url` 默认固定指向 `http://127.0.0.1:4180/oauth2/auth`。插件只向该回环网关验证本轮请求的 SSO Cookie，然后复用原生 SessionStore；不接受伪造身份头，不修改第三方安装文件。退出先通过回环网关删除服务端会话，再清除两层 Cookie 并停在退出页，旧票据不可重放。后台标签页失效时不抢先打开登录页，回到前台后才重新访问当前管理页面，并优先复用其他标签页已续期的会话；浏览器返回缓存也会重新检查。登录流程的 CSRF Cookie 有效期为一小时；Casdoor 自身登录态不随此处退出连带清除。
 
 连接恢复区分登录失效与临时网络故障：网关或身份服务不可用时返回 503，不删除会话、不重放写请求，也不自动发起登录。聊天与日志继续由原生 WebSocket 管理重连，HTTP 会话恢复会合并并退避；原生离线提示仍由真实健康检查控制。维护者通过 `scripts/build_oauth2_proxy.py` 构建固定源码与工具链的网关补丁，包含受限刷新超时、覆盖认证窗口的 Redis 锁租期与刷新令牌验证；构建默认执行回归并输出来源记录。
