@@ -74,7 +74,11 @@ class PluginWorkshopService(Service):
         if sandbox is None:
             from utils.plugin_workshop_sandbox.docker import DockerSandbox
 
-            sandbox = DockerSandbox(config.sandbox_image, framework_version=self.framework_version)
+            sandbox = DockerSandbox(
+                config.sandbox_image,
+                framework_version=self.framework_version,
+                egress_root=self.root / "egress",
+            )
         self.sandbox = sandbox
         self.driver = driver if driver is not None else NativePluginDriver(self.root)
         self._lifecycle_lock = asyncio.Lock()

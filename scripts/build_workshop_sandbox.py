@@ -19,7 +19,14 @@ import subprocess
 from email.parser import BytesParser
 
 DEFAULT_BASE = "ghcr.io/astral-sh/uv@sha256:a041b350d5d9483b538d5af07e9553ee8cbc7fc7fa90c2f7d20d93f18ce9bbd1"
-WORKER_FILES = ("worker.py", "worker_harness.py", "worker_transport.py", "probe_plugin.py")
+WORKER_FILES = (
+    "worker.py",
+    "worker_harness.py",
+    "worker_transport.py",
+    "worker_rendering.py",
+    "worker_http.py",
+    "probe_plugin.py",
+)
 
 
 def docker_json(executable: str, *args: str):
@@ -63,6 +70,13 @@ def collect_inputs(root: Path) -> tuple[dict[str, bytes], str, str]:
         "uv.lock": lock,
         wheel_path: wheel,
     }
+    webui_wheels = set(re.findall(r'vendor/webui/entari_plugin_webui-[^"\s/]+\.whl', lock.decode("utf-8")))
+    if len(webui_wheels) != 1:
+        raise ValueError("The current lock must identify exactly one vendored WebUI wheel")
+    webui_path = webui_wheels.pop()
+    if webui_path.encode() not in pyproject:
+        raise ValueError("Project and lock do not reference the same pinned WebUI wheel")
+    inputs[webui_path] = trusted_bytes(root, webui_path)
     for name in WORKER_FILES:
         inputs[f"worker/{name}"] = trusted_bytes(root, f"utils/plugin_workshop_sandbox/{name}")
     return inputs, framework, hashlib.sha256(wheel).hexdigest()

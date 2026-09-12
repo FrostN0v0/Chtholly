@@ -1,0 +1,126 @@
+{
+  "evidence": {
+    "official_source_root": "https://github.com/oauth2-proxy/oauth2-proxy/tree/81ff034fe2ff3246e670c694b02e3267d1ae46bc",
+    "release_tag": "https://api.github.com/repos/oauth2-proxy/oauth2-proxy/git/tags/a79d2775e0dcd3f3a0811148a1ed3686c0ca40c1",
+    "toolchain_checksums": "https://go.dev/dl/?mode=json",
+    "upstream_findings": [
+      "stored_session.go: lease2s; background lock-wait context; transient failures fall through validation then outer Clear; error wrappers erase types.",
+      "session_state.go: Refreshed has msgpack:- and must not be serialized as a JWT verification exemption.",
+      "oidc.go: createSession verifies returned ID tokens; current Refreshed skips subsequent JWT verification; reloaded session loses that flag and nonce-less refresh fails original-nonce comparison.",
+      "provider_data.go: claim extraction used context.TODO and could outlive authentication cancellation.",
+      "redis_store.go: Redis nil and Redis outage were untyped; ContextTimeoutEnabled was absent.",
+      "requests/http.go: DefaultHTTPClient had no timeout; go.mod requires Go1.26.0.",
+      "coreos/go-oidc v3.20.0 oidc/verify.go: exported TokenExpiredError is typed; signature/JWKS errors can erase underlying cause. Unknown verifier failures reject503 without accepting token or deleting the record."
+    ]
+  },
+  "files": {
+    "oauthproxy.go": {
+      "after": "4bfd2324dfd6edefc1c71b868403694c77c413a6e392cf0dc229df0bd51dfdc5",
+      "before": "ffaac319c26fb5da2573bac43ae92b56b0e830ed1a6965f1a6d4c05002197186"
+    },
+    "pkg/apis/sessions/session_errors.go": {
+      "after": "6161c8edcde9f7058c7ffad6e5a3316fe0acb40c8b4cdf367afa45abff8cdd64",
+      "before": null
+    },
+    "pkg/apis/sessions/session_state.go": {
+      "after": "a456f81cf34a1a26624e2bd9bbf67616e70f6c6eaf3dc43d1708a77b94d35581",
+      "before": "26de599ebe948d5e2facceb5cc51fe30aabf05958fa84b1af1a47a4c671f27f8"
+    },
+    "pkg/middleware/chtholly_refresh_test.go": {
+      "after": "9cfe35eb520fdc4627d7ead766c4edbf43b2be00797b9e38decb8ab318014ef0",
+      "before": null
+    },
+    "pkg/middleware/stored_session.go": {
+      "after": "755597956f34f08b0ed48436a0fe9d9584fa5ad346e27df1db832e7e3167b6f0",
+      "before": "9b8975b497407015b57ded0074a57ed07dad18a9c8d07dce425a1a9640049628"
+    },
+    "pkg/middleware/stored_session_test.go": {
+      "after": "d4cfb3bf6d77a68788be61e9596e463a0ac9dc637908bc45ac38d399f308db6c",
+      "before": "60530f62aad424ecb6686e34577c0a77a0d8f88a85d539ebf027175288966c28"
+    },
+    "pkg/providers/oidc/verifier.go": {
+      "after": "8c0bad1751103b944b572e9cdecf63bcf8401a0ae615c00b7472b798e498e23e",
+      "before": "c4e6ef6eec1a700a5cf2ed65049dc285655686ac5cd58382198fbb6a338a4dd1"
+    },
+    "pkg/requests/http.go": {
+      "after": "b31232a41987ee935dc0f580e9c09c8786b31994e8dd74f56fdc6a0e1db32750",
+      "before": "b72c634de322adfec15bd7c4a73e3409b7c79724862058d3159adb584647b445"
+    },
+    "pkg/sessions/persistence/ticket.go": {
+      "after": "fb1013512c8c6c0e96e34172fc8944606ff4604ec925086ff2c1459f74d6453f",
+      "before": "57cea0d2bfe1c14093a64d3169844a66a62441fe241d50605856efcdc5fe3e00"
+    },
+    "pkg/sessions/persistence/ticket_test.go": {
+      "after": "88236b873706254609c9cf6cee20e9cbe51744c1c406087a3796564f4de0a4cb",
+      "before": "2fabc5eb03d1d6a16b67835146f8c8edf9c2110596d0a4ce783373d50d38f21d"
+    },
+    "pkg/sessions/redis/redis_store.go": {
+      "after": "a42a136a0407e693a35783d485a3300c9ad07737b8f04aa01e13490a17d69d95",
+      "before": "0d6068e48672d9ae43a066a54a8cbc13f2a1e9f770a9a6ece921cd607eb76ade"
+    },
+    "providers/adfs.go": {
+      "after": "50e2fa8dad7502830ad174f9c5585d2311bb0cf2eac8d511af3b467b68292efc",
+      "before": "86961a7ebc1291ca2120382056eacd1bce3ea59d751f8b629162120fe4f2d377"
+    },
+    "providers/adfs_test.go": {
+      "after": "9fd2080d050445b16a8c43dc6308f1b7d6603e01b22309f60210e5d0c6b75ba4",
+      "before": "ae4901d3110eeef39326cb57b326424085dd3bd97e5db6a25c6ae8f3ce0269d6"
+    },
+    "providers/azure.go": {
+      "after": "e89869ef2db3e3d7898361736759497edd8e6a6ca11d61be1a6c6c8b809679fa",
+      "before": "6645d62504df27bf533aab6df100d0f6a40eec06930feb0259bd70914044cf22"
+    },
+    "providers/chtholly_oidc_test.go": {
+      "after": "e9e06a01aa5a8ef643fedd526850f735390debc04518acbf47424ba7bc208be4",
+      "before": null
+    },
+    "providers/ms_entra_id.go": {
+      "after": "20310830a6fb9cdbc38e366b4c79cca999523555d0cd45f60910e891139ee40d",
+      "before": "5486a95ba4d035ff532542b84a6832520dafb66e8a14bbcb23c8226af8eb5d7b"
+    },
+    "providers/oidc.go": {
+      "after": "f1ec96aa8db18bc8580a401217b40ca42a10c51a72e8ab595a80a1e6ee79f3c6",
+      "before": "58ba9abf2b6f8ed3303b351c8718e741883462290856c3d0e4a9033a2d174ee5"
+    },
+    "providers/oidc_test.go": {
+      "after": "ed8655b120fc78b7626e6178001ccc5cb6995c393add6819e8c445e39f11b7d9",
+      "before": "91a6183508f1e74119d354a8447ab515d67ec7e717a0dc384163db19414861b6"
+    },
+    "providers/provider_data.go": {
+      "after": "66d417e1b7f939bb7221669c80b893f0771d0776da217ab0e2ad98fe067df316",
+      "before": "07caa155f0cf21d5c956e7b17e592cc7372bf3030afd68c74acd9c19de61f223"
+    },
+    "providers/provider_data_test.go": {
+      "after": "3e123ef790a714e02ab820a6caa162bfdd62476292200ddffad2e0cd25416f23",
+      "before": "ffb4fee1c62d53f2607593f95b9aac6844c954d3cc8eb2ff6234efc621836ece"
+    }
+  },
+  "go_mod_sha256": "a20e9317204378379da72e2eb9e66ae81883ce39e290af0a295699fc5487e84f",
+  "go_sum_sha256": "65290ffed063a57f648e592a37c0d88616f27ce256ca20d673e28d8c79188218",
+  "go_version": "go1.26.8",
+  "patch": "refresh-hardening.patch",
+  "patch_sha256": "045b04fdea0683d4b06eb7ef842205717056dab971a0168ec0f65b1dabe7602b",
+  "patched_version": "v7.15.4-chtholly.1",
+  "source_commit": "81ff034fe2ff3246e670c694b02e3267d1ae46bc",
+  "source_sha256": "12af844d3fa3b53693e4dd6874fc9ca2861d1eee1c79678c623cab906b944d1f",
+  "source_url": "https://codeload.github.com/oauth2-proxy/oauth2-proxy/tar.gz/81ff034fe2ff3246e670c694b02e3267d1ae46bc",
+  "toolchains": {
+    "linux-amd64": {
+      "filename": "go1.26.8.linux-amd64.tar.gz",
+      "sha256": "d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b"
+    },
+    "linux-arm64": {
+      "filename": "go1.26.8.linux-arm64.tar.gz",
+      "sha256": "211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0"
+    },
+    "windows-amd64": {
+      "filename": "go1.26.8.windows-amd64.zip",
+      "sha256": "b92c3b2adae85a11ba71fe7216daf0d84e82af4c8ab6c5625807f28622043a59"
+    },
+    "windows-arm64": {
+      "filename": "go1.26.8.windows-arm64.zip",
+      "sha256": "4bc560ed3ccb64eec0be6180b8c29185c07f5215276820adb4303d7bf3365435"
+    }
+  },
+  "upstream_version": "v7.15.4"
+}

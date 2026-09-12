@@ -1,0 +1,1622 @@
+--- a/oauthproxy.go
++++ b/oauthproxy.go
+@@ -429,11 +429,18 @@
+ 		chain = chain.Append(middleware.NewBasicAuthSessionLoader(validator, opts.HtpasswdUserGroups, opts.LegacyPreferEmailToUser))
+ 	}
+ 
++	// Use the error-preserving path only for the concrete generic OIDC provider.
++	// Embedded providers may override validation with additional security checks.
++	var validateWithError func(context.Context, *sessionsapi.SessionState) error
++	if oidcProvider, ok := provider.(*providers.OIDCProvider); ok {
++		validateWithError = oidcProvider.ValidateSessionWithError
++	}
+ 	chain = chain.Append(middleware.NewStoredSessionLoader(&middleware.StoredSessionLoaderOptions{
+-		SessionStore:    sessionStore,
+-		RefreshPeriod:   opts.Cookie.Refresh,
+-		RefreshSession:  provider.RefreshSession,
+-		ValidateSession: provider.ValidateSession,
++		SessionStore:             sessionStore,
++		RefreshPeriod:            opts.Cookie.Refresh,
++		RefreshSession:           provider.RefreshSession,
++		ValidateSession:          provider.ValidateSession,
++		ValidateSessionWithError: validateWithError,
+ 	}))
+ 
+ 	return chain
+@@ -883,6 +890,9 @@
+ // OAuthCallback is the OAuth2 authentication flow callback that finishes the
+ // OAuth2 authentication flow
+ func (p *OAuthProxy) OAuthCallback(rw http.ResponseWriter, req *http.Request) {
++	ctx, cancel := context.WithTimeout(req.Context(), 20*time.Second)
++	defer cancel()
++	req = req.WithContext(ctx)
+ 	remoteAddr := ip.GetClientString(p.realClientIPParser, req, true)
+ 
+ 	// finish the oauth cycle
+--- /dev/null
++++ b/pkg/apis/sessions/session_errors.go
+@@ -0,0 +1,12 @@
++package sessions
++
++import "errors"
++
++// ErrSessionUnavailable denotes a dependency failure, never a login decision.
++var ErrSessionUnavailable = errors.New("session service unavailable")
++
++// ErrSessionMissing denotes an absent/expired server-side ticket record.
++var ErrSessionMissing = errors.New("session does not exist")
++
++// ErrSessionInvalid denotes a definite authentication failure.
++var ErrSessionInvalid = errors.New("session is invalid")
+--- a/pkg/apis/sessions/session_state.go
++++ b/pkg/apis/sessions/session_state.go
+@@ -23,6 +23,11 @@
+ 	RefreshToken string `msgpack:"rt,omitempty"`
+ 
+ 	Nonce []byte `msgpack:"n,omitempty"`
++
++	// OIDCNonceOptional is set only after a verified refresh response supplies
++	// a new ID token. It permits an omitted nonce, not an incorrect nonce and
++	// never bypasses signature, issuer, audience or expiry verification.
++	OIDCNonceOptional bool `msgpack:"ono,omitempty"`
+ 
+ 	Email             string   `msgpack:"e,omitempty"`
+ 	User              string   `msgpack:"u,omitempty"`
+--- /dev/null
++++ b/pkg/middleware/chtholly_refresh_test.go
+@@ -0,0 +1,247 @@
++package middleware
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/alicebob/miniredis/v2"
++	middlewareapi "github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/middleware"
++	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/options"
++	sessionsapi "github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/sessions"
++	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/sessions/persistence"
++	redissessions "github.com/oauth2-proxy/oauth2-proxy/v7/pkg/sessions/redis"
++	"github.com/oauth2-proxy/oauth2-proxy/v7/providers"
++)
++
++func chthollyStoredTicket(t *testing.T) (*miniredis.Miniredis, sessionsapi.SessionStore, *http.Request) {
++	t.Helper()
++	mr := miniredis.RunT(t)
++	store, err := redissessions.NewRedisSessionStore(&options.SessionOptions{
++		Redis: options.RedisStoreOptions{ConnectionURL: "redis://" + mr.Addr()},
++	}, &options.Cookie{Name: "_oauth2_proxy", Path: "/", Expire: 12 * time.Hour,
++		Secret: "0123456789abcdef0123456789abcdef"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		_ = store.(*persistence.Manager).Store.(*redissessions.SessionStore).Client.(interface{ Close() error }).Close()
++	})
++	created := time.Now().Add(-10 * time.Minute)
++	expires := time.Now().Add(time.Hour)
++	session := &sessionsapi.SessionState{CreatedAt: &created, ExpiresOn: &expires,
++		User: "alice", RefreshToken: "rotating-original", AccessToken: "old-access"}
++	rw := httptest.NewRecorder()
++	req := httptest.NewRequest(http.MethodGet, "/oauth2/auth", nil)
++	if err := store.Save(rw, req, session); err != nil {
++		t.Fatal(err)
++	}
++	for _, cookie := range rw.Result().Cookies() {
++		req.AddCookie(cookie)
++	}
++	return mr, store, req
++}
++
++func chthollyRefreshHandler(store sessionsapi.SessionStore, endpoint string) http.Handler {
++	u, _ := url.Parse(endpoint)
++	provider := &providers.OIDCProvider{ProviderData: &providers.ProviderData{
++		ClientID: "test-client", ClientSecret: "test-secret", RedeemURL: u,
++	}}
++	// The local rotating-token IdP intentionally omits its optional ID token.
++	// JWT/nonce verification is covered by signed-token provider regressions.
++	return NewStoredSessionLoader(&StoredSessionLoaderOptions{
++		SessionStore: store, RefreshPeriod: time.Minute, RefreshSession: provider.RefreshSession,
++		ValidateSession: func(context.Context, *sessionsapi.SessionState) bool { return true },
++	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if middlewareapi.GetRequestScope(r).Session == nil {
++			w.WriteHeader(401)
++			return
++		}
++		w.WriteHeader(202)
++	}))
++}
++
++func chthollyServe(h http.Handler, req *http.Request) *httptest.ResponseRecorder {
++	rw := httptest.NewRecorder()
++	req = middlewareapi.AddRequestScope(req.Clone(req.Context()), &middlewareapi.RequestScope{})
++	h.ServeHTTP(rw, req)
++	return rw
++}
++
++func TestChthollySlowRotatingRefreshIsSingleExchange(t *testing.T) {
++	mr, store, req := chthollyStoredTicket(t)
++	var exchanges atomic.Int32
++	started := make(chan struct{})
++	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		if exchanges.Add(1) != 1 {
++			w.WriteHeader(400)
++			_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
++			return
++		}
++		close(started)
++		// miniredis does not advance TTLs with wall time: advance it explicitly
++		// while the real HTTP exchange is still pending beyond the old 2s lease.
++		time.Sleep(2300 * time.Millisecond)
++		mr.FastForward(2300 * time.Millisecond)
++		time.Sleep(100 * time.Millisecond)
++		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "new-access",
++			"refresh_token": "rotating-new", "expires_in": 3600, "token_type": "Bearer"})
++	}))
++	defer idp.Close()
++	h := chthollyRefreshHandler(store, idp.URL)
++	results := make(chan *httptest.ResponseRecorder, 2)
++	go func() { results <- chthollyServe(h, req) }()
++	select {
++	case <-started:
++	case <-time.After(5 * time.Second):
++		t.Fatal("refresh did not start")
++	}
++	go func() { results <- chthollyServe(h, req) }()
++	for range 2 {
++		select {
++		case rw := <-results:
++			if rw.Code != 202 {
++				t.Fatalf("concurrent auth returned %d", rw.Code)
++			}
++		case <-time.After(25 * time.Second):
++			t.Fatal("authentication did not finish")
++		}
++	}
++	if exchanges.Load() != 1 {
++		t.Fatalf("rotating token exchanged %d times", exchanges.Load())
++	}
++	saved, err := store.Load(req)
++	if err != nil || saved == nil || saved.RefreshToken != "rotating-new" {
++		t.Fatalf("rotated session not usable: %v", err)
++	}
++}
++
++func TestChthollyRefreshFailuresRetainOnlyValidTickets(t *testing.T) {
++	for _, tc := range []struct {
++		name, body   string
++		status, want int
++		retained     bool
++	}{
++		{"outage", `{"error":"temporarily_unavailable"}`, 503, 503, true},
++		{"revocation", `{"error":"invalid_grant"}`, 400, 401, false},
++		{"invalid-client", `{"error":"invalid_client"}`, 401, 401, false},
++		{"misleading-description", `{"error":"server_error","error_description":"invalid_grant diagnostic"}`, 503, 503, true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			_, store, req := chthollyStoredTicket(t)
++			idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				w.Header().Set("Content-Type", "application/json")
++				w.WriteHeader(tc.status)
++				_, _ = w.Write([]byte(tc.body))
++			}))
++			defer idp.Close()
++			rw := chthollyServe(chthollyRefreshHandler(store, idp.URL), req)
++			if rw.Code != tc.want {
++				t.Fatalf("got %d, want %d", rw.Code, tc.want)
++			}
++			saved, err := store.Load(req)
++			if tc.retained {
++				if err != nil || saved == nil || saved.RefreshToken != "rotating-original" {
++					t.Fatalf("transient failure destroyed record: %v", err)
++				}
++				if len(rw.Result().Cookies()) != 0 || rw.Header().Get("Location") != "" {
++					t.Fatal("outage mutated browser ticket or redirected to login")
++				}
++			} else if err == nil || saved != nil {
++				t.Fatal("revoked record survived")
++			}
++		})
++	}
++}
++
++func TestChthollyCancelledRefreshStopsWithoutDeletingTicket(t *testing.T) {
++	_, store, req := chthollyStoredTicket(t)
++	started, stopped := make(chan struct{}), make(chan struct{})
++	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		close(started)
++		_ = r.ParseForm()
++		<-r.Context().Done()
++		close(stopped)
++	}))
++	defer idp.Close()
++	ctx, cancel := context.WithCancel(req.Context())
++	defer cancel()
++	result := make(chan *httptest.ResponseRecorder, 1)
++	h := chthollyRefreshHandler(store, idp.URL)
++	go func() { result <- chthollyServe(h, req.WithContext(ctx)) }()
++	select {
++	case <-started:
++	case <-time.After(5 * time.Second):
++		t.Fatal("refresh did not start")
++	}
++	cancel()
++	select {
++	case rw := <-result:
++		if rw.Code != 503 || len(rw.Result().Cookies()) != 0 {
++			t.Fatal("cancellation became login")
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatal("cancelled authentication still running")
++	}
++	select {
++	case <-stopped:
++	case <-time.After(2 * time.Second):
++		t.Fatal("provider HTTP ignored cancellation")
++	}
++	saved, err := store.Load(req)
++	if err != nil || saved == nil || saved.RefreshToken != "rotating-original" {
++		t.Fatal("cancel destroyed record")
++	}
++}
++
++func TestChthollyRedisOutageAndMalformedTickets(t *testing.T) {
++	mr, store, req := chthollyStoredTicket(t)
++	h := chthollyRefreshHandler(store, "http://127.0.0.1:1")
++	mr.SetError("LOADING temporarily unavailable")
++	rw := chthollyServe(h, req)
++	mr.SetError("")
++	if rw.Code != 503 || len(rw.Result().Cookies()) != 0 {
++		t.Fatal("Redis outage became login")
++	}
++	if saved, err := store.Load(req); err != nil || saved == nil {
++		t.Fatal("Redis outage erased record")
++	}
++	bad := httptest.NewRequest(http.MethodGet, "/oauth2/auth", nil)
++	bad.AddCookie(&http.Cookie{Name: "_oauth2_proxy", Value: "malformed"})
++	if rw := chthollyServe(h, bad); rw.Code != 401 {
++		t.Fatalf("malformed ticket returned %d", rw.Code)
++	}
++	mr.FastForward(13 * time.Hour)
++	if rw := chthollyServe(h, req); rw.Code != 401 {
++		t.Fatalf("expired record returned %d", rw.Code)
++	}
++}
++
++func TestChthollyAuthenticationDeadlineStopsStoreWork(t *testing.T) {
++	stopped := make(chan struct{})
++	store := &fakeSessionStore{LoadFunc: func(req *http.Request) (*sessionsapi.SessionState, error) {
++		<-req.Context().Done()
++		close(stopped)
++		return nil, sessionsapi.ErrSessionUnavailable
++	}, ClearFunc: func(http.ResponseWriter, *http.Request) error {
++		t.Error("authentication timeout cleared a server record")
++		return nil
++	}}
++	start := time.Now()
++	rw := chthollyServe(chthollyRefreshHandler(store, "http://127.0.0.1:1"),
++		httptest.NewRequest(http.MethodGet, "/oauth2/auth", nil))
++	if elapsed := time.Since(start); rw.Code != 503 || elapsed > 23*time.Second {
++		t.Fatalf("authentication deadline failed: status=%d duration=%s", rw.Code, elapsed)
++	}
++	select {
++	case <-stopped:
++	default:
++		t.Fatal("store work survived authentication response")
++	}
++}
+--- a/pkg/middleware/stored_session.go
++++ b/pkg/middleware/stored_session.go
+@@ -5,7 +5,6 @@
+ 	"errors"
+ 	"fmt"
+ 	"net/http"
+-	"strings"
+ 	"time"
+ 
+ 	"github.com/justinas/alice"
+@@ -13,50 +12,22 @@
+ 	sessionsapi "github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/sessions"
+ 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/logger"
+ 	"github.com/oauth2-proxy/oauth2-proxy/v7/providers"
++	"golang.org/x/oauth2"
+ )
+ 
+ const (
+-	// When attempting to obtain the lock, if it's not done before this timeout
+-	// then exit and fail the refresh attempt.
+-	// TODO: This should probably be configurable by the end user.
+-	sessionRefreshObtainTimeout = 5 * time.Second
+-
+-	// Maximum time allowed for a session refresh attempt.
+-	// If the refresh request isn't finished within this time, the lock will be
+-	// released.
+-	// TODO: This should probably be configurable by the end user.
+-	sessionRefreshLockDuration = 2 * time.Second
+-
+-	// How long to wait after failing to obtain the lock before trying again.
+-	// TODO: This should probably be configurable by the end user.
+-	sessionRefreshRetryPeriod = 10 * time.Millisecond
++	// All authentication work, including store access and lock acquisition,
++	// is cancelled before the non-renewing Redis lease can expire.
++	sessionAuthenticationTimeout = 20 * time.Second
++	sessionRefreshObtainTimeout  = 20 * time.Second
++	sessionRefreshLockDuration   = 30 * time.Second
++	sessionRefreshRetryPeriod    = 10 * time.Millisecond
+ )
+ 
+-// isFatalRefreshError checks if a refresh error indicates a revoked or
+-// non-existent session that should be immediately invalidated.
+-// Fatal errors indicate the session is no longer valid at the provider level.
+-// Non-fatal errors (network issues, timeouts) should not invalidate the session.
+-//
+-// Only checks standard OAuth2 error codes (RFC 6749 Section 5.2).
+-// Does NOT check error_description strings as they are optional and provider-specific.
+ func isFatalRefreshError(err error) bool {
+-	if err == nil {
+-		return false
+-	}
+-
+-	// Only check standard OAuth2 error codes (RFC 6749 Section 5.2)
+-	// Do NOT check error_description strings as they are optional and provider-specific
+-	fatalErrors := []string{
+-		"invalid_grant",  // refresh token revoked, expired, or session terminated
+-		"invalid_client", // client credentials no longer valid
+-	}
+-
+-	for _, fe := range fatalErrors {
+-		if strings.Contains(err.Error(), fe) {
+-			return true
+-		}
+-	}
+-	return false
++	var tokenError *oauth2.RetrieveError
++	return errors.As(err, &tokenError) &&
++		(tokenError.ErrorCode == "invalid_grant" || tokenError.ErrorCode == "invalid_client")
+ }
+ 
+ // StoredSessionLoaderOptions contains all of the requirements to construct
+@@ -75,7 +46,8 @@
+ 	// Provider based session validation.
+ 	// If the sesssion is older than `RefreshPeriod` but the provider doesn't
+ 	// refresh it, we must re-validate using this validation.
+-	ValidateSession func(context.Context, *sessionsapi.SessionState) bool
++	ValidateSession          func(context.Context, *sessionsapi.SessionState) bool
++	ValidateSessionWithError func(context.Context, *sessionsapi.SessionState) error
+ }
+ 
+ // NewStoredSessionLoader creates a new storedSessionLoader which loads
+@@ -84,10 +56,11 @@
+ // If a session was loader by a previous handler, it will not be replaced.
+ func NewStoredSessionLoader(opts *StoredSessionLoaderOptions) alice.Constructor {
+ 	ss := &storedSessionLoader{
+-		store:            opts.SessionStore,
+-		refreshPeriod:    opts.RefreshPeriod,
+-		sessionRefresher: opts.RefreshSession,
+-		sessionValidator: opts.ValidateSession,
++		store:                     opts.SessionStore,
++		refreshPeriod:             opts.RefreshPeriod,
++		sessionRefresher:          opts.RefreshSession,
++		sessionValidator:          opts.ValidateSession,
++		sessionValidatorWithError: opts.ValidateSessionWithError,
+ 	}
+ 	return ss.loadSession
+ }
+@@ -95,10 +68,11 @@
+ // storedSessionLoader is responsible for loading sessions from cookie
+ // identified sessions in the session store.
+ type storedSessionLoader struct {
+-	store            sessionsapi.SessionStore
+-	refreshPeriod    time.Duration
+-	sessionRefresher func(context.Context, *sessionsapi.SessionState) (bool, error)
+-	sessionValidator func(context.Context, *sessionsapi.SessionState) bool
++	store                     sessionsapi.SessionStore
++	refreshPeriod             time.Duration
++	sessionRefresher          func(context.Context, *sessionsapi.SessionState) (bool, error)
++	sessionValidator          func(context.Context, *sessionsapi.SessionState) bool
++	sessionValidatorWithError func(context.Context, *sessionsapi.SessionState) error
+ }
+ 
+ // loadSession attempts to load a session as identified by the request cookies.
+@@ -117,13 +91,19 @@
+ 
+ 		session, err := s.getValidatedSession(rw, req)
+ 		if err != nil && !errors.Is(err, http.ErrNoCookie) {
+-			// In the case when there was an error loading the session,
+-			// we should clear the session
+-			logger.Errorf("Error loading cookied session: %v, removing session", err)
+-			err = s.store.Clear(rw, req)
+-			if err != nil {
+-				logger.Errorf("Error removing session: %v", err)
+-			}
++			rw.Header().Set("Cache-Control", "no-store")
++			if errors.Is(err, sessionsapi.ErrSessionUnavailable) {
++				rw.Header().Set("Retry-After", "5")
++				http.Error(rw, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
++				return
++			}
++			// Only a definite invalid session clears the record. Dependency
++			// failures must never erase a valid ticket or redirect to login.
++			if clearErr := s.store.Clear(rw, req); clearErr != nil {
++				logger.Errorf("Error removing invalid session: %v", clearErr)
++			}
++			http.Error(rw, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
++			return
+ 		}
+ 
+ 		// Add the session to the scope if it was found
+@@ -135,6 +115,9 @@
+ // getValidatedSession is responsible for loading a session and making sure
+ // that it is valid.
+ func (s *storedSessionLoader) getValidatedSession(rw http.ResponseWriter, req *http.Request) (*sessionsapi.SessionState, error) {
++	ctx, cancel := context.WithTimeout(req.Context(), sessionAuthenticationTimeout)
++	defer cancel()
++	req = req.WithContext(ctx)
+ 	session, err := s.store.Load(req)
+ 	if err != nil || session == nil {
+ 		// No session was found in the storage or error occurred, nothing more to do
+@@ -143,9 +126,15 @@
+ 
+ 	err = s.refreshSessionIfNeeded(rw, req, session)
+ 	if err != nil {
+-		return nil, fmt.Errorf("error refreshing access token for session (%s): %v", session, err)
+-	}
+-
++		return nil, fmt.Errorf("error refreshing access token for session: %w", err)
++	}
++
++	if err := req.Context().Err(); err != nil {
++		return nil, fmt.Errorf("%w: %w", sessionsapi.ErrSessionUnavailable, err)
++	}
++	if session.IsExpired() {
++		return nil, fmt.Errorf("%w: session is expired", sessionsapi.ErrSessionInvalid)
++	}
+ 	return session, nil
+ }
+ 
+@@ -159,19 +148,23 @@
+ 	}
+ 
+ 	var lockObtained bool
+-	ctx, cancel := context.WithTimeout(context.Background(), sessionRefreshObtainTimeout)
++	ctx, cancel := context.WithTimeout(req.Context(), sessionRefreshObtainTimeout)
+ 	defer cancel()
++	req = req.WithContext(ctx)
+ 
+ 	for !lockObtained {
+ 		select {
+ 		case <-ctx.Done():
+-			return errors.New("timeout obtaining session lock")
++			return fmt.Errorf("%w: timeout obtaining session lock: %w", sessionsapi.ErrSessionUnavailable, ctx.Err())
+ 		default:
+ 			err := session.ObtainLock(req.Context(), sessionRefreshLockDuration)
+ 			if err != nil && !errors.Is(err, sessionsapi.ErrLockNotObtained) {
+-				return fmt.Errorf("error occurred while trying to obtain lock: %v", err)
++				return fmt.Errorf("%w: obtaining session lock: %w", sessionsapi.ErrSessionUnavailable, err)
+ 			} else if errors.Is(err, sessionsapi.ErrLockNotObtained) {
+-				time.Sleep(sessionRefreshRetryPeriod)
++				select {
++				case <-ctx.Done():
++				case <-time.After(sessionRefreshRetryPeriod):
++				}
+ 				continue
+ 			}
+ 			// No error means we obtained the lock
+@@ -185,7 +178,11 @@
+ 		if session == nil {
+ 			return
+ 		}
+-		if err := session.ReleaseLock(req.Context()); err != nil {
++		// Release still needs to run when the client disconnected. The bounded
++		// cleanup context cannot extend provider work or the lease.
++		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(req.Context()), time.Second)
++		defer releaseCancel()
++		if err := session.ReleaseLock(releaseCtx); err != nil {
+ 			logger.Errorf("unable to release lock: %v", err)
+ 		}
+ 	}()
+@@ -193,7 +190,7 @@
+ 	// Reload the session in case it was changed underneath us.
+ 	freshSession, err := s.store.Load(req)
+ 	if err != nil {
+-		return fmt.Errorf("could not load session: %v", err)
++		return fmt.Errorf("could not load session: %w", err)
+ 	}
+ 	if freshSession == nil {
+ 		return errors.New("session no longer exists, it may have been removed by another request")
+@@ -216,28 +213,18 @@
+ 	// We are holding the lock and the session needs a refresh
+ 	logger.Printf("Refreshing session - User: %s; SessionAge: %s", session.User, session.Age())
+ 	if err := s.refreshSession(rw, req, session); err != nil {
+-		logger.Errorf("Unable to refresh session: %v", err)
+-
+-		// Check if this is a fatal error that indicates the session is revoked
+-		// or no longer valid at the provider level
+-		if isFatalRefreshError(err) {
+-			logger.Printf("Fatal refresh error detected (session revoked or invalid), clearing session for user: %s", session.User)
+-
+-			// Clear the session from storage (Redis) and remove the cookie
+-			if err := s.store.Clear(rw, req); err != nil {
+-				logger.Errorf("failed clearing session: %v", err)
+-			}
+-
+-			// Return error immediately to force re-authentication
+-			return fmt.Errorf("session invalidated due to fatal refresh error: %w", err)
+-		}
+-
+-		// For non-fatal errors (network issues, timeouts), keep the session
+-		// and let validateSession determine if it's still usable
+-	}
+-
+-	// Validate all sessions after any Redeem/Refresh operation (fail or success)
+-	return s.validateSession(req.Context(), session)
++		if isFatalRefreshError(err) || errors.Is(err, sessionsapi.ErrSessionInvalid) {
++			// Invalidate while still holding the lease, before a waiting request
++			// can reload the revoked token. The outer handler clears its cookie.
++			if clearErr := s.store.Clear(rw, req); clearErr != nil {
++				logger.Errorf("failed clearing revoked session: %v", clearErr)
++			}
++			return err
++		}
++		return fmt.Errorf("%w: %w", sessionsapi.ErrSessionUnavailable, err)
++	}
++
++	return nil
+ }
+ 
+ // needsRefresh determines whether we should attempt to refresh a session or not.
+@@ -250,7 +237,7 @@
+ func (s *storedSessionLoader) refreshSession(rw http.ResponseWriter, req *http.Request, session *sessionsapi.SessionState) error {
+ 	refreshed, err := s.sessionRefresher(req.Context(), session)
+ 	if err != nil && !errors.Is(err, providers.ErrNotImplemented) {
+-		return fmt.Errorf("error refreshing tokens: %v", err)
++		return fmt.Errorf("error refreshing tokens: %w", err)
+ 	}
+ 
+ 	// HACK:
+@@ -266,7 +253,17 @@
+ 	// Session not refreshed, nothing to persist.
+ 	if !refreshed {
+ 		logger.Printf("Session not refreshed - User: %s; no refresh token available or provider returned false", session.User)
+-		return nil
++		return s.validateSession(req.Context(), session)
++	}
++
++	if err := req.Context().Err(); err != nil {
++		return fmt.Errorf("%w: %w", sessionsapi.ErrSessionUnavailable, err)
++	}
++
++	// Never persist a fresh timestamp before validation succeeds: otherwise a
++	// concurrent request could accept a record whose IdP validation failed.
++	if err := s.validateSession(req.Context(), session); err != nil {
++		return err
+ 	}
+ 
+ 	// If we refreshed, update the `CreatedAt` time to reset the refresh timer
+@@ -287,11 +284,14 @@
+ // An error implies the session is not longer valid.
+ func (s *storedSessionLoader) validateSession(ctx context.Context, session *sessionsapi.SessionState) error {
+ 	if session.IsExpired() {
+-		return errors.New("session is expired")
+-	}
+-
++		return fmt.Errorf("%w: session is expired", sessionsapi.ErrSessionInvalid)
++	}
++
++	if s.sessionValidatorWithError != nil {
++		return s.sessionValidatorWithError(ctx, session)
++	}
+ 	if !s.sessionValidator(ctx, session) {
+-		return errors.New("session is invalid")
++		return sessionsapi.ErrSessionInvalid
+ 	}
+ 
+ 	return nil
+--- a/pkg/middleware/stored_session_test.go
++++ b/pkg/middleware/stored_session_test.go
+@@ -4,6 +4,7 @@
+ 	"context"
+ 	"errors"
+ 	"fmt"
++	"golang.org/x/oauth2"
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"sync"
+@@ -88,8 +89,6 @@
+ 		noRefresh      = "NoRefresh"
+ 		notImplemented = "NotImplemented"
+ 	)
+-
+-	var ctx = context.Background()
+ 
+ 	Context("StoredSessionLoader", func() {
+ 		now := time.Now()
+@@ -306,12 +305,7 @@
+ 					"Cookie": []string{"_oauth2_proxy=RefreshError"},
+ 				},
+ 				existingSession: nil,
+-				expectedSession: &sessionsapi.SessionState{
+-					RefreshToken: "RefreshError",
+-					CreatedAt:    &createdPast,
+-					ExpiresOn:    &createdFuture,
+-					Lock:         &sessionsapi.NoOpLock{},
+-				},
++				expectedSession: nil,
+ 				store:           defaultSessionStore,
+ 				refreshPeriod:   1 * time.Minute,
+ 				refreshSession:  defaultRefreshFunc,
+@@ -581,20 +575,7 @@
+ 				expectValidated:          false,
+ 				expectedLockObtained:     true,
+ 			}),
+-			Entry("when obtaining lock failed with a valid session", refreshSessionIfNeededTableInput{
+-				refreshPeriod: 1 * time.Minute,
+-				session: &sessionsapi.SessionState{
+-					RefreshToken: noRefresh,
+-					CreatedAt:    &createdPast,
+-					Lock: &testLock{
+-						obtainError: sessionsapi.ErrLockNotObtained,
+-					},
+-				},
+-				expectedErr:          errors.New("timeout obtaining session lock"),
+-				expectRefreshed:      false,
+-				expectValidated:      false,
+-				expectedLockObtained: true,
+-			}),
++
+ 			Entry("when the session is not refreshed by the provider", refreshSessionIfNeededTableInput{
+ 				refreshPeriod: 1 * time.Minute,
+ 				session: &sessionsapi.SessionState{
+@@ -637,140 +618,6 @@
+ 		)
+ 	})
+ 
+-	Context("refreshSession", func() {
+-		type refreshSessionWithProviderTableInput struct {
+-			session     *sessionsapi.SessionState
+-			expectedErr error
+-			expectSaved bool
+-		}
+-
+-		now := time.Now()
+-
+-		DescribeTable("when refreshing with the provider",
+-			func(in refreshSessionWithProviderTableInput) {
+-				saved := false
+-
+-				s := &storedSessionLoader{
+-					store: &fakeSessionStore{
+-						SaveFunc: func(_ http.ResponseWriter, _ *http.Request, ss *sessionsapi.SessionState) error {
+-							saved = true
+-							if ss.AccessToken == "NoSave" {
+-								return errors.New("unable to save session")
+-							}
+-							return nil
+-						},
+-					},
+-					sessionRefresher: func(_ context.Context, ss *sessionsapi.SessionState) (bool, error) {
+-						switch ss.RefreshToken {
+-						case refresh:
+-							return true, nil
+-						case noRefresh:
+-							return false, nil
+-						case notImplemented:
+-							return false, providers.ErrNotImplemented
+-						default:
+-							return false, errors.New("error refreshing session")
+-						}
+-					},
+-				}
+-
+-				req := httptest.NewRequest("", "/", nil)
+-				req = middlewareapi.AddRequestScope(req, &middlewareapi.RequestScope{})
+-				err := s.refreshSession(nil, req, in.session)
+-				if in.expectedErr != nil {
+-					Expect(err).To(MatchError(in.expectedErr))
+-				} else {
+-					Expect(err).ToNot(HaveOccurred())
+-				}
+-				Expect(saved).To(Equal(in.expectSaved))
+-			},
+-			Entry("when the provider does not refresh the session", refreshSessionWithProviderTableInput{
+-				session: &sessionsapi.SessionState{
+-					RefreshToken: noRefresh,
+-				},
+-				expectedErr: nil,
+-				expectSaved: false,
+-			}),
+-			Entry("when the provider refreshes the session", refreshSessionWithProviderTableInput{
+-				session: &sessionsapi.SessionState{
+-					RefreshToken: refresh,
+-				},
+-				expectedErr: nil,
+-				expectSaved: true,
+-			}),
+-			Entry("when the provider doesn't implement refresh", refreshSessionWithProviderTableInput{
+-				session: &sessionsapi.SessionState{
+-					RefreshToken: notImplemented,
+-				},
+-				expectedErr: nil,
+-				expectSaved: true,
+-			}),
+-			Entry("when the provider returns an error", refreshSessionWithProviderTableInput{
+-				session: &sessionsapi.SessionState{
+-					RefreshToken: "RefreshError",
+-					CreatedAt:    &now,
+-					ExpiresOn:    &now,
+-				},
+-				expectedErr: errors.New("error refreshing tokens: error refreshing session"),
+-				expectSaved: false,
+-			}),
+-			Entry("when the saving the session returns an error", refreshSessionWithProviderTableInput{
+-				session: &sessionsapi.SessionState{
+-					RefreshToken: refresh,
+-					AccessToken:  "NoSave",
+-				},
+-				expectedErr: errors.New("error saving session: unable to save session"),
+-				expectSaved: true,
+-			}),
+-		)
+-	})
+-
+-	Context("validateSession", func() {
+-		var s *storedSessionLoader
+-
+-		BeforeEach(func() {
+-			s = &storedSessionLoader{
+-				sessionValidator: func(_ context.Context, ss *sessionsapi.SessionState) bool {
+-					return ss.AccessToken == "Valid"
+-				},
+-			}
+-		})
+-
+-		Context("with a valid session", func() {
+-			It("does not return an error", func() {
+-				expires := time.Now().Add(1 * time.Minute)
+-				session := &sessionsapi.SessionState{
+-					AccessToken: "Valid",
+-					ExpiresOn:   &expires,
+-				}
+-				Expect(s.validateSession(ctx, session)).To(Succeed())
+-			})
+-		})
+-
+-		Context("with an expired session", func() {
+-			It("returns an error", func() {
+-				created := time.Now().Add(-5 * time.Minute)
+-				expires := time.Now().Add(-1 * time.Minute)
+-				session := &sessionsapi.SessionState{
+-					AccessToken: "Valid",
+-					CreatedAt:   &created,
+-					ExpiresOn:   &expires,
+-				}
+-				Expect(s.validateSession(ctx, session)).To(MatchError("session is expired"))
+-			})
+-		})
+-
+-		Context("with an invalid session", func() {
+-			It("returns an error", func() {
+-				expires := time.Now().Add(1 * time.Minute)
+-				session := &sessionsapi.SessionState{
+-					AccessToken: "Invalid",
+-					ExpiresOn:   &expires,
+-				}
+-				Expect(s.validateSession(ctx, session)).To(MatchError("session is invalid"))
+-			})
+-		})
+-	})
+ })
+ 
+ type fakeSessionStore struct {
+@@ -818,12 +665,12 @@
+ 		},
+ 		{
+ 			name:     "invalid_grant error",
+-			err:      fmt.Errorf("failed to get token: oauth2: \"invalid_grant\" \"Session not active\""),
++			err:      fmt.Errorf("failed to get token: %w", &oauth2.RetrieveError{ErrorCode: "invalid_grant"}),
+ 			expected: true,
+ 		},
+ 		{
+ 			name:     "invalid_client error",
+-			err:      fmt.Errorf("invalid_client: client not found"),
++			err:      &oauth2.RetrieveError{ErrorCode: "invalid_client"},
+ 			expected: true,
+ 		},
+ 		{
+--- a/pkg/providers/oidc/verifier.go
++++ b/pkg/providers/oidc/verifier.go
+@@ -45,7 +45,7 @@
+ func (v *idTokenVerifier) Verify(ctx context.Context, rawIDToken string) (*oidc.IDToken, error) {
+ 	token, err := v.verifier.Verify(ctx, rawIDToken)
+ 	if err != nil {
+-		return nil, fmt.Errorf("failed to verify token: %v", err)
++		return nil, fmt.Errorf("failed to verify token: %w", err)
+ 	}
+ 
+ 	claims := map[string]interface{}{}
+--- a/pkg/requests/http.go
++++ b/pkg/requests/http.go
+@@ -2,6 +2,7 @@
+ 
+ import (
+ 	"net/http"
++	"time"
+ 
+ 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/version"
+ )
+@@ -17,7 +18,7 @@
+ 	return t.next.RoundTrip(r)
+ }
+ 
+-var DefaultHTTPClient = &http.Client{Transport: &userAgentTransport{
++var DefaultHTTPClient = &http.Client{Timeout: 15 * time.Second, Transport: &userAgentTransport{
+ 	next:      DefaultTransport,
+ 	userAgent: "oauth2-proxy/" + version.VERSION,
+ }}
+--- a/pkg/sessions/persistence/ticket.go
++++ b/pkg/sessions/persistence/ticket.go
+@@ -180,7 +180,7 @@
+ func (t *ticket) loadSession(loader loadFunc, initLock initLockFunc) (*sessions.SessionState, error) {
+ 	ciphertext, err := loader(t.id)
+ 	if err != nil {
+-		return nil, fmt.Errorf("failed to load the session state with the ticket: %v", err)
++		return nil, fmt.Errorf("failed to load the session state with the ticket: %w", err)
+ 	}
+ 	c, err := t.makeCipher()
+ 	if err != nil {
+--- a/pkg/sessions/redis/redis_store.go
++++ b/pkg/sessions/redis/redis_store.go
+@@ -50,9 +50,9 @@
+ func (store *SessionStore) Load(ctx context.Context, key string) ([]byte, error) {
+ 	value, err := store.Client.Get(ctx, key)
+ 	if err == redis.Nil {
+-		return nil, fmt.Errorf("session does not exist")
++		return nil, sessions.ErrSessionMissing
+ 	} else if err != nil {
+-		return nil, fmt.Errorf("error loading redis session: %v", err)
++		return nil, fmt.Errorf("%w: loading redis session: %w", sessions.ErrSessionUnavailable, err)
+ 	}
+ 
+ 	return value, nil
+@@ -118,13 +118,14 @@
+ 	}
+ 
+ 	client := redis.NewFailoverClient(&redis.FailoverOptions{
+-		MasterName:       opts.SentinelMasterName,
+-		SentinelAddrs:    addrs,
+-		SentinelPassword: opts.SentinelPassword,
+-		Username:         opt.Username,
+-		Password:         opt.Password,
+-		TLSConfig:        opt.TLSConfig,
+-		ConnMaxIdleTime:  opt.ConnMaxIdleTime,
++		ContextTimeoutEnabled: true,
++		MasterName:            opts.SentinelMasterName,
++		SentinelAddrs:         addrs,
++		SentinelPassword:      opts.SentinelPassword,
++		Username:              opt.Username,
++		Password:              opt.Password,
++		TLSConfig:             opt.TLSConfig,
++		ConnMaxIdleTime:       opt.ConnMaxIdleTime,
+ 	})
+ 	return newClient(client), nil
+ }
+@@ -151,11 +152,12 @@
+ 	}
+ 
+ 	client := redis.NewClusterClient(&redis.ClusterOptions{
+-		Addrs:           addrs,
+-		Username:        opt.Username,
+-		Password:        opt.Password,
+-		TLSConfig:       opt.TLSConfig,
+-		ConnMaxIdleTime: opt.ConnMaxIdleTime,
++		ContextTimeoutEnabled: true,
++		Addrs:                 addrs,
++		Username:              opt.Username,
++		Password:              opt.Password,
++		TLSConfig:             opt.TLSConfig,
++		ConnMaxIdleTime:       opt.ConnMaxIdleTime,
+ 	})
+ 	return newClusterClient(client), nil
+ }
+@@ -182,6 +184,7 @@
+ 		return nil, err
+ 	}
+ 
++	opt.ContextTimeoutEnabled = true
+ 	client := redis.NewClient(opt)
+ 	return newClient(client), nil
+ }
+--- a/providers/adfs.go
++++ b/providers/adfs.go
+@@ -94,8 +94,8 @@
+ 	return refreshed, err
+ }
+ 
+-func (p *ADFSProvider) fallbackUPN(_ context.Context, s *sessions.SessionState) error {
+-	claims, err := p.getClaimExtractor(s.IDToken, s.AccessToken)
++func (p *ADFSProvider) fallbackUPN(ctx context.Context, s *sessions.SessionState) error {
++	claims, err := p.getClaimExtractor(ctx, s.IDToken, s.AccessToken)
+ 	if err != nil {
+ 		return fmt.Errorf("could not extract claims: %v", err)
+ 	}
+--- a/providers/adfs_test.go
++++ b/providers/adfs_test.go
+@@ -157,7 +157,7 @@
+ 	Context("with valid token", func() {
+ 		It("should not throw an error", func() {
+ 			rawIDToken, _ := newSignedTestIDToken(defaultIDToken)
+-			session, err := p.buildSessionFromClaims(rawIDToken, "")
++			session, err := p.buildSessionFromClaims(context.Background(), rawIDToken, "")
+ 			Expect(err).To(BeNil())
+ 			session.IDToken = rawIDToken
+ 			err = p.EnrichSession(context.Background(), session)
+--- a/providers/azure.go
++++ b/providers/azure.go
+@@ -263,9 +263,9 @@
+ 	// due to above issues, id_token may not be signed by AAD
+ 	// in that case, we will fallback to access token
+ 	var err error
+-	s, err = p.buildSessionFromClaims(session.IDToken, session.AccessToken)
++	s, err = p.buildSessionFromClaims(ctx, session.IDToken, session.AccessToken)
+ 	if err != nil || s.Email == "" {
+-		s, err = p.buildSessionFromClaims(session.AccessToken, session.AccessToken)
++		s, err = p.buildSessionFromClaims(ctx, session.AccessToken, session.AccessToken)
+ 	}
+ 	if err != nil {
+ 		return fmt.Errorf("unable to get claims from token: %v", err)
+--- /dev/null
++++ b/providers/chtholly_oidc_test.go
+@@ -0,0 +1,180 @@
++package providers
++
++import (
++	"context"
++	"crypto"
++	"crypto/rand"
++	"crypto/rsa"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"testing"
++	"time"
++
++	"github.com/coreos/go-oidc/v3/oidc"
++	"github.com/golang-jwt/jwt/v5"
++	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/sessions"
++	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/encryption"
++	internaloidc "github.com/oauth2-proxy/oauth2-proxy/v7/pkg/providers/oidc"
++)
++
++func chthollySigningKey(t *testing.T) *rsa.PrivateKey {
++	t.Helper()
++	key, err := rsa.GenerateKey(rand.Reader, 2048)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return key
++}
++
++func chthollySignedToken(key *rsa.PrivateKey, claims idTokenClaims) (string, error) {
++	return jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(key)
++}
++
++func newChthollyOIDCSetup(t *testing.T, key *rsa.PrivateKey, body []byte) (*httptest.Server, *OIDCProvider) {
++	t.Helper()
++	server, provider := newTestOIDCSetup(body)
++	provider.Verifier = internaloidc.NewVerifier(oidc.NewVerifier(oidcIssuer,
++		&oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{&key.PublicKey}},
++		&oidc.Config{ClientID: oidcClientID}),
++		internaloidc.IDTokenVerificationOptions{AudienceClaims: []string{"aud"}, ClientID: oidcClientID})
++	return server, provider
++}
++
++func TestChthollyInitialNonceCannotUseRefreshExemption(t *testing.T) {
++	key := chthollySigningKey(t)
++	server, provider := newChthollyOIDCSetup(t, key, []byte(`{}`))
++	defer server.Close()
++	for _, tc := range []struct {
++		name, claimNonce, storedNonce string
++		refreshed, want               bool
++	}{
++		{"correct", defaultIDToken.Nonce, oidcNonce, false, true},
++		{"incorrect", defaultIDToken.Nonce, "wrong", false, false},
++		{"absent", "", oidcNonce, false, false},
++		{"transient-helper-is-not-proof", defaultIDToken.Nonce, "wrong", true, false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			claims := defaultIDToken
++			claims.Nonce = tc.claimNonce
++			raw, err := chthollySignedToken(key, claims)
++			if err != nil {
++				t.Fatal(err)
++			}
++			session := &sessions.SessionState{IDToken: raw, Nonce: []byte(tc.storedNonce), Refreshed: tc.refreshed}
++			if got := provider.ValidateSession(context.Background(), session); got != tc.want {
++				t.Fatalf("initial nonce acceptance = %v, want %v", got, tc.want)
++			}
++		})
++	}
++}
++
++func TestChthollyVerifiedRefreshNonceSurvivesEncryptedStore(t *testing.T) {
++	key := chthollySigningKey(t)
++	claims := defaultIDToken
++	claims.Nonce = ""
++	raw, err := chthollySignedToken(key, claims)
++	if err != nil {
++		t.Fatal(err)
++	}
++	body, _ := json.Marshal(redeemTokenResponse{AccessToken: "new-access", RefreshToken: "new-refresh",
++		ExpiresIn: 3600, TokenType: "Bearer", IDToken: raw})
++	server, provider := newChthollyOIDCSetup(t, key, body)
++	defer server.Close()
++	provider.ValidateURL = &url.URL{}
++	initial, _ := chthollySignedToken(key, defaultIDToken)
++	session := &sessions.SessionState{IDToken: initial, Nonce: []byte(oidcNonce), RefreshToken: "old-refresh"}
++	if ok, err := provider.RefreshSession(context.Background(), session); !ok || err != nil {
++		t.Fatal(err)
++	}
++	cipher, err := encryption.NewGCMCipher([]byte("0123456789abcdef"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	encoded, err := session.EncodeSessionState(cipher, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	reloaded, err := sessions.DecodeSessionState(encoded, cipher, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := provider.ValidateSessionWithError(context.Background(), reloaded); err != nil {
++		t.Fatalf("verified nonce-less refresh failed after Redis-style round trip: %v", err)
++	}
++	// Even an authenticated persisted marker cannot waive other JWT checks.
++	for _, mutation := range []string{"signature", "expiry", "issuer", "audience", "wrong-nonce"} {
++		t.Run(mutation, func(t *testing.T) {
++			changed := claims
++			switch mutation {
++			case "expiry":
++				changed.ExpiresAt = jwt.NewNumericDate(time.Now().Add(-time.Minute))
++			case "issuer":
++				changed.Issuer = "https://foreign.example"
++			case "audience":
++				changed.Audience = jwt.ClaimStrings{"foreign-client"}
++			case "wrong-nonce":
++				changed.Nonce = encryption.HashNonce([]byte("wrong"))
++			}
++			token, err := chthollySignedToken(key, changed)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if mutation == "signature" {
++				token += "tampered"
++			}
++			copy := *reloaded
++			copy.IDToken = token
++			if provider.ValidateSession(context.Background(), &copy) {
++				t.Fatal("persisted marker bypassed " + mutation)
++			}
++		})
++	}
++}
++
++func TestChthollyRefreshedIncorrectNonceDoesNotReplaceSession(t *testing.T) {
++	key := chthollySigningKey(t)
++	claims := defaultIDToken
++	claims.Nonce = encryption.HashNonce([]byte("different"))
++	raw, _ := chthollySignedToken(key, claims)
++	body, _ := json.Marshal(redeemTokenResponse{AccessToken: "new-access", RefreshToken: "new-refresh",
++		ExpiresIn: 3600, TokenType: "Bearer", IDToken: raw})
++	server, provider := newChthollyOIDCSetup(t, key, body)
++	defer server.Close()
++	session := &sessions.SessionState{IDToken: "original", AccessToken: "original-access",
++		Nonce: []byte(oidcNonce), RefreshToken: "original-refresh"}
++	if ok, err := provider.RefreshSession(context.Background(), session); ok || err == nil {
++		t.Fatal("wrong nonce accepted")
++	}
++	if session.IDToken != "original" || session.RefreshToken != "original-refresh" || session.OIDCNonceOptional {
++		t.Fatal("invalid refresh replaced authenticated state")
++	}
++}
++
++func TestChthollyProviderHTTPDeadline(t *testing.T) {
++	stopped := make(chan struct{})
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		_ = r.ParseForm()
++		<-r.Context().Done()
++		close(stopped)
++	}))
++	defer server.Close()
++	u, _ := url.Parse(server.URL)
++	provider := newOIDCProvider(u, false)
++	// The provider operation deadline also prevents oauth2 auth-style probing
++	// from replaying a timed-out exchange with a rotating refresh token.
++	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
++	defer cancel()
++	start := time.Now()
++	_, err := provider.RefreshSession(ctx, &sessions.SessionState{RefreshToken: "original"})
++	elapsed := time.Since(start)
++	if err == nil || elapsed > 19*time.Second {
++		t.Fatalf("provider deadline not enforced: %v (%s)", err, elapsed)
++	}
++	select {
++	case <-stopped:
++	case <-time.After(time.Second):
++		t.Fatal("provider request survived deadline")
++	}
++}
+--- a/providers/ms_entra_id.go
++++ b/providers/ms_entra_id.go
+@@ -64,7 +64,7 @@
+ 		return fmt.Errorf("unable to enrich session: %v", err)
+ 	}
+ 
+-	hasGroupOverage, err := p.checkGroupOverage(session)
++	hasGroupOverage, err := p.checkGroupOverage(ctx, session)
+ 	if err != nil {
+ 		return fmt.Errorf("unable to check token: %v", err)
+ 	}
+@@ -81,7 +81,7 @@
+ 
+ // ValidateSession checks for allowed tenants (e.g. for multi-tenant apps) and passes through to generic ValidateSession
+ func (p *MicrosoftEntraIDProvider) ValidateSession(ctx context.Context, session *sessions.SessionState) bool {
+-	tenant, err := p.getTenantFromToken(session)
++	tenant, err := p.getTenantFromToken(ctx, session)
+ 	if err != nil {
+ 		logger.Errorf("unable to retrieve entra tenant from token: %v", err)
+ 		return false
+@@ -136,7 +136,7 @@
+ 		return nil, fmt.Errorf("error fetching token: %w", err)
+ 	}
+ 
+-	return p.OIDCProvider.createSession(ctx, token, false)
++	return p.OIDCProvider.createSession(ctx, token, false, nil)
+ }
+ 
+ // RefreshSession uses the RefreshToken to fetch new Access and ID Tokens
+@@ -183,7 +183,7 @@
+ 		return fmt.Errorf("error fetching token: %w", err)
+ 	}
+ 
+-	newSession, err := p.OIDCProvider.createSession(ctx, token, true)
++	newSession, err := p.OIDCProvider.createSession(ctx, token, true, s.Nonce)
+ 	if err != nil {
+ 		return fmt.Errorf("unable create new session state from response: %v", err)
+ 	}
+@@ -192,6 +192,7 @@
+ 	// ref. https://openid.net/specs/openid-connect-core-1_0.html#RefreshTokenResponse
+ 	if newSession.IDToken != "" {
+ 		s.IDToken = newSession.IDToken
++		s.OIDCNonceOptional = newSession.OIDCNonceOptional
+ 		s.Email = newSession.Email
+ 		s.User = newSession.User
+ 		s.Groups = newSession.Groups
+@@ -207,8 +208,8 @@
+ }
+ 
+ // checkGroupOverage checks ID token's group membership claims for the group overage
+-func (p *MicrosoftEntraIDProvider) checkGroupOverage(session *sessions.SessionState) (bool, error) {
+-	extractor, err := p.getClaimExtractor(session.IDToken, session.AccessToken)
++func (p *MicrosoftEntraIDProvider) checkGroupOverage(ctx context.Context, session *sessions.SessionState) (bool, error) {
++	extractor, err := p.getClaimExtractor(ctx, session.IDToken, session.AccessToken)
+ 	if err != nil {
+ 		return false, fmt.Errorf("unable to get claim extractor: %v", err)
+ 	}
+@@ -269,8 +270,8 @@
+ 	return nil
+ }
+ 
+-func (p *MicrosoftEntraIDProvider) getTenantFromToken(session *sessions.SessionState) (string, error) {
+-	extractor, err := p.getClaimExtractor(session.IDToken, session.AccessToken)
++func (p *MicrosoftEntraIDProvider) getTenantFromToken(ctx context.Context, session *sessions.SessionState) (string, error) {
++	extractor, err := p.getClaimExtractor(ctx, session.IDToken, session.AccessToken)
+ 	if err != nil {
+ 		return "", fmt.Errorf("unable to get claim extractor: %v", err)
+ 	}
+--- a/providers/oidc.go
++++ b/providers/oidc.go
+@@ -4,13 +4,13 @@
+ 	"context"
+ 	"errors"
+ 	"fmt"
++	"net/http"
+ 	"net/url"
+ 	"time"
+ 
+ 	"github.com/coreos/go-oidc/v3/oidc"
+ 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/options"
+ 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/sessions"
+-	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/logger"
+ 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/requests"
+ 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/util/ptr"
+ 	"golang.org/x/oauth2"
+@@ -73,6 +73,8 @@
+ 
+ // Redeem exchanges the OAuth2 authentication token for an ID token
+ func (p *OIDCProvider) Redeem(ctx context.Context, redirectURL, code, codeVerifier string) (*sessions.SessionState, error) {
++	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
++	defer cancel()
+ 	clientSecret, err := p.GetClientSecret()
+ 	if err != nil {
+ 		return nil, err
+@@ -95,10 +97,10 @@
+ 	ctx = oidc.ClientContext(ctx, requests.DefaultHTTPClient)
+ 	token, err := c.Exchange(ctx, code, opts...)
+ 	if err != nil {
+-		return nil, fmt.Errorf("token exchange failed: %v", err)
+-	}
+-
+-	return p.createSession(ctx, token, false)
++		return nil, fmt.Errorf("token exchange failed: %w", err)
++	}
++
++	return p.createSession(ctx, token, false, nil)
+ }
+ 
+ // EnrichSession is called after Redeem to allow providers to enrich session fields
+@@ -113,38 +115,55 @@
+ 
+ // ValidateSession checks that the session's id_token or access_token (when a ValidateURL is configured) is still valid
+ func (p *OIDCProvider) ValidateSession(ctx context.Context, s *sessions.SessionState) bool {
++	return p.ValidateSessionWithError(ctx, s) == nil
++}
++
++// ValidateSessionWithError preserves outage versus revocation semantics for
++// the stored-session middleware. Refreshed is deliberately NOT a JWT bypass.
++func (p *OIDCProvider) ValidateSessionWithError(ctx context.Context, s *sessions.SessionState) error {
+ 	ctx = oidc.ClientContext(ctx, requests.DefaultHTTPClient)
+-
+-	// https://openid.net/specs/openid-connect-core-1_0.html#RefreshTokenResponse
+-	// The ID Token is optional in the Refresh Token Response
+-	if s.Refreshed {
+-		validateEndpointAvailable := p.Data().ValidateURL != nil && p.Data().ValidateURL.String() != ""
+-		if validateEndpointAvailable && !validateToken(ctx, p, s.AccessToken, makeOIDCHeader(s.AccessToken)) {
+-			logger.Errorf("access_token validation failed")
+-			return false
+-		}
+-		return true
+-	}
+-
+-	if _, err := p.Verifier.Verify(ctx, s.IDToken); err != nil {
+-		logger.Errorf("id_token verification failed: %v", err)
+-		return false
+-	}
+-
+-	if p.SkipNonce {
+-		return true
+-	}
+-
+-	if err := p.checkNonce(s); err != nil {
+-		logger.Errorf("nonce verification failed: %v", err)
+-		return false
+-	}
+-
+-	return true
++	if s.IsExpired() {
++		return fmt.Errorf("%w: session is expired", sessions.ErrSessionInvalid)
++	}
++	idToken, err := p.Verifier.Verify(ctx, s.IDToken)
++	if err != nil {
++		var expired *oidc.TokenExpiredError
++		if errors.As(err, &expired) {
++			return fmt.Errorf("%w: %w", sessions.ErrSessionInvalid, err)
++		}
++		// The upstream verifier can erase the distinction between an invalid
++		// signature and an unavailable JWKS endpoint. Reject both, but do not
++		// delete a server-side record without evidence of revocation.
++		return fmt.Errorf("%w: verifying ID token: %w", sessions.ErrSessionUnavailable, err)
++	}
++	if !p.SkipNonce && !(s.OIDCNonceOptional && idToken.Nonce == "") && !s.CheckNonce(idToken.Nonce) {
++		return fmt.Errorf("%w: id_token nonce claim does not match the session nonce", sessions.ErrSessionInvalid)
++	}
++	if (s.Refreshed || s.OIDCNonceOptional) && p.ValidateURL != nil && p.ValidateURL.String() != "" {
++		req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.ValidateURL.String(), nil)
++		if err != nil {
++			return fmt.Errorf("%w: invalid validation endpoint", sessions.ErrSessionUnavailable)
++		}
++		req.Header = makeOIDCHeader(s.AccessToken)
++		resp, err := requests.DefaultHTTPClient.Do(req)
++		if err != nil {
++			return fmt.Errorf("%w: validating access token: %w", sessions.ErrSessionUnavailable, err)
++		}
++		defer resp.Body.Close()
++		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
++			return fmt.Errorf("%w: access token is revoked", sessions.ErrSessionInvalid)
++		}
++		if resp.StatusCode != http.StatusOK {
++			return fmt.Errorf("%w: validation status %d", sessions.ErrSessionUnavailable, resp.StatusCode)
++		}
++	}
++	return nil
+ }
+ 
+ // RefreshSession uses the RefreshToken to fetch new Access and ID Tokens
+ func (p *OIDCProvider) RefreshSession(ctx context.Context, s *sessions.SessionState) (bool, error) {
++	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
++	defer cancel()
+ 	if s == nil || s.RefreshToken == "" {
+ 		return false, nil
+ 	}
+@@ -152,7 +171,7 @@
+ 	ctx = oidc.ClientContext(ctx, requests.DefaultHTTPClient)
+ 	err := p.redeemRefreshToken(ctx, s)
+ 	if err != nil {
+-		return false, fmt.Errorf("unable to redeem refresh token: %v", err)
++		return false, fmt.Errorf("unable to redeem refresh token: %w", err)
+ 	}
+ 
+ 	return true, nil
+@@ -180,17 +199,18 @@
+ 	}
+ 	token, err := c.TokenSource(ctx, t).Token()
+ 	if err != nil {
+-		return fmt.Errorf("failed to get token: %v", err)
+-	}
+-
+-	newSession, err := p.createSession(ctx, token, true)
+-	if err != nil {
+-		return fmt.Errorf("unable create new session state from response: %v", err)
++		return fmt.Errorf("failed to get token: %w", err)
++	}
++
++	newSession, err := p.createSession(ctx, token, true, s.Nonce)
++	if err != nil {
++		return fmt.Errorf("unable create new session state from response: %w", err)
+ 	}
+ 
+ 	// It's possible that a refresh does not renew the ID Token.
+ 	// If it doesn't, it's probably better to retain the old one.
+ 	if newSession.IDToken != "" {
++		s.OIDCNonceOptional = newSession.OIDCNonceOptional
+ 		s.IDToken = newSession.IDToken
+ 		s.Email = newSession.Email
+ 		s.User = newSession.User
+@@ -201,7 +221,10 @@
+ 	s.AccessToken = newSession.AccessToken
+ 	s.RefreshToken = newSession.RefreshToken
+ 	s.CreatedAt = newSession.CreatedAt
+-	s.ExpiresOn = newSession.ExpiresOn
++	if newSession.IDToken != "" || s.ExpiresOn == nil ||
++		(newSession.ExpiresOn != nil && newSession.ExpiresOn.Before(*s.ExpiresOn)) {
++		s.ExpiresOn = newSession.ExpiresOn
++	}
+ 	s.Refreshed = newSession.Refreshed
+ 
+ 	return nil
+@@ -215,7 +238,7 @@
+ 		return nil, err
+ 	}
+ 
+-	ss, err := p.buildSessionFromClaims(token, "")
++	ss, err := p.buildSessionFromClaims(ctx, token, "")
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -237,8 +260,8 @@
+ 
+ // createSession takes an oauth2.Token and creates a SessionState from it.
+ // It alters behavior if called from Redeem vs Refresh
+-func (p *OIDCProvider) createSession(ctx context.Context, token *oauth2.Token, refresh bool) (*sessions.SessionState, error) {
+-	_, err := p.verifyIDToken(ctx, token)
++func (p *OIDCProvider) createSession(ctx context.Context, token *oauth2.Token, refresh bool, nonce []byte) (*sessions.SessionState, error) {
++	idToken, err := p.verifyIDToken(ctx, token)
+ 	if err != nil {
+ 		switch err {
+ 		case ErrMissingIDToken:
+@@ -247,12 +270,12 @@
+ 				return nil, errors.New("token response did not contain an id_token")
+ 			}
+ 		default:
+-			return nil, fmt.Errorf("could not verify id_token: %v", err)
++			return nil, fmt.Errorf("could not verify id_token: %w", err)
+ 		}
+ 	}
+ 
+ 	rawIDToken := getIDToken(token)
+-	ss, err := p.buildSessionFromClaims(rawIDToken, token.AccessToken)
++	ss, err := p.buildSessionFromClaims(ctx, rawIDToken, token.AccessToken)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -262,8 +285,19 @@
+ 	ss.IDToken = rawIDToken
+ 
+ 	ss.CreatedAtNow()
+-	ss.SetExpiresOn(token.Expiry)
++	expiry := token.Expiry
++	if idToken != nil && (expiry.IsZero() || idToken.Expiry.Before(expiry)) {
++		expiry = idToken.Expiry
++	}
++	ss.SetExpiresOn(expiry)
+ 	ss.Refreshed = refresh
++	ss.Nonce = nonce
++	if refresh && idToken != nil {
++		if !p.SkipNonce && idToken.Nonce != "" && !ss.CheckNonce(idToken.Nonce) {
++			return nil, fmt.Errorf("%w: refreshed id_token nonce does not match the session nonce", sessions.ErrSessionInvalid)
++		}
++		ss.OIDCNonceOptional = true
++	}
+ 
+ 	return ss, nil
+ }
+--- a/providers/oidc_test.go
++++ b/providers/oidc_test.go
+@@ -197,6 +197,7 @@
+ 	existingSession := &sessions.SessionState{
+ 		AccessToken:  "changeit",
+ 		IDToken:      "changeit",
++		Nonce:        []byte(oidcNonce),
+ 		CreatedAt:    nil,
+ 		ExpiresOn:    nil,
+ 		RefreshToken: refreshToken,
+--- a/providers/provider_data.go
++++ b/providers/provider_data.go
+@@ -259,14 +259,14 @@
+ 
+ // buildSessionFromClaims uses IDToken claims to populate a fresh SessionState
+ // with non-Token related fields.
+-func (p *ProviderData) buildSessionFromClaims(rawIDToken, accessToken string) (*sessions.SessionState, error) {
++func (p *ProviderData) buildSessionFromClaims(ctx context.Context, rawIDToken, accessToken string) (*sessions.SessionState, error) {
+ 	ss := &sessions.SessionState{}
+ 
+ 	if rawIDToken == "" {
+ 		return ss, nil
+ 	}
+ 
+-	extractor, err := p.getClaimExtractor(rawIDToken, accessToken)
++	extractor, err := p.getClaimExtractor(ctx, rawIDToken, accessToken)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -310,13 +310,13 @@
+ 	return ss, nil
+ }
+ 
+-func (p *ProviderData) getClaimExtractor(rawIDToken, accessToken string) (util.ClaimExtractor, error) {
++func (p *ProviderData) getClaimExtractor(ctx context.Context, rawIDToken, accessToken string) (util.ClaimExtractor, error) {
+ 	profileURL := p.ProfileURL
+ 	if p.SkipClaimsFromProfileURL {
+ 		profileURL = &url.URL{}
+ 	}
+ 
+-	extractor, err := util.NewClaimExtractor(context.TODO(), rawIDToken, profileURL, p.getAuthorizationHeader(accessToken))
++	extractor, err := util.NewClaimExtractor(ctx, rawIDToken, profileURL, p.getAuthorizationHeader(accessToken))
+ 	if err != nil {
+ 		return nil, fmt.Errorf("could not initialise claim extractor: %v", err)
+ 	}
+@@ -340,23 +340,6 @@
+ 	}
+ }
+ 
+-// checkNonce compares the session's nonce with the IDToken's nonce claim
+-func (p *ProviderData) checkNonce(s *sessions.SessionState) error {
+-	extractor, err := p.getClaimExtractor(s.IDToken, "")
+-	if err != nil {
+-		return fmt.Errorf("id_token claims extraction failed: %v", err)
+-	}
+-	var nonce string
+-	if _, err := extractor.GetClaimInto("nonce", &nonce); err != nil {
+-		return fmt.Errorf("could not extract nonce from ID Token: %v", err)
+-	}
+-
+-	if !s.CheckNonce(nonce) {
+-		return errors.New("id_token nonce claim does not match the session nonce")
+-	}
+-	return nil
+-}
+-
+ func (p *ProviderData) getAuthorizationHeader(accessToken string) http.Header {
+ 	if p.getAuthorizationHeaderFunc != nil && accessToken != "" {
+ 		return p.getAuthorizationHeaderFunc(accessToken)
+--- a/providers/provider_data_test.go
++++ b/providers/provider_data_test.go
+@@ -480,7 +480,7 @@
+ 			rawIDToken, err := newSignedTestIDToken(tc.IDToken)
+ 			g.Expect(err).ToNot(HaveOccurred())
+ 
+-			ss, err := provider.buildSessionFromClaims(rawIDToken, "testtoken")
++			ss, err := provider.buildSessionFromClaims(context.Background(), rawIDToken, "testtoken")
+ 			if err != nil {
+ 				g.Expect(err).To(Equal(tc.ExpectedError))
+ 			}
+@@ -488,66 +488,6 @@
+ 				g.Expect(ss).To(Equal(tc.ExpectedSession))
+ 			}
+ 			g.Expect(profileURLCalled).To(Equal(tc.ExpectProfileURLCalled))
+-		})
+-	}
+-}
+-
+-func TestProviderData_checkNonce(t *testing.T) {
+-	testCases := map[string]struct {
+-		Session       *sessions.SessionState
+-		IDToken       idTokenClaims
+-		ExpectedError error
+-	}{
+-		"Nonces match": {
+-			Session: &sessions.SessionState{
+-				Nonce: []byte(oidcNonce),
+-			},
+-			IDToken:       defaultIDToken,
+-			ExpectedError: nil,
+-		},
+-		"Nonces do not match": {
+-			Session: &sessions.SessionState{
+-				Nonce: []byte("WrongWrongWrong"),
+-			},
+-			IDToken:       defaultIDToken,
+-			ExpectedError: errors.New("id_token nonce claim does not match the session nonce"),
+-		},
+-
+-		"Missing nonce claim": {
+-			Session: &sessions.SessionState{
+-				Nonce: []byte(oidcNonce),
+-			},
+-			IDToken:       minimalIDToken,
+-			ExpectedError: errors.New("id_token nonce claim does not match the session nonce"),
+-		},
+-	}
+-	for testName, tc := range testCases {
+-		t.Run(testName, func(t *testing.T) {
+-			g := NewWithT(t)
+-
+-			// Ensure that the ID token in the session is valid (signed and contains a nonce)
+-			// as the nonce claim is extracted to compare with the session nonce
+-			rawIDToken, err := newSignedTestIDToken(tc.IDToken)
+-			g.Expect(err).ToNot(HaveOccurred())
+-			tc.Session.IDToken = rawIDToken
+-
+-			verificationOptions := internaloidc.IDTokenVerificationOptions{
+-				AudienceClaims: []string{"aud"},
+-				ClientID:       oidcClientID,
+-			}
+-			provider := &ProviderData{
+-				Verifier: internaloidc.NewVerifier(oidc.NewVerifier(
+-					oidcIssuer,
+-					mockJWKS{},
+-					&oidc.Config{ClientID: oidcClientID},
+-				), verificationOptions),
+-			}
+-
+-			if err := provider.checkNonce(tc.Session); err != nil {
+-				g.Expect(err).To(Equal(tc.ExpectedError))
+-			} else {
+-				g.Expect(err).ToNot(HaveOccurred())
+-			}
+ 		})
+ 	}
+ }
+--- a/pkg/sessions/persistence/ticket_test.go
++++ b/pkg/sessions/persistence/ticket_test.go
+@@ -117,19 +117,19 @@
+ 			Expect(loadedSession).To(Equal(ss))
+ 		})
+ 
+-		It("errors when the loadFunc errors", func() {
++		It("preserves missing-session classification through load errors", func() {
+ 			t, err := newTicket(&options.Cookie{Name: "dummy"})
+ 			Expect(err).ToNot(HaveOccurred())
+ 
+ 			data, err := t.loadSession(
+ 				func(k string) ([]byte, error) {
+-					return nil, errors.New("load error")
++					return nil, sessions.ErrSessionMissing
+ 				},
+ 				func(k string) sessions.Lock {
+ 					return &sessions.NoOpLock{}
+ 				})
+ 			Expect(data).To(BeNil())
+-			Expect(err).To(MatchError(errors.New("failed to load the session state with the ticket: load error")))
++			Expect(errors.Is(err, sessions.ErrSessionMissing)).To(BeTrue())
+ 		})
+ 	})
+ 

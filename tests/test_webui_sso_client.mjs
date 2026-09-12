@@ -9,11 +9,51 @@ const origin = "https://manage.example";
 function page({ path = "/plugins?tab=config", visibility = "visible" } = {}) {
   const navigations = [];
   const requests = [];
+  const requestObjects = [];
+  const sockets = [];
+  const timers = new Map();
+  const observers = [];
+  let clock = 0;
+  let nextTimer = 0;
+  let offline = null;
+  function element(textContent = "") {
+    return {
+      textContent,
+      parentNode: null,
+      children: [],
+      setAttribute(name, value) { this[name] = value; },
+      appendChild(child) {
+        child.remove();
+        this.children.push(child);
+        child.parentNode = this;
+      },
+      remove() {
+        if (this.parentNode) {
+          this.parentNode.children = this.parentNode.children.filter((child) => child !== this);
+          this.parentNode = null;
+        }
+      },
+    };
+  }
+  const main = element();
   const document = new EventTarget();
+  document.body = element();
   document.visibilityState = visibility;
+  document.createElement = () => element();
+  document.querySelector = (selector) => selector === ".el-main" ? main : offline;
+  class MutationObserver {
+    constructor(callback) { observers.push(callback); }
+    observe() {}
+  }
   const window = new EventTarget();
   window.location = new URL(origin + path);
   window.location.replace = (target) => navigations.push(target);
+  window.setTimeout = (callback, delay) => {
+    const id = ++nextTimer;
+    timers.set(id, { callback, due: clock + delay });
+    return id;
+  };
+  window.clearTimeout = (id) => timers.delete(id);
   window.history = {};
   for (const name of ["pushState", "replaceState"]) {
     window.history[name] = (data, unused, url) => {
@@ -21,26 +61,82 @@ function page({ path = "/plugins?tab=config", visibility = "visible" } = {}) {
     };
   }
   class XMLHttpRequest extends EventTarget {
+    timeout = 0;
+    completed = false;
     open(method, url) {
+      this.completed = false;
       this.method = method;
       this.url = url;
     }
     send(body) {
       requests.push({ method: this.method, url: this.url, body });
+      requestObjects.push(this);
+      if (this.timeout) this.deadline = window.setTimeout(() => this.complete(0), this.timeout);
     }
     complete(status) {
+      if (this.completed) return;
+      this.completed = true;
+      window.clearTimeout(this.deadline);
       this.status = status;
       this.dispatchEvent(new Event("loadend"));
     }
+    abort() { this.complete(0); }
   }
-  runInNewContext(client, { window, document, XMLHttpRequest, URL });
+  class WebSocket extends EventTarget {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSED = 3;
+    readyState = WebSocket.CONNECTING;
+    constructor(url, protocols) {
+      super();
+      this.url = url;
+      this.protocols = protocols;
+      sockets.push(this);
+    }
+    accept() {
+      this.readyState = WebSocket.OPEN;
+      this.dispatchEvent(new Event("open"));
+    }
+    disconnect(code = 1006) {
+      this.readyState = WebSocket.CLOSED;
+      const event = new Event("close");
+      Object.defineProperty(event, "code", { value: code });
+      this.dispatchEvent(event);
+    }
+    close() { this.disconnect(1000); }
+  }
+  window.WebSocket = WebSocket;
+  runInNewContext(client, { window, document, XMLHttpRequest, MutationObserver, URL });
   return {
     navigations,
     requests,
+    requestObjects,
+    sockets,
     window,
-    request(method = "GET", url = "/api/health", body) {
+    status() {
+      return [main, offline].filter(Boolean).flatMap((node) => node.children)
+        .filter((node) => node.role === "status").map((node) => node.textContent);
+    },
+    showNativeOffline(text) {
+      offline = element(text);
+      for (const observer of observers) observer();
+      return offline;
+    },
+    tick(milliseconds) {
+      const until = clock + milliseconds;
+      for (;;) {
+        const next = [...timers].filter(([, timer]) => timer.due <= until).sort((a, b) => a[1].due - b[1].due)[0];
+        if (!next) break;
+        timers.delete(next[0]);
+        clock = next[1].due;
+        next[1].callback();
+      }
+      clock = until;
+    },
+    request(method = "GET", url = "/api/health", body, timeout = 2000) {
       const xhr = new XMLHttpRequest();
       xhr.open(method, url);
+      xhr.timeout = timeout;
       xhr.send(body);
       return xhr;
     },
@@ -156,4 +252,96 @@ test("BFCache restores recheck previously healthy UI and never revive a complete
   loggedOut.pageshow(true);
   loggedOut.request().complete(401);
   assert.deepEqual(loggedOut.navigations, ["/signed-out", "/signed-out"]);
+});
+
+test("slow authenticated health succeeds without extending or replaying write deadlines", () => {
+  const tab = page();
+  const health = tab.request();
+  tab.tick(3000);
+  health.complete(200);
+  assert.deepEqual(tab.status(), []);
+  assert.deepEqual(tab.navigations, []);
+  tab.request("PUT", "/api/config", "change", 2000);
+  tab.tick(2000);
+  assert.equal(tab.status().length, 1);
+  assert.deepEqual(tab.requests.filter(({ method }) => method === "PUT"), [
+    { method: "PUT", url: "/api/config", body: "change" },
+  ]);
+});
+
+test("transport outages retain native offline state and expose an inline recoverable status", () => {
+  const tab = page();
+  tab.request().complete(503);
+  const native = tab.showNativeOffline("native disconnected state");
+  assert.equal(native.textContent, "native disconnected state");
+  assert.equal(native.children.length, 1);
+  assert.match(tab.status()[0], /503/);
+  assert.deepEqual(tab.navigations, []);
+  tab.request().complete(200);
+  assert.equal(native.textContent, "native disconnected state");
+  assert.deepEqual(tab.status(), []);
+});
+
+test("failed native upgrades share a real HTTP bootstrap with backoff and no extra sockets", () => {
+  const tab = page();
+  const chat = new tab.window.WebSocket("wss://manage.example/api/chat");
+  const logs = new tab.window.WebSocket("wss://manage.example/ws/logs");
+  chat.disconnect();
+  logs.disconnect();
+  tab.tick(0);
+  assert.deepEqual(tab.requests, [{ method: "GET", url: "/api/webui-sso/session", body: undefined }]);
+  tab.requestObjects[0].complete(503);
+  tab.tick(999);
+  assert.equal(tab.requests.length, 1);
+  tab.tick(1);
+  tab.requestObjects[1].complete(0);
+  tab.tick(1999);
+  assert.equal(tab.requests.length, 2);
+  tab.tick(1);
+  tab.requestObjects[2].complete(204);
+  assert.deepEqual(tab.status(), []);
+  assert.deepEqual(tab.navigations, []);
+  assert.equal(tab.sockets.length, 2);
+});
+
+test("bootstrap authentication expiry defers gateway navigation until visible", () => {
+  const tab = page();
+  new tab.window.WebSocket("wss://manage.example/ws/logs").disconnect();
+  tab.tick(0);
+  tab.visibility("hidden");
+  tab.requestObjects[0].complete(401);
+  assert.deepEqual(tab.navigations, []);
+  tab.visibility("visible");
+  assert.deepEqual(tab.navigations, ["/plugins?tab=config"]);
+});
+
+test("manual socket closure and logout cannot create or revive deferred bootstraps", () => {
+  const tab = page({ visibility: "hidden" });
+  new tab.window.WebSocket("wss://manage.example/api/chat").close();
+  tab.visibility("visible");
+  tab.tick(0);
+  assert.deepEqual(tab.requests, []);
+  tab.visibility("hidden");
+  new tab.window.WebSocket("wss://manage.example/ws/logs").disconnect();
+  tab.tick(30000);
+  assert.deepEqual(tab.requests, []);
+  tab.visibility("visible");
+  tab.tick(0);
+  assert.equal(tab.requests.length, 1);
+  tab.request("POST", "/api/auth/logout").complete(204);
+  tab.tick(60000);
+  assert.equal(tab.requests.length, 2);
+  assert.deepEqual(tab.navigations, ["/signed-out"]);
+});
+
+test("repeated native duplicate rejection does not become repeated login or auth traffic", () => {
+  const tab = page();
+  new tab.window.WebSocket("wss://manage.example/api/chat").disconnect();
+  tab.tick(0);
+  tab.requestObjects[0].complete(204);
+  new tab.window.WebSocket("wss://manage.example/api/chat").disconnect();
+  tab.tick(3000);
+  assert.equal(tab.requests.length, 1);
+  assert.deepEqual(tab.navigations, []);
+  assert.equal(tab.sockets.length, 2);
 });

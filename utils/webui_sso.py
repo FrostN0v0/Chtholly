@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import re
 from typing import Protocol
+import asyncio
+from hashlib import sha256
 from ipaddress import ip_address
+from threading import Lock
 from urllib.parse import urlsplit
 from collections.abc import Callable
 
@@ -80,7 +83,8 @@ class SsoSessions:
         self._store = store
         self._ttl = session_ttl
         self._transport = transport
-        self._issued: dict[str, NativeSessionStore] = {}
+        self._issued: dict[bytes, tuple[str, NativeSessionStore]] = {}
+        self._session_lock = Lock()
         self.closed = False
 
     def is_public(self, connection: HTTPConnection) -> bool:
@@ -90,31 +94,54 @@ class SsoSessions:
     async def verify(self, cookies: dict[str, str], *, logout: bool = False) -> bool:
         selected = [f"{name}={value}" for name, value in cookies.items() if _COOKIE_NAME.fullmatch(name)]
         cookie = "; ".join(selected)
-        if not cookie or len(cookie) > 16384 or "\r" in cookie or "\n" in cookie:
+        if not cookies.get(SSO_COOKIE) or len(cookie) > 16384 or "\r" in cookie or "\n" in cookie:
             return False
-        try:
+
+        async def check_authority() -> bool:
             async with httpx.AsyncClient(
-                timeout=3.0, trust_env=False, follow_redirects=False, transport=self._transport
+                timeout=20.0, trust_env=False, follow_redirects=False, transport=self._transport
             ) as client:
                 async with client.stream(
                     "GET",
                     self._auth_url.rsplit("/", 1)[0] + "/sign_out" if logout else self._auth_url,
                     headers={"Cookie": cookie, "X-Forwarded-Proto": "https"},
                 ) as response:
-                    if response.status_code >= 500:
-                        raise ProxyUnavailable
-                    return response.status_code == (302 if logout else 202)
-        except httpx.HTTPError:
+                    if response.status_code == (302 if logout else 202):
+                        return True
+                    if response.status_code in (401, 403):
+                        return False
+                    raise ProxyUnavailable
+
+        try:
+            return await asyncio.wait_for(check_authority(), timeout=20.0)
+        except (httpx.HTTPError, asyncio.TimeoutError):
             raise ProxyUnavailable from None
 
+    @staticmethod
+    def _session_key(connection: HTTPConnection) -> bytes:
+        # OAuth2 Proxy signs base64(ticket)|createdAt|signature. Redis refresh
+        # retains the ticket but changes the last two fields. This is only an
+        # identity key AFTER fresh authority verification, never authorization.
+        ticket = connection.cookies[SSO_COOKIE].split("|", 1)[0]
+        return sha256(ticket.encode("utf-8")).digest()
+
     def session(self, connection: HTTPConnection) -> tuple[str, bool]:
+        key = self._session_key(connection)
         store = self._store()
-        sid = connection.cookies.get(NATIVE_COOKIE)
-        if sid and store.get(sid) is not None:
-            return sid, False
-        sid = store.create(ip=connection.client.host if connection.client else "unknown")
-        self._issued[sid] = store
-        return sid, True
+        # No await separates lookup and creation; the lock also protects native
+        # identity issuance if callers run on different ASGI event-loop threads.
+        with self._session_lock:
+            issued = self._issued.get(key)
+            if issued is not None and issued[1] is store and store.get(issued[0]) is not None:
+                sid = issued[0]
+            else:
+                for expired_key, (old_sid, owner) in tuple(self._issued.items()):
+                    if owner is not store or owner.get(old_sid) is None:
+                        owner.destroy(old_sid)
+                        del self._issued[expired_key]
+                sid = store.create(ip=connection.client.host if connection.client else "unknown")
+                self._issued[key] = (sid, store)
+        return sid, sid != connection.cookies.get(NATIVE_COOKIE)
 
     def cookie(self, sid: str) -> bytes:
         response = Response()
@@ -132,10 +159,13 @@ class SsoSessions:
                 status_code=503,
                 headers={"Cache-Control": "private, no-store"},
             )
-        sid = connection.cookies.get(NATIVE_COOKIE)
-        if sid:
-            self._store().destroy(sid)
-            self._issued.pop(sid, None)
+        with self._session_lock:
+            issued = self._issued.pop(self._session_key(connection), None)
+            if issued is not None:
+                issued[1].destroy(issued[0])
+            sid = connection.cookies.get(NATIVE_COOKIE)
+            if sid:
+                self._store().destroy(sid)
         response = JSONResponse({"success": True}, headers={"Cache-Control": "private, no-store"})
         names = {NATIVE_COOKIE, SSO_COOKIE}
         names.update(name for name in connection.cookies if _COOKIE_NAME.fullmatch(name))
@@ -144,10 +174,11 @@ class SsoSessions:
         return response
 
     def close(self) -> None:
-        self.closed = True
-        for sid, store in self._issued.items():
-            store.destroy(sid)
-        self._issued.clear()
+        with self._session_lock:
+            self.closed = True
+            for sid, store in self._issued.values():
+                store.destroy(sid)
+            self._issued.clear()
 
 
 class WebUISsoMiddleware:
@@ -175,7 +206,7 @@ class WebUISsoMiddleware:
             status = 503
         if not authenticated:
             if scope["type"] == "websocket":
-                await send({"type": "websocket.close", "code": 1008})
+                await send({"type": "websocket.close", "code": 1013 if status == 503 else 1008})
             else:
                 response = JSONResponse(
                     {"success": False, "code": "sso_unavailable" if status == 503 else "authentication_required"},

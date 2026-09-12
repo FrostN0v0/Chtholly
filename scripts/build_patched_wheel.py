@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild Chtholly's Entari wheel from a pinned upstream wheel and local patch."""
+"""Rebuild pinned Entari ecosystem wheels with audited repository patches."""
 
 from __future__ import annotations
 
@@ -15,20 +15,52 @@ import zipfile
 import argparse
 import tempfile
 import subprocess
+from dataclasses import dataclass
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
-UPSTREAM_VERSION = "0.19.0rc2"
-PATCHED_VERSION = "0.19.0rc2+chtholly.2"
-UPSTREAM_URL = (
-    "https://files.pythonhosted.org/packages/60/9d/"
-    "77b1d45b57f02dc8ac88d025c92c52060e5ad0b7ce8e0db5102cd8455fd0/"
-    "arclet_entari-0.19.0rc2-py3-none-any.whl"
-)
-UPSTREAM_SHA256 = "f6c1a568d63034ab32ddf83d8500cb3e8fdadff3f629f15a04aa74f63f7aa7b5"
-PATCH = ROOT / "patches" / "entari-0.19.0rc2-staged-rollback.patch"
-WHEEL_NAME = f"arclet_entari-{PATCHED_VERSION}-py3-none-any.whl"
-DEFAULT_OUTPUT = ROOT / "vendor" / "entari" / WHEEL_NAME
+
+
+@dataclass(frozen=True)
+class WheelSpec:
+    package: str
+    upstream: str
+    patched: str
+    url: str
+    sha256: str
+    patch: str
+    directory: str
+
+    @property
+    def output(self) -> Path:
+        return ROOT / "vendor" / self.directory / f"{self.package}-{self.patched}-py3-none-any.whl"
+
+
+PACKAGES = {
+    "entari": WheelSpec(
+        "arclet_entari",
+        "0.19.0rc2",
+        "0.19.0rc2+chtholly.2",
+        "https://files.pythonhosted.org/packages/60/9d/"
+        "77b1d45b57f02dc8ac88d025c92c52060e5ad0b7ce8e0db5102cd8455fd0/"
+        "arclet_entari-0.19.0rc2-py3-none-any.whl",
+        "f6c1a568d63034ab32ddf83d8500cb3e8fdadff3f629f15a04aa74f63f7aa7b5",
+        "entari-0.19.0rc2-staged-rollback.patch",
+        "entari",
+    ),
+    "webui": WheelSpec(
+        "entari_plugin_webui",
+        "1.0.3",
+        "1.0.3+chtholly.1",
+        "https://files.pythonhosted.org/packages/17/0c/"
+        "c02c08d5f23ee7577f0ce6613aedb78c4e01740cbbad34299b2129c32d1e/"
+        "entari_plugin_webui-1.0.3-py3-none-any.whl",
+        "43f7a67034c23490c18547ba840bb9f97a39f49f58bb10c5835456fc377c6341",
+        "webui-1.0.3-connection-lifecycle.patch",
+        "webui",
+    ),
+}
+
 MAX_WHEEL_BYTES = 16 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 30
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
@@ -43,19 +75,19 @@ class NoRedirects(urllib.request.HTTPRedirectHandler):
         raise BuildError("upstream download redirected; only the pinned URL is allowed")
 
 
-def read_upstream(wheel: Path | None) -> bytes:
+def read_upstream(spec: WheelSpec, wheel: Path | None) -> bytes:
     if wheel is not None:
         with wheel.open("rb") as stream:
             data = stream.read(MAX_WHEEL_BYTES + 1)
     else:
         opener = urllib.request.build_opener(NoRedirects())
-        with opener.open(UPSTREAM_URL, timeout=DOWNLOAD_TIMEOUT) as response:
+        with opener.open(spec.url, timeout=DOWNLOAD_TIMEOUT) as response:
             data = response.read(MAX_WHEEL_BYTES + 1)
     if len(data) > MAX_WHEEL_BYTES:
         raise BuildError(f"upstream wheel exceeds the {MAX_WHEEL_BYTES}-byte limit")
     digest = hashlib.sha256(data).hexdigest()
-    if digest != UPSTREAM_SHA256:
-        raise BuildError(f"upstream SHA256 mismatch: expected {UPSTREAM_SHA256}, got {digest}")
+    if digest != spec.sha256:
+        raise BuildError(f"upstream SHA256 mismatch: expected {spec.sha256}, got {digest}")
     return data
 
 
@@ -85,14 +117,15 @@ def extract_upstream(data: bytes, destination: Path) -> None:
         archive.extractall(destination)
 
 
-def apply_patch(source: Path) -> None:
-    if not PATCH.is_file():
-        raise BuildError(f"patch not found: {PATCH}")
+def apply_patch(spec: WheelSpec, source: Path) -> None:
+    patch = ROOT / "patches" / spec.patch
+    if not patch.is_file():
+        raise BuildError(f"patch not found: {patch}")
     for check in (True, False):
         command = ["git", "-c", "core.autocrlf=false", "apply"]
         if check:
             command.append("--check")
-        command.extend(["--", str(PATCH)])
+        command.extend(["--", str(patch)])
         result = subprocess.run(
             command,
             cwd=source,
@@ -111,12 +144,12 @@ def apply_patch(source: Path) -> None:
         compile(path.read_bytes(), path.relative_to(source).as_posix(), "exec", dont_inherit=True)
 
 
-def update_metadata(source: Path) -> None:
-    old_info = source / f"arclet_entari-{UPSTREAM_VERSION}.dist-info"
+def update_metadata(spec: WheelSpec, source: Path) -> None:
+    old_info = source / f"{spec.package}-{spec.upstream}.dist-info"
     metadata = old_info / "METADATA"
     lines = metadata.read_bytes().splitlines(keepends=True)
-    old_version = f"Version: {UPSTREAM_VERSION}".encode("ascii")
-    new_version = f"Version: {PATCHED_VERSION}".encode("ascii")
+    old_version = f"Version: {spec.upstream}".encode("ascii")
+    new_version = f"Version: {spec.patched}".encode("ascii")
     changed = 0
     for index, line in enumerate(lines):
         if not line.strip():
@@ -127,11 +160,11 @@ def update_metadata(source: Path) -> None:
     if changed != 1:
         raise BuildError("upstream METADATA must contain exactly one expected Version header")
     metadata.write_bytes(b"".join(lines))
-    old_info.rename(source / f"arclet_entari-{PATCHED_VERSION}.dist-info")
+    old_info.rename(source / f"{spec.package}-{spec.patched}.dist-info")
 
 
-def publish_wheel(source: Path, output: Path) -> None:
-    record_name = f"arclet_entari-{PATCHED_VERSION}.dist-info/RECORD"
+def publish_wheel(spec: WheelSpec, source: Path, output: Path) -> None:
+    record_name = f"{spec.package}-{spec.patched}.dist-info/RECORD"
     files = sorted(
         (path.relative_to(source).as_posix(), path)
         for path in source.rglob("*")
@@ -173,27 +206,29 @@ def publish_wheel(source: Path, output: Path) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def build(wheel: Path | None = None, output: Path = DEFAULT_OUTPUT) -> Path:
-    """Verify, patch and atomically publish the fixed Entari wheel without importing it."""
-    data = read_upstream(wheel)
-    with tempfile.TemporaryDirectory(prefix="chtholly-entari-") as directory:
+def build(spec: WheelSpec, wheel: Path | None = None, output: Path | None = None) -> Path:
+    """Verify, patch and atomically publish a pinned wheel without importing it."""
+    output = output or spec.output
+    data = read_upstream(spec, wheel)
+    with tempfile.TemporaryDirectory(prefix="chtholly-wheel-") as directory:
         source = Path(directory).resolve()
         extract_upstream(data, source)
-        apply_patch(source)
-        update_metadata(source)
-        publish_wheel(source, output)
+        apply_patch(spec, source)
+        update_metadata(spec, source)
+        publish_wheel(spec, source, output)
     return output
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--package", choices=PACKAGES, required=True)
     parser.add_argument("--wheel", type=Path, help="local official wheel (must match the pinned SHA256)")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help=f"output wheel (default: {DEFAULT_OUTPUT})")
+    parser.add_argument("--output", type=Path, help="override the vendored output wheel")
     args = parser.parse_args(argv)
     try:
-        output = build(args.wheel, args.output)
+        output = build(PACKAGES[args.package], args.wheel, args.output)
     except (BuildError, OSError, ValueError, SyntaxError, zipfile.BadZipFile, subprocess.SubprocessError) as exc:
-        sys.stderr.write(f"build_entari_patch: {exc}\n")
+        sys.stderr.write(f"build_patched_wheel: {exc}\n")
         return 1
     sys.stdout.write(f"{output}\n")
     return 0

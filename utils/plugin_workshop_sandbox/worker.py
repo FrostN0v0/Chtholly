@@ -84,6 +84,9 @@ def main() -> int:
         {
             "HOME": "/workspace",
             "TMPDIR": "/tmp",
+            "XDG_CACHE_HOME": "/tmp/cache",
+            "XDG_CONFIG_HOME": "/tmp/config",
+            "PLAYWRIGHT_BROWSERS_PATH": "/tmp/workshop-playwright/browsers",
             "PATH": "/opt/workshop/.venv/bin:/usr/bin:/bin",
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONIOENCODING": "utf-8",
@@ -99,11 +102,13 @@ def main() -> int:
     report_fd = os.dup(sys.stdout.fileno())
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from worker_http import install_http_transport
     from worker_harness import Acceptance
 
     acceptance = Acceptance(payload, Path("/workspace"))
     try:
-        asyncio.run(acceptance.run())
+        with install_http_transport():
+            asyncio.run(acceptance.run())
     except BaseException as exc:
         traceback.print_exc(limit=12)
         acceptance.fail(exc)

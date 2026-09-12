@@ -35,6 +35,12 @@ def install(app: FastAPI, sessions: SsoSessions) -> Callable[[], None]:
     async def client() -> Response:
         return FileResponse(script, media_type="text/javascript", headers=_HEADERS)
 
+    @router.get("/api/webui-sso/session", include_in_schema=False, dependencies=[Depends(require_auth)])
+    async def bootstrap_session() -> Response:
+        # A browser WebSocket cannot attach authorization headers or reliably
+        # bootstrap its cookie jar from a failed upgrade. Use ordinary HTTP.
+        return Response(status_code=204, headers=_HEADERS)
+
     start = len(app.router.routes)
     app.include_router(router)
     registered = tuple(app.router.routes[start:])

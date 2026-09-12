@@ -7,11 +7,14 @@ import json
 import math
 import uuid
 import asyncio
+from pathlib import Path
+from contextlib import AsyncExitStack
 from dataclasses import asdict
 from importlib.metadata import PackageNotFoundError, version
 
 from utils.plugin_workshop_core.models import CheckResult, SandboxRequest, ValidationReport
 
+from .egress import WorkshopEgress
 from .process import ProcessIOError, settle, run_process
 
 PROTOCOL = "1"
@@ -22,6 +25,7 @@ WARNING = (
 STAGES = frozenset(
     {
         "syntax",
+        "render_capability",
         "import",
         "commands",
         "execution",
@@ -39,11 +43,13 @@ class DockerSandbox:
         self,
         image: str = "chtholly-workshop:local",
         *,
+        egress_root: Path,
         executable: str = "docker",
         framework_version: str | None = None,
     ):
         self.image = image
         self.executable = executable
+        self.egress_root = Path(egress_root)
         if framework_version is None:
             try:
                 framework_version = version("arclet-entari")
@@ -88,6 +94,15 @@ class DockerSandbox:
                 raise RuntimeError("Sandbox image Entari version does not match the host")
             if labels.get("org.chtholly.workshop.python") != "3.10":
                 raise RuntimeError("Sandbox image must use Python 3.10")
+            if labels.get("org.chtholly.workshop.rendering") != "playwright-v1":
+                raise RuntimeError("Sandbox image lacks the trusted Playwright rendering capability; rebuild it")
+            if labels.get("org.chtholly.workshop.egress") != "open-meteo-v1":
+                raise RuntimeError("Sandbox image lacks the bounded Open-Meteo transport; rebuild it")
+            result["capabilities"] = {
+                "rendering": "playwright",
+                "network": "none",
+                "controlled_https": ["geocoding-api.open-meteo.com/v1/search", "api.open-meteo.com/v1/forecast"],
+            }
             result.update(available=True, image_id=image_id)
         except (OSError, ValueError, KeyError, IndexError, TypeError, RuntimeError, asyncio.TimeoutError) as exc:
             result["reason"] = str(exc)[:1000]
@@ -126,6 +141,7 @@ class DockerSandbox:
         self._validations.add(current)
         name = "chtholly-workshop-" + uuid.uuid4().hex
         image_id = ""
+        resources = AsyncExitStack()
         try:
             from utils.plugin_workshop_core.codec import manifest_payload
             from utils.plugin_workshop_core.policy import parse_manifest, normalize_submission
@@ -168,6 +184,7 @@ class DockerSandbox:
             )
             if len(payload) > 2 * 1024 * 1024:
                 return self._report(request, "failed", "Worker request exceeds its wire limit", image_id)
+            egress = await resources.enter_async_context(WorkshopEgress(self.egress_root))
             self._containers.add(name)
             created = await run_process(
                 self.executable,
@@ -182,6 +199,8 @@ class DockerSandbox:
                 "--network",
                 "none",
                 "--read-only",
+                "--mount",
+                f"type=bind,src={egress.socket_path},dst=/run/workshop-http.sock,readonly",
                 "--user",
                 "65532:65532",
                 "--cap-drop",
@@ -201,7 +220,7 @@ class DockerSandbox:
                 "--ulimit",
                 "core=0:0",
                 "--shm-size",
-                "8m",
+                "128m",
                 "--log-driver",
                 "none",
                 "--ipc",
@@ -211,7 +230,7 @@ class DockerSandbox:
                 "--tmpfs",
                 "/workspace:rw,nosuid,nodev,noexec,size=64m,uid=65532,gid=65532,mode=700",
                 "--tmpfs",
-                "/tmp:rw,nosuid,nodev,noexec,size=32m,uid=65532,gid=65532,mode=700",
+                "/tmp:rw,nosuid,nodev,noexec,size=256m,uid=65532,gid=65532,mode=700",
                 "--env",
                 "HOME=/workspace",
                 "--env",
@@ -269,7 +288,10 @@ class DockerSandbox:
                 if name in self._containers:
                     await settle(asyncio.create_task(self._remove(name)))
             finally:
-                self._validations.discard(current)
+                try:
+                    await settle(asyncio.create_task(resources.aclose()))
+                finally:
+                    self._validations.discard(current)
 
     def _decode(self, request: SandboxRequest, stdout: bytes, stderr: bytes, image_id: str) -> ValidationReport:
         payload = json.loads(stdout)

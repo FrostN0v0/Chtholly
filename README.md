@@ -46,7 +46,7 @@ uv sync --locked --all-extras
 uv run --locked entari run
 ```
 
-`uv.lock` 固定当前兼容组合，包含 Entari 补丁包与 LLM Git 版本；请按锁文件安装，升级前核验框架、LLM 与渲染插件的兼容性。Entari 的 `0.19.0rc2+chtholly.2` 修复热更新失败后的旧插件丢失、重复更新的监听器清理和命令目录残留；失败候选不会夺走旧命令的解析器与帮助信息。wheel 随仓库提供，维护者可用 `python scripts/build_entari_patch.py` 从固定的官方 wheel 和仓库补丁重建，不手改 `.venv`。
+`uv.lock` 固定当前兼容组合，包含 Entari、WebUI 补丁包与 LLM Git 版本；请按锁文件安装。Entari `0.19.0rc2+chtholly.2` 修复热更新回滚、监听器清理和命令目录残留；WebUI `1.0.3+chtholly.1` 将登录会话与聊天连接分离，支持同一账号多个标签页，并允许失败的认证初始化重试。wheel 随仓库提供，可用 `python scripts/build_patched_wheel.py --package entari` 或 `--package webui` 从固定官方 wheel 和仓库补丁重建，不手改 `.venv`。
 
 更多框架用法见 [Entari 文档](https://arclet.top/tutorial/entari/)。
 
@@ -67,6 +67,8 @@ uv run --locked entari run
 会话使用独立回环 Redis（`scripts/chtholly-webui-sessions.service`、`scripts/webui-redis.conf`）：刷新令牌只保留在加密的服务端会话中，浏览器仅持有签名票据。网关请求 `offline_access`，每 5 分钟按需刷新，Cookie 窗口为 12 小时；Casdoor 刷新令牌到期、撤销或账号权限失效时仍须重新登录。Redis 密码通过同一受限环境文件的 `OAUTH2_PROXY_REDIS_PASSWORD` 注入，ACL 仅保存密码哈希；默认 Redis 服务不启用，也不开放公网端口。旧 Cookie 会话切换到服务端存储时须重新登录一次。
 
 在既有空前缀插件加载列表中加入 `webui_sso`，并设置它的 `public_origin` 为管理域名的 HTTPS origin；`auth_url` 默认固定指向 `http://127.0.0.1:4180/oauth2/auth`。插件只向该回环网关验证本轮请求的 SSO Cookie，然后复用原生 SessionStore；不接受伪造身份头，不修改第三方安装文件。退出先通过回环网关删除服务端会话，再清除两层 Cookie 并停在退出页，旧票据不可重放。后台标签页失效时不抢先打开登录页，回到前台后才重新访问当前管理页面，并优先复用其他标签页已续期的会话；浏览器返回缓存也会重新检查。登录流程的 CSRF Cookie 有效期为一小时；Casdoor 自身登录态不随此处退出连带清除。
+
+连接恢复区分登录失效与临时网络故障：网关或身份服务不可用时返回 503，不删除会话、不重放写请求，也不自动发起登录。聊天与日志继续由原生 WebSocket 管理重连，HTTP 会话恢复会合并并退避；原生离线提示仍由真实健康检查控制。维护者通过 `scripts/build_oauth2_proxy.py` 构建固定源码与工具链的网关补丁，包含受限刷新超时、覆盖认证窗口的 Redis 锁租期与刷新令牌验证；构建默认执行回归并输出来源记录。
 
 Caddy 只代理明确的管理页面、API 与两个管理 WebSocket；Satori/OneBot、自动 API 文档和未知路径一律拒绝。API、静态脚本和图标未认证时统一返回 401，不分别启动 OAuth 流程。跨站 Origin 和不带正确 Origin 的写请求在入口拒绝，管理内容禁用共享缓存。DNS 建议保持仅 DNS，以保留工坊最长 330 秒的请求窗口；如启用 CDN 代理，需另行确认超时与真实客户端 IP 配置。
 
@@ -118,15 +120,15 @@ Bot 与独立预览进程共享项目依赖环境；同步依赖或浏览器后�
 
 ## 插件工坊
 
-启用 `plugin_workshop` 与 `llm_chat.plugin_workshop_enabled` 后，可让模型编写标准 Entari 插件，使用 `submit_plugin` 保存完整源码、命令、配置、权限与数据声明，并在无网络、无生产凭证及数据的 Linux Docker 容器中验收。模型可承接上下文直接提交、修订或重新提交，不要求当前消息再次说“提交”。失败报告返回模型修正，每次修订产生新的不可变版本；提交或验收通过均不会自动激活。
+启用 `plugin_workshop` 与 `llm_chat.plugin_workshop_enabled` 后，可让模型编写标准 Entari 插件，使用 `submit_plugin` 保存完整源码、命令、配置、权限与数据声明，并在无生产凭证及数据的 Linux Docker 容器中验收。容器没有网络接口出口；仅可经逐次受限的 Unix Socket 代理调用 Open-Meteo 的地名和天气 GET 接口。模型可承接上下文直接提交、修订或重新提交，不要求当前消息再次说“提交”。失败报告返回模型修正，每次修订产生新的不可变版本；提交或验收通过均不会自动激活。
 
-运行前需安装可用的 Linux Docker Engine（Windows 可使用 Docker Desktop），并由维护者显式构建与当前锁文件一致的验收镜像：
+验收宿主需 Linux 与可用的 Linux Docker Engine；Windows 可在 WSL2 的 Linux 环境运行宿主。维护者需显式构建与当前锁文件一致的验收镜像：
 
 ```shell
 uv run --locked python scripts/build_workshop_sandbox.py --tag chtholly-workshop:local
 ```
 
-构建只打包固定依赖、Entari wheel 和可信验收器，不发送项目配置、资源或 `.env`；模型提交不会构建或拉取镜像。Docker、镜像或版本前提不满足时明确显示不可用，不回退到宿主验收。
+构建只打包固定依赖、vendored wheel 和可信验收器，不发送项目配置、资源或 `.env`；模型提交不会构建或拉取镜像。镜像预装 Chromium、Inter/Noto CJK 字体和图像解码器，先验证可信模板的真实 PNG，再执行候选命令、重载及清理。模板访问限于候选源码目录，单命令 30 秒、总验收默认 180 秒；图片须完整解码并满足大小、像素和动画限制。Docker、镜像或版本前提不满足时明确显示不可用，不回退到宿主验收。
 
 生产推荐由 Bot 用户运行 rootless Docker，并通过 `DOCKER_HOST` 指向受限 Unix Socket；不要为方便调用而将 Bot 加入可控制宿主 root 的 Docker 组。rootless daemon 必须支持 cgroup v2 的内存、CPU 与 PID 限制，不能因安装模式改变而放宽验收边界。
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from asyncio import gather
 from secrets import token_urlsafe
+from http.cookies import SimpleCookie
 
 import httpx
 import pytest
@@ -32,14 +34,18 @@ class Sessions:
         return self.values.pop(sid, None) is not None
 
 
-def application():
+def application(*, auth_status: int | None = None):
     store = Sessions()
     authority = {"available": True, "revoked": False}
 
     def verify(request: httpx.Request) -> httpx.Response:
         if not authority["available"]:
             raise httpx.ConnectError("unavailable", request=request)
-        valid = request.headers.get("cookie") == f"{SSO_COOKIE}=verified" and not authority["revoked"]
+        if auth_status is not None:
+            return httpx.Response(auth_status)
+        cookies = SimpleCookie(request.headers.get("cookie", ""))
+        sso = cookies.get(SSO_COOKIE)
+        valid = sso is not None and sso.value.split("|", 1)[0] == "verified" and not authority["revoked"]
         if request.url.path == "/oauth2/sign_out":
             authority["revoked"] = True
             return httpx.Response(302, headers={"Location": "/"})
@@ -88,6 +94,50 @@ async def test_verified_sso_bootstraps_native_requests_and_recovers_expired_sess
         assert "webui_sid" in recovered.cookies
         sessions.close()
         assert (await client.get("/private")).status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_concurrent_bootstrap_and_process_restart_converge_on_one_native_cookie():
+    app, store, _, _ = application()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=PUBLIC) as client:
+        headers = {"Cookie": f"{SSO_COOKIE}=verified"}
+        initial = await gather(*(client.get("/private", headers=headers) for _ in range(8)))
+        assert all(response.status_code == 200 for response in initial)
+        native = {response.cookies["webui_sid"] for response in initial}
+        assert len(native) == 1
+        original = native.pop()
+
+        store.values.clear()
+        headers["Cookie"] += f"; webui_sid={original}"
+        recovered = await gather(*(client.get("/private", headers=headers) for _ in range(8)))
+        assert all(response.status_code == 200 for response in recovered)
+        replacement = {response.cookies["webui_sid"] for response in recovered}
+        assert len(replacement) == 1
+        assert replacement != {original}
+
+
+@pytest.mark.asyncio
+async def test_refreshed_redis_cookie_keeps_native_identity_but_never_cached_authorization():
+    app, _, _, authority = application()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=PUBLIC) as client:
+        original = await client.get("/private", headers={"Cookie": f"{SSO_COOKIE}=verified|100|first-signature"})
+        refreshed = await client.get("/private", headers={"Cookie": f"{SSO_COOKIE}=verified|200|second-signature"})
+        assert refreshed.status_code == 200
+        assert refreshed.cookies["webui_sid"] == original.cookies["webui_sid"]
+        authority["revoked"] = True
+        rejected = await client.get("/private", headers={"Cookie": f"{SSO_COOKIE}=verified|200|second-signature"})
+        assert rejected.status_code == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 302, 429, 503])
+async def test_unexpected_authority_responses_are_unavailable_not_login_expiry(status):
+    app, _, _, _ = application(auth_status=status)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=PUBLIC) as client:
+        response = await client.get("/private", headers={"Cookie": f"{SSO_COOKIE}=verified"})
+        assert response.status_code == 503
+        assert response.json()["code"] == "sso_unavailable"
+        assert "webui_sid" not in response.cookies
 
 
 @pytest.mark.asyncio
@@ -153,6 +203,18 @@ def test_websocket_uses_real_native_session_and_rejects_cross_origin():
             ):
                 pytest.fail("Cross-origin socket was accepted")
         assert rejected.value.code == 1008
+
+
+def test_websocket_authority_outage_is_retryable_not_an_auth_rejection():
+    app, _, _, authority = application()
+    authority["available"] = False
+    with TestClient(app, base_url=PUBLIC) as client:
+        with pytest.raises(WebSocketDisconnect) as rejected:
+            with client.websocket_connect(
+                "wss://manage.example/ws/logs", headers={"Cookie": f"{SSO_COOKIE}=verified", "Origin": PUBLIC}
+            ):
+                pytest.fail("Unavailable authority accepted the socket")
+        assert rejected.value.code == 1013
 
 
 @pytest.mark.parametrize("url", ["http://example.com/oauth2/auth", "http://127.0.0.1/"])

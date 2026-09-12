@@ -6,9 +6,9 @@ from arclet.entari import BasicConfModel
 class WorkshopConfig(BasicConfModel):
     sandbox_image: str = "chtholly-workshop:local"
     """Prebuilt trusted Docker image; submissions never build or pull images."""
-    sandbox_timeout_seconds: float = 60.0
+    sandbox_timeout_seconds: float = 180.0
     """Maximum isolated acceptance duration in seconds."""
-    sandbox_memory_mb: int = 512
+    sandbox_memory_mb: int = 1024
     """Container memory limit in MiB."""
     sandbox_cpus: float = 1.0
     """Container CPU quota."""

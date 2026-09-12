@@ -2,3 +2,5 @@ utils/web_artifacts_server/chromium-isolated.sh text eol=lf
 scripts/chtholly_config_apply.py text eol=lf
 patches/*.patch text eol=lf
 vendor/entari/*.whl binary
+scripts/oauth2_proxy/* text eol=lf
+vendor/webui/*.whl binary

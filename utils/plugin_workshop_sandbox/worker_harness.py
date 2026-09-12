@@ -12,6 +12,7 @@ from launart import Launart, Service
 from arclet.entari import Entari, ConfigReload, AiohttpClientService
 from arclet.alconna import command_manager
 from arclet.letoderea import publish
+from worker_rendering import COMMAND_TIMEOUT, renderer_config, verify_renderer, prepare_renderer_environment
 from worker_transport import CaptureTransport
 from arclet.entari.config import EntariConfig
 from arclet.entari.plugin import (
@@ -28,7 +29,18 @@ from arclet.entari.localdata import local_data
 from arclet.entari.plugin.service import plugin_service
 from graia.amnesia.builtins.memcache import MemcacheService
 
-STAGES = ("syntax", "import", "commands", "execution", "reload", "failed_reload", "cancellation", "services", "unload")
+STAGES = (
+    "render_capability",
+    "syntax",
+    "import",
+    "commands",
+    "execution",
+    "reload",
+    "failed_reload",
+    "cancellation",
+    "services",
+    "unload",
+)
 
 
 class Acceptance:
@@ -39,7 +51,7 @@ class Acceptance:
         self.package = root / "plugins" / self.module
         self.manifest = payload["manifest"]
         self.results: list[dict] = []
-        self.stage = "syntax"
+        self.stage = "render_capability"
         self.transport: CaptureTransport | None = None
         self.manager = it(Launart)
         self.baseline_commands: dict[str, int] = {}
@@ -114,15 +126,26 @@ class Acceptance:
 
     async def exercise(self, *, first: bool = False):
         assert self.transport is not None
+        text_failures: list[str] = []
         for index, check in enumerate(self.manifest["checks"]):
             if not first and not check.get("repeatable", True):
                 continue
             effects = await asyncio.wait_for(
-                self.transport.execute(check["command"], check.get("operator", False)),
-                5,
+                self.transport.execute(check["command"], check.get("operator", False), check["expected_contains"]),
+                COMMAND_TIMEOUT,
             )
-            if check["expected_contains"] not in "\n".join(effects):
-                raise AssertionError(
+            images = [effect for effect in effects if "[image mime=" in effect]
+            if first and images:
+                # Record valid media independently, including when text matching fails.
+                self.results.append(
+                    {
+                        "name": f"{self.stage}_media_{index + 1}",
+                        "passed": True,
+                        "detail": "\n".join(images)[:4000],
+                    }
+                )
+            if not self.transport.account.protocol.matched_expected:
+                text_failures.append(
                     f"Check {index + 1} {check['command']!r}: expected text absent; effects={effects!r}"
                 )
             if first:
@@ -132,6 +155,8 @@ class Acceptance:
                     f"Check {index + 1}: replacement changed visible effect count (possible duplicate handler)"
                 )
         await self.baseline()
+        if text_failures:
+            raise AssertionError("\n".join(text_failures)[:4000])
 
     async def ready_services(self):
         await asyncio.sleep(0)
@@ -144,6 +169,7 @@ class Acceptance:
                 await asyncio.wait_for(service.status.wait_for("prepared"), 5)
 
     async def run_candidate(self):
+        self.stage = "syntax"
         self.publish_source()
         self.passed("Every Python source compiled without host-side execution")
         self.stage = "import"
@@ -223,6 +249,7 @@ class Acceptance:
 
     async def run(self):
         set_event_loop(asyncio.get_running_loop())
+        prepare_renderer_environment()
         config_path = self.root / "entari.json"
         config_path.write_text(
             json.dumps(
@@ -234,7 +261,10 @@ class Acceptance:
                         "superusers": {"workshop": ["workshop-operator"]},
                         "log": {"level": "ERROR", "save": False, "rich_error": False},
                     },
-                    "plugins": {"database": {"name": str(self.root / "acceptance.sqlite3")}},
+                    "plugins": {
+                        "database": {"name": str(self.root / "acceptance.sqlite3")},
+                        "htmlrender": renderer_config(self.package),
+                    },
                 }
             ),
             encoding="utf-8",
@@ -254,10 +284,18 @@ class Acceptance:
         self.manager.add_component(app)
         if load_plugin("entari_plugin_database", config={"name": str(self.root / "acceptance.sqlite3")}) is None:
             raise RuntimeError("Locked SQLite database dependency failed to initialize")
+        if load_plugin("entari_plugin_htmlrender", config=renderer_config(self.package)) is None:
+            raise RuntimeError("Trusted HTMLRender Playwright dependency failed to initialize")
         running = asyncio.create_task(self.manager.launch())
         probe = None
         try:
             await asyncio.wait_for(plugin_service.status.wait_for("blocking"), 10)
+            renderer = self.manager.components.get("htmlrender.runtime")
+            if renderer is None:
+                raise RuntimeError("Trusted HTMLRender service was not registered")
+            await asyncio.wait_for(renderer.status.wait_for("blocking"), COMMAND_TIMEOUT)
+            evidence = await asyncio.wait_for(verify_renderer(renderer, self.package), COMMAND_TIMEOUT)
+            self.passed("Trusted Playwright renderer decoded deterministic HTML/template PNG: " + evidence)
             plugins = self.root / "plugins"
             plugins.mkdir(exist_ok=True)
             (plugins / "_workshop_acceptance_probe.py").write_bytes(

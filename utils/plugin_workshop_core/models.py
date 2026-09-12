@@ -99,10 +99,10 @@ class Operation:
 
 @dataclass(frozen=True, slots=True)
 class SandboxLimits:
-    timeout_seconds: float = 60.0
-    memory_mb: int = 512
+    timeout_seconds: float = 180.0
+    memory_mb: int = 1024
     cpus: float = 1.0
-    pids: int = 64
+    pids: int = 256
     output_bytes: int = 65536
 
 

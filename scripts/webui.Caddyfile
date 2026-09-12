@@ -119,7 +119,7 @@
 
 		@read_api {
 			method GET
-			path_regexp read_api ^/api/(auth/check|webui-sso/client\.js|health|menus|stats|extensions/manifest|config(?:/[^/]+(?:/schema)?)?|plugins(?:/[^/]+)?|market/(?:plugins(?:/[^/]+)?|tasks/[^/]+)|config-apply/status|llm-chat/sessions/(?:page|scopes|scopes/[^/]+/sessions|sessions/[^/]+(?:/turns)?|turns/[^/]+/(?:events|inspection|context)|events/[^/]+/(?:payload|attachments/[^/]+)|assets/(?:app\.css|app\.js))|llm-chat/memes(?:/page|/assets/(?:app\.css|app\.js)|/files/[^/]+)?|plugin-workshop/(?:page|status|projects(?:/[^/]+/versions(?:/[^/]+(?:/source)?)?)?|assets/(?:app\.css|app\.js)))$
+			path_regexp read_api ^/api/(auth/check|webui-sso/(?:client\.js|session)|health|menus|stats|extensions/manifest|config(?:/[^/]+(?:/schema)?)?|plugins(?:/[^/]+)?|market/(?:plugins(?:/[^/]+)?|tasks/[^/]+)|config-apply/status|llm-chat/sessions/(?:page|scopes|scopes/[^/]+/sessions|sessions/[^/]+(?:/turns)?|turns/[^/]+/(?:events|inspection|context)|events/[^/]+/(?:payload|attachments/[^/]+)|assets/(?:app\.css|app\.js))|llm-chat/memes(?:/page|/assets/(?:app\.css|app\.js)|/files/[^/]+)?|plugin-workshop/(?:page|status|projects(?:/[^/]+/versions(?:/[^/]+(?:/source)?)?)?|assets/(?:app\.css|app\.js)))$
 		}
 		handle @read_api {
 			import webui_oidc_gateway
