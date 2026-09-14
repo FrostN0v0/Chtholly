@@ -7,10 +7,9 @@ from collections.abc import Callable
 
 from arclet.entari import Session
 from arclet.letoderea import Subscriber
-from satori.exception import ApiNotAvailable, MethodNotAllowedException
 from arclet.entari.plugin.model import PluginDispatcher
 
-from ._delivery import send_with_delivery, build_forward_chain, send_forward_fallback
+from ._delivery import send_merged_text
 from ..core.types import JSONType
 from ._registration import register_tool
 from ..core.delivery import (
@@ -40,8 +39,11 @@ def register_send_merged_forward(
     ) -> str:
         """Send one merged-forward message, with paced plain-text fallback when unavailable.
 
-        Prefer this when the reply would usually exceed the send_text message budget or contains several long
-        sections. Choose send_text or send_merged_forward before the first text delivery and never mix them.
+        Use this for a long answer with many points or substantial sections that would crowd the chat.
+        Preserve each readable paragraph or point as a separate ordered node, not one wall of text.
+        A few short paragraphs belong in send_text; a short answer can stay in final text.
+        Plan the whole reply before the first text send; do not wait until the bubble budget is exhausted.
+        Never mix send_text and send_merged_forward in one generation or add a redundant summary afterward.
 
         Args:
             messages (list[str]): Ordered visible text nodes without internal control markers.
@@ -55,22 +57,8 @@ def register_send_merged_forward(
             raise DeliveryError("messages must be a list of strings")
         delivery_state, normalized_messages = reserve_forward_messages(messages)
 
-        if session.account.platform != "onebot":
-            return await send_forward_fallback(session, delivery_state, normalized_messages, delay)
-
-        try:
-            await send_with_delivery(
-                session,
-                build_forward_chain(normalized_messages),
-                delivery_state,
-                delay_seconds=delay,
-                texts=normalized_messages,
-            )
-        except (NotImplementedError, ApiNotAvailable, MethodNotAllowedException) as exc:
-            context.warn(f"merged forward unavailable; falling back to paced text: {type(exc).__name__}")
-            return await send_forward_fallback(session, delivery_state, normalized_messages, delay)
-
-        count = len(normalized_messages)
-        return f"已发送包含 {count} 个节点的合并转发；不要在最终回复中重复，若无需补充只返回 [END_OF_RESPONSE]。"
+        return await send_merged_text(
+            session, delivery_state, normalized_messages, warn=context.warn, delay_seconds=delay
+        )
 
     return register_tool(dispatcher, send_merged_forward)

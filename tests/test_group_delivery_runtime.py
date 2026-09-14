@@ -8,7 +8,7 @@ from datetime import datetime
 from contextvars import ContextVar
 
 import pytest
-from satori import At, File, User, Audio, Event, Image, Login, Quote, Channel, EventType, ChannelType
+from satori import At, File, User, Audio, Event, Image, Login, Quote, Channel, Message, EventType, ChannelType
 from satori.const import Api
 from satori.model import MessageObject
 from arclet.entari import Session, MessageChain, MessageCreatedEvent
@@ -27,6 +27,7 @@ from plugins.llm_chat.group_delivery import (
     finish_group_delivery,
     install_group_delivery,
 )
+from plugins.llm_chat.turn_lifecycle import ActiveChatTurn
 from plugins.llm_chat.tools._delivery import send_with_delivery, build_forward_chain
 
 _OWNER: ContextVar[str] = ContextVar("test_delivery_owner", default="outside")
@@ -53,7 +54,15 @@ async def transport(monkeypatch, tmp_path):
     clock = Clock()
     login = Login(sn=0, platform="onebot", adapter="onebot", user=User("10", name="Bot"))
     account = Account(login, ApiInfo(), [], EntariProtocol)
-    network = SimpleNamespace(wire=[], hold="", entered=asyncio.Event(), gate=asyncio.Event(), outcome="success")
+    network = SimpleNamespace(
+        wire=[],
+        hold="",
+        entered=asyncio.Event(),
+        gate=asyncio.Event(),
+        outcome="success",
+        forward_error=None,
+        fail_text="",
+    )
     prepared = {}
     observer = Scope.of()
 
@@ -69,6 +78,12 @@ async def transport(monkeypatch, tmp_path):
         assert action == Api.MESSAGE_CREATE
         message = prepared[params["content"]]
         network.wire.append((message, _OWNER.get()))
+        if network.forward_error is not None and any(
+            isinstance(element, Message) and element.forward for element in message
+        ):
+            raise network.forward_error
+        if network.fail_text and message.extract_plain_text() == network.fail_text:
+            raise RuntimeError("Text transport failed")
         if network.hold and message.extract_plain_text() == network.hold:
             network.entered.set()
             await network.gate.wait()
@@ -105,6 +120,100 @@ async def transport(monkeypatch, tmp_path):
 
 def quotes(chain: MessageChain) -> list[str]:
     return [element.id for element in chain if isinstance(element, Quote)]
+
+
+def lifecycle(state, history, deleted):
+    async def append(_channel, _user, _name, _role, content):
+        history.append(content)
+
+    async def delete(identifier):
+        deleted.append(identifier)
+
+    return ActiveChatTurn("100", 1, state, append, delete, lambda _message: None)
+
+
+@pytest.mark.parametrize(
+    "paragraphs", [("Hi.",), ("First useful point.", "Second useful point.", "Third useful point.")]
+)
+async def test_final_text_preserves_readable_bubbles_and_original_reply_target(transport, paragraphs) -> None:
+    session, state = transport.session("readable"), transport.state()
+    history, deleted = [], []
+    turn = lifecycle(state, history, deleted)
+    with group_delivery_scope(session):
+        assert await turn.deliver_model_reply(session, "\n\n".join(paragraphs))
+    await turn.persist_delivered_text()
+    messages = [message for message, _ in transport.network.wire]
+    assert [message.extract_plain_text() for message in messages] == list(paragraphs)
+    assert quotes(messages[0]) == ["readable"]
+    assert history == ["\n\n".join(paragraphs)]
+    assert deleted == []
+
+
+async def test_excess_final_paragraphs_encode_as_one_forward_with_original_target(transport) -> None:
+    paragraphs = tuple(f"Useful point {index}." for index in range(6))
+    session, state = transport.session("long-request"), transport.state()
+    history, deleted = [], []
+    turn = lifecycle(state, history, deleted)
+    with group_delivery_scope(session):
+        assert await turn.deliver_model_reply(session, "\n".join(paragraphs))
+    await turn.persist_delivered_text()
+    calls = []
+
+    class Network:
+        async def call_api(self, action, params):
+            calls.append((action, params))
+            return {"message_id": str(len(calls))}
+
+    for message, _ in transport.network.wire:
+        await OneBot11MessageEncoder(transport.login, Network(), "100").send(str(message))
+    assert [action for action, _ in calls] == ["send_group_forward_msg", "send_group_msg"]
+    nodes = calls[0][1]["messages"]
+    assert [node["data"]["content"] for node in nodes] == [
+        [{"type": "text", "data": {"text": paragraph}}] for paragraph in paragraphs
+    ]
+    assert quotes(transport.network.wire[-1][0]) == ["long-request"]
+    assert history[0].startswith("\n\n".join(paragraphs))
+    assert deleted == []
+
+
+async def test_final_forward_unavailability_falls_back_without_losing_paragraphs(transport) -> None:
+    transport.network.forward_error = NotImplementedError("Forward unavailable")
+    paragraphs = tuple(f"Useful point {index}." for index in range(6))
+    session, state = transport.session("fallback"), transport.state()
+    history, deleted = [], []
+    turn = lifecycle(state, history, deleted)
+    with group_delivery_scope(session):
+        assert await turn.deliver_model_reply(session, "\n".join(paragraphs))
+    await turn.persist_delivered_text()
+    assert [message.extract_plain_text() for message, _ in transport.network.wire[1:]] == list(paragraphs)
+    assert history == ["\n\n".join(paragraphs)]
+    assert deleted == []
+
+
+async def test_partial_forward_fallback_keeps_only_confirmed_prefix(transport) -> None:
+    transport.network.forward_error = NotImplementedError("Forward unavailable")
+    transport.network.fail_text = "Useful point 1."
+    paragraphs = tuple(f"Useful point {index}." for index in range(6))
+    session, state = transport.session("partial"), transport.state()
+    history, deleted = [], []
+    turn = lifecycle(state, history, deleted)
+    with group_delivery_scope(session), pytest.raises(RuntimeError):
+        await turn.deliver_model_reply(session, "\n".join(paragraphs))
+    assert history == [paragraphs[0]]
+    assert len(transport.network.wire) == 3
+    assert deleted == []
+
+
+async def test_unknown_forward_failure_does_not_retry_as_plain_text(transport) -> None:
+    transport.network.forward_error = TimeoutError("Forward outcome unknown")
+    session, state = transport.session("unknown"), transport.state()
+    history, deleted = [], []
+    turn = lifecycle(state, history, deleted)
+    with group_delivery_scope(session), pytest.raises(TimeoutError):
+        await turn.deliver_model_reply(session, "\n".join(f"Useful point {index}." for index in range(6)))
+    assert len(transport.network.wire) == 1
+    assert history == []
+    assert deleted == []
 
 
 async def test_native_reply_target_is_immutable_and_continuation_is_not_requoted(transport) -> None:

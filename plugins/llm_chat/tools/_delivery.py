@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from satori import Text, Message
 from arclet.entari import Session, MessageChain
+from satori.exception import ApiNotAvailable, MethodNotAllowedException
 
 from ..core.delivery import (
     DeliveryError,
@@ -79,4 +80,29 @@ async def send_forward_fallback(
     return (
         f"合并转发不可用，已按顺序回退发送 {total} 条普通文本；"
         "不要在最终回复中重复，若无需补充只返回 [END_OF_RESPONSE]。"
+    )
+
+
+async def send_merged_text(
+    session: Session,
+    state: DeliveryState,
+    messages: Sequence[str],
+    *,
+    warn: Callable[[str], object],
+    delay_seconds: float | None = None,
+) -> str:
+    """Share native forward transport and confirmed-prefix fallback across text paths."""
+
+    if session.account.platform != "onebot":
+        return await send_forward_fallback(session, state, messages, delay_seconds)
+    try:
+        await send_with_delivery(
+            session, build_forward_chain(messages), state, delay_seconds=delay_seconds, texts=messages
+        )
+    except (NotImplementedError, ApiNotAvailable, MethodNotAllowedException) as exc:
+        warn(f"merged forward unavailable; falling back to paced text: {type(exc).__name__}")
+        return await send_forward_fallback(session, state, messages, delay_seconds)
+    return (
+        f"Sent one merged forward containing {len(messages)} nodes. "
+        "Do not repeat delivered text; return [END_OF_RESPONSE] unless new information is necessary."
     )

@@ -28,7 +28,7 @@ from plugins.llm_chat.core.delivery import (
     current_llm_chat_delivery,
     normalize_delivery_limits,
     require_llm_chat_delivery,
-    reserve_final_text_messages,
+    reserve_final_text_delivery,
 )
 from plugins.llm_chat.core.media_delivery import (
     MEDIA_UNAVAILABLE_MARKER,
@@ -512,27 +512,56 @@ def test_final_supplement_uses_remaining_total_budget_only_after_tool_delivery()
     assert ordinary.text_chars == 0
 
 
-def test_multiline_final_text_reserves_independent_messages_without_splitting_structured_content() -> None:
-    state = DeliveryState(limits=_limits(max_text_messages=3, max_text_chars_per_message=20, max_total_text_chars=40))
+def test_final_prose_keeps_paragraphs_separate_and_structured_text_intact() -> None:
+    state = DeliveryState()
+    plan = reserve_final_text_delivery(state, "First useful point.\nSecond useful point.")
+    assert plan.mode == "segments"
+    assert plan.messages == ("First useful point.", "Second useful point.")
 
-    assert reserve_final_text_messages(state, "first beat\nsecond beat") == ("first beat", "second beat")
-    assert state.mode == "segments"
-    assert state.text_messages == 2
-    assert state.text_chars == 21
-
-    structured = DeliveryState()
-    markdown = "Steps:\n- first\n- second"
-    assert reserve_final_text_messages(structured, markdown) == (markdown,)
-    assert structured.mode is None
-    assert structured.text_messages == 0
+    for structured in (
+        "Steps:\n- first\n- second",
+        "Example:\n```python\nx = 1\nprint(x)\n```",
+        "| Key | Value |\n| A | B |",
+    ):
+        assert reserve_final_text_delivery(DeliveryState(), structured).messages == (structured,)
 
 
-def test_multiline_final_text_stays_atomic_when_segment_budget_is_insufficient() -> None:
-    state = DeliveryState(limits=_limits(max_text_messages=1, max_text_chars_per_message=20, max_total_text_chars=40))
+def test_excess_final_paragraphs_become_ordered_forward_nodes_not_one_wall() -> None:
+    state = DeliveryState(limits=_limits(max_text_messages=2))
+    paragraphs = ("First useful point.", "Second useful point.", "Third useful point.")
+    plan = reserve_final_text_delivery(state, "\n\n".join(paragraphs))
+    assert plan.mode == "forward"
+    assert plan.messages == paragraphs
 
-    assert reserve_final_text_messages(state, "first beat\nsecond beat") == ("first beat\nsecond beat",)
-    assert state.mode is None
-    assert state.text_messages == 0
+
+def test_long_prose_splits_only_at_complete_sentence_boundaries() -> None:
+    state = DeliveryState(limits=_limits(max_text_chars_per_message=30))
+    reply = "First complete thought. Second complete thought. Third complete thought."
+    plan = reserve_final_text_delivery(state, reply)
+    assert plan.mode == "segments"
+    assert plan.messages == ("First complete thought.", "Second complete thought.", "Third complete thought.")
+    assert " ".join(plan.messages) == reply
+
+
+def test_final_paragraphs_use_remaining_bubbles_without_switching_started_mode() -> None:
+    state = DeliveryState(limits=_limits(max_text_messages=3))
+    with llm_chat_delivery_scope(state):
+        reserve_text_message("Already delivered.")
+    plan = reserve_final_text_delivery(state, "First supplement.\nSecond supplement.")
+    assert plan.mode == "segments"
+    assert plan.messages == ("First supplement.", "Second supplement.")
+    before = _state_snapshot(state)
+    with pytest.raises(DeliveryError):
+        reserve_final_text_delivery(state, "Another point.\nAnother point again.")
+    assert _state_snapshot(state) == before
+
+
+def test_unrepresentable_forward_preserves_budget_without_partial_reservation() -> None:
+    state = DeliveryState(limits=_limits(max_text_messages=1, max_forward_nodes=2))
+    before = _state_snapshot(state)
+    with pytest.raises(DeliveryError):
+        reserve_final_text_delivery(state, "First point.\nSecond point.\nThird point.")
+    assert _state_snapshot(state) == before
 
 
 def test_forward_validation_limits_and_atomic_rejection() -> None:

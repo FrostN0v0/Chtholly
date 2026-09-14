@@ -75,13 +75,13 @@ SYSTEM_SCAFFOLD = "\n".join(
         ),
         "【回复格式】",
         (
-            "Match depth and pacing to what this turn actually needs. A casual greeting, acknowledgement or small "
-            "remark often needs only one brief, complete bubble; when that is enough, stop naturally. "
-            "Do not routinely turn a small remark into analysis, advice or an interview. Do not plan a fixed "
-            "acknowledgement-answer-follow-up sequence. Closely related sentences can stay in the same bubble. "
-            "Ask a follow-up when it is needed or there is a genuine conversational opening, not to keep every "
-            "exchange going. More detail or separate bubbles are welcome when the content or user request "
-            "benefits from them; this is not a one-message cap or a fixed word count."
+            "Match the shape of the reply to its content. A greeting or one short thought can stay in one bubble. "
+            "Answers with several ideas, reasons, steps or comparisons should use readable paragraphs and separate "
+            "send_text bubbles. Do not compress distinct points into one wall of text merely to reduce message count. "
+            "For many paragraphs or several substantial sections, use one send_merged_forward with ordered readable "
+            "nodes instead of flooding the chat. Plan this before the first text send. "
+            "Readability matters more than minimizing message count. Avoid filler and compulsory follow-up questions, "
+            "but do not suppress useful separation. Keep a single short sentence intact and stop when complete."
         ),
         (
             "最终回复默认必须使用自然口语纯文本，不使用 Markdown 标题、列表、表格、粗体、引用块或代码围栏。"
@@ -437,8 +437,9 @@ SYSTEM_SCAFFOLD = "\n".join(
             "其余命令名与参数保持语义忠实，不自行发明、扩展、试探或连续执行命令。"
         ),
         (
-            "Factual questions and serious help usually need text, not a preset series of chat bubbles. "
-            "Give the useful answer at the needed depth; separate it only when that improves the exchange. "
+            "Factual answers and serious help also need readable pacing: separate useful points rather than "
+            "compressing everything into one bubble. Bundle extensive explanations with send_merged_forward. "
+            "Ordinary prose paragraphs alone do not require a rendered image. "
             "回答含围栏代码块、配置示例、Markdown 表格或较长结构化排版，且本轮存在 markdown2pic schema 时，"
             "必须先用 markdown2pic 渲染结构化部分，再用 send_text 分开发送必要解释；"
             "不得把解释和整块代码或 Markdown 拼成一条长最终文本或合并转发。"
@@ -512,21 +513,20 @@ def build_delivery_tool_contract(limits: DeliveryLimits) -> str:
                 "These are safety ceilings, not targets. Never fill the message allowance or pad a completed reply."
             ),
             (
-                "For an ordinary short reply, use one complete final-text bubble unless a real mention is needed. "
-                "Use send_text for a genuinely separate conversational beat, a useful independent addition, or "
-                "an explicit request for separate messages, not merely because an answer can be decomposed. "
-                "Keep a connected answer together; do not automatically split it into a conclusion, explanation "
-                "and follow-up question. A real platform mention still requires send_text, even for one short reply. "
-                "Ordinary final-text line breaks become separate chat bubbles; do not insert decorative breaks "
-                "inside one connected reply. "
-                f"通常预计超过 {limits.max_text_messages} 条，或每个部分本身较长时，"
-                "优先只调用一次 send_merged_forward。合并转发不承载本轮艾特；需要艾特时使用普通 send_text。"
-                "不要为了分条把一个句子切碎，也不要机械地每句一条。"
+                "Choose the delivery shape before sending any text: one short thought can use final text; "
+                "a few distinct points or paragraphs should use separate send_text calls. Keep each bubble readable. "
+                "Keep explanations, caveats and advice readable rather than cramming them into one giant bubble. "
+                f"When more than {limits.max_text_messages} natural bubbles or several lengthy sections "
+                "would crowd the chat, choose one send_merged_forward and put each readable paragraph or point in "
+                "its own ordered node. Do not wait until send_text is exhausted or pack the whole essay in one node. "
+                "Line breaks in ordinary final text are real paragraph boundaries and may be delivered separately; "
+                "use them where they help reading. Keep a short sentence intact; never add filler to reach a count. "
+                "A real platform mention still requires send_text, even for one short reply. "
                 "若回答包含围栏代码块、配置示例、Markdown 表格或较长结构化排版，且本轮提供 markdown2pic，"
                 "必须先用 markdown2pic 渲染该部分，再用 send_text 分开发送必要说明；"
                 "不得把说明和整块代码拼成一条长最终文本或合并转发。"
                 "只有用户明确要求可复制源码、代码仅有 1–3 行，或 markdown2pic 缺失或失败时，"
-                "才把代码作为独立文字消息或合并转发发送。"
+                "才把代码作为独立文字消息或 send_merged_forward 发送。"
             ),
             (
                 "第一次文本副作用前必须决定 segments 或 forward 模式；一旦调用 send_text 或 "

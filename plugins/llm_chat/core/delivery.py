@@ -26,6 +26,15 @@ _INTERNAL_IMAGE_REF = re.compile(
     r"(?<!\w)(?:web_ref_[0-9a-f]{24}|(?:input|reference|output)_[0-9a-f]{32})(?!\w)",
     re.IGNORECASE,
 )
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[\u3002\uff01\uff1f\uff1b])(?=\S)|(?<=[.!?;])(?=\s+)")
+
+
+@dataclass(frozen=True)
+class FinalTextPlan:
+    """Reserved final text delivery, either paced bubbles or one merged forward."""
+
+    mode: DeliveryMode
+    messages: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -273,20 +282,12 @@ def reserve_text_message(text: object) -> tuple[DeliveryState, str]:
     return state, normalized
 
 
-def reserve_forward_messages(messages: object) -> tuple[DeliveryState, tuple[str, ...]]:
-    """Atomically reserve one merged-forward delivery."""
+def _reserve_forward_messages_for_state(
+    state: DeliveryState,
+    normalized: tuple[str, ...],
+) -> tuple[DeliveryState, tuple[str, ...]]:
+    """Reserve one merged-forward delivery after all nodes are normalized."""
 
-    state = require_llm_chat_delivery()
-    if isinstance(messages, (str, bytes, bytearray)) or not isinstance(messages, Sequence):
-        raise DeliveryError("messages must be a list of strings")
-    if any(not isinstance(message, str) for message in messages):
-        raise DeliveryError("messages must be a list of strings")
-    if not messages:
-        raise DeliveryError("messages must contain at least one text node")
-
-    normalized = tuple(
-        normalize_delivery_text(message, field=f"messages[{index}]") for index, message in enumerate(messages)
-    )
     if state.mode == "segments":
         raise DeliveryError("Do not mix send_text and send_merged_forward in one generation")
     if state.forward_calls >= 1:
@@ -314,6 +315,23 @@ def reserve_forward_messages(messages: object) -> tuple[DeliveryState, tuple[str
     return state, normalized
 
 
+def reserve_forward_messages(messages: object) -> tuple[DeliveryState, tuple[str, ...]]:
+    """Atomically reserve one merged-forward delivery."""
+
+    state = require_llm_chat_delivery()
+    if isinstance(messages, (str, bytes, bytearray)) or not isinstance(messages, Sequence):
+        raise DeliveryError("messages must be a list of strings")
+    if any(not isinstance(message, str) for message in messages):
+        raise DeliveryError("messages must be a list of strings")
+    if not messages:
+        raise DeliveryError("messages must contain at least one text node")
+
+    normalized = tuple(
+        normalize_delivery_text(message, field=f"messages[{index}]") for index, message in enumerate(messages)
+    )
+    return _reserve_forward_messages_for_state(state, normalized)
+
+
 def reserve_media_messages_for_state(state: DeliveryState, count: int) -> DeliveryState:
     """Atomically reserve media deliveries for a completed generation state."""
 
@@ -339,36 +357,52 @@ def reserve_media_message() -> DeliveryState:
     return reserve_media_messages(1)
 
 
-def _split_final_text(normalized: str) -> tuple[str, ...]:
-    if "```" in normalized or "~~~" in normalized:
-        return (normalized,)
-    segments = tuple(part.strip() for part in re.split(r"[\r\n]+", normalized) if part.strip())
-    if len(segments) < 2 or any(_STRUCTURED_FINAL_LINE.match(segment) for segment in segments):
-        return (normalized,)
-    return segments
+def _split_long_block(block: str, max_chars: int) -> tuple[str, ...]:
+    """Pack complete sentences without cutting words, URLs or individual sentences."""
+
+    if max_chars <= 0 or len(block) <= max_chars:
+        return (block,)
+    result: list[str] = []
+    current = ""
+    for piece in _SENTENCE_BOUNDARY.split(block):
+        if current and len(current) + len(piece) > max_chars:
+            result.append(current.strip())
+            current = piece
+        else:
+            current += piece
+    if current.strip():
+        result.append(current.strip())
+    return tuple(result)
 
 
-def reserve_final_text_messages(state: DeliveryState, text: object) -> tuple[str, ...]:
-    """Reserve natural newline-separated final text as paced chat messages when budgets allow."""
+def _split_final_text(normalized: str, *, max_chars: int) -> tuple[str, ...]:
+    blocks = tuple(part.strip() for part in re.split(r"[\r\n]+", normalized) if part.strip())
+    if "```" in normalized or "~~~" in normalized or any(_STRUCTURED_FINAL_LINE.match(block) for block in blocks):
+        return (normalized,)
+    return tuple(segment for block in blocks for segment in _split_long_block(block, max_chars))
+
+
+def reserve_final_text_delivery(state: DeliveryState, text: object) -> FinalTextPlan:
+    """Preserve readable paragraphs; reserve excess initial bubbles as one forward."""
 
     normalized = normalize_delivery_text(text, field="text")
-    segments = _split_final_text(normalized)
+    segments = _split_final_text(normalized, max_chars=state.limits.max_text_chars_per_message)
     if len(segments) < 2 or state.mode == "forward":
-        return (reserve_final_text(state, normalized),)
+        return FinalTextPlan("segments", (reserve_final_text(state, normalized),))
 
-    remaining_messages = state.limits.max_text_messages - state.text_messages
     total_chars = sum(map(len, segments))
     if (
-        len(segments) > remaining_messages
-        or any(len(segment) > state.limits.max_text_chars_per_message for segment in segments)
-        or state.text_chars + total_chars > state.limits.max_total_text_chars
+        len(segments) <= state.limits.max_text_messages - state.text_messages
+        and all(len(segment) <= state.limits.max_text_chars_per_message for segment in segments)
+        and state.text_chars + total_chars <= state.limits.max_total_text_chars
     ):
-        return (reserve_final_text(state, normalized),)
+        state.mode = "segments"
+        state.text_messages += len(segments)
+        state.text_chars += total_chars
+        return FinalTextPlan("segments", segments)
 
-    state.mode = "segments"
-    state.text_messages += len(segments)
-    state.text_chars += total_chars
-    return segments
+    _, messages = _reserve_forward_messages_for_state(state, segments)
+    return FinalTextPlan("forward", messages)
 
 
 def reserve_final_text(state: DeliveryState, text: object) -> str:

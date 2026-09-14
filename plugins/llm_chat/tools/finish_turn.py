@@ -16,7 +16,7 @@ from ..core.delivery import (
     DeliveryError,
     normalize_delivery_text,
     current_llm_chat_delivery,
-    reserve_final_text_messages,
+    reserve_final_text_delivery,
 )
 from ..core.tool_trace import current_tool_trace
 from ..core.tool_trace_policy import _DELIVERY_TOOLS, _OBSERVATION_TOOLS
@@ -88,7 +88,7 @@ async def finish_turn(
         reply = normalize_delivery_text(reply, field="reply")
         if state.confirmed_media_deliveries:
             raise DeliveryError("Cannot decline after media delivery")
-        reserve_final_text_messages(replace(state), reply)
+        reserve_final_text_delivery(replace(state), reply)
     else:
         if state.confirmed_deliveries <= 0:
             raise DeliveryError("Delivered finish requires confirmed output")

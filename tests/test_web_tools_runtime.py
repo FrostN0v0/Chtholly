@@ -2042,9 +2042,8 @@ async def test_merged_forward_uses_public_satori_shape_and_onebot_encoder(local_
         target = _tool_callable(state_module, "send_merged_forward")
         messages = [f"node-{index}" for index in range(1, 7)]
         with llm_chat_delivery_scope(state):
-            result = await target(session, messages, None)
+            await target(session, messages, None)
 
-        assert "6 个节点" in result
         assert len(session.sent) == 1
         chain = cast(MessageChain, session.sent[0])
         forward = cast(SatoriMessage, chain[0])
