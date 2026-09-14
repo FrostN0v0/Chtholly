@@ -13,14 +13,12 @@ from .core.media import strip_internal_media_records
 from .core.delivery import (
     DeliveryError,
     DeliveryState,
-    wait_for_delivery,
-    mark_delivery_attempt,
-    mark_delivery_success,
     render_delivered_text,
     reserve_final_text_messages,
     strip_trailing_end_of_response,
     reserve_media_messages_for_state,
 )
+from .group_delivery import finish_group_delivery
 from .core.tool_trace import ToolTraceRecorder
 from .tools._delivery import send_with_delivery
 from .core.agent_trace import AgentEventDraft, AgentTurnRecorder
@@ -204,22 +202,13 @@ class ActiveChatTurn:
                 return False
             for final_reply in final_replies:
                 try:
-                    await wait_for_delivery(self.delivery_state)
-                except asyncio.CancelledError:
+                    await send_with_delivery(session, final_reply, self.delivery_state, texts=[final_reply])
+                except BaseException:
                     await self.preserve_and_rollback()
                     raise
-                except Exception:
-                    await self.preserve_and_rollback()
-                    raise
-                try:
-                    await session.send(final_reply)
-                except asyncio.CancelledError:
-                    mark_delivery_attempt(self.delivery_state)
-                    await self.persist_delivered_text(preserve_original=True)
-                    raise
-                except Exception:
-                    mark_delivery_attempt(self.delivery_state)
-                    await self.persist_delivered_text(preserve_original=True)
-                    raise
-                mark_delivery_success(self.delivery_state, [final_reply])
+        try:
+            await finish_group_delivery(session, self.delivery_state)
+        except BaseException:
+            await self.preserve_and_rollback()
+            raise
         return True

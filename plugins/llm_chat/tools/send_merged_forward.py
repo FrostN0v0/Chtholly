@@ -2,22 +2,19 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from collections.abc import Callable
 
 from arclet.entari import Session
 from arclet.letoderea import Subscriber
+from satori.exception import ApiNotAvailable, MethodNotAllowedException
 from arclet.entari.plugin.model import PluginDispatcher
 
-from ._delivery import build_forward_chain, send_forward_fallback
+from ._delivery import send_with_delivery, build_forward_chain, send_forward_fallback
 from ..core.types import JSONType
 from ._registration import register_tool
 from ..core.delivery import (
     DeliveryError,
-    wait_for_delivery,
-    mark_delivery_attempt,
-    mark_delivery_success,
     normalize_delivery_delay,
     reserve_forward_messages,
 )
@@ -61,18 +58,18 @@ def register_send_merged_forward(
         if session.account.platform != "onebot":
             return await send_forward_fallback(session, delivery_state, normalized_messages, delay)
 
-        await wait_for_delivery(delivery_state, delay)
         try:
-            await session.send(build_forward_chain(normalized_messages))
-        except asyncio.CancelledError:
-            mark_delivery_attempt(delivery_state)
-            raise
-        except Exception as exc:
-            mark_delivery_attempt(delivery_state)
-            context.warn(f"merged forward failed; falling back to paced text: {type(exc).__name__}")
+            await send_with_delivery(
+                session,
+                build_forward_chain(normalized_messages),
+                delivery_state,
+                delay_seconds=delay,
+                texts=normalized_messages,
+            )
+        except (NotImplementedError, ApiNotAvailable, MethodNotAllowedException) as exc:
+            context.warn(f"merged forward unavailable; falling back to paced text: {type(exc).__name__}")
             return await send_forward_fallback(session, delivery_state, normalized_messages, delay)
 
-        mark_delivery_success(delivery_state, normalized_messages)
         count = len(normalized_messages)
         return f"已发送包含 {count} 个节点的合并转发；不要在最终回复中重复，若无需补充只返回 [END_OF_RESPONSE]。"
 

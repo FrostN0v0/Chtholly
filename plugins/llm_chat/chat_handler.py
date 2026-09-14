@@ -45,8 +45,10 @@ from .channel_turns import (
     current_participant_turn_superseded,
 )
 from .delivery_audit import delivery_audit_scope, current_delivery_audit
+from .group_delivery import group_delivery_scope
 from .chat_evaluation import cancel_pending_evaluations, schedule_relationship_evaluation
 from .forward_context import resolve_merged_forward_messages
+from .tools._delivery import send_with_delivery
 from .agent_turn_setup import prepare_agent_turn
 from .agent_attachments import capture_user_input_images, remove_user_input_attachments
 from .reaction_feedback import MessageReactionFeedback, settle_reaction_update, llm_chat_reaction_scope
@@ -96,7 +98,12 @@ plugin.collect_disposes(cancel_pending_evaluations)
 @latest_participant_turn
 async def on_chat(session: Session, ctx: Contexts):
     reaction = MessageReactionFeedback(session, _LOGGER.warning)
-    with delivery_audit_scope(session, _LOGGER.warning), llm_chat_reaction_scope(reaction), main_model_scope():
+    with (
+        group_delivery_scope(session),
+        delivery_audit_scope(session, _LOGGER.warning),
+        llm_chat_reaction_scope(reaction),
+        main_model_scope(),
+    ):
         try:
             await reaction.set_stage("processing")
             result = await _run_chat(session, ctx, reaction)
@@ -149,7 +156,7 @@ async def _run_chat(
         identity = await resolve_chat_identity(session)
     except Exception as exc:
         _LOGGER.warning(f"user identity resolve failed: {summarize_exception(exc)}")
-        await session.send(_CHAT_FAILURE_REPLY)
+        await send_with_delivery(session, _CHAT_FAILURE_REPLY, None)
         await reaction.finish("failed")
         return BLOCK
     user_id = identity.user_id
@@ -320,6 +327,7 @@ async def _run_chat(
         if resolution.outcome == "delivered":
             if not delivery_state.confirmed_deliveries:
                 raise RuntimeError("explicit delivered outcome lacked confirmed output")
+            await turn.deliver_model_reply(session, "")
             await turn.persist_delivered_text()
             turn.agent_events.append(
                 "response_decision",

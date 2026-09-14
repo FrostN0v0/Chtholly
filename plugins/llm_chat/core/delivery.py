@@ -386,6 +386,22 @@ def reserve_final_text(state: DeliveryState, text: object) -> str:
     return normalized
 
 
+def reserve_attribution_text(state: DeliveryState, text: str) -> str:
+    """Budget a final reply anchor after non-quotable media, including forward mode."""
+    normalized = normalize_delivery_text(text, field="attribution")
+    if (
+        state.text_messages >= state.limits.max_text_messages
+        or len(normalized) > state.limits.max_text_chars_per_message
+        or state.text_chars + len(normalized) > state.limits.max_total_text_chars
+    ):
+        raise DeliveryError("Reply attribution exceeds the configured delivery text budget")
+    state.text_messages += 1
+    state.text_chars += len(normalized)
+    if state.mode is None:
+        state.mode = "segments"
+    return normalized
+
+
 def normalize_delivery_delay(delay_seconds: object) -> float | None:
     """Validate a model-provided target delay without exposing its value."""
 
@@ -397,6 +413,11 @@ def normalize_delivery_delay(delay_seconds: object) -> float | None:
     return normalized if math.isfinite(normalized) else None
 
 
+def delivery_interval_seconds(limits: DeliveryLimits, delay_seconds: float | None = None) -> float:
+    target = limits.default_interval_seconds if delay_seconds is None else delay_seconds
+    return _clamp_float(target, limits.min_interval_seconds, limits.max_interval_seconds)
+
+
 async def wait_for_delivery(
     state: DeliveryState,
     delay_seconds: float | None = None,
@@ -405,12 +426,7 @@ async def wait_for_delivery(
 
     if state.last_delivery_at is None:
         return
-    target = state.limits.default_interval_seconds if delay_seconds is None else delay_seconds
-    target = _clamp_float(
-        target,
-        state.limits.min_interval_seconds,
-        state.limits.max_interval_seconds,
-    )
+    target = delivery_interval_seconds(state.limits, delay_seconds)
     elapsed = max(0.0, state.clock() - state.last_delivery_at)
     remaining = target - elapsed
     if remaining > 0.0:

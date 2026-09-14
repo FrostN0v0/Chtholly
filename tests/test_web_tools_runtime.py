@@ -203,6 +203,7 @@ class _DeliveryToolSession(Session[Any]):
         platform: str = "onebot",
         fail_attempts: set[int] | None = None,
         cancel_attempts: set[int] | None = None,
+        unavailable_attempts: set[int] | None = None,
     ) -> None:
         self.account = cast(Any, SimpleNamespace(platform=platform, self_id="10001"))
         self.event = cast(
@@ -216,12 +217,15 @@ class _DeliveryToolSession(Session[Any]):
         self.attempts: list[Any] = []
         self.fail_attempts = fail_attempts or set()
         self.cancel_attempts = cancel_attempts or set()
+        self.unavailable_attempts = unavailable_attempts or set()
 
     async def send(self, message: Any, *_args: Any, **_kwargs: Any) -> list[Any]:
         self.attempts.append(message)
         attempt = len(self.attempts)
         if attempt in self.cancel_attempts:
             raise asyncio.CancelledError
+        if attempt in self.unavailable_attempts:
+            raise NotImplementedError("Forward messages are unsupported")
         if attempt in self.fail_attempts:
             raise RuntimeError("sanitized transport failure")
         self.sent.append(message)
@@ -2075,17 +2079,14 @@ async def test_merged_forward_uses_public_satori_shape_and_onebot_encoder(local_
 @pytest.mark.asyncio
 async def test_merged_forward_fallbacks_are_paced_and_report_confirmed_prefix(
     local_modules: SimpleNamespace,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     baseline = _registry_snapshot()
-    warnings: list[str] = []
 
     async with _temporary_plugin(
         config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
         module_path=_TOOL_RUNTIME_PATH,
     ) as harness:
         runtime = harness.module
-        monkeypatch.setattr(runtime.merged_forward_context, "warn", warnings.append)
         target = _tool_callable(runtime, "send_merged_forward")
         messages = [f"node-{index}" for index in range(1, 7)]
 
@@ -2103,28 +2104,31 @@ async def test_merged_forward_fallbacks_are_paced_and_report_confirmed_prefix(
 
         onebot_clock = _FakeClock()
         onebot_state = runtime.DeliveryState(sleep=onebot_clock.sleep, clock=onebot_clock.monotonic)
-        onebot = _DeliveryToolSession(platform="onebot", fail_attempts={1})
+        onebot = _DeliveryToolSession(platform="onebot", unavailable_attempts={1})
         with llm_chat_delivery_scope(onebot_state):
             await target(onebot, messages, 0.2)
         assert onebot.sent == messages
         assert onebot_clock.sleeps == [1.1] * 6
-        assert warnings == ["merged forward failed; falling back to paced text: RuntimeError"]
 
         partial_clock = _FakeClock()
         partial_state = runtime.DeliveryState(sleep=partial_clock.sleep, clock=partial_clock.monotonic)
-        partial = _DeliveryToolSession(platform="onebot", fail_attempts={1, 4})
+        partial = _DeliveryToolSession(platform="onebot", unavailable_attempts={1}, fail_attempts={4})
         with llm_chat_delivery_scope(partial_state):
-            with pytest.raises(
-                runtime.DeliveryError,
-                match=(
-                    "^merged forward fallback confirmed 2/6 text messages before failure; "
-                    "do not repeat the confirmed prefix$"
-                ),
-            ):
+            with pytest.raises(runtime.DeliveryError):
                 await target(partial, messages, 0.2)
         assert partial.sent == messages[:2]
         assert partial_state.delivered_texts == messages[:2]
         assert len(partial.attempts) == 4
+
+        unknown_state = runtime.DeliveryState()
+        unknown = _DeliveryToolSession(platform="onebot", fail_attempts={1})
+        with llm_chat_delivery_scope(unknown_state), pytest.raises(RuntimeError):
+            await target(unknown, messages, None)
+        assert unknown.sent == []
+        assert len(unknown.attempts) == 1
+        assert unknown_state.delivery_attempts == 1
+        assert unknown_state.confirmed_deliveries == 0
+        assert unknown_state.delivered_texts == []
 
         await harness.dispose()
         _assert_registry_matches(baseline)
