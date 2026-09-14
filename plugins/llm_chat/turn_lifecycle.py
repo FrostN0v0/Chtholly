@@ -14,13 +14,13 @@ from .core.delivery import (
     DeliveryError,
     DeliveryState,
     render_delivered_text,
-    reserve_final_text_delivery,
+    reserve_final_text_messages,
     strip_trailing_end_of_response,
     reserve_media_messages_for_state,
 )
 from .group_delivery import finish_group_delivery
 from .core.tool_trace import ToolTraceRecorder
-from .tools._delivery import send_merged_text, send_with_delivery
+from .tools._delivery import send_with_delivery
 from .core.agent_trace import AgentEventDraft, AgentTurnRecorder
 from .core.native_images import to_entari_image, extract_native_images
 from .core.media_delivery import strip_media_unavailable_marker
@@ -192,21 +192,17 @@ class ActiveChatTurn:
 
         if reply:
             try:
-                plan = reserve_final_text_delivery(self.delivery_state, reply)
+                final_replies = reserve_final_text_messages(self.delivery_state, reply)
             except DeliveryError:
                 self.warn("suppressed final supplement outside delivery budget")
-                plan = None
-            if plan is None and self.delivery_state.confirmed_deliveries == 0:
+                final_replies = ()
+            if not final_replies and self.delivery_state.confirmed_deliveries == 0:
                 await self.rollback_if_unstarted()
                 self.warn("final reply was suppressed without confirmed delivery")
                 return False
-            if plan is not None:
+            for final_reply in final_replies:
                 try:
-                    if plan.mode == "forward":
-                        await send_merged_text(session, self.delivery_state, plan.messages, warn=self.warn)
-                    else:
-                        for final_reply in plan.messages:
-                            await send_with_delivery(session, final_reply, self.delivery_state, texts=[final_reply])
+                    await send_with_delivery(session, final_reply, self.delivery_state, texts=[final_reply])
                 except BaseException:
                     await self.preserve_and_rollback()
                     raise

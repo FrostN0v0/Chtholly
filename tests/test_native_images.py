@@ -79,7 +79,7 @@ def test_agno_compat_litellm_wrapper_attaches_provider_images() -> None:
                     "images": [{"index": 0, "type": "image_url", "image_url": {"url": _DATA_URL}}],
                 }
             }
-        ],
+        ]
     )
 
     with llm_chat_tool_trace_scope(ToolTraceRecorder()):

@@ -141,14 +141,11 @@ def register_send_text(
     ) -> str:
         """Send one paced text bubble, optionally mentioning current-channel participants.
 
-        Use this for each readable paragraph or distinct idea in an answer with several useful points, reasons,
-        steps or comparisons. Related short sentences can share one bubble; do not compress a medium or long answer
-        into one wall of text just to reduce message count. A greeting or one short thought can use final text.
-        If there are many points or several substantial sections, choose one send_merged_forward before the first
-        text send, with separate readable nodes. Avoid filler and forced closing questions, not useful separation.
-        Use send_text whenever a real mention is needed, even for one short bubble. Mentions are optional, for
-        deliberate address, summoning, handoff or disambiguation, not every reply. Use current_user for the current
-        speaker. For anyone else, first resolve one unambiguous participant_ref
+        Prefer this when a reply has two or more naturally separate chat beats, including factual answers with a
+        conclusion followed by a reason, caveat, or follow-up. Use this whenever a real mention is needed, including
+        for one short bubble; final response text cannot create a platform mention. Mentions are optional and should
+        be used only for deliberate direct address, summoning, handoff, or multi-person disambiguation, never on every
+        reply. Use current_user for the current speaker. For anyone else, first resolve one unambiguous participant_ref
         with find_channel_participants or current-channel context. Never place raw platform IDs, participant_ref values,
         or a textual @name inside text.
 

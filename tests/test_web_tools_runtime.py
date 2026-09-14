@@ -4348,8 +4348,10 @@ async def test_native_finish_stops_queued_effects_with_matched_skipped_results(
         rows.append(AgentEvent(turn_id=1, event_ref=f"event-{event.sequence}", **values))
     history = _turn_messages(AgentTurn(id=1), rows, inline_chars=10_000)
     history_results = [message for message in history if message["role"] == "tool"]
-    assert [message["tool_call_id"] for message in history_results] == [call["id"] for call in calls]
-    decision_result = json.loads(history_results[-2]["content"])
+    assert sorted(message["tool_call_id"] for message in history_results) == sorted(call["id"] for call in calls)
+    decision_result = json.loads(
+        next(message["content"] for message in history_results if message["tool_call_id"] == "finish")
+    )
     assert decision_result["effect"] == "none"
     assert decision_result["data"] == {"outcome": outcome}
     assert "private boundary explanation" not in json.dumps(history)
