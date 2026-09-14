@@ -393,7 +393,7 @@ async def finish_turn(turn_id: int, *, status: str, final_text: str = "") -> Non
         turn.status = status
         turn.final_text = final_text
         turn.finished_at = datetime.utcnow()
-        if was_running and status in {"completed", "partial"}:
+        if was_running and status in {"completed", "partial", "silent", "declined"}:
             context_session = await db.get(ContextSession, turn.session_id)
             if context_session is not None:
                 context_session.turn_count += 1

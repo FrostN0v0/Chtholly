@@ -56,6 +56,7 @@ from .tools.send_audio import AudioToolContext, register_send_audio
 from .tools.send_image import ImageToolContext, register_send_image
 from .core.image_source import raw_to_image_data_url
 from .tools.call_plugin import CommandToolContext, register_call_plugin
+from .tools.finish_turn import register_finish_turn
 from .tools.pin_context import register_pin_context
 from .tools.markdown2pic import register_markdown2pic
 from .tools.list_sessions import register_list_sessions
@@ -354,6 +355,8 @@ tag_image_context = TagImageToolContext(
 )
 tag_image = register_tag_image(tools, tag_image_context)
 registered_tools.append("tag_image")
+finish_turn = register_finish_turn(tools)
+registered_tools.append("finish_turn")
 plugin.collect_disposes(cancel_pending_image_collections)
 
 

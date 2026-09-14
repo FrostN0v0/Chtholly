@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import UserMemory, Conversation, UserRelation, UserProfileFact
 from .perception import MentionedParticipant, get_channel_perception
+from .relationships.identity import merge_relationship_identity
 
 MAX_MENTIONED_PARTICIPANTS = 10
 
@@ -75,7 +76,7 @@ async def _merge_relation(
     channel_id: str,
     source_ids: set[str],
     target_id: str,
-) -> None:
+) -> bool:
     rows = list(
         (
             await session.execute(
@@ -88,8 +89,8 @@ async def _merge_relation(
         .scalars()
         .all()
     )
-    if not rows:
-        return
+    if not any(row.user_id in source_ids for row in rows):
+        return False
     target = next((row for row in rows if row.user_id == target_id), None)
     latest = max(rows, key=lambda row: row.last_interaction)
     if target is None:
@@ -103,7 +104,6 @@ async def _merge_relation(
         target.familiarity = latest.familiarity
         target.impression = latest.impression
         target.last_interaction = latest.last_interaction
-    target.eval_counter = max(row.eval_counter for row in rows)
     stale_ids = [row.user_id for row in rows if row is not target]
     if stale_ids:
         await session.execute(
@@ -112,6 +112,7 @@ async def _merge_relation(
                 UserRelation.user_id.in_(stale_ids),
             )
         )
+    return True
 
 
 async def _merge_profile_facts(
@@ -168,7 +169,14 @@ async def migrate_legacy_user_state(
         return
     async with get_session() as raw_session:
         session = raw_session
-        await _merge_relation(session, channel_id, source_ids, target_user_id)
+        relation_changed = await _merge_relation(session, channel_id, source_ids, target_user_id)
+        await merge_relationship_identity(
+            session,
+            channel_id,
+            source_ids,
+            target_user_id,
+            relation_changed=relation_changed,
+        )
         await _merge_profile_facts(session, channel_id, source_ids, target_user_id)
         await session.execute(
             update(UserMemory)

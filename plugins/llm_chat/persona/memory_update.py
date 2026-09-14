@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import cast
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import field, dataclass
 
-from sqlalchemy import update
+from sqlalchemy import case, func, update
 from entari_plugin_database import select, get_session
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,7 +48,18 @@ class MergedFact:
     patch: ProfilePatch
     snapshot: ProfileFactSnapshot
     embedding_json: str
-    embedding_should_update: bool
+    patch_vector: list[float] | None
+
+
+@dataclass(slots=True, frozen=True)
+class PreparedMemoryUpdates:
+    user_id: str
+    channel_id: str
+    facts: tuple[MergedFact, ...] = ()
+    importance_bumps: dict[int, float] = field(default_factory=dict)
+    memories: tuple[PendingMemory, ...] = ()
+    profile_value_similarity: float = 0.9
+    memory_max_records: int = 200
 
 
 def resolve_fact_embedding_update(
@@ -88,15 +99,15 @@ async def _find_profile_fact(
     return result.scalars().first()
 
 
-async def apply_memory_updates(
+async def prepare_memory_updates(
     config: LLMChatConfigLike,
     user_id: str,
     channel_id: str,
     result: EvalResult,
-) -> None:
-    """Merge evaluator profile patches and episodic memories into storage."""
+) -> PreparedMemoryUpdates:
+    """Perform memory reads and embedding calls before opening a write transaction."""
     if not config.memory_enabled:
-        return
+        return PreparedMemoryUpdates(user_id, channel_id)
 
     patches: dict[tuple[str, str], ProfilePatch] = {}
     for patch in result.profile_patches:
@@ -105,9 +116,8 @@ async def apply_memory_updates(
         :MEMORY_ITEM_LIMIT
     ]
     if not patches and not eligible_memory_items:
-        return
+        return PreparedMemoryUpdates(user_id, channel_id)
 
-    fact_ids: dict[tuple[str, str], int | None] = {}
     snapshots: dict[tuple[str, str], ProfileFactSnapshot | None] = {}
     fact_vectors: dict[tuple[str, str], list[float] | None] = {}
     existing_memories: list[ExistingMemory] = []
@@ -115,7 +125,6 @@ async def apply_memory_updates(
         session = cast(AsyncSession, raw_session)
         for key, patch in patches.items():
             fact = await _find_profile_fact(session, user_id, channel_id, patch.category, patch.key)
-            fact_ids[key] = None if fact is None else fact.id
             fact_vectors[key] = None if fact is None else decode_embedding(fact.embedding_json)
             snapshots[key] = (
                 None
@@ -155,7 +164,7 @@ async def apply_memory_updates(
         backfill_vector: list[float] | None = None
         if merged.value != patch.value and existing_vector is None:
             backfill_vector = await embed_text(config, f"{patch.category}:{patch.key}:{merged.value}")
-        embedding_json, embedding_should_update = resolve_fact_embedding_update(
+        embedding_json, _ = resolve_fact_embedding_update(
             merged.value,
             patch.value,
             patch_vector,
@@ -167,7 +176,7 @@ async def apply_memory_updates(
                 patch=patch,
                 snapshot=merged,
                 embedding_json=embedding_json,
-                embedding_should_update=embedding_should_update,
+                patch_vector=patch_vector,
             )
         )
 
@@ -212,47 +221,90 @@ async def apply_memory_updates(
     )
     admitted_pending = [pending[index] for index in admitted_indexes]
 
+    return PreparedMemoryUpdates(
+        user_id,
+        channel_id,
+        tuple(merged_facts),
+        importance_bumps,
+        tuple(admitted_pending),
+        config.profile_value_similarity,
+        config.memory_max_records_per_user,
+    )
+
+
+async def apply_memory_updates(session: AsyncSession, prepared: PreparedMemoryUpdates) -> None:
+    """Apply prepared memory writes in the caller's transaction without network IO or commit."""
     now = datetime.utcnow()
-    async with get_session() as raw_session:
-        session = cast(AsyncSession, raw_session)
-        for fact in merged_facts:
-            patch = fact.patch
-            merged = fact.snapshot
-            fact_id = fact_ids[(patch.category, patch.key)]
-            if fact_id is None:
-                session.add(
-                    UserProfileFact(
-                        user_id=user_id,
-                        channel_id=channel_id,
-                        category=patch.category,
-                        key=patch.key,
-                        value=merged.value,
-                        confidence=merged.confidence,
-                        evidence_count=merged.evidence_count,
-                        last_evidence=patch.evidence,
-                        embedding_json=fact.embedding_json,
-                        created_at=now,
-                        updated_at=now,
-                    )
+    user_id, channel_id = prepared.user_id, prepared.channel_id
+    for fact in prepared.facts:
+        patch = fact.patch
+        current = await _find_profile_fact(session, user_id, channel_id, patch.category, patch.key)
+        current_vector = decode_embedding(current.embedding_json) if current is not None else None
+        values_match = (
+            cosine_similarity(fact.patch_vector, current_vector) >= prepared.profile_value_similarity
+            if fact.patch_vector is not None and current_vector is not None
+            else None
+        )
+        current_snapshot = (
+            ProfileFactSnapshot(current.value, current.confidence, current.evidence_count)
+            if current is not None
+            else None
+        )
+        merged = merge_profile_snapshot(current_snapshot, patch, values_match=values_match)
+        backfill = decode_embedding(fact.embedding_json) if merged.value == fact.snapshot.value else None
+        embedding_json, embedding_should_update = resolve_fact_embedding_update(
+            merged.value,
+            patch.value,
+            fact.patch_vector,
+            current_vector,
+            backfill,
+        )
+        if current is None:
+            session.add(
+                UserProfileFact(
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    category=patch.category,
+                    key=patch.key,
+                    value=merged.value,
+                    confidence=merged.confidence,
+                    evidence_count=merged.evidence_count,
+                    last_evidence=patch.evidence,
+                    embedding_json=embedding_json,
+                    created_at=now,
+                    updated_at=now,
                 )
-            else:
-                values: dict[str, object] = {
-                    "value": merged.value,
-                    "confidence": merged.confidence,
-                    "evidence_count": merged.evidence_count,
-                    "last_evidence": patch.evidence,
-                    "updated_at": now,
-                }
-                if fact.embedding_should_update:
-                    values["embedding_json"] = fact.embedding_json
-                await session.execute(update(UserProfileFact).where(UserProfileFact.id == fact_id).values(**values))
-
-        for mem_id, importance in importance_bumps.items():
-            await session.execute(
-                update(UserMemory).where(UserMemory.id == mem_id).values(importance=importance, created_at=now)
             )
-
-        for item in admitted_pending:
+        else:
+            current.value = merged.value
+            current.confidence = merged.confidence
+            current.evidence_count = merged.evidence_count
+            current.last_evidence = patch.evidence
+            current.updated_at = now
+            if embedding_should_update:
+                current.embedding_json = embedding_json
+    for memory_id, importance in prepared.importance_bumps.items():
+        await session.execute(
+            update(UserMemory)
+            .where(UserMemory.id == memory_id, UserMemory.user_id == user_id, UserMemory.channel_id == channel_id)
+            .values(
+                importance=case((UserMemory.importance < importance, importance), else_=UserMemory.importance),
+                created_at=now,
+            )
+        )
+    if prepared.memories:
+        count = (
+            await session.scalar(
+                select(func.count())
+                .select_from(UserMemory)
+                .where(
+                    UserMemory.user_id == user_id,
+                    UserMemory.channel_id == channel_id,
+                )
+            )
+            or 0
+        )
+        for item in prepared.memories[: max(0, prepared.memory_max_records - count)]:
             session.add(
                 UserMemory(
                     user_id=user_id,
@@ -263,5 +315,3 @@ async def apply_memory_updates(
                     source="conversation",
                 )
             )
-
-        await session.commit()

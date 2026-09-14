@@ -17,11 +17,17 @@ from entari_plugin_llm.config import get_model_config
 from arclet.entari.plugin.model import Plugin
 from entari_plugin_llm.exception import ModelNotFoundError
 
+_superuser_check = superusers().check
+
+
+async def _is_operator(session: Session) -> bool:
+    return await _superuser_check(session) is not STOP
+
+
 from utils.llm_model_core.snapshot import pin_main_model, main_model_scope
 
 from .config import LLMChatConfig
 from .identity import resolve_chat_identity, resolve_mentioned_participants
-from .core.media import has_meaningful_text
 from .generation import response_content, generate_chat_response
 from .core.errors import summarize_exception
 from .chat_context import (
@@ -39,24 +45,15 @@ from .channel_turns import (
     current_participant_turn_superseded,
 )
 from .delivery_audit import delivery_audit_scope, current_delivery_audit
-from .chat_evaluation import cancel_pending_evaluations, schedule_chat_state_after_delivery
-from .core.engagement import turn_feedback
+from .chat_evaluation import cancel_pending_evaluations, schedule_relationship_evaluation
 from .forward_context import resolve_merged_forward_messages
 from .agent_turn_setup import prepare_agent_turn
-from .engagement_state import record_declined_turn, persist_turn_feedback
 from .agent_attachments import capture_user_input_images, remove_user_input_attachments
 from .reaction_feedback import MessageReactionFeedback, settle_reaction_update, llm_chat_reaction_scope
 
 _LOGGER = log.wrapper("[llm_chat]")
 _CHAT_FAILURE_REPLY = "这次回复没有成功，请稍后重试。"
 _MEDIA_FAILURE_REPLY = "这次图片处理没有成功，请重新发送原图后再试。"
-_superuser_check = superusers().check
-
-
-async def _is_operator(session: Session) -> bool:
-    """Operators are always answered regardless of relationship state."""
-
-    return await _superuser_check(session) is not STOP
 
 
 async def _addressed_to_me(session: Session, is_reply_me: bool = False, is_notice_me: bool = False) -> bool:
@@ -125,7 +122,6 @@ async def _run_chat(
     model_text = session.elements.extract_plain_text().strip()
     raw_user_text = model_text
     message_images = collect_message_images(session)
-    require_text_reply = bool(message_images) and not has_meaningful_text(model_text)
     channel_id = session.channel.id
 
     try:
@@ -201,7 +197,6 @@ async def _run_chat(
             warn=_LOGGER.warning,
             tool_schemas=registered_tool_schemas,
             input_attachments=input_attachments,
-            requires_media_reply=require_text_reply,
             is_operator=await _is_operator(session),
         )
     except BaseException:
@@ -210,8 +205,6 @@ async def _run_chat(
     delivery_audit = current_delivery_audit()
     if delivery_audit is not None:
         delivery_audit.bind(prepared.agent_events)
-    memory_context = prepared.memory_context
-    eval_history = prepared.eval_history
     chat_messages = prepared.chat_messages
     system = prepared.system
     media_requested = prepared.media_requested
@@ -220,26 +213,13 @@ async def _run_chat(
     channel_image_references = prepared.channel_image_references
     image_edit_references = prepared.image_edit_references
     turn = prepared.lifecycle
-    engagement = prepared.engagement
-    feedback = turn_feedback(prepared.engagement_signals, declined=not engagement.replies)
-    if not engagement.replies:
-        # Deliberate silence is a normal terminal state, not a generation failure.
-        await record_declined_turn(channel_id, user_id, user_name)
-        await persist_turn_feedback(
-            user_id=user_id,
-            channel_id=channel_id,
-            feedback=feedback,
-        )
-        await turn.finalize_agent_turn("declined")
-        _LOGGER.info(f"engagement declined reply: {'; '.join(engagement.reasons)}")
-        await reaction.finish("declined")
-        return BLOCK
-    await reaction.set_stage("thinking")
+    resolution = prepared.resolution
     agent_events = prepared.agent_events
     agent_access = prepared.agent_access
     turn_status = "failed"
     try:
         try:
+            await reaction.set_stage("thinking")
             response = await generate_chat_response(
                 chat_messages,
                 system=system,
@@ -255,7 +235,7 @@ async def _run_chat(
                 tool_trace=turn.tool_trace,
                 agent_events=agent_events,
                 agent_access=agent_access,
-                require_text_reply=require_text_reply,
+                resolution=resolution,
             )
         except asyncio.CancelledError:
             turn.capture_tool_events()
@@ -275,7 +255,7 @@ async def _run_chat(
             try:
                 if await turn.deliver_model_reply(session, failure_reply):
                     await turn.persist_delivered_text()
-                    turn_status = "completed"
+                    turn_status = "failed"
             except asyncio.CancelledError:
                 raise
             except Exception as delivery_exc:
@@ -285,11 +265,86 @@ async def _run_chat(
             return BLOCK
 
         turn.capture_tool_events()
+        if delivery_state.delivery_attempts > delivery_state.confirmed_deliveries or any(
+            event.status in {"failed", "cancelled"} and event.effect in {"partial", "unknown"}
+            for event in turn.tool_trace.events
+        ):
+            await turn.preserve_and_rollback()
+            turn_status = "partial" if delivery_state.confirmed_deliveries else "failed"
+            await reaction.finish("partial" if delivery_state.confirmed_deliveries else "failed")
+            return BLOCK
+        if resolution.outcome == "silent":
+            turn.agent_events.append(
+                "response_decision",
+                role="assistant",
+                model_visible=False,
+                payload={
+                    "outcome": "silent",
+                    "source": resolution.source,
+                    "reason": resolution.reason[:240],
+                    "actual_delivery": {
+                        "text_messages": 0,
+                        "media_messages": 0,
+                        "confirmed_deliveries": delivery_state.confirmed_deliveries,
+                    },
+                },
+            )
+            turn_status = "silent"
+            await reaction.finish_silent()
+            return BLOCK
+        if resolution.outcome == "declined":
+            previous_deliveries = delivery_state.confirmed_deliveries
+            if not resolution.reply or not await turn.deliver_model_reply(session, resolution.reply):
+                raise RuntimeError("explicit refusal was not confirmed")
+            if delivery_state.confirmed_deliveries <= previous_deliveries:
+                raise RuntimeError("explicit refusal was suppressed without new delivery")
+            await turn.persist_delivered_text()
+            turn.agent_events.append(
+                "response_decision",
+                role="assistant",
+                model_visible=False,
+                payload={
+                    "outcome": "declined",
+                    "source": resolution.source,
+                    "reason": resolution.reason[:240],
+                    "actual_delivery": {
+                        "text_messages": len(delivery_state.delivered_texts),
+                        "media_messages": delivery_state.confirmed_media_deliveries,
+                        "confirmed_deliveries": delivery_state.confirmed_deliveries,
+                    },
+                },
+            )
+            turn_status = "declined"
+            await reaction.finish("declined")
+            return BLOCK
+        if resolution.outcome == "delivered":
+            if not delivery_state.confirmed_deliveries:
+                raise RuntimeError("explicit delivered outcome lacked confirmed output")
+            await turn.persist_delivered_text()
+            turn.agent_events.append(
+                "response_decision",
+                role="assistant",
+                model_visible=False,
+                payload={
+                    "outcome": "delivered",
+                    "source": resolution.source,
+                    "reason": resolution.reason[:240],
+                    "actual_delivery": {
+                        "text_messages": len(delivery_state.delivered_texts),
+                        "media_messages": delivery_state.confirmed_media_deliveries,
+                        "confirmed_deliveries": delivery_state.confirmed_deliveries,
+                    },
+                },
+            )
+            turn_status = "completed"
+            await reaction.finish("success")
+            return BLOCK
         try:
             if not await turn.deliver_model_images(session, response):
                 await reaction.finish("partial" if delivery_state.confirmed_deliveries else "failed")
                 return BLOCK
         except asyncio.CancelledError:
+            turn_status = "partial" if delivery_state.confirmed_deliveries else "cancelled"
             raise
         except Exception as exc:
             _LOGGER.warning(f"native image delivery failed: {summarize_exception(exc)}")
@@ -298,35 +353,47 @@ async def _run_chat(
         if not await turn.deliver_model_reply(session, response_content(response)):
             await reaction.finish("partial" if delivery_state.confirmed_deliveries else "failed")
             return BLOCK
-        assistant_reply = await turn.persist_delivered_text()
+        await turn.persist_delivered_text()
+        turn.agent_events.append(
+            "response_decision",
+            role="assistant",
+            model_visible=False,
+            payload={
+                "outcome": "automatic",
+                "source": "runtime",
+                "reason": "",
+                "actual_delivery": {
+                    "text_messages": len(delivery_state.delivered_texts),
+                    "media_messages": delivery_state.confirmed_media_deliveries,
+                    "confirmed_deliveries": delivery_state.confirmed_deliveries,
+                },
+            },
+        )
         turn_status = "completed"
-        await persist_turn_feedback(
-            user_id=user_id,
-            channel_id=channel_id,
-            feedback=feedback,
-        )
-        schedule_chat_state_after_delivery(
-            config,
-            memory_context,
-            eval_history,
-            persona_prompt=prepared.persona.prompt,
-            user_id=user_id,
-            user_name=user_name,
-            channel_id=channel_id,
-            user_content=content,
-            assistant_reply=assistant_reply,
-            warn=_LOGGER.warning,
-        )
         await reaction.finish("success")
         return BLOCK
+    except asyncio.CancelledError:
+        if turn_status == "failed":
+            turn_status = "partial" if delivery_state.confirmed_deliveries else "cancelled"
+            await turn.preserve_and_rollback()
+        raise
     finally:
-        if turn_status not in {"completed", "cancelled"} and delivery_state.confirmed_deliveries:
+        if turn_status not in {"completed", "declined", "silent", "cancelled"} and delivery_state.confirmed_deliveries:
             turn_status = "partial"
 
         async def finalize_with_delivery_audit() -> None:
             if delivery_audit is not None:
                 await delivery_audit.drain()
             await turn.finalize_agent_turn(turn_status)
+            if turn_status in {"completed", "silent", "declined"} and turn.agent_turn_id is not None:
+                schedule_relationship_evaluation(
+                    config,
+                    turn_id=turn.agent_turn_id,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    persona_prompt=prepared.persona.prompt,
+                    warn=_LOGGER.warning,
+                )
 
         finalize_task = asyncio.create_task(finalize_with_delivery_audit())
         try:

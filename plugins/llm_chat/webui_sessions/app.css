@@ -250,6 +250,31 @@ pre { margin: 0; }
 .payload-code { min-height: 180px; max-height: 55dvh; overflow: auto; font-size: 13px; line-height: 1.85; }
 .confirmation-field { display: flex; flex-direction: column; gap: 6px; }
 
+.affect-indicators { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.affect-indicators .badge { white-space: normal; overflow-wrap: anywhere; }
+.emotion-badge { background: var(--selected); color: var(--primary); border-color: transparent; }
+.relationship-panel { border-top: 3px solid var(--primary); background: var(--soft); }
+.relationship-panel p, .relationship-panel strong { overflow-wrap: anywhere; white-space: pre-wrap; }
+.response-outcome { border-left: 3px solid var(--primary); padding: 10px 12px; background: var(--surface); border-radius: 6px; }
+.response-outcome > * + * { margin-top: 6px; }
+.relationship-axes { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+.relationship-axis { display: flex; flex-direction: column; align-items: center; padding: 9px 3px; background: var(--surface); border: 1px solid var(--border); border-radius: 7px; }
+.relationship-axis strong { font-size: 18px; font-variant-numeric: tabular-nums; }
+.snapshot-description > * + *, .emotion-snapshot > * + * { margin-top: 7px; }
+.emotion-entry { padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 7px; }
+.emotion-entry > * + * { margin-top: 6px; }
+.emotion-evidence { margin-bottom: 0; background: transparent; border: 0; }
+.emotion-evidence > .disclosure-summary { min-height: 0; padding: 6px 0; }
+.emotion-evidence > .disclosure-content { padding: 8px 0 0; }
+.affect-comparison { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 12px; }
+.evaluation-result { background: var(--surface); margin-top: 16px; }
+.batch-notice { color: var(--primary); font-weight: 550; }
+.relationship-changes { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.relationship-changes th, .relationship-changes td { padding: 8px 4px; border-bottom: 1px solid var(--border); text-align: right; }
+.relationship-changes th:first-child { text-align: left; }
+.axis-delta { font-weight: 650; }
+.evidence-links button { font-size: 12px; }
+
 @media (min-width: 1700px) {
   .workspace { grid-template-columns: 220px 280px minmax(0, 1fr); }
   .call-panels { grid-template-columns: repeat(2, minmax(0, 1fr)); }

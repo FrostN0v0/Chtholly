@@ -14,7 +14,6 @@ from arclet.entari import Image, Author, Session, MessageChain
 from .config import LLMChatConfig
 from .models import Conversation
 from .vision import describe_image, fetch_image_data_url
-from .core.eval import EvalMessage, EvalConversation
 from .core.media import format_image_note, sanitize_assistant_history
 from .perception import MentionedParticipant
 from .core.errors import summarize_exception
@@ -91,60 +90,6 @@ def build_chat_messages(
         }
     )
     return messages
-
-
-def build_eval_conversation(
-    history: Sequence[Conversation],
-    user_id: str,
-    user_name: str,
-    content: str,
-    reply: str,
-) -> EvalConversation:
-    """Separate recent history from the evaluator's current-turn evidence."""
-    recent_history: list[EvalMessage] = []
-    for row in history:
-        if row.role == "assistant":
-            assistant_content = sanitize_assistant_history(row.content)
-            if assistant_content:
-                recent_history.append(
-                    {
-                        "role": "assistant",
-                        "speaker": "bot",
-                        "target": False,
-                        "content": assistant_content,
-                    }
-                )
-            continue
-        recent_history.append(
-            {
-                "role": "user",
-                "speaker": row.user_name,
-                "target": row.user_id == user_id,
-                "content": row.content,
-            }
-        )
-    assistant: EvalMessage | None = (
-        {
-            "role": "assistant",
-            "speaker": "bot",
-            "target": False,
-            "content": reply,
-        }
-        if reply and reply != "[END_OF_RESPONSE]"
-        else None
-    )
-    return {
-        "recent_history": recent_history,
-        "current_turn": {
-            "user": {
-                "role": "user",
-                "speaker": user_name,
-                "target": True,
-                "content": content,
-            },
-            "assistant": assistant,
-        },
-    }
 
 
 def collect_top_level_images(elements: MessageChain) -> list[Image]:

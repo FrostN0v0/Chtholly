@@ -1,24 +1,19 @@
-"""Evaluator LLM call: bypasses the llm plugin's tool loop.
+"""Side-effect-free relationship evaluator provider runner."""
 
-llm.generate() hardcodes tools + tool_choice into every payload, which would
-let the evaluator trigger side-effect tools. We call litellm directly with the
-plugin's resolved model config instead (same credentials, no tools).
-"""
+from __future__ import annotations
 
+import time
 from typing import Protocol, cast
+from collections.abc import Mapping, Sequence
 
 import litellm
 from entari_plugin_llm.config import get_model_config
 from entari_plugin_llm.exception import ModelNotFoundError
 
+from utils.relationship_core import read_emotions
+
 from ..config import LLMChatConfig
-from ..core.eval import (
-    EvalResult,
-    EvalConversation,
-    build_eval_prompt,
-    build_eval_system,
-    parse_eval_response,
-)
+from ..core.eval import EvalResult, build_eval_prompt, build_eval_system, parse_eval_response
 from ..core.memory_policy import ProfileFactData
 
 
@@ -37,42 +32,34 @@ class _CompletionLike(Protocol):
 async def run_evaluation(
     config: LLMChatConfig,
     persona: str,
-    axes: dict[str, float],
-    impression: str,
+    relationship: Mapping[str, object],
     evaluator_profile_facts: list[ProfileFactData],
-    conversation: EvalConversation,
-    user_name: str = "",
+    episodes: Sequence[Mapping[str, object]],
     channel_id: str = "$default",
 ) -> EvalResult | None:
-    """Run the relationship evaluator; returns None when parsing fails."""
     try:
         conf = get_model_config(config.eval_model or config.model, channel_id)
     except ModelNotFoundError:
-        # Stale channel default: fall back to the "$default" scope resolution.
         conf = get_model_config(config.eval_model or config.model)
-    excluded_extra = {"tools", "tool_choice", "response_format", "timeout", "max_retries"}
-    extra = {key: value for key, value in conf.extra.items() if key not in excluded_extra}
+    extra = {
+        k: v
+        for k, v in conf.extra.items()
+        if k not in {"tools", "tool_choice", "response_format", "timeout", "max_retries"}
+    }
+    expected: list[int] = []
+    for episode in episodes:
+        turn_id = episode.get("turn_id")
+        if isinstance(turn_id, bool) or not isinstance(turn_id, int) or turn_id <= 0:
+            raise ValueError("Evaluation episode requires a valid host turn ID")
+        expected.append(turn_id)
     response = await litellm.acompletion(
         model=conf.name,
         messages=[
             {
                 "role": "system",
-                "content": build_eval_system(
-                    config.profile_fact_min_confidence,
-                    config.memory_min_importance,
-                ),
+                "content": build_eval_system(config.profile_fact_min_confidence, config.memory_min_importance),
             },
-            {
-                "role": "user",
-                "content": build_eval_prompt(
-                    persona,
-                    axes,
-                    impression,
-                    evaluator_profile_facts,
-                    conversation,
-                    user_name,
-                ),
-            },
+            {"role": "user", "content": build_eval_prompt(persona, relationship, evaluator_profile_facts, episodes)},
         ],
         base_url=conf.base_url,
         api_key=conf.api_key,
@@ -82,12 +69,14 @@ async def run_evaluation(
         **extra,
     )
     completion = cast(_CompletionLike, response)
-    content = completion.choices[0].message.content
-    if not content:
+    if not completion.choices or not completion.choices[0].message.content:
         return None
     return parse_eval_response(
-        content,
-        current_impression=impression,
+        completion.choices[0].message.content,
+        expected_turn_ids=expected,
+        previous_emotions=read_emotions(relationship.get("emotions", [])),
+        now=time.time(),
+        current_impression=str(relationship.get("impression", "")),
         min_memory_importance=config.memory_min_importance,
         min_profile_confidence=config.profile_fact_min_confidence,
     )

@@ -22,6 +22,7 @@ from entari_plugin_llm.tools import _ToolPropagator, available_functions
 import entari_plugin_llm.service as llm_service_module
 from entari_plugin_llm.sessions import SessionInfo
 
+from utils.turn_resolution_core import current_turn_resolution
 from utils.llm_model_core.snapshot import current_main_model
 
 from .core.errors import summarize_exception
@@ -417,6 +418,24 @@ async def _run_local_tools(
         finally:
             await _flush_tool_events(audit, recorder)
 
+    def stop_remaining() -> None:
+        for pending_index, requirement in enumerate(requirements):
+            if pending_index in finished:
+                continue
+            recorder.finish_skipped(calls[pending_index])
+            finished.add(pending_index)
+            requirement.set_external_execution_result(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": "Tool was not executed because this turn deliberately ended",
+                    }
+                )
+            )
+            if requirement.tool_execution is not None:
+                requirement.tool_execution.tool_call_error = True
+        _append_stopped_results(response, requirements)
+
     try:
         if audit is not None:
             await audit.flush()
@@ -441,6 +460,10 @@ async def _run_local_tools(
                     await asyncio.gather(*tasks, return_exceptions=True)
                     raise
                 index = end
+                resolution = current_turn_resolution()
+                if resolution is not None and resolution.explicit:
+                    stop_remaining()
+                    return False
             else:
                 lock = _DELIVERY_TOOL_LOCK.get()
                 if lock is None:
@@ -448,6 +471,10 @@ async def _run_local_tools(
                 else:
                     async with lock:
                         await execute_one(index)
+                resolution = current_turn_resolution()
+                if resolution is not None and resolution.explicit:
+                    stop_remaining()
+                    return False
                 index += 1
     except asyncio.CancelledError:
         for index, req in enumerate(requirements):

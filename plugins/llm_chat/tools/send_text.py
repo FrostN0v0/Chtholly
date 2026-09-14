@@ -141,11 +141,13 @@ def register_send_text(
     ) -> str:
         """Send one paced text bubble, optionally mentioning current-channel participants.
 
-        Prefer this when a reply has two or more naturally separate chat beats, including factual answers with a
-        conclusion followed by a reason, caveat, or follow-up. Use this whenever a real mention is needed, including
-        for one short bubble; final response text cannot create a platform mention. Mentions are optional and should
-        be used only for deliberate direct address, summoning, handoff, or multi-person disambiguation, never on every
-        reply. Use current_user for the current speaker. For anyone else, first resolve one unambiguous participant_ref
+        Use this for a genuinely separate conversational beat, a useful independent addition, or an explicit request
+        for separate messages. A normal short reply can stay in one final-text bubble; do not make repeated calls for
+        an acknowledgement, explanation and closing question, or to fill the message allowance. Keep connected
+        sentences together and stop when the reply is complete. Use this whenever a real mention is needed, even
+        for one short bubble; final response text cannot create a platform mention. Mentions are optional, for
+        deliberate direct address, summoning, handoff or disambiguation, not every reply. Use current_user for the
+        current speaker. For anyone else, first resolve one unambiguous participant_ref
         with find_channel_participants or current-channel context. Never place raw platform IDs, participant_ref values,
         or a textual @name inside text.
 

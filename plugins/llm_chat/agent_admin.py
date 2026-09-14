@@ -6,12 +6,12 @@ import json
 from pathlib import Path
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import JSON, case, select, type_coerce
 from entari_plugin_database import get_session
 from entari_plugin_llm.config import get_model_config
 
 from .config import LLMChatConfig
-from .models import AgentTurn, ChatScope, AgentEvent, ContextSession
+from .models import AgentTurn, ChatScope, AgentEvent, ContextSession, RelationshipEvidence
 from .personality import session_persona, persona_scope_lock, resolve_scope_persona, remember_session_persona
 from .agent_events import load_event_payload, select_payload_path
 from .context_builder import build_baseline_fingerprint
@@ -29,7 +29,7 @@ from .session_manager import (
     list_scope_sessions,
     seal_scope_sessions,
 )
-from .agent_event_view import serialize_event_view
+from .agent_event_view import serialize_event_view, project_relationship_views
 from .core.personality import ResolvedPersona
 from .agent_attachments import (
     is_agent_attachment,
@@ -49,6 +49,7 @@ from .session_inspection import (
     summarize_turn_events,
     session_context_summary,
 )
+from .relationships.identity import resolve_relationship_owner
 
 
 class AgentAdminError(ValueError):
@@ -146,7 +147,8 @@ class AgentAdminService:
             )
         turns.reverse()
         summaries = await turn_list_summaries(turns)
-        return [{**self._serialize_turn(turn), **summaries[turn.id]} for turn in turns]
+        affect = await self._turn_relationship_summaries(turns)
+        return [{**self._serialize_turn(turn), **summaries[turn.id], **affect[turn.id]} for turn in turns]
 
     async def list_events(self, turn_ref: str) -> list[dict[str, object]]:
         turn = await self._turn(turn_ref)
@@ -155,6 +157,7 @@ class AgentAdminService:
     async def turn_inspection(self, turn_ref: str) -> dict[str, object]:
         turn = await self._turn(turn_ref)
         events = await turn_events(turn.id)
+        relationship = project_relationship_views(events)
         return {
             "turn": {
                 **self._serialize_turn(turn),
@@ -167,7 +170,87 @@ class AgentAdminService:
             "model_calls": project_model_calls(events, turn_status=turn.status),
             "tool_calls": project_tool_calls(events, turn_status=turn.status),
             "outputs": project_outputs(events),
+            **relationship,
+            "evidence_turns": await self._relationship_evidence_turns(turn, relationship),
         }
+
+    @staticmethod
+    async def _turn_relationship_summaries(turns: list[AgentTurn]) -> dict[int, dict[str, object]]:
+        """Fetch bounded affect records without loading context or persona memory payloads."""
+        grouped: dict[int, list[AgentEvent]] = {turn.id: [] for turn in turns}
+        if not grouped:
+            return {}
+        payload = type_coerce(AgentEvent.payload_json, JSON)
+        async with get_session() as db:
+            rows = (
+                await db.execute(
+                    select(
+                        AgentEvent.turn_id,
+                        AgentEvent.event_ref,
+                        AgentEvent.event_type,
+                        AgentEvent.status,
+                        payload["relationship"],
+                        case((AgentEvent.event_type != "persona_state", AgentEvent.payload_json)),
+                    )
+                    .where(
+                        AgentEvent.turn_id.in_(grouped),
+                        AgentEvent.event_type.in_(
+                            ("persona_state", "relationship_evaluation", "response_decision", "engagement_decision")
+                        ),
+                    )
+                    .order_by(AgentEvent.turn_id.asc(), AgentEvent.sequence.asc())
+                )
+            ).all()
+        for turn_id, event_ref, event_type, status, relationship, raw in rows:
+            grouped[turn_id].append(
+                AgentEvent(
+                    turn_id=turn_id,
+                    event_ref=event_ref,
+                    event_type=event_type,
+                    status=status,
+                    payload_json=json.dumps({"relationship": relationship}) if event_type == "persona_state" else raw,
+                )
+            )
+        return {turn_id: project_relationship_views(events, compact=True) for turn_id, events in grouped.items()}
+
+    async def _relationship_evidence_turns(self, turn: AgentTurn, views: dict[str, object]) -> list[dict[str, object]]:
+        """Resolve host-owned evidence references only within this member's scope."""
+        ids: set[int] = set()
+        evaluation = views.get("relationship_evaluation")
+        snapshots = [views.get("relationship")]
+        if isinstance(evaluation, dict):
+            ids.update(evaluation.get("evidence_turn_ids", []))
+            snapshots.extend((evaluation.get("before"), evaluation.get("after")))
+        for snapshot in snapshots:
+            if isinstance(snapshot, dict) and isinstance(snapshot.get("emotions"), list):
+                for emotion in snapshot["emotions"]:
+                    if isinstance(emotion, dict):
+                        ids.update(emotion.get("evidence_turn_ids", []))
+        if not ids:
+            return []
+        context_session = await self._session_id(turn.session_id)
+        async with get_session() as db:
+            scope = await db.get(ChatScope, context_session.scope_id)
+            if scope is None:
+                raise AgentAdminError("Scope not found", code="not_found", status=404)
+            owner = await resolve_relationship_owner(db, turn.user_id, scope.channel_id)
+            rows = (
+                await db.execute(
+                    select(AgentTurn.id, AgentTurn.turn_ref, AgentTurn.sequence, ContextSession.session_ref)
+                    .join(ContextSession, AgentTurn.session_id == ContextSession.id)
+                    .join(RelationshipEvidence, RelationshipEvidence.turn_id == AgentTurn.id)
+                    .where(
+                        AgentTurn.id.in_(ids),
+                        ContextSession.scope_id == context_session.scope_id,
+                        RelationshipEvidence.user_id == owner,
+                        RelationshipEvidence.channel_id == scope.channel_id,
+                    )
+                )
+            ).all()
+        return [
+            {"turn_id": turn_id, "turn_ref": turn_ref, "sequence": sequence, "session_ref": session_ref}
+            for turn_id, turn_ref, sequence, session_ref in rows
+        ]
 
     async def read_event_payload(
         self,

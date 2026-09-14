@@ -179,7 +179,8 @@ plugins:
     image_generation_output_format: webp
     image_generation_output_compression: 90
     eval_request_timeout: 60.0
-    eval_every_n: 5
+    relationship_eval_batch_size: 8
+    relationship_eval_debounce_seconds: 2.0
     image_tag_model: doubao
     tag_batch_size: 50
     # Memory policy: compact chat retrieval, complete evaluator facts, conservative writes.

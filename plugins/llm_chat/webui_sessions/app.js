@@ -26,6 +26,8 @@ const labels = {
   estimated_tokens: "预估输入", full_session_tokens: "会话估算", max_input_tokens: "输入上限",
   output_reserve_tokens: "输出预留", rollover_ratio: "续接阈值", minimum_recent_turns: "最少近期轮次",
   inline_event_chars: "内联事件字数", included_count: "选中轮次", excluded_count: "排除轮次",
+  relationship: "\u5173\u7cfb\u4e0e\u60c5\u7eea", relationship_evaluation: "\u5173\u7cfb\u8bc4\u4f30", response_decision: "\u81ea\u4e3b\u56de\u5e94",
+  silent: "\u81ea\u4e3b\u6c89\u9ed8", declined: "\u5df2\u7ec8\u6b62 (declined)", superseded: "\u5df2\u88ab\u65b0\u8f6e\u6b21\u66ff\u4ee3",
 };
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -246,6 +248,177 @@ function eventButton(ref, title, path = "") {
   return item;
 }
 
+const relationshipAxes = {
+  affection: "\u597d\u611f", trust: "\u4fe1\u4efb", dependence: "\u4f9d\u8d56", resentment: "\u6028\u5ff5", familiarity: "\u719f\u6089\u5ea6",
+};
+const actualOutcomeLabels = {
+  silent: "\u81ea\u4e3b\u6c89\u9ed8", refusal: "\u5df2\u9001\u8fbe\u62d2\u7edd", media_only: "\u4ec5\u5a92\u4f53", text: "\u6587\u5b57\u56de\u590d", mixed: "\u6587\u5b57\u4e0e\u5a92\u4f53", unknown: "\u56de\u5e94\u9001\u8fbe\u672a\u8bb0\u5f55",
+};
+function affectNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "\u672a\u8bb0\u5f55";
+}
+function axisDelta(value) {
+  return typeof value === "number" && Number.isFinite(value) ? `${value > 0 ? "+" : ""}${affectNumber(value)}` : "\u672a\u8bb0\u5f55";
+}
+function evaluationStatus(value) {
+  return ({ pending: "\u8bc4\u4f30\u6392\u961f\u4e2d", running: "\u8bc4\u4f30\u8fd0\u884c\u4e2d", succeeded: "\u8bc4\u4f30\u5df2\u5b8c\u6210", failed: "\u8bc4\u4f30\u5931\u8d25" })[value] || label(value);
+}
+function outcomeLabel(decision, turnStatus) {
+  if (decision?.actual_outcome === "silent" && turnStatus !== "silent") return actualOutcomeLabels.unknown;
+  if (decision) return actualOutcomeLabels[decision.actual_outcome] || actualOutcomeLabels.unknown;
+  return "\u81ea\u4e3b\u56de\u5e94\u672a\u8bb0\u5f55";
+}
+function affectIndicators(view, turnStatus) {
+  const row = node("div", "affect-indicators");
+  if (view.response_decision) row.append(node("span", "badge", outcomeLabel(view.response_decision, turnStatus)));
+  else if (view.engagement) row.append(node("span", "badge", `\u5386\u53f2\u610f\u5411\uff1a${view.engagement.level_label || "\u672a\u8bb0\u5f55"}`));
+  const evaluation = view.relationship_evaluation;
+  if (evaluation) {
+    const indicator = badge(evaluation.status);
+    indicator.textContent = evaluationStatus(evaluation.status);
+    row.append(indicator);
+    const count = evaluation.evidence_count ?? evaluation.evidence_turn_ids?.length;
+    if (count > 1) row.append(node("span", "badge", `${count} \u8f6e\u5408\u5e76\u6279\u6b21`));
+  }
+  if (view.relationship?.emotions?.length) {
+    for (const emotion of view.relationship.emotions.slice(0, 4)) row.append(node("span", "badge emotion-badge", `${emotion.name || "\u60c5\u7eea\u672a\u8bb0\u5f55"} ${affectNumber(emotion.intensity)}`));
+  } else if (view.relationship?.emotions) row.append(node("span", "badge", "\u65e0\u6d3b\u8dc3\u60c5\u7eea"));
+  return row;
+}
+async function selectEvidenceTurn(evidence) {
+  if (!evidence?.turn_ref || !evidence.session_ref) return;
+  if (state.session?.session_ref !== evidence.session_ref) {
+    const generation = state.navigation;
+    const result = await request(`/sessions/${encodeURIComponent(evidence.session_ref)}`);
+    if (generation !== state.navigation) return;
+    if (!state.sessions.some((session) => session.session_ref === evidence.session_ref)) state.sessions.push(result.item);
+    await selectSession(result.item, evidence.turn_ref);
+  } else await selectTurn(state.turns.find((turn) => turn.turn_ref === evidence.turn_ref) || evidence);
+}
+function evidenceLinks(ids, recordKey) {
+  const row = node("div", "actions evidence-links");
+  for (const id of ids || []) {
+    const evidence = state.inspection.evidence_turns?.find((turn) => turn.turn_id === id);
+    const link = button(evidence ? `\u67e5\u770b\u8bc1\u636e #${id}` : `\u8bc1\u636e #${id}\uff08\u4e0d\u53ef\u7528\uff09`, () => selectEvidenceTurn(evidence));
+    link.dataset.focusKey = `${recordKey}:evidence:${id}`;
+    link.disabled = !evidence;
+    row.append(link);
+  }
+  if (!ids?.length) row.append(node("p", "muted", "\u672a\u8bb0\u5f55\u8bc1\u636e\u5f15\u7528"));
+  return row;
+}
+function emotionSnapshot(snapshot, title, key) {
+  const panel = node("div", "emotion-snapshot");
+  panel.append(node("h4", "", title));
+  const emotions = snapshot?.emotions;
+  if (!Array.isArray(emotions)) panel.append(node("p", "muted", "\u60c5\u7eea\u672a\u8bb0\u5f55"));
+  else if (!emotions.length) panel.append(node("p", "muted", "\u5df2\u8bb0\u5f55\uff1a\u65e0\u6d3b\u8dc3\u60c5\u7eea"));
+  for (const [index, emotion] of (emotions || []).entries()) {
+    const item = node("div", "emotion-entry");
+    item.append(node("strong", "", `${emotion.name || "\u672a\u547d\u540d"} \u00b7 ${affectNumber(emotion.intensity)}`));
+    item.append(node("p", "", emotion.cause ?? "\u539f\u56e0\u672a\u8bb0\u5f55"));
+    const evidence = disclosure("\u60c5\u7eea\u8bc1\u636e\u4e0e\u65f6\u95f4", "", "emotion-evidence");
+    evidence.item.dataset.detailKey = `${key}:emotion:${index}`;
+    evidence.content.append(evidenceLinks(emotion.evidence_turn_ids, `${key}:emotion:${index}`));
+    const updated = typeof emotion.updated_at === "number" ? new Date(emotion.updated_at * 1000) : null;
+    evidence.content.append(node("p", "muted", `\u66f4\u65b0\u65f6\u95f4\uff1a${updated && Number.isFinite(updated.getTime()) ? updated.toLocaleString() : "\u672a\u8bb0\u5f55"}`));
+    item.append(evidence.item);
+    panel.append(item);
+  }
+  return panel;
+}
+function snapshotDescription(snapshot, title) {
+  const panel = node("div", "snapshot-description");
+  panel.append(node("h4", "", title));
+  panel.append(node("p", "", snapshot?.description ?? "\u5173\u7cfb\u63cf\u8ff0\u672a\u8bb0\u5f55"));
+  panel.append(node("p", "", `\u5370\u8c61\uff1a${snapshot?.impression ?? "\u672a\u8bb0\u5f55"}`));
+  panel.append(node("p", "muted", `\u7248\u672c ${affectNumber(snapshot?.version)} \u00b7 ${date(snapshot?.updated_at)}`));
+  return panel;
+}
+function relationshipPanel() {
+  const view = state.inspection;
+  const panel = section("\u672c\u8f6e\u5173\u7cfb\u3001\u60c5\u7eea\u4e0e\u81ea\u4e3b\u56de\u5e94", "\u5c55\u793a\u672c\u8f6e\u5b9e\u9645\u4f7f\u7528\u7684\u5feb\u7167\uff0c\u4e0d\u4ece\u5f53\u524d\u914d\u7f6e\u5012\u63a8\u5386\u53f2\u3002");
+  panel.classList.add("relationship-panel");
+  panel.dataset.recordKey = "relationship";
+  panel.append(affectIndicators(view, view.turn.status));
+  const decision = view.response_decision;
+  const outcome = node("div", "response-outcome");
+  outcome.append(node("strong", "", outcomeLabel(decision, view.turn.status)));
+  if (decision) {
+    const delivery = decision.actual_delivery || {};
+    outcome.append(node("p", "", `\u786e\u8ba4\u9001\u8fbe ${affectNumber(delivery.confirmed_deliveries)} \u00b7 \u6587\u5b57 ${affectNumber(delivery.text_messages)} \u00b7 \u5a92\u4f53 ${affectNumber(delivery.media_messages)}`));
+    outcome.append(node("p", "muted", `${decision.source === "model" ? "\u6a21\u578b\u9009\u62e9" : decision.source === "runtime" ? "\u8fd0\u884c\u65f6\u8bb0\u5f55" : "\u6765\u6e90\u672a\u8bb0\u5f55"}\uff1a${decision.reason || "\u539f\u56e0\u672a\u8bb0\u5f55"}`));
+    outcome.append(eventButton(decision.event_ref, "\u5b8c\u6574\u56de\u5e94\u51b3\u7b56"));
+  }
+  if (["failed", "partial", "cancelled", "superseded"].includes(view.turn.status)) outcome.append(node("p", "error", "\u5931\u8d25\u3001\u90e8\u5206\u9001\u8fbe\u6216\u88ab\u53d6\u6d88\u4e0d\u7b49\u4e8e\u81ea\u4e3b\u6c89\u9ed8\u3002"));
+  panel.append(outcome);
+  const snapshot = view.relationship;
+  if (snapshot) {
+    panel.append(node("h4", "", "\u751f\u6210\u524d\u5b9e\u9645\u4f7f\u7528\u7684\u5173\u7cfb"));
+    const axes = node("div", "relationship-axes");
+    for (const [key, title] of Object.entries(relationshipAxes)) {
+      const axis = node("div", "relationship-axis");
+      axis.append(node("span", "muted", title), node("strong", "", affectNumber(snapshot.axes?.[key])));
+      axes.append(axis);
+    }
+    panel.append(axes, snapshotDescription(snapshot, "\u5bf9\u8be5\u6210\u5458\u7684\u5173\u7cfb\u4e0e\u5370\u8c61"), emotionSnapshot(snapshot, "\u751f\u6210\u65f6\u7684\u611f\u53d7\u4e0e\u539f\u56e0", "generation"));
+  } else {
+    panel.append(node("p", "muted", "\u672c\u8f6e\u672a\u8bb0\u5f55\u65b0\u7248\u5173\u7cfb\u4e0e\u60c5\u7eea\u5feb\u7167\uff1b\u4e0d\u8865\u5199\u6570\u503c\u3002"));
+    const legacy = state.events.find((event) => event.event_type === "persona_state");
+    if (legacy?.persona?.relation?.length) {
+      const old = disclosure("\u5386\u53f2\u5173\u7cfb\u8bb0\u5f55");
+      old.item.dataset.detailKey = "legacy-relation";
+      for (const row of legacy.persona.relation) old.content.append(node("p", "", `${row.label}\uff1a${row.value}`));
+      old.content.append(eventButton(legacy.event_ref, "\u5b8c\u6574\u5386\u53f2\u5feb\u7167"));
+      panel.append(old.item);
+    }
+  }
+  const evaluation = view.relationship_evaluation;
+  if (!evaluation) panel.append(node("p", "muted", "\u672c\u8f6e\u5c1a\u65e0\u5173\u7cfb\u8bc4\u4f30\u8bb0\u5f55\uff1b\u4e0d\u4ee3\u8868\u5df2\u8bc4\u4f30\u6216\u53d8\u5316\u4e3a\u96f6\u3002"));
+  else {
+    const result = section(evaluationStatus(evaluation.status));
+    result.dataset.recordKey = `evaluation:${evaluation.event_ref}`;
+    result.classList.add("evaluation-result");
+    const count = evaluation.evidence_turn_ids?.length || 0;
+    result.append(node("p", "batch-notice", count > 1 ? `\u6b64\u7ed3\u679c\u5c5e\u4e8e ${count} \u8f6e\u5408\u5e76\u8bc4\u4f30\uff0c\u4e0d\u662f\u672c\u6761\u6d88\u606f\u7684\u5355\u72ec\u8d21\u732e\u3002` : "\u6b64\u7ed3\u679c\u5bf9\u5e94\u8bc4\u4f30\u6279\u6b21\uff0c\u751f\u6210\u524d\u5feb\u7167\u4e0e\u8bc4\u4f30\u524d\u72b6\u6001\u53ef\u80fd\u4e0d\u540c\u3002"));
+    if (evaluation.error) result.append(node("p", "error", evaluation.error));
+    if (evaluation.status !== "succeeded") result.append(node("p", "muted", "\u5c1a\u65e0\u6210\u529f\u5199\u5165\u7684\u8bc4\u4f30\u540e\u72b6\u6001\uff1b\u4e0d\u628a\u672a\u77e5\u53d8\u5316\u5f53\u4f5c\u96f6\u3002"));
+    const table = node("table", "relationship-changes");
+    const head = node("thead"), headers = node("tr");
+    for (const title of ["\u5173\u7cfb\u8f74", "\u8bc4\u4f30\u524d", "\u2192 \u8bc4\u4f30\u540e", "\u53d8\u5316"]) { const cell = node("th", "", title); cell.scope = "col"; headers.append(cell); }
+    head.append(headers); table.append(head);
+    const body = node("tbody");
+    for (const [key, title] of Object.entries(relationshipAxes)) {
+      const row = node("tr"), change = evaluation.changes?.[key];
+      const name = node("th", "", title); name.scope = "row";
+      row.append(name, node("td", "", affectNumber(evaluation.before?.axes?.[key])), node("td", "", affectNumber(evaluation.after?.axes?.[key])), node("td", "axis-delta", axisDelta(change?.delta)));
+      body.append(row);
+    }
+    table.append(body); result.append(table);
+    const feelings = node("div", "affect-comparison");
+    feelings.append(emotionSnapshot(evaluation.before, "\u8bc4\u4f30\u524d\u611f\u53d7", "before"), emotionSnapshot(evaluation.after, "\u8bc4\u4f30\u540e\u611f\u53d7", "after"));
+    result.append(feelings);
+    const evidence = disclosure("\u6279\u6b21\u8bc1\u636e\u4e0e\u8bc4\u4f30\u8be6\u60c5", `${count} \u8f6e\u8bc1\u636e`);
+    evidence.item.dataset.detailKey = "evaluation-evidence";
+    evidence.content.append(node("p", "muted", `\u8bc4\u4f30\u6807\u8bc6\uff1a${evaluation.evaluation_ref || "\u672a\u8bb0\u5f55"}`), node("p", "muted", `\u6a21\u578b\uff1a${evaluation.model || "\u672a\u8bb0\u5f55"}`));
+    evidence.content.append(node("p", "muted", `\u6392\u961f ${date(evaluation.queued_at)} \u00b7 \u5f00\u59cb ${date(evaluation.started_at)} \u00b7 \u7ed3\u675f ${date(evaluation.finished_at)}`));
+    evidence.content.append(evidenceLinks(evaluation.evidence_turn_ids, evaluation.event_ref));
+    evidence.content.append(snapshotDescription(evaluation.before, "\u8bc4\u4f30\u524d\u5173\u7cfb\u4e0e\u5370\u8c61"), snapshotDescription(evaluation.after, "\u8bc4\u4f30\u540e\u5173\u7cfb\u4e0e\u5370\u8c61"));
+    evidence.content.append(eventButton(evaluation.event_ref, "\u5b8c\u6574\u8bc4\u4f30\u8d1f\u8f7d"));
+    result.append(evidence.item); panel.append(result);
+  }
+  if (view.engagement) {
+    const history = disclosure("\u5386\u53f2\u56de\u5e94\u610f\u5411\uff08\u65e7\u7b56\u7565\uff09", view.engagement.level_label || "");
+    history.item.dataset.detailKey = "legacy-engagement";
+    history.content.append(node("p", "", view.engagement.tone || ""));
+    for (const reason of view.engagement.reasons || []) history.content.append(node("p", "", reason));
+    const event = state.events.find((item) => item.event_type === "engagement_decision");
+    history.content.append(eventButton(event?.event_ref, "\u5b8c\u6574\u5386\u53f2\u610f\u5411"));
+    panel.append(history.item);
+  }
+  return panel;
+}
+
 async function loadScopes() {
   const generation = ++state.scopeLoad;
   status("正在同步…");
@@ -304,7 +477,7 @@ function renderSessions() {
     $("session-list").append(item);
   }
 }
-async function selectSession(session) {
+async function selectSession(session, preferredTurnRef = "") {
   stopPolling();
   const generation = beginNavigation();
   state.session = session;
@@ -321,7 +494,8 @@ async function selectSession(session) {
   state.detail = detail.item;
   state.turns = turns.items || [];
   renderSession(); renderTurns();
-  if (state.turns.length) await selectTurn(state.turns[state.turns.length - 1]);
+  if (preferredTurnRef) await selectTurn(state.turns.find((turn) => turn.turn_ref === preferredTurnRef) || { turn_ref: preferredTurnRef });
+  else if (state.turns.length) await selectTurn(state.turns[state.turns.length - 1]);
 }
 function renderSession() {
   const container = $("session-detail");
@@ -358,6 +532,10 @@ function renderTurns() {
     item.append(node("p", "muted", date(turn.created_at)));
     item.append(node("p", "muted", `${turn.model || "模型未记录"} · 请求 ${number(turn.model_call_count)} · 工具 ${number(turn.tool_call_count)}`));
     item.append(node("p", "muted turn-duration", turnDuration(turn)));
+    item.append(affectIndicators(turn, turn.status));
+    if (turn.relationship?.axes) item.append(node("p", "muted", Object.entries(relationshipAxes).map(([key, title]) => `${title} ${affectNumber(turn.relationship.axes[key])}`).join(" \u00b7 ")));
+    const changes = Object.entries(turn.relationship_evaluation?.changes || {}).filter(([, change]) => typeof change.delta === "number" && change.delta !== 0);
+    if (changes.length) item.append(node("p", "muted", `\u6279\u6b21\u53d8\u5316\uff1a${changes.map(([key, change]) => `${relationshipAxes[key] || key} ${axisDelta(change.delta)}`).join(" \u00b7 ")}`));
     $("turn-list").append(item);
   }
 }
@@ -379,7 +557,7 @@ async function selectTurn(turn) {
   state.events = result.events;
   state.turn = result.inspection.turn;
   renderTurns(); renderWorkspace();
-  if (state.turn.status === "running") startPolling();
+  startPolling();
 }
 function renderWorkspace() {
   const header = $("turn-header");
@@ -396,6 +574,7 @@ function renderWorkspace() {
   const models = [...new Set((inspection.model_calls || []).map((call) => call.model).filter(Boolean))];
   header.append(heading, node("p", "muted", `${personaName(inspection.persona)} · ${models.length ? models.join(" / ") : inspection.turn.model || "模型未记录"}`), usageDetails(inspection.usage));
   header.append(node("p", "turn-duration", turnDuration(inspection.turn)));
+  header.append(affectIndicators(inspection, inspection.turn.status));
   renderTimeline(); renderContext(); renderIO();
 }
 function callPanel(title, preview, ref, path = "") {
@@ -457,6 +636,7 @@ function renderTimeline() {
   const target = $("timeline-view");
   target.replaceChildren();
   const inspection = state.inspection;
+  target.append(relationshipPanel());
   const calls = [
     ...(inspection.model_calls || []).map((call, index) => ({ ref: call.request_event_ref || call.response_event_ref, card: () => modelCard(call, index) })),
     ...(inspection.tool_calls || []).map((call, index) => ({ ref: call.call_event_ref || call.result_event_ref, card: () => toolCard(call, index) })),
@@ -465,7 +645,7 @@ function renderTimeline() {
   const overview = node("div", "timeline-overview");
   overview.append(node("h3", "", "执行记录"), node("p", "muted", `${inspection.model_calls?.length || 0} 次模型请求 · ${inspection.tool_calls?.length || 0} 次工具调用 · 点击记录展开详情`));
   target.append(overview);
-  if (!calls.length) empty(target, "本轮未记录模型请求或工具调用；不以生成尝试推断实际请求。");
+  if (!calls.length) target.append(node("p", "empty", "\u672c\u8f6e\u672a\u8bb0\u5f55\u6a21\u578b\u8bf7\u6c42\u6216\u5de5\u5177\u8c03\u7528\uff1b\u4e0d\u4ee5\u751f\u6210\u5c1d\u8bd5\u63a8\u65ad\u5b9e\u9645\u8bf7\u6c42\u3002"));
   for (const call of calls) target.append(call.card());
   const audit = node("details", "audit-list");
   audit.append(node("summary", "", `原始审计事件（${state.events.length}）`));
@@ -667,6 +847,8 @@ function deliveryCard(output, recordKey) {
 function renderIO() {
   const target = $("io-view");
   target.replaceChildren();
+  const decision = state.inspection.response_decision;
+  if (decision) target.append(section("\u81ea\u4e3b\u56de\u5e94\u4e0e\u5b9e\u9645\u9001\u8fbe", outcomeLabel(decision, state.turn.status)));
   const inputs = state.events.filter((event) => event.event_type === "user_input");
   if (!inputs.length) target.append(section("用户输入", "本轮未记录"));
   for (const [index, event] of inputs.entries()) target.append(ioEvent(event, "用户输入", `input:${event.event_ref || index}`).item);
@@ -691,7 +873,8 @@ function refreshPanels() {
   const focused = document.activeElement;
   const focusKey = focused?.dataset.focusKey;
   const focusedDetail = focused?.tagName === "SUMMARY" ? detailKey(focused.parentElement) : null;
-  const scrollPositions = [...document.querySelectorAll(".workspace .scroll")].map((item) => [item, item.scrollTop, item.scrollLeft]);
+  const scrollPositions = [...document.querySelectorAll(".workspace .scroll, #session-detail")].map((item) => [item, item.scrollTop, item.scrollLeft]);
+  const pageScroll = { top: window.scrollY, left: window.scrollX, behavior: "instant" };
   renderTurns(); renderSession(); renderWorkspace();
   for (const item of document.querySelectorAll(".workspace details")) {
     item.open = opened.has(detailKey(item));
@@ -705,6 +888,7 @@ function refreshPanels() {
     item.scrollTop = top;
     item.scrollLeft = left;
   }
+  window.scrollTo(pageScroll);
 }
 
 function stopPolling() {
@@ -714,7 +898,10 @@ function stopPolling() {
 }
 function startPolling() {
   stopPolling();
-  if (document.hidden || state.turn?.status !== "running") return;
+  const evaluation = state.inspection?.relationship_evaluation;
+  const awaitingAffect = ["pending", "running", "failed"].includes(evaluation?.status)
+    || (!evaluation && state.inspection?.relationship && ["completed", "silent", "declined"].includes(state.turn?.status));
+  if (document.hidden || (state.turn?.status !== "running" && !awaitingAffect)) return;
   $("auto-refresh").classList.remove("is-hidden");
   state.pollTimer = setTimeout(pollTurn, 3000);
 }

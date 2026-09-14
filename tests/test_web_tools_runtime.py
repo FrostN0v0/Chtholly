@@ -38,6 +38,7 @@ from arclet.entari.config import EntariConfig
 from arclet.letoderea.context import Contexts
 from satori.adapters.onebot11.message import OneBot11MessageEncoder
 
+from utils.turn_resolution_core import TurnResolution
 from plugins.llm_chat.web.policy import WebAccessLimits, llm_chat_web_access_scope
 from utils.llm_model_core.snapshot import pin_main_model, main_model_scope
 from plugins.llm_chat.core.delivery import llm_chat_delivery_scope
@@ -98,7 +99,7 @@ async def _settle_dispose_tasks(pending: set[asyncio.Task[Any]] | None) -> None:
         if task.get_loop() is running_loop:
             local_tasks.append(task)
         else:
-            task.cancel()
+            raise AssertionError("Plugin cleanup escaped the active test event loop")
     if local_tasks:
         await asyncio.gather(*local_tasks)
 
@@ -313,21 +314,12 @@ def _load_local_modules() -> Iterator[SimpleNamespace]:
     import plugins as plugins_package
 
     prefix = "plugins.llm_chat"
+    package = importlib.import_module(prefix)
     before_modules = {
         name: module for name, module in sys.modules.items() if name == prefix or name.startswith(f"{prefix}.")
     }
     previous_package_attr = getattr(plugins_package, "llm_chat", _MISSING)
 
-    package = sys.modules.get(prefix)
-    package_was_created = package is None
-    if package is None:
-        package = ModuleType(prefix)
-        package.__package__ = prefix
-        package.__path__ = [str(_LLM_CHAT_DIR)]  # type: ignore[attr-defined]
-        package.__spec__ = ModuleSpec(prefix, loader=None, is_package=True)
-        if package.__spec__.submodule_search_locations is not None:
-            package.__spec__.submodule_search_locations.append(str(_LLM_CHAT_DIR))
-        sys.modules[prefix] = package
     package_namespace = dict(vars(package))
     setattr(plugins_package, "llm_chat", package)
 
@@ -374,9 +366,8 @@ def _load_local_modules() -> Iterator[SimpleNamespace]:
         for name, module in before_modules.items():
             sys.modules[name] = module
 
-        if not package_was_created:
-            package.__dict__.clear()
-            package.__dict__.update(package_namespace)
+        package.__dict__.clear()
+        package.__dict__.update(package_namespace)
         if previous_package_attr is _MISSING:
             if getattr(plugins_package, "llm_chat", _MISSING) is package:
                 delattr(plugins_package, "llm_chat")
@@ -4238,3 +4229,233 @@ async def test_external_tool_failure_redacts_credentials_in_model_result_and_aud
     assert "secret-value" not in requirement.external_execution_result
     assert recorder.events[0].status == "failed"
     assert "secret-value" not in json.dumps(recorder.events[0].outcome)
+
+
+@pytest.mark.asyncio
+async def test_native_readonly_batch_executes_following_delivery_exactly_once(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(
+                tool_calls=[
+                    _tool_call("local", "get_local_time", {}),
+                    _tool_call("utc", "get_local_time", {"timezone": "UTC"}),
+                    _tool_call("effect", "send_text", {"text": "Clock checks completed."}),
+                ]
+            ),
+            _model_response("[END_OF_RESPONSE]"),
+        ],
+    )
+    session = _DeliveryToolSession()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        await local_modules.generation.generate_chat_response(
+            [{"role": "user", "content": "Check both clocks, then acknowledge."}],
+            system="delivery rules",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=local_modules.delivery.DeliveryState(),
+        )
+
+    assert session.attempts == session.sent == ["Clock checks completed."]
+    results = _tool_messages(payloads[1])
+    assert [result["tool_call_id"] for result in results] == ["local", "utc", "effect"]
+    assert all(json.loads(result["content"])["ok"] for result in results)
+    assert json.loads(json.loads(results[1]["content"])["data"])["utc_offset"] == "+00:00"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["silent", "declined", "delivered"])
+async def test_native_finish_stops_queued_effects_with_matched_skipped_results(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    from dataclasses import asdict
+
+    from plugins.llm_chat.models import AgentTurn, AgentEvent
+    from plugins.llm_chat.context_builder import _turn_messages
+    from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
+
+    calls = []
+    if outcome == "delivered":
+        calls.append(_tool_call("prefix", "send_text", {"text": "Confirmed output."}))
+    calls.extend(
+        [
+            _tool_call(
+                "finish",
+                "finish_turn",
+                {
+                    "outcome": outcome,
+                    "reason": "private boundary explanation",
+                    "reply": "I cannot do that." if outcome == "declined" else "",
+                },
+            ),
+            _tool_call("skipped", "send_text", {"text": "Must not escape."}),
+        ]
+    )
+    payloads = _install_completion_script(monkeypatch, [_model_response(tool_calls=calls)])
+    session = _DeliveryToolSession()
+    resolution = TurnResolution()
+    trace = ToolTraceRecorder()
+    events = AgentTurnRecorder()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        response = await local_modules.generation.generate_chat_response(
+            [{"role": "user", "content": "Choose whether to continue."}],
+            system="delivery rules",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=local_modules.delivery.DeliveryState(),
+            tool_trace=trace,
+            resolution=resolution,
+            agent_events=events,
+        )
+
+    assert session.sent == (["Confirmed output."] if outcome == "delivered" else [])
+    assert len(payloads) == 1
+    results = [message for message in response.messages if message.role == "tool"]
+    assert [message.tool_call_id for message in results] == [call["id"] for call in calls]
+    skipped = json.loads(results[-1].content)
+    assert skipped["ok"] is False
+    assert skipped["error"]
+    assert [(event.tool_call_id, event.status, event.effect) for event in trace.events][-1] == (
+        "skipped",
+        "cancelled",
+        "none",
+    )
+    assert trace.events[-1].outcome["error_code"] == "turn_ended"
+    assert json.loads(results[-2].content) == {"ok": True, "data": {"outcome": outcome}}
+    assert "private boundary explanation" not in repr([message.content for message in results])
+    rows = []
+    for event in events.events:
+        values = asdict(event)
+        values["payload_json"] = json.dumps(values.pop("payload"))
+        rows.append(AgentEvent(turn_id=1, event_ref=f"event-{event.sequence}", **values))
+    history = _turn_messages(AgentTurn(id=1), rows, inline_chars=10_000)
+    history_results = [message for message in history if message["role"] == "tool"]
+    assert [message["tool_call_id"] for message in history_results] == [call["id"] for call in calls]
+    decision_result = json.loads(history_results[-2]["content"])
+    assert decision_result["effect"] == "none"
+    assert decision_result["data"] == {"outcome": outcome}
+    assert "private boundary explanation" not in json.dumps(history)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rejection", ["empty", "partial", "refusal_budget"])
+async def test_native_rejected_finish_allows_corrective_tool_continuation(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    rejection: str,
+) -> None:
+    from dataclasses import replace
+
+    calls = []
+    if rejection != "empty":
+        calls.append(_tool_call("prefix", "send_text", {"text": "Prefix"}))
+    if rejection == "partial":
+        calls.append(_tool_call("failed", "send_text", {"text": "Unconfirmed"}))
+    calls.append(
+        _tool_call(
+            "finish",
+            "finish_turn",
+            {
+                "outcome": "declined" if rejection == "refusal_budget" else "delivered",
+                "reply": "This refusal cannot fit." if rejection == "refusal_budget" else "",
+            },
+        )
+    )
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(tool_calls=calls),
+            _model_response(tool_calls=[_tool_call("corrective", "send_text", {"text": "OK"})]),
+            _model_response("[END_OF_RESPONSE]"),
+        ],
+    )
+    session = _DeliveryToolSession(fail_attempts={2} if rejection == "partial" else None)
+    state = local_modules.delivery.DeliveryState(sleep=_FakeClock().sleep)
+    if rejection == "refusal_budget":
+        state.limits = replace(state.limits, max_total_text_chars=8)
+    resolution = TurnResolution()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        response = await local_modules.generation.generate_chat_response(
+            [{"role": "user", "content": "Acknowledge only confirmed work."}],
+            system="delivery rules",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=state,
+            resolution=resolution,
+        )
+
+    assert resolution.outcome == "automatic"
+    assert session.sent == (["OK"] if rejection == "empty" else ["Prefix", "OK"])
+    assert response.content == "[END_OF_RESPONSE]"
+    rejected = next(message for message in _tool_messages(payloads[1]) if message["tool_call_id"] == "finish")
+    assert json.loads(rejected["content"])["ok"] is False
+    corrective = next(message for message in _tool_messages(payloads[2]) if message["tool_call_id"] == "corrective")
+    assert json.loads(corrective["content"])["ok"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["silent", "declined"])
+async def test_native_finish_during_media_recovery_does_not_request_fake_delivery(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response("I sent the image."),
+            _model_response(
+                tool_calls=[
+                    _tool_call(
+                        "finish",
+                        "finish_turn",
+                        {
+                            "outcome": outcome,
+                            "reply": "I cannot provide that image." if outcome == "declined" else "",
+                        },
+                    )
+                ]
+            ),
+        ],
+    )
+    session = _DeliveryToolSession()
+    resolution = TurnResolution()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        response = await local_modules.generation.generate_chat_response(
+            [{"role": "user", "content": "Send me an image."}],
+            system="delivery rules",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=local_modules.delivery.DeliveryState(),
+            resolution=resolution,
+        )
+
+    assert len(payloads) == 2
+    assert session.attempts == []
+    assert resolution.outcome == outcome
+    assert any(message.tool_call_id == "finish" for message in response.messages if message.role == "tool")

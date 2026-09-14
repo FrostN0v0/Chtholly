@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from dataclasses import field, dataclass
+from collections.abc import Sequence
 
 from entari_plugin_database import select, get_session
 
@@ -28,6 +29,67 @@ class MemoryContext:
     evaluator_profile_facts: list[ProfileFactData]
     relevant_memories: list[str]
     retrieval: dict[str, object] = field(default_factory=dict)
+
+
+def _profile_candidates(rows: Sequence[UserProfileFact]) -> list[ProfileFactCandidate]:
+    return [
+        ProfileFactCandidate(
+            id=row.id,
+            category=row.category,
+            key=row.key,
+            value=row.value,
+            confidence=row.confidence,
+            evidence_count=row.evidence_count,
+            updated_at=row.updated_at,
+            embedding=decode_embedding(row.embedding_json),
+        )
+        for row in rows
+    ]
+
+
+def _evaluator_facts(
+    config: LLMChatConfigLike,
+    grouped_facts: Sequence[ProfileFactCandidate],
+) -> list[ProfileFactData]:
+    selected = sorted(
+        grouped_facts,
+        key=lambda fact: (fact.confidence, fact.evidence_count, fact.updated_at or datetime.min, -fact.id),
+        reverse=True,
+    )[: max(0, config.memory_eval_profile_fact_limit)]
+    selected.sort(key=lambda fact: (fact.category, fact.key))
+    return [
+        ProfileFactData(
+            category=fact.category,
+            key=fact.key,
+            value=fact.value,
+            confidence=fact.confidence,
+            aliases=list(fact.alias_keys),
+        )
+        for fact in selected
+    ]
+
+
+async def load_evaluator_profile_facts(
+    config: LLMChatConfigLike,
+    user_id: str,
+    channel_id: str,
+) -> list[ProfileFactData]:
+    """Read canonical evaluator facts without a second embedding request."""
+    if not config.memory_enabled:
+        return []
+    async with get_session() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(UserProfileFact).where(
+                        UserProfileFact.user_id == user_id,
+                        UserProfileFact.channel_id == channel_id,
+                    )
+                )
+            ).scalars()
+        )
+    grouped = group_profile_facts(_profile_candidates(rows), min_similarity=config.profile_alias_similarity)
+    return _evaluator_facts(config, grouped)
 
 
 async def load_memory_context(
@@ -73,45 +135,13 @@ async def load_memory_context(
 
     query_embedding = await embed_text(config, query) if profile_rows or memory_rows else None
 
-    profile_candidates = [
-        ProfileFactCandidate(
-            id=row.id,
-            category=row.category,
-            key=row.key,
-            value=row.value,
-            confidence=row.confidence,
-            evidence_count=row.evidence_count,
-            updated_at=row.updated_at,
-            embedding=decode_embedding(row.embedding_json),
-        )
-        for row in profile_rows
-    ]
+    profile_candidates = _profile_candidates(profile_rows)
     grouped_facts = group_profile_facts(
         profile_candidates,
         min_similarity=config.profile_alias_similarity,
     )
 
-    evaluator_candidates = sorted(
-        grouped_facts,
-        key=lambda fact: (
-            fact.confidence,
-            fact.evidence_count,
-            fact.updated_at or datetime.min,
-            -fact.id,
-        ),
-        reverse=True,
-    )[: max(0, config.memory_eval_profile_fact_limit)]
-    evaluator_candidates.sort(key=lambda fact: (fact.category, fact.key))
-    evaluator_profile_facts: list[ProfileFactData] = [
-        ProfileFactData(
-            category=fact.category,
-            key=fact.key,
-            value=fact.value,
-            confidence=fact.confidence,
-            aliases=list(fact.alias_keys),
-        )
-        for fact in evaluator_candidates
-    ]
+    evaluator_profile_facts = _evaluator_facts(config, grouped_facts)
 
     chat_candidates = select_chat_profile_facts(
         [fact for fact in grouped_facts if fact.confidence >= config.profile_fact_min_confidence],

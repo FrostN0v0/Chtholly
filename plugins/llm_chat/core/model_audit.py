@@ -10,7 +10,16 @@ from dataclasses import field, dataclass
 from collections.abc import Mapping
 
 ADMIN_ONLY_EVENT_TYPES = frozenset(
-    {"model_request", "model_response", "context_snapshot", "turn_timing", "message_delivery"}
+    {
+        "model_request",
+        "model_response",
+        "context_snapshot",
+        "turn_timing",
+        "message_delivery",
+        "persona_state",
+        "relationship_evaluation",
+        "response_decision",
+    }
 )
 _SECRET_KEY = re.compile(
     r"(?:api[_-]?key|authorization|password|passwd|secret|credential|cookie|headers?|(?:access|refresh|capture)[_-]?token|bearer|private[_-]?key)",
