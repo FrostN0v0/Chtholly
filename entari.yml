@@ -49,7 +49,10 @@ plugins:
       max_concurrency: 2
     resources:
       local_access:
-        allowed_paths: ["plugins/llm_chat/render_templates"]
+        # Only approved plugins are published here; never allow the whole LocalData root.
+        allowed_paths:
+          - "plugins/llm_chat/render_templates"
+          - ".chtholly/data/plugin_workshop/runtime"
   database:
     type: sqlite
     name: "data/chtholly.db"

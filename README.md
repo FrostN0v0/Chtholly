@@ -130,6 +130,8 @@ uv run --locked python scripts/build_workshop_sandbox.py --tag chtholly-workshop
 
 构建只打包固定依赖、vendored wheel 和可信验收器，不发送项目配置、资源或 `.env`；模型提交不会构建或拉取镜像。镜像预装 Chromium、Inter/Noto CJK 字体和图像解码器，先验证可信模板的真实 PNG，再执行候选命令、重载及清理。模板访问限于候选源码目录，单命令 30 秒、总验收默认 180 秒；图片须完整解码并满足大小、像素和动画限制。Docker、镜像或版本前提不满足时明确显示不可用，不回退到宿主验收。
 
+容器验收与激活后的宿主渲染使用各自的 HTMLRender 配置。宿主 `htmlrender.resources.local_access.allowed_paths` 必须同时保留原有模板目录和工坊专用 `runtime` 目录；本仓库默认 `.localdata.app_name: chtholly` 对应 `.chtholly/data/plugin_workshop/runtime`，改变 LocalData 位置时需同步调整。该目录只发布已批准插件，停用时删除对应包；不得授权整个 `.chtholly`、`versions` 或 `staging`。仅批准源码不会自动扩大渲染器文件访问权限，验收需同时覆盖激活后的实际命令出图。
+
 生产推荐由 Bot 用户运行 rootless Docker，并通过 `DOCKER_HOST` 指向受限 Unix Socket；不要为方便调用而将 Bot 加入可控制宿主 root 的 Docker 组。rootless daemon 必须支持 cgroup v2 的内存、CPU 与 PID 限制，不能因安装模式改变而放宽验收边界。
 
 在 Entari WebUI「插件工坊」审阅功能、源码差异、不可变配置、数据影响、验收报告与 SHA-256，确认后批准精确版本，再激活。工坊要求预先配置 WebUI 密码，并在回环监听时同样启用真实密码认证；若热加载前已有免密会话，必须完整重启以使旧 Cookie 失效，不把免密 Cookie 升格为管理员会话。管理端口继续保持回环监听及 SSH 隧道。页面复用原生隔离 iframe 的 API 消息桥，不放宽 iframe sandbox、同源写入或会话认证。
