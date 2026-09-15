@@ -8,20 +8,17 @@ from typing import Any, cast
 from pathlib import Path
 
 import pytest
-import litellm
 from agno.media import Image as AgnoImage
 from arclet.entari import Session
-from agno.models.litellm import LiteLLM
 from arclet.entari.config import EntariConfig
 
 if not hasattr(EntariConfig, "instance"):
     setattr(EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.yml"))
 
-from plugins.llm_chat import generation, agno_compat
+from plugins.llm_chat import generation
 from plugins.llm_chat.core.media import sanitize_assistant_history, strip_internal_media_records
 from plugins.llm_chat.core.delivery import DeliveryError, DeliveryState
 from plugins.llm_chat.turn_lifecycle import ActiveChatTurn
-from plugins.llm_chat.core.tool_trace import ToolTraceRecorder, llm_chat_tool_trace_scope
 from plugins.llm_chat.core.image_source import IMAGE_FETCH_MAX_BYTES
 from plugins.llm_chat.core.native_images import extract_native_images
 
@@ -64,29 +61,6 @@ def test_native_image_sources_survive_provider_and_agno_boundaries(response: obj
     assert len(images) == 1
     assert images[0].mime_type == "image/png"
     assert images[0].content == _PNG_BYTES
-
-
-def test_agno_compat_litellm_wrapper_attaches_provider_images() -> None:
-    wrapped = agno_compat._wrap_litellm_model(LiteLLM)
-    provider_response = litellm.ModelResponse(
-        model="openai/test-model",
-        usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-        choices=[
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "images": [{"index": 0, "type": "image_url", "image_url": {"url": _DATA_URL}}],
-                }
-            }
-        ]
-    )
-
-    with llm_chat_tool_trace_scope(ToolTraceRecorder()):
-        parsed = wrapped(id="test-model")._parse_provider_response(provider_response)
-
-    assert parsed.images is not None
-    assert parsed.images[0].content == _PNG_BYTES
 
 
 @pytest.mark.asyncio

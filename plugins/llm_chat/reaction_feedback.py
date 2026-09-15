@@ -116,6 +116,20 @@ class MessageReactionFeedback:
     async def finish(self, stage: TerminalReactionStage) -> None:
         await self._replace(stage, terminal=True)
 
+    async def finish_silent(self) -> None:
+        """End successfully without replacing transient feedback with another reaction."""
+        async with self._lock:
+            if self._terminal:
+                return
+            if not self._disabled and self._current_emoji is not None:
+                if await self._call(
+                    self._delete_reaction(self._current_emoji),
+                    action="delete",
+                    stage="silent",
+                ):
+                    self._current_emoji = None
+            self._terminal = True
+
     async def clear_transient(self) -> None:
         async with self._lock:
             if self._disabled or self._terminal or self._current_emoji is None:

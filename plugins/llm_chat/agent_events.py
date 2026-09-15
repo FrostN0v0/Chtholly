@@ -110,7 +110,7 @@ async def load_session_turns(session_id: int, *, limit: int = 100) -> list[Agent
                     select(AgentTurn)
                     .where(
                         AgentTurn.session_id == session_id,
-                        AgentTurn.status.in_(("completed", "partial")),
+                        AgentTurn.status.in_(("completed", "partial", "silent", "declined")),
                     )
                     .order_by(AgentTurn.sequence.desc())
                     .limit(max(1, limit))

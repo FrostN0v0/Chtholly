@@ -162,6 +162,26 @@ class ToolTraceRecorder:
             audit_result=sanitize_audit_value(error),
         )
 
+    def finish_skipped(
+        self,
+        call: PendingToolCall,
+        *,
+        reason: str = "Tool was not executed because this turn deliberately ended",
+    ) -> None:
+        """Settle a requested tool that was never started after explicit termination."""
+        result: dict[str, JSONType] = {
+            "error_code": "turn_ended",
+            "error": reason,
+        }
+        self._append(
+            call,
+            status="cancelled",
+            effect="none",
+            outcome=result,
+            recorded_result=result,
+            audit_result=sanitize_audit_value(result),
+        )
+
     def _append(
         self,
         call: PendingToolCall,

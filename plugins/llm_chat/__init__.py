@@ -33,10 +33,12 @@ if plug is not None and plug.module.__name__ == __name__:
     from .agno_compat import install_agno_tool_bridge  # entari: package
     from .protocol_compat import install_entari_internal_bridge  # entari: package
     from .delivery_audit import install_delivery_audit  # entari: package
+    from .group_delivery import install_group_delivery  # entari: package
 
     install_agno_tool_bridge()
     plugin.collect_disposes(install_entari_internal_bridge())
     plugin.collect_disposes(install_delivery_audit())
+    plugin.collect_disposes(install_group_delivery())
     from .config_schema import LLMChatWebUIConfig  # entari: package
 
     metadata(

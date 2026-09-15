@@ -31,6 +31,11 @@ ToolEffect = Literal["observed", "confirmed", "partial", "none", "unknown"]
 
 _DELIVERY_TOOLS = {
     "edit_image",
+    "generate_image",
+    "html2pic",
+    "jinja2pic",
+    "markdown2pic",
+    "screenshot_web_page",
     "send_audio",
     "send_artifact",
     "send_external_image",
@@ -47,6 +52,11 @@ _OBSERVATION_TOOLS = {
     "get_local_time",
     "list_image_resources",
     "list_tts_voices",
+    "list_sessions",
+    "list_tool_executions",
+    "read_session_handoff",
+    "read_agent_event",
+    "read_tool_execution",
     "list_web_artifacts",
     "read_web_artifact",
     "read_channel_messages",
@@ -82,6 +92,8 @@ def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> d
             "url": safe_url(arguments.get("url")),
             **selected_arguments(arguments, "purpose", "section", "width"),
         }
+    if tool_name == "finish_turn":
+        return selected_arguments(arguments, "outcome")
     if tool_name == "get_local_time":
         return selected_arguments(arguments, "timezone")
     if tool_name == "list_image_resources":
@@ -180,6 +192,8 @@ def project_tool_success(
     """Normalize one handler return into execution and effect semantics."""
 
     outcome = _project_tool_result(tool_name, result, before=before, after=after)
+    if tool_name == "finish_turn":
+        return "succeeded", "none", outcome
     if tool_name in WORKSHOP_TOOLS:
         if tool_name == "submit_plugin":
             if outcome.get("validation_status") == "passed":
@@ -317,6 +331,8 @@ def _project_tool_result(
             "excerpt": compact_text(content, MAX_RESULT_TEXT),
         }
     parsed = parse_json_object(result)
+    if tool_name == "finish_turn" and parsed is not None:
+        return selected_arguments(parsed, "outcome")
     if tool_name == "capture_web_reference" and parsed is not None:
         return {
             "available": parsed.get("available") is True,

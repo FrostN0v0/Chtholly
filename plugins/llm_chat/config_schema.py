@@ -72,8 +72,14 @@ _CONFIG_SCHEMA_TEXT = {
         "JPEG 与 WebP 原创图片输出使用的压缩百分比。",
     ),
     "eval_request_timeout": ("评估请求超时", "关系评估模型单次请求的超时时间（秒）。"),
-    "eval_every_n": ("关系评估间隔", "每位用户累计多少次机器人回复后运行一次关系评估。"),
-    "eval_context_window": ("评估上下文条数", "关系评估时包含的近期历史消息条数。"),
+    "relationship_eval_batch_size": (
+        "\u5173\u7cfb\u8bc4\u4f30\u6279\u6b21\u4e0a\u9650",
+        "\u6bcf\u6b21\u540e\u53f0\u8bc4\u4f30\u6700\u591a\u5904\u7406\u7684\u5b8c\u6574\u4e92\u52a8\u8f6e\u6b21\u6570\uff0c\u4e0d\u662f\u8df3\u8fc7\u4e2d\u95f4\u6d88\u606f\u7684\u89e6\u53d1\u95f4\u9694\u3002",
+    ),
+    "relationship_eval_debounce_seconds": (
+        "\u5173\u7cfb\u8bc4\u4f30\u5408\u5e76\u7a97\u53e3",
+        "\u540e\u53f0\u5408\u5e76\u77ed\u65f6\u95f4\u5185\u4e92\u52a8\u7684\u7b49\u5f85\u79d2\u6570\uff0c\u4ece\u9996\u6761\u4e92\u52a8\u5f00\u59cb\u8ba1\u65f6\uff0c\u4e0d\u963b\u585e\u56de\u590d\u3002",
+    ),
     "memory_enabled": ("启用长期记忆", "是否启用用户画像与语义记忆的检索和更新。"),
     "memory_embedding_model": (
         "记忆嵌入模型",

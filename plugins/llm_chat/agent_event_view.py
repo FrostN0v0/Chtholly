@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import cast
 from urllib.parse import quote
 from collections.abc import Mapping, Sequence
 
 from .models import AgentEvent
 from .core.types import JSONType
+from .agent_events import load_event_payload
 from .agent_attachments import is_agent_attachment, event_attachment_metadata
 
 _INLINE_OBJECT_CHARS = 8000
@@ -22,6 +24,8 @@ _INPUT_ATTACHMENT_ENDPOINT = "/api/llm-chat/sessions/events"
 EVENT_TITLES = {
     "user_input": "用户输入",
     "engagement_decision": "回应意向",
+    "relationship_evaluation": "\u5173\u7cfb\u4e0e\u60c5\u7eea\u8bc4\u4f30",
+    "response_decision": "\u81ea\u4e3b\u56de\u5e94\u7ed3\u679c",
     "model_attempt": "生成尝试（汇总）",
     "model_request": "模型请求",
     "model_response": "模型响应",
@@ -362,6 +366,7 @@ def event_persona(event: AgentEvent, payload: Mapping[str, JSONType]) -> dict[st
     ]
     return {
         "relation": cast(JSONType, _labelled_rows(payload.get("relation"))),
+        "relationship": relationship_snapshot(payload.get("relationship")),
         "state": cast(JSONType, _labelled_rows(payload.get("state"))),
         "budgets": cast(JSONType, _labelled_rows(payload.get("budgets"))),
         "thresholds": cast(JSONType, _labelled_rows(memory_map.get("thresholds"))),
@@ -413,6 +418,165 @@ def event_engagement(event: AgentEvent, payload: Mapping[str, JSONType]) -> dict
         "budget": cast(JSONType, dict(budget) if isinstance(budget, Mapping) else {}),
         "signals": cast(JSONType, dict(signals) if isinstance(signals, Mapping) else {}),
     }
+
+
+_RELATIONSHIP_AXES = ("affection", "trust", "dependence", "resentment", "familiarity")
+
+
+def _finite_number(value: object) -> int | float | None:
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+
+
+def _turn_ids(value: object) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    return list(
+        dict.fromkeys(item for item in value if isinstance(item, int) and not isinstance(item, bool) and item > 0)
+    )
+
+
+def relationship_snapshot(value: object) -> dict[str, JSONType] | None:
+    """Read only the captured snapshot; missing axes and emotions remain unknown."""
+    if not isinstance(value, Mapping):
+        return None
+    axes = value.get("axes")
+    raw_emotions = value.get("emotions")
+    emotions: list[JSONType] | None = None
+    if isinstance(raw_emotions, list) and all(isinstance(item, Mapping) for item in raw_emotions):
+        emotions = [
+            {
+                "name": item.get("name") if isinstance(item.get("name"), str) else None,
+                "intensity": _finite_number(item.get("intensity")),
+                "cause": item.get("cause") if isinstance(item.get("cause"), str) else None,
+                "evidence_turn_ids": cast(JSONType, _turn_ids(item.get("evidence_turn_ids"))),
+                "updated_at": _finite_number(item.get("updated_at")),
+            }
+            for item in raw_emotions
+            if isinstance(item, Mapping)
+        ]
+    return {
+        "version": _finite_number(value.get("version")),
+        "axes": {key: _finite_number(axes.get(key)) for key in _RELATIONSHIP_AXES}
+        if isinstance(axes, Mapping)
+        else None,
+        "description": value.get("description") if isinstance(value.get("description"), str) else None,
+        "impression": value.get("impression") if isinstance(value.get("impression"), str) else None,
+        "emotions": emotions,
+        "updated_at": value.get("updated_at") if isinstance(value.get("updated_at"), str) else None,
+        "processed_turn_id": _finite_number(value.get("processed_turn_id")),
+    }
+
+
+def event_relationship_evaluation(event: AgentEvent, payload: Mapping[str, JSONType]) -> dict[str, JSONType] | None:
+    if event.event_type != "relationship_evaluation":
+        return None
+    succeeded = event.status == "succeeded"
+    raw_changes = payload.get("changes")
+    changes: dict[str, JSONType] = {}
+    if succeeded and isinstance(raw_changes, Mapping):
+        for key in _RELATIONSHIP_AXES:
+            item = raw_changes.get(key)
+            if isinstance(item, Mapping):
+                changes[key] = {field: _finite_number(item.get(field)) for field in ("before", "after", "delta")}
+    return {
+        "event_ref": event.event_ref,
+        "status": event.status,
+        "evaluation_ref": payload.get("evaluation_ref") if isinstance(payload.get("evaluation_ref"), str) else None,
+        "evidence_turn_ids": cast(JSONType, _turn_ids(payload.get("evidence_turn_ids"))),
+        "before": relationship_snapshot(payload.get("before")),
+        "after": relationship_snapshot(payload.get("after")) if succeeded else None,
+        "changes": changes,
+        **{
+            key: payload.get(key) if isinstance(payload.get(key), str) else None
+            for key in ("model", "error", "started_at", "finished_at", "queued_at")
+        },
+    }
+
+
+def event_response_decision(event: AgentEvent, payload: Mapping[str, JSONType]) -> dict[str, JSONType] | None:
+    if event.event_type != "response_decision":
+        return None
+    raw_delivery = payload.get("actual_delivery")
+    delivery: dict[str, int | None] = {}
+    for key in ("text_messages", "media_messages", "confirmed_deliveries"):
+        count = raw_delivery.get(key) if isinstance(raw_delivery, Mapping) else None
+        delivery[key] = count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else None
+    outcome = payload.get("outcome")
+    text_count, media_count = delivery["text_messages"], delivery["media_messages"]
+    confirmed = delivery["confirmed_deliveries"]
+    actual = "unknown"
+    if confirmed is not None and confirmed > 0 and text_count is not None and media_count is not None:
+        actual = (
+            "mixed"
+            if text_count > 0 and media_count > 0
+            else "text"
+            if text_count > 0
+            else "media_only"
+            if media_count > 0
+            else "unknown"
+        )
+        if outcome == "declined" and text_count > 0:
+            actual = "refusal"
+    elif outcome == "silent" and confirmed == 0 and text_count == 0 and media_count == 0:
+        actual = "silent"
+    return {
+        "event_ref": event.event_ref,
+        "outcome": outcome if isinstance(outcome, str) else None,
+        "source": payload.get("source") if isinstance(payload.get("source"), str) else None,
+        "reason": payload.get("reason") if isinstance(payload.get("reason"), str) else None,
+        "actual_delivery": cast(JSONType, delivery),
+        "actual_outcome": actual,
+    }
+
+
+def project_relationship_views(events: Sequence[AgentEvent], *, compact: bool = False) -> dict[str, object]:
+    """Project independent generation inputs, batch results and actual delivery choices."""
+    views: dict[str, object] = {
+        "relationship": None,
+        "relationship_evaluation": None,
+        "response_decision": None,
+        "engagement": None,
+    }
+    for event in events:
+        if event.event_type not in (
+            "persona_state",
+            "relationship_evaluation",
+            "response_decision",
+            "engagement_decision",
+        ):
+            continue
+        payload = load_event_payload(event)
+        if event.event_type == "persona_state":
+            snapshot = relationship_snapshot(payload.get("relationship"))
+            if compact and snapshot is not None:
+                snapshot = {key: snapshot[key] for key in ("version", "axes", "emotions")}
+                emotions = snapshot.get("emotions")
+                if isinstance(emotions, list):
+                    snapshot["emotions"] = [
+                        {key: emotion[key] for key in ("name", "intensity")}
+                        for emotion in emotions
+                        if isinstance(emotion, dict)
+                    ]
+            views["relationship"] = snapshot
+        elif event.event_type == "relationship_evaluation":
+            evaluation = event_relationship_evaluation(event, payload)
+            views["relationship_evaluation"] = (
+                {key: evaluation[key] for key in ("event_ref", "status", "evaluation_ref", "changes")}
+                | {"evidence_count": len(_turn_ids(payload.get("evidence_turn_ids")))}
+                if compact and evaluation
+                else evaluation
+            )
+        elif event.event_type == "response_decision":
+            decision = event_response_decision(event, payload)
+            views["response_decision"] = (
+                {key: decision[key] for key in ("outcome", "actual_outcome", "actual_delivery")}
+                if compact and decision
+                else decision
+            )
+        else:
+            engagement = event_engagement(event, payload)
+            views["engagement"] = {"level_label": engagement["level_label"]} if compact and engagement else engagement
+    return views
 
 
 def event_images(
@@ -472,6 +636,11 @@ def serialize_event_view(event: AgentEvent, payload: Mapping[str, JSONType]) -> 
         "evidence": event_evidence(payload),
         "persona": event_persona(event, payload),
         "engagement": event_engagement(event, payload),
+        "relationship": relationship_snapshot(payload.get("relationship"))
+        if event.event_type == "persona_state"
+        else None,
+        "relationship_evaluation": event_relationship_evaluation(event, payload),
+        "response_decision": event_response_decision(event, payload),
         "images": event_images(event, payload),
         "payload_chars": len(event.payload_json or ""),
     }

@@ -33,7 +33,6 @@ from plugins.llm_chat import (
     session_handoff,
     session_manager,
     agent_turn_setup,
-    engagement_state,
     agent_attachments,
     session_inspection,
 )
@@ -57,6 +56,7 @@ from plugins.llm_chat.core.tool_trace import ToolTraceRecorder
 from plugins.llm_chat.session_manager import ScopeIdentity, BaselineFingerprint
 from plugins.llm_chat.agent_event_view import serialize_event_view
 from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
+from plugins.llm_chat.relationships.state import snapshot_relationship
 from plugins.llm_chat.core.tool_trace_policy import DeliverySnapshot
 from plugins.llm_chat.persona.memory_context import MemoryContext
 
@@ -72,7 +72,6 @@ async def agent_store(monkeypatch: pytest.MonkeyPatch):
         agent_migration,
         agent_query,
         session_manager,
-        engagement_state,
         personality,
         session_inspection,
     ):
@@ -638,8 +637,8 @@ async def test_running_turn_exposes_recorded_context_without_replaying_operator_
 ) -> None:
     appended: list[tuple[object, ...]] = []
 
-    async def relation(*_args: object) -> UserRelation:
-        return UserRelation(
+    async def relation(*_args: object) -> tuple[UserRelation, dict[str, object]]:
+        row = UserRelation(
             user_id="alice",
             channel_id="channel",
             affection=30.0,
@@ -648,8 +647,8 @@ async def test_running_turn_exposes_recorded_context_without_replaying_operator_
             resentment=0.0,
             familiarity=0.0,
             impression="",
-            eval_counter=0,
         )
+        return row, cast(dict[str, object], snapshot_relationship(row, None))
 
     async def mood(*_args: object) -> float:
         return 0.25
@@ -679,9 +678,6 @@ async def test_running_turn_exposes_recorded_context_without_replaying_operator_
             },
         )
 
-    async def history(*_args: object) -> list[Conversation]:
-        return []
-
     async def append(*args: object) -> int:
         appended.append(args)
         return 7
@@ -689,10 +685,9 @@ async def test_running_turn_exposes_recorded_context_without_replaying_operator_
     async def delete(_message_id: int | None) -> None:
         return None
 
-    monkeypatch.setattr(agent_turn_setup, "get_relation", relation)
+    monkeypatch.setattr(agent_turn_setup, "load_relationship_snapshot", relation)
     monkeypatch.setattr(agent_turn_setup, "get_mood", mood)
     monkeypatch.setattr(agent_turn_setup, "load_memory_context", memory)
-    monkeypatch.setattr(agent_turn_setup, "load_history", history)
     monkeypatch.setattr(agent_turn_setup, "append_message", append)
     monkeypatch.setattr(agent_turn_setup, "delete_message", delete)
 

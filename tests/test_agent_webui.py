@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
 from arclet.entari.config import EntariConfig
 
 if not hasattr(EntariConfig, "instance"):
@@ -18,9 +18,17 @@ if not hasattr(EntariConfig, "instance"):
 from entari_plugin_database import Base
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from plugins.llm_chat import agent_admin, personality, agent_events, session_manager, session_inspection
+from plugins.llm_chat import (
+    identity,
+    agent_admin,
+    personality,
+    agent_events,
+    session_manager,
+    agent_event_view,
+    session_inspection,
+)
 from plugins.llm_chat.config import LLMChatConfig
-from plugins.llm_chat.models import AgentTurn, AgentEvent
+from plugins.llm_chat.models import AgentTurn, AgentEvent, RelationshipEvidence
 from plugins.llm_chat.agent_admin import AgentAdminService
 from plugins.llm_chat.agent_webui_api import create_agent_sessions_router
 from plugins.llm_chat.session_manager import ScopeIdentity, BaselineFingerprint
@@ -601,3 +609,439 @@ def test_turn_timing_distinguishes_unknown_legacy_running_and_no_delivery() -> N
     assert unknown["duration_ms"] is None
     assert unknown["duration_source"] == "not_recorded"
     assert unknown["received_at"] is unknown["last_delivery_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_relationship_inspection_preserves_snapshots_batch_states_and_authenticated_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    for module in (agent_admin, agent_events, session_manager, session_inspection, personality):
+        monkeypatch.setattr(module, "get_session", session_factory)
+    scope = await session_manager.get_or_create_scope(ScopeIdentity("test", "bot", "guild", "affect", "Affect"))
+    baseline = BaselineFingerprint("test", "persona", "system", "tools", "policy")
+    previous_session = await session_manager.create_session(scope.id, baseline, start_reason="initial")
+    first = await session_manager.start_turn(
+        previous_session,
+        trigger_message_id="first",
+        user_id="alice",
+        user_name="Alice",
+        conversation_user_id=None,
+        fresh_context=False,
+    )
+    await session_manager.finish_turn(first.id, status="completed", final_text="Confirmed first reply")
+    current_session = await session_manager.create_session(scope.id, baseline, start_reason="webui_new")
+    current = await session_manager.start_turn(
+        current_session,
+        trigger_message_id="second",
+        user_id="alice",
+        user_name="Alice",
+        conversation_user_id=None,
+        fresh_context=False,
+    )
+    await session_manager.finish_turn(current.id, status="silent", final_text="")
+    unrelated = await session_manager.start_turn(
+        current_session,
+        trigger_message_id="other",
+        user_id="bob",
+        user_name="Bob",
+        conversation_user_id=None,
+        fresh_context=False,
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    captured = {
+        "version": 3,
+        "axes": {"affection": 41, "trust": 50, "dependence": 22, "resentment": 15, "familiarity": 60},
+        "description": "Private relationship description",
+        "impression": "Earlier impression",
+        "emotions": [
+            {
+                "name": "hurt",
+                "intensity": 0.7,
+                "cause": "<script>literal emotional cause</script>",
+                "evidence_turn_ids": [first.id],
+                "updated_at": 100.0,
+            }
+        ],
+        "updated_at": now,
+        "processed_turn_id": 0,
+    }
+    before = {**captured, "version": 4, "axes": {**captured["axes"], "resentment": 20}}
+    after = {
+        **before,
+        "version": 5,
+        "axes": {**before["axes"], "resentment": 8},
+        "emotions": [],
+        "description": "Repaired after considering both turns",
+        "processed_turn_id": current.id,
+    }
+    evaluation = {
+        "evaluation_ref": "shared-batch",
+        "evidence_turn_ids": [first.id, current.id],
+        "before": None,
+        "after": None,
+        "model": "evaluator-alias",
+        "error": None,
+        "queued_at": now,
+        "started_at": None,
+        "finished_at": None,
+        "changes": {},
+    }
+    for turn in (first, current):
+        recorder = AgentTurnRecorder()
+        recorder.append(
+            "persona_state",
+            payload={"relationship": captured, "memory": {"private": "x" * 100000}},
+            model_visible=False,
+        )
+        recorder.append("relationship_evaluation", payload=evaluation, status="pending", model_visible=False)
+        if turn.id == current.id:
+            recorder.append(
+                "response_decision",
+                payload={
+                    "outcome": "silent",
+                    "source": "model",
+                    "reason": "Prefer no reply to this turn",
+                    "actual_delivery": {"text_messages": 0, "media_messages": 0, "confirmed_deliveries": 0},
+                },
+                model_visible=False,
+            )
+        await agent_events.persist_agent_events(turn.id, recorder.events)
+    service = AgentAdminService(LLMChatConfig(), [])
+    evaluation_event_ids = [
+        event.id
+        for turn in (first, current)
+        for event in await agent_events.load_turn_events(turn.id)
+        if event.event_type == "relationship_evaluation"
+    ]
+    async with session_factory() as db:
+        for turn, event_id in zip((first, current), evaluation_event_ids, strict=True):
+            db.add(
+                RelationshipEvidence(
+                    turn_id=turn.id,
+                    user_id=turn.user_id,
+                    channel_id=scope.channel_id,
+                    persona_prompt="Test persona",
+                    event_id=event_id,
+                    evaluation_ref="shared-batch",
+                    payload_json=json.dumps(
+                        {
+                            "turn_id": turn.id,
+                            "user": f"Private input for {turn.trigger_message_id}",
+                            "assistant": "Confirmed first reply" if turn.id == first.id else "",
+                            "outcome": "completed" if turn.id == first.id else "silent",
+                            "delivered_media": 0,
+                        }
+                    ),
+                )
+            )
+        await db.commit()
+
+    def authenticate(request: Request) -> None:
+        if request.headers.get("authorization") != "Bearer test-admin":
+            raise HTTPException(status_code=401)
+
+    app = FastAPI()
+    app.include_router(
+        create_agent_sessions_router(
+            service,
+            asset_dir=Path(__file__).resolve().parents[1] / "plugins" / "llm_chat" / "webui_sessions",
+            auth_dependency=authenticate,
+        )
+    )
+    path = f"/api/llm-chat/sessions/turns/{current.turn_ref}/inspection"
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            assert (await client.get(path)).status_code == 401
+            client.headers["authorization"] = "Bearer test-admin"
+            pending = (await client.get(path)).json()["item"]
+            assert pending["relationship"]["axes"]["resentment"] == 15
+            assert pending["relationship"]["emotions"][0]["cause"] == captured["emotions"][0]["cause"]
+            assert pending["relationship_evaluation"]["status"] == "pending"
+            assert pending["relationship_evaluation"]["before"] is None
+            assert pending["relationship_evaluation"]["after"] is None
+            assert pending["response_decision"]["actual_outcome"] == "silent"
+            links = {item["turn_id"]: item for item in pending["evidence_turns"]}
+            assert links[first.id]["session_ref"] == previous_session.session_ref
+            assert links[first.id]["turn_ref"] == first.turn_ref
+            assert links[current.id]["turn_ref"] == current.turn_ref
+            assert unrelated.id not in links
+            linked_path = f"/api/llm-chat/sessions/turns/{links[first.id]['turn_ref']}/inspection"
+            assert (await client.get(linked_path)).status_code == 200
+            client.headers.pop("authorization")
+            assert (await client.get(linked_path)).status_code == 401
+            client.headers["authorization"] = "Bearer test-admin"
+            event_ref = pending["relationship_evaluation"]["event_ref"]
+            for status in ("running", "failed", "succeeded"):
+                payload = {
+                    **evaluation,
+                    "before": before,
+                    "started_at": now,
+                    "after": after,
+                    "changes": {"resentment": {"before": 20, "after": 8, "delta": -12}},
+                    "error": "Provider timeout; evidence retained" if status == "failed" else None,
+                    "finished_at": now if status != "running" else None,
+                }
+                async with session_factory() as db:
+                    for event_id in evaluation_event_ids:
+                        stored = await db.get(AgentEvent, event_id)
+                        assert stored is not None
+                        stored.status = status
+                        stored.payload_json = json.dumps(payload)
+                    await db.commit()
+                inspection = (await client.get(path)).json()["item"]
+                projected = inspection["relationship_evaluation"]
+                assert projected["event_ref"] == event_ref
+                assert projected["status"] == status
+                assert projected["evidence_turn_ids"] == [first.id, current.id]
+                assert inspection["relationship"]["axes"]["resentment"] == 15
+                assert projected["before"]["axes"]["resentment"] == 20
+                if status == "succeeded":
+                    assert projected["after"]["axes"]["resentment"] == 8
+                    assert projected["after"]["emotions"] == []
+                    assert projected["changes"]["resentment"]["delta"] == -12
+                else:
+                    assert projected["after"] is None
+                    assert projected["changes"] == {}
+                if status == "failed":
+                    assert projected["error"] == payload["error"]
+                other = (await client.get(linked_path)).json()["item"]["relationship_evaluation"]
+                assert other["evaluation_ref"] == projected["evaluation_ref"]
+                assert other["evidence_turn_ids"] == projected["evidence_turn_ids"]
+                listing = (
+                    await client.get(f"/api/llm-chat/sessions/sessions/{current_session.session_ref}/turns")
+                ).json()["items"]
+                summary = next(item for item in listing if item["turn_ref"] == current.turn_ref)
+                assert summary["relationship_evaluation"]["status"] == status
+                assert summary["relationship_evaluation"]["evidence_count"] == 2
+                assert summary["response_decision"]["actual_outcome"] == "silent"
+                serialized_list = json.dumps(listing)
+                assert "Private relationship description" not in serialized_list
+                assert "literal emotional cause" not in serialized_list
+                assert "Prefer no reply to this turn" not in serialized_list
+                assert "x" * 1000 not in serialized_list
+            events = (await client.get(f"/api/llm-chat/sessions/turns/{current.turn_ref}/events")).json()["items"]
+            event = next(item for item in events if item["event_type"] == "relationship_evaluation")
+            assert event["relationship_evaluation"]["after"]["version"] == 5
+            persona = next(item for item in events if item["event_type"] == "persona_state")
+            assert persona["relationship"]["version"] == persona["persona"]["relationship"]["version"] == 3
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_relationship_evidence_navigation_survives_identity_migration_without_cross_owner_links(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    for module in (agent_admin, agent_events, session_manager, session_inspection, personality, identity):
+        monkeypatch.setattr(module, "get_session", session_factory)
+    scope = await session_manager.get_or_create_scope(ScopeIdentity("test", "bot", "guild", "affect", "Affect"))
+    foreign_scope = await session_manager.get_or_create_scope(
+        ScopeIdentity("test", "other-bot", "guild", "affect", "Other account"),
+    )
+    baseline = BaselineFingerprint("test", "persona", "system", "tools", "policy")
+    previous_session = await session_manager.create_session(scope.id, baseline, start_reason="initial")
+    current_session = await session_manager.create_session(scope.id, baseline, start_reason="webui_new")
+    foreign_session = await session_manager.create_session(foreign_scope.id, baseline, start_reason="initial")
+    turns = []
+    for context_session, message_id, user_id in (
+        (previous_session, "legacy", "alice-old"),
+        (current_session, "current", "alice-current"),
+        (current_session, "another-member", "bob"),
+        (foreign_session, "another-scope", "alice-current"),
+        (current_session, "without-evidence", "alice-current"),
+    ):
+        turn = await session_manager.start_turn(
+            context_session,
+            trigger_message_id=message_id,
+            user_id=user_id,
+            user_name=user_id,
+            conversation_user_id=None,
+            fresh_context=False,
+        )
+        await session_manager.finish_turn(turn.id, status="silent", final_text="")
+        turns.append(turn)
+    legacy, current, other_member, foreign, unowned = turns
+    now = datetime.now(timezone.utc).isoformat()
+    captured = {
+        "version": 7,
+        "axes": {"affection": 40, "trust": 50, "dependence": 20, "resentment": 10, "familiarity": 60},
+        "description": "Private state captured before identity migration",
+        "impression": "Historical impression",
+        "emotions": [
+            {
+                "name": "uncertain",
+                "intensity": 0.5,
+                "cause": "Private historical cause",
+                "evidence_turn_ids": [legacy.id, foreign.id],
+                "updated_at": 100.0,
+            }
+        ],
+        "updated_at": now,
+        "processed_turn_id": 0,
+    }
+    evaluation = {
+        "evaluation_ref": "identity-batch",
+        "evidence_turn_ids": [legacy.id, current.id, other_member.id, unowned.id],
+        "before": None,
+        "after": None,
+        "model": "evaluator-alias",
+        "error": None,
+        "queued_at": now,
+        "started_at": None,
+        "finished_at": None,
+        "changes": {},
+    }
+    # Untrusted references in either view cannot substitute for durable, scoped ownership.
+    for turn in turns:
+        recorder = AgentTurnRecorder()
+        recorder.record_user_input(
+            f"Private attributable input for {turn.trigger_message_id}",
+            user_name=turn.user_name,
+            fresh_context=False,
+        )
+        if turn.id in (legacy.id, current.id):
+            recorder.append("persona_state", payload={"relationship": captured}, model_visible=False)
+        recorder.append(
+            "relationship_evaluation",
+            status="pending",
+            model_visible=False,
+            payload=evaluation
+            if turn.id in (legacy.id, current.id)
+            else {
+                **evaluation,
+                "evaluation_ref": f"separate-{turn.id}",
+                "evidence_turn_ids": [turn.id],
+            },
+        )
+        await agent_events.persist_agent_events(turn.id, recorder.events)
+        if turn.id == unowned.id:
+            continue
+        event = next(
+            item
+            for item in await agent_events.load_turn_events(turn.id)
+            if item.event_type == "relationship_evaluation"
+        )
+        async with session_factory() as db:
+            db.add(
+                RelationshipEvidence(
+                    turn_id=turn.id,
+                    user_id=turn.user_id,
+                    channel_id=scope.channel_id,
+                    persona_prompt="Test persona",
+                    event_id=event.id,
+                    evaluation_ref="identity-batch" if turn.id in (legacy.id, current.id) else f"separate-{turn.id}",
+                    payload_json=json.dumps(
+                        {
+                            "turn_id": turn.id,
+                            "user": f"Private attributable input for {turn.trigger_message_id}",
+                            "assistant": "",
+                            "outcome": "silent",
+                            "delivered_media": 0,
+                        }
+                    ),
+                )
+            )
+            await db.commit()
+
+    def authenticate(request: Request) -> None:
+        if request.headers.get("authorization") != "Bearer test-admin":
+            raise HTTPException(status_code=401)
+
+    app = FastAPI()
+    app.include_router(
+        create_agent_sessions_router(
+            AgentAdminService(LLMChatConfig(), []),
+            asset_dir=Path(__file__).resolve().parents[1] / "plugins" / "llm_chat" / "webui_sessions",
+            auth_dependency=authenticate,
+        )
+    )
+    legacy_path = f"/api/llm-chat/sessions/turns/{legacy.turn_ref}/inspection"
+    current_path = f"/api/llm-chat/sessions/turns/{current.turn_ref}/inspection"
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            assert (await client.get(legacy_path)).status_code == 401
+            client.headers["authorization"] = "Bearer test-admin"
+            previous = (await client.get(legacy_path)).json()["item"]
+            assert {item["turn_id"] for item in previous["evidence_turns"]} == {legacy.id}
+            assert previous["relationship"]["description"] == captured["description"]
+            assert previous["relationship"]["emotions"][0]["cause"] == captured["emotions"][0]["cause"]
+            current_before = (await client.get(current_path)).json()["item"]
+            assert {item["turn_id"] for item in current_before["evidence_turns"]} == {current.id}
+
+            await identity.migrate_legacy_user_state(scope.channel_id, ["alice-old"], "alice-current")
+
+            async with session_factory() as db:
+                historical_turn = await db.get(AgentTurn, legacy.id)
+                historical_evidence = await db.get(RelationshipEvidence, legacy.id)
+                unrelated_evidence = await db.get(RelationshipEvidence, other_member.id)
+                assert historical_turn is not None
+                assert historical_turn.user_id == "alice-old"
+                assert historical_evidence is not None
+                assert historical_evidence.user_id == "alice-current"
+                assert unrelated_evidence is not None
+                assert unrelated_evidence.user_id == "bob"
+            expected_links = {
+                legacy.id: (legacy.turn_ref, previous_session.session_ref),
+                current.id: (current.turn_ref, current_session.session_ref),
+            }
+            for path, original in ((legacy_path, previous), (current_path, current_before)):
+                response = await client.get(path)
+                assert response.status_code == 200
+                inspection = response.json()["item"]
+                assert inspection["turn"]["user_id"] == original["turn"]["user_id"]
+                assert inspection["relationship"] == original["relationship"]
+                assert inspection["relationship_evaluation"] == original["relationship_evaluation"]
+                assert {
+                    item["turn_id"]: (item["turn_ref"], item["session_ref"]) for item in inspection["evidence_turns"]
+                } == expected_links
+                for link in inspection["evidence_turns"]:
+                    linked_path = f"/api/llm-chat/sessions/turns/{link['turn_ref']}/inspection"
+                    linked = await client.get(linked_path)
+                    assert linked.status_code == 200
+                    assert linked.json()["item"]["turn"]["turn_ref"] == link["turn_ref"]
+                    client.headers.pop("authorization")
+                    assert (await client.get(linked_path)).status_code == 401
+                    client.headers["authorization"] = "Bearer test-admin"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("outcome", "delivery", "expected"),
+    [
+        ("delivered", {"text_messages": 0, "media_messages": 1, "confirmed_deliveries": 1}, "media_only"),
+        ("delivered", {"text_messages": 1, "media_messages": 0, "confirmed_deliveries": 1}, "text"),
+        ("delivered", {"text_messages": 1, "media_messages": 1, "confirmed_deliveries": 2}, "mixed"),
+        ("silent", {"text_messages": 0, "media_messages": 0, "confirmed_deliveries": 0}, "silent"),
+        ("declined", {"text_messages": 1, "media_messages": 0, "confirmed_deliveries": 1}, "refusal"),
+        ("declined", {"text_messages": 0, "media_messages": 0, "confirmed_deliveries": 0}, "unknown"),
+        ("silent", {}, "unknown"),
+    ],
+)
+def test_response_projection_requires_actual_delivery_for_visible_outcomes(outcome, delivery, expected) -> None:
+    event = AgentEvent(event_ref="decision", event_type="response_decision", status="recorded")
+    projected = agent_event_view.event_response_decision(event, {"outcome": outcome, "actual_delivery": delivery})
+    assert projected is not None
+    assert projected["actual_outcome"] == expected
+
+
+def test_missing_relationship_fields_and_legacy_engagement_are_not_new_state() -> None:
+    legacy = AgentEvent(event_type="engagement_decision", payload_json=json.dumps({"level": "brief", "warmth": "cold"}))
+    views = agent_event_view.project_relationship_views([legacy])
+    assert views["relationship"] is views["relationship_evaluation"] is views["response_decision"] is None
+    assert views["engagement"]["level"] == "brief"
+    captured = agent_event_view.relationship_snapshot(
+        {"axes": {"affection": 0, "trust": True, "resentment": float("nan")}}
+    )
+    assert captured is not None
+    assert captured["axes"]["affection"] == 0
+    assert captured["axes"]["trust"] is captured["axes"]["resentment"] is captured["axes"]["dependence"] is None
+    assert captured["emotions"] is None

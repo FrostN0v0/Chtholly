@@ -9,10 +9,13 @@ from collections.abc import Mapping, Callable, Sequence
 
 from arclet.entari import Session
 
+from utils.turn_resolution_core import TurnResolution
+from utils.relationship_core.policy import read_emotions, build_relationship_context
+
 from .config import LLMChatConfig
-from .models import Conversation, UserRelation
+from .models import UserRelation
 from .identity import ChatIdentity
-from .core.types import ChatMessage
+from .core.types import JSONType, ChatMessage
 from .perception import MentionedParticipant
 from .web.policy import WebAccessLimits, normalize_web_access_limits
 from .personality import persona_scope_lock, resolve_scope_persona, remember_session_persona
@@ -22,7 +25,7 @@ from .core.compose import energy_at, compose_persona_prompt
 from .core.forward import ForwardedMessage
 from .agent_context import AgentAccessContext
 from .core.delivery import DeliveryState, normalize_delivery_limits
-from .persona.store import get_mood, get_relation, load_history, append_message, delete_message
+from .persona.store import get_mood, append_message, delete_message
 from .channel_images import ChannelImageReferences
 from .turn_lifecycle import ActiveChatTurn
 from .context_builder import (
@@ -33,16 +36,6 @@ from .context_builder import (
     render_session_baseline,
     requests_archived_context,
     build_baseline_fingerprint,
-)
-from .core.engagement import (
-    EngagementBudget,
-    EngagementSignals,
-    EngagementDecision,
-    decide_engagement,
-    engagement_budget,
-    apply_engagement_budget,
-    engagement_event_payload,
-    engagement_prompt_context,
 )
 from .image_edit_refs import ImageEditReferences
 from .session_handoff import generate_session_handoff
@@ -57,7 +50,6 @@ from .session_manager import (
 )
 from .core.agent_trace import AgentTurnRecorder
 from .core.personality import ResolvedPersona
-from .engagement_state import collect_engagement_signals
 from .core.media_delivery import (
     latest_user_requests_media,
     latest_user_requests_image_edit,
@@ -65,6 +57,7 @@ from .core.media_delivery import (
     latest_user_requests_web_image_reference,
 )
 from .core.self_reference import append_self_reference_image
+from .relationships.state import load_relationship_snapshot
 from .core.artifact_access import is_artifact_request
 from .core.context_snapshot import build_context_snapshot
 from .persona.memory_context import MemoryContext, load_memory_context
@@ -78,7 +71,6 @@ class PreparedAgentTurn:
     persona: ResolvedPersona
     mood: float
     memory_context: MemoryContext
-    eval_history: list[Conversation]
     chat_messages: list[ChatMessage]
     system: str
     media_requested: bool
@@ -89,9 +81,8 @@ class PreparedAgentTurn:
     lifecycle: ActiveChatTurn
     agent_events: AgentTurnRecorder
     agent_access: AgentAccessContext
-    engagement: EngagementDecision
-    engagement_budget: EngagementBudget
-    engagement_signals: EngagementSignals
+    relationship_snapshot: dict[str, JSONType]
+    resolution: TurnResolution
 
 
 async def prepare_agent_turn(
@@ -110,21 +101,21 @@ async def prepare_agent_turn(
     warn: WarningSink,
     tool_schemas: Sequence[Mapping[str, object]],
     input_attachments: Sequence[Mapping[str, object]] = (),
-    requires_media_reply: bool = False,
     is_operator: bool = False,
 ) -> PreparedAgentTurn:
     channel_id = session.channel.id
     user_id = identity.user_id
     user_name = identity.display_name
-    relation = await get_relation(user_id, channel_id)
+    relation, relationship_snapshot = await load_relationship_snapshot(user_id, channel_id)
+    relationship_context = build_relationship_context(
+        axes=cast(Mapping[str, float], relationship_snapshot["axes"]),
+        description=cast(str, relationship_snapshot["description"]),
+        impression=relation.impression,
+        emotions=read_emotions(relationship_snapshot["emotions"]),
+        now=datetime.fromisoformat(cast(str, relationship_snapshot["observed_at"]).replace("Z", "+00:00")).timestamp(),
+    )
     mood = await get_mood(channel_id)
     memory_context = await load_memory_context(config, user_id, channel_id, content)
-    pending_eval = relation.eval_counter + 1 >= config.eval_every_n
-    eval_history = (
-        await load_history(channel_id, config.eval_context_window)
-        if pending_eval and config.eval_context_window > 0
-        else []
-    )
 
     current_messages = cast(
         list[ChatMessage],
@@ -159,21 +150,7 @@ async def prepare_agent_turn(
     media_requested = (
         latest_user_requests_media(current_messages) or artifact_requested or is_artifact_request(raw_user_text, "send")
     )
-    signals = await collect_engagement_signals(
-        user_id=user_id,
-        channel_id=channel_id,
-        relation=relation,
-        user_mood=mood,
-        energy=energy,
-        text=model_text,
-        is_command=False,
-        is_private=not str(getattr(getattr(session, "guild", None), "id", "") or ""),
-        is_operator=is_operator,
-        requires_media_reply=requires_media_reply,
-    )
-    engagement = decide_engagement(signals)
-    budget = engagement_budget(engagement.level, delivery_limits, media_requested=media_requested)
-    delivery_limits = apply_engagement_budget(delivery_limits, budget)
+    resolution = TurnResolution()
     delivery_state = DeliveryState(limits=delivery_limits)
     scope = await get_or_create_scope(await resolve_scope_identity(session))
     async with persona_scope_lock(scope.id):
@@ -213,12 +190,7 @@ async def prepare_agent_turn(
                 energy,
                 persona_name=persona.name,
                 appearance=persona.appearance,
-                affection=relation.affection,
-                trust=relation.trust,
-                dependence=relation.dependence,
-                resentment=relation.resentment,
-                familiarity=relation.familiarity,
-                impression=relation.impression,
+                relationship=relationship_context,
                 profile=memory_context.chat_profile,
                 relevant_memories=memory_context.relevant_memories,
                 agent_session=render_session_baseline(context_session, anchors),
@@ -229,7 +201,6 @@ async def prepare_agent_turn(
                 web_page_limit=web_limits.read_limit,
                 web_total_limit=web_limits.total_limit,
                 delivery_limits=delivery_limits,
-                engagement=engagement_prompt_context(engagement, budget),
             )
 
         system = compose_system()
@@ -297,12 +268,11 @@ async def prepare_agent_turn(
                 "resentment": round(relation.resentment, 3),
                 "familiarity": round(relation.familiarity, 3),
                 "impression": relation.impression,
-                "eval_counter": relation.eval_counter,
             },
+            "relationship": relationship_snapshot,
             "state": {
                 "mood": round(mood, 3),
                 "energy": round(energy, 3),
-                "pending_eval": pending_eval,
             },
             "memory": memory_context.retrieval,
             "prompt_profile": memory_context.chat_profile,
@@ -314,12 +284,6 @@ async def prepare_agent_turn(
                 "full_session_tokens": selection.full_session_tokens,
             },
         }
-    )
-    agent_events.append(
-        "engagement_decision",
-        payload=engagement_event_payload(engagement, budget, signals),
-        status=engagement.level,
-        model_visible=False,
     )
     agent_events.append(
         "context_selection",
@@ -379,7 +343,6 @@ async def prepare_agent_turn(
         persona=persona,
         mood=mood,
         memory_context=memory_context,
-        eval_history=eval_history,
         chat_messages=selection.messages,
         system=system,
         media_requested=media_requested,
@@ -396,9 +359,8 @@ async def prepare_agent_turn(
         channel_image_references=ChannelImageReferences(),
         lifecycle=lifecycle,
         agent_events=agent_events,
-        engagement=engagement,
-        engagement_budget=budget,
-        engagement_signals=signals,
+        relationship_snapshot=relationship_snapshot,
+        resolution=resolution,
         agent_access=AgentAccessContext(
             scope_id=scope.id,
             session_id=context_session.id,

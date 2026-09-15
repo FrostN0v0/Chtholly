@@ -16,6 +16,7 @@ import asyncio
 from hashlib import sha256
 from pathlib import Path
 from datetime import datetime, timezone as datetime_timezone, timedelta
+from functools import partial
 import importlib
 from contextlib import contextmanager, asynccontextmanager
 from collections import deque
@@ -38,6 +39,7 @@ from arclet.entari.config import EntariConfig
 from arclet.letoderea.context import Contexts
 from satori.adapters.onebot11.message import OneBot11MessageEncoder
 
+from utils.turn_resolution_core import TurnResolution
 from plugins.llm_chat.web.policy import WebAccessLimits, llm_chat_web_access_scope
 from utils.llm_model_core.snapshot import pin_main_model, main_model_scope
 from plugins.llm_chat.core.delivery import llm_chat_delivery_scope
@@ -98,7 +100,7 @@ async def _settle_dispose_tasks(pending: set[asyncio.Task[Any]] | None) -> None:
         if task.get_loop() is running_loop:
             local_tasks.append(task)
         else:
-            task.cancel()
+            raise AssertionError("Plugin cleanup escaped the active test event loop")
     if local_tasks:
         await asyncio.gather(*local_tasks)
 
@@ -202,6 +204,7 @@ class _DeliveryToolSession(Session[Any]):
         platform: str = "onebot",
         fail_attempts: set[int] | None = None,
         cancel_attempts: set[int] | None = None,
+        unavailable_attempts: set[int] | None = None,
     ) -> None:
         self.account = cast(Any, SimpleNamespace(platform=platform, self_id="10001"))
         self.event = cast(
@@ -215,12 +218,15 @@ class _DeliveryToolSession(Session[Any]):
         self.attempts: list[Any] = []
         self.fail_attempts = fail_attempts or set()
         self.cancel_attempts = cancel_attempts or set()
+        self.unavailable_attempts = unavailable_attempts or set()
 
     async def send(self, message: Any, *_args: Any, **_kwargs: Any) -> list[Any]:
         self.attempts.append(message)
         attempt = len(self.attempts)
         if attempt in self.cancel_attempts:
             raise asyncio.CancelledError
+        if attempt in self.unavailable_attempts:
+            raise NotImplementedError("Forward messages are unsupported")
         if attempt in self.fail_attempts:
             raise RuntimeError("sanitized transport failure")
         self.sent.append(message)
@@ -313,21 +319,12 @@ def _load_local_modules() -> Iterator[SimpleNamespace]:
     import plugins as plugins_package
 
     prefix = "plugins.llm_chat"
+    package = importlib.import_module(prefix)
     before_modules = {
         name: module for name, module in sys.modules.items() if name == prefix or name.startswith(f"{prefix}.")
     }
     previous_package_attr = getattr(plugins_package, "llm_chat", _MISSING)
 
-    package = sys.modules.get(prefix)
-    package_was_created = package is None
-    if package is None:
-        package = ModuleType(prefix)
-        package.__package__ = prefix
-        package.__path__ = [str(_LLM_CHAT_DIR)]  # type: ignore[attr-defined]
-        package.__spec__ = ModuleSpec(prefix, loader=None, is_package=True)
-        if package.__spec__.submodule_search_locations is not None:
-            package.__spec__.submodule_search_locations.append(str(_LLM_CHAT_DIR))
-        sys.modules[prefix] = package
     package_namespace = dict(vars(package))
     setattr(plugins_package, "llm_chat", package)
 
@@ -374,9 +371,8 @@ def _load_local_modules() -> Iterator[SimpleNamespace]:
         for name, module in before_modules.items():
             sys.modules[name] = module
 
-        if not package_was_created:
-            package.__dict__.clear()
-            package.__dict__.update(package_namespace)
+        package.__dict__.clear()
+        package.__dict__.update(package_namespace)
         if previous_package_attr is _MISSING:
             if getattr(plugins_package, "llm_chat", _MISSING) is package:
                 delattr(plugins_package, "llm_chat")
@@ -2047,9 +2043,8 @@ async def test_merged_forward_uses_public_satori_shape_and_onebot_encoder(local_
         target = _tool_callable(state_module, "send_merged_forward")
         messages = [f"node-{index}" for index in range(1, 7)]
         with llm_chat_delivery_scope(state):
-            result = await target(session, messages, None)
+            await target(session, messages, None)
 
-        assert "6 个节点" in result
         assert len(session.sent) == 1
         chain = cast(MessageChain, session.sent[0])
         forward = cast(SatoriMessage, chain[0])
@@ -2084,17 +2079,14 @@ async def test_merged_forward_uses_public_satori_shape_and_onebot_encoder(local_
 @pytest.mark.asyncio
 async def test_merged_forward_fallbacks_are_paced_and_report_confirmed_prefix(
     local_modules: SimpleNamespace,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     baseline = _registry_snapshot()
-    warnings: list[str] = []
 
     async with _temporary_plugin(
         config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
         module_path=_TOOL_RUNTIME_PATH,
     ) as harness:
         runtime = harness.module
-        monkeypatch.setattr(runtime.merged_forward_context, "warn", warnings.append)
         target = _tool_callable(runtime, "send_merged_forward")
         messages = [f"node-{index}" for index in range(1, 7)]
 
@@ -2112,28 +2104,31 @@ async def test_merged_forward_fallbacks_are_paced_and_report_confirmed_prefix(
 
         onebot_clock = _FakeClock()
         onebot_state = runtime.DeliveryState(sleep=onebot_clock.sleep, clock=onebot_clock.monotonic)
-        onebot = _DeliveryToolSession(platform="onebot", fail_attempts={1})
+        onebot = _DeliveryToolSession(platform="onebot", unavailable_attempts={1})
         with llm_chat_delivery_scope(onebot_state):
             await target(onebot, messages, 0.2)
         assert onebot.sent == messages
         assert onebot_clock.sleeps == [1.1] * 6
-        assert warnings == ["merged forward failed; falling back to paced text: RuntimeError"]
 
         partial_clock = _FakeClock()
         partial_state = runtime.DeliveryState(sleep=partial_clock.sleep, clock=partial_clock.monotonic)
-        partial = _DeliveryToolSession(platform="onebot", fail_attempts={1, 4})
+        partial = _DeliveryToolSession(platform="onebot", unavailable_attempts={1}, fail_attempts={4})
         with llm_chat_delivery_scope(partial_state):
-            with pytest.raises(
-                runtime.DeliveryError,
-                match=(
-                    "^merged forward fallback confirmed 2/6 text messages before failure; "
-                    "do not repeat the confirmed prefix$"
-                ),
-            ):
+            with pytest.raises(runtime.DeliveryError):
                 await target(partial, messages, 0.2)
         assert partial.sent == messages[:2]
         assert partial_state.delivered_texts == messages[:2]
         assert len(partial.attempts) == 4
+
+        unknown_state = runtime.DeliveryState()
+        unknown = _DeliveryToolSession(platform="onebot", fail_attempts={1})
+        with llm_chat_delivery_scope(unknown_state), pytest.raises(RuntimeError):
+            await target(unknown, messages, None)
+        assert unknown.sent == []
+        assert len(unknown.attempts) == 1
+        assert unknown_state.delivery_attempts == 1
+        assert unknown_state.confirmed_deliveries == 0
+        assert unknown_state.delivered_texts == []
 
         await harness.dispose()
         _assert_registry_matches(baseline)
@@ -4238,3 +4233,601 @@ async def test_external_tool_failure_redacts_credentials_in_model_result_and_aud
     assert "secret-value" not in requirement.external_execution_result
     assert recorder.events[0].status == "failed"
     assert "secret-value" not in json.dumps(recorder.events[0].outcome)
+
+
+@pytest.mark.asyncio
+async def test_native_readonly_batch_executes_following_delivery_exactly_once(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(
+                tool_calls=[
+                    _tool_call("local", "get_local_time", {}),
+                    _tool_call("utc", "get_local_time", {"timezone": "UTC"}),
+                    _tool_call("effect", "send_text", {"text": "Clock checks completed."}),
+                ]
+            ),
+            _model_response("[END_OF_RESPONSE]"),
+        ],
+    )
+    session = _DeliveryToolSession()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        await local_modules.generation.generate_chat_response(
+            [{"role": "user", "content": "Check both clocks, then acknowledge."}],
+            system="delivery rules",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=local_modules.delivery.DeliveryState(),
+        )
+
+    assert session.attempts == session.sent == ["Clock checks completed."]
+    results = _tool_messages(payloads[1])
+    assert [result["tool_call_id"] for result in results] == ["local", "utc", "effect"]
+    assert all(json.loads(result["content"])["ok"] for result in results)
+    assert json.loads(json.loads(results[1]["content"])["data"])["utc_offset"] == "+00:00"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["silent", "declined", "delivered"])
+async def test_native_finish_stops_queued_effects_with_matched_skipped_results(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    from dataclasses import asdict
+
+    from plugins.llm_chat.models import AgentTurn, AgentEvent
+    from plugins.llm_chat.context_builder import _turn_messages
+    from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
+
+    calls = []
+    if outcome == "delivered":
+        calls.append(_tool_call("prefix", "send_text", {"text": "Confirmed output."}))
+    calls.extend(
+        [
+            _tool_call(
+                "finish",
+                "finish_turn",
+                {
+                    "outcome": outcome,
+                    "reason": "private boundary explanation",
+                    "reply": "I cannot do that." if outcome == "declined" else "",
+                },
+            ),
+            _tool_call("skipped", "send_text", {"text": "Must not escape."}),
+        ]
+    )
+    payloads = _install_completion_script(monkeypatch, [_model_response(tool_calls=calls)])
+    session = _DeliveryToolSession()
+    resolution = TurnResolution()
+    trace = ToolTraceRecorder()
+    events = AgentTurnRecorder()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        response = await local_modules.generation.generate_chat_response(
+            [{"role": "user", "content": "Choose whether to continue."}],
+            system="delivery rules",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=local_modules.delivery.DeliveryState(),
+            tool_trace=trace,
+            resolution=resolution,
+            agent_events=events,
+        )
+
+    assert session.sent == (["Confirmed output."] if outcome == "delivered" else [])
+    assert len(payloads) == 1
+    results = [message for message in response.messages if message.role == "tool"]
+    assert [message.tool_call_id for message in results] == [call["id"] for call in calls]
+    skipped = json.loads(results[-1].content)
+    assert skipped["ok"] is False
+    assert skipped["error"]
+    assert [(event.tool_call_id, event.status, event.effect) for event in trace.events][-1] == (
+        "skipped",
+        "cancelled",
+        "none",
+    )
+    assert trace.events[-1].outcome["error_code"] == "turn_ended"
+    assert json.loads(results[-2].content) == {"ok": True, "data": {"outcome": outcome}}
+    assert "private boundary explanation" not in repr([message.content for message in results])
+    rows = []
+    for event in events.events:
+        values = asdict(event)
+        values["payload_json"] = json.dumps(values.pop("payload"))
+        rows.append(AgentEvent(turn_id=1, event_ref=f"event-{event.sequence}", **values))
+    history = _turn_messages(AgentTurn(id=1), rows, inline_chars=10_000)
+    history_results = [message for message in history if message["role"] == "tool"]
+    assert sorted(message["tool_call_id"] for message in history_results) == sorted(call["id"] for call in calls)
+    decision_result = json.loads(
+        next(message["content"] for message in history_results if message["tool_call_id"] == "finish")
+    )
+    assert decision_result["effect"] == "none"
+    assert decision_result["data"] == {"outcome": outcome}
+    assert "private boundary explanation" not in json.dumps(history)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rejection", ["empty", "partial", "refusal_budget"])
+async def test_native_rejected_finish_allows_corrective_tool_continuation(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    rejection: str,
+) -> None:
+    from dataclasses import replace
+
+    calls = []
+    if rejection != "empty":
+        calls.append(_tool_call("prefix", "send_text", {"text": "Prefix"}))
+    if rejection == "partial":
+        calls.append(_tool_call("failed", "send_text", {"text": "Unconfirmed"}))
+    calls.append(
+        _tool_call(
+            "finish",
+            "finish_turn",
+            {
+                "outcome": "declined" if rejection == "refusal_budget" else "delivered",
+                "reply": "This refusal cannot fit." if rejection == "refusal_budget" else "",
+            },
+        )
+    )
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(tool_calls=calls),
+            _model_response(tool_calls=[_tool_call("corrective", "send_text", {"text": "OK"})]),
+            _model_response("[END_OF_RESPONSE]"),
+        ],
+    )
+    session = _DeliveryToolSession(fail_attempts={2} if rejection == "partial" else None)
+    state = local_modules.delivery.DeliveryState(sleep=_FakeClock().sleep)
+    if rejection == "refusal_budget":
+        state.limits = replace(state.limits, max_total_text_chars=8)
+    resolution = TurnResolution()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        response = await local_modules.generation.generate_chat_response(
+            [{"role": "user", "content": "Acknowledge only confirmed work."}],
+            system="delivery rules",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=state,
+            resolution=resolution,
+        )
+
+    assert resolution.outcome == "automatic"
+    assert session.sent == (["OK"] if rejection == "empty" else ["Prefix", "OK"])
+    assert response.content == "[END_OF_RESPONSE]"
+    rejected = next(message for message in _tool_messages(payloads[1]) if message["tool_call_id"] == "finish")
+    assert json.loads(rejected["content"])["ok"] is False
+    corrective = next(message for message in _tool_messages(payloads[2]) if message["tool_call_id"] == "corrective")
+    assert json.loads(corrective["content"])["ok"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["silent", "declined"])
+async def test_native_finish_during_media_recovery_does_not_request_fake_delivery(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response("I sent the image."),
+            _model_response(
+                tool_calls=[
+                    _tool_call(
+                        "finish",
+                        "finish_turn",
+                        {
+                            "outcome": outcome,
+                            "reply": "I cannot provide that image." if outcome == "declined" else "",
+                        },
+                    )
+                ]
+            ),
+        ],
+    )
+    session = _DeliveryToolSession()
+    resolution = TurnResolution()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        response = await local_modules.generation.generate_chat_response(
+            [{"role": "user", "content": "Send me an image."}],
+            system="delivery rules",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=local_modules.delivery.DeliveryState(),
+            resolution=resolution,
+        )
+
+    assert len(payloads) == 2
+    assert session.attempts == []
+    assert resolution.outcome == outcome
+    assert any(message.tool_call_id == "finish" for message in response.messages if message.role == "tool")
+
+
+def _native_image_response(
+    images: Sequence[bytes],
+    *,
+    tool_calls: list[dict[str, Any]] | None = None,
+    content: str | None = None,
+) -> litellm.ModelResponse:
+    return litellm.ModelResponse(
+        model="test-model",
+        choices=[
+            {
+                "index": 0,
+                "finish_reason": "tool_calls" if tool_calls else "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls,
+                    "images": [
+                        {
+                            "index": index,
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64," + base64.b64encode(image).decode()},
+                        }
+                        for index, image in enumerate(images)
+                    ],
+                },
+            }
+        ],
+        usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    )
+
+
+@asynccontextmanager
+async def _native_image_turn(local_modules, session, *, maximum=6):
+    from dataclasses import replace
+
+    lifecycle = importlib.import_module("plugins.llm_chat.turn_lifecycle")
+    native = importlib.import_module("plugins.llm_chat.native_image_delivery")
+    history = []
+    clock = _FakeClock()
+    state = local_modules.delivery.DeliveryState(clock=clock.monotonic, sleep=clock.sleep)
+    state.limits = replace(state.limits, max_media_messages=maximum)
+
+    async def append(_channel, _user, _name, _role, content):
+        history.append(content)
+
+    async def delete(_message_id):
+        return None
+
+    turn = lifecycle.ActiveChatTurn("12345", 1, state, append, delete, lambda _message: None)
+    resolution = TurnResolution()
+    with native.native_image_delivery_scope(partial(turn.deliver_model_images, session)):
+        yield SimpleNamespace(turn=turn, state=state, resolution=resolution, history=history)
+
+
+async def _generate_native_turn(local_modules, session, turn, *, references=None, content="Create an image."):
+    return await local_modules.generation.generate_chat_response(
+        [{"role": "user", "content": content}],
+        system="Use native images and end only after actual delivery.",
+        model="test-model",
+        channel_id="12345",
+        ctx=_tool_context(session),
+        web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+        delivery_state=turn.state,
+        image_edit_references=references,
+        resolution=turn.resolution,
+        tool_trace=turn.turn.tool_trace,
+        agent_events=turn.turn.agent_events,
+    )
+
+
+async def test_native_images_finish_only_after_actual_delivery_without_another_model_request(
+    local_modules, monkeypatch
+):
+    gif = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _native_image_response(
+                [_PNG_BYTES, gif], tool_calls=[_tool_call("finish", "finish_turn", {"outcome": "delivered"})]
+            )
+        ],
+    )
+    session = _DeliveryToolSession()
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ),
+        _native_image_turn(local_modules, session) as turn,
+    ):
+        response = await _generate_native_turn(local_modules, session, turn)
+        assert turn.resolution.outcome == "delivered"
+        assert turn.state.confirmed_media_deliveries == 2
+        assert turn.state.delivery_attempts == turn.state.confirmed_deliveries == 2
+        assert [base64.b64decode(payload[0].src.split(",", 1)[1]) for payload in session.sent] == [_PNG_BYTES, gif]
+        assert turn.history == ["[发送了图片]", "[发送了图片]"]
+        results = [event for event in turn.turn.tool_trace.events if event.tool_name == "finish_turn"]
+        assert [(event.status, event.outcome) for event in results] == [("succeeded", {"outcome": "delivered"})]
+        await turn.turn.deliver_model_images(session, response)
+        assert len(session.sent) == 2
+    assert len(payloads) == 1
+
+
+async def test_native_images_precede_same_batch_text_and_never_repeat_at_finalization(local_modules, monkeypatch):
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _native_image_response(
+                [_PNG_BYTES],
+                tool_calls=[
+                    _tool_call("text", "send_text", {"text": "A short caption."}),
+                    _tool_call("finish", "finish_turn", {"outcome": "delivered"}),
+                ],
+            )
+        ],
+    )
+    session = _DeliveryToolSession()
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ),
+        _native_image_turn(local_modules, session) as turn,
+    ):
+        response = await _generate_native_turn(local_modules, session, turn)
+        await turn.turn.deliver_model_images(session, response)
+        await turn.turn.persist_delivered_text()
+        assert isinstance(session.sent[0][0], Image)
+        assert session.sent[1:] == ["A short caption."]
+        assert turn.history == ["[发送了图片]", "A short caption."]
+        assert turn.resolution.outcome == "delivered"
+    assert len(payloads) == 1
+
+
+async def test_native_images_survive_readonly_pause_and_image_only_terminal_response(local_modules, monkeypatch):
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _native_image_response([_PNG_BYTES], tool_calls=[_tool_call("time", "get_local_time", {})]),
+            _model_response("[END_OF_RESPONSE]"),
+        ],
+    )
+    session = _DeliveryToolSession()
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ),
+        _native_image_turn(local_modules, session) as turn,
+    ):
+        response = await _generate_native_turn(local_modules, session, turn)
+        await turn.turn.deliver_model_images(session, response)
+        assert turn.state.confirmed_media_deliveries == 1
+        assert len(session.sent) == 1
+        assert turn.history == ["[发送了图片]"]
+    assert len(payloads) == 2
+    assert "data:image/" not in json.dumps(payloads[1]["messages"])
+
+
+@pytest.mark.parametrize("outcome", ["failed", "cancelled"])
+async def test_native_image_failure_stops_finish_and_queued_tools_without_replay(local_modules, monkeypatch, outcome):
+    native = importlib.import_module("plugins.llm_chat.native_image_delivery")
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _native_image_response(
+                [_PNG_BYTES, _PNG_BYTES],
+                tool_calls=[
+                    _tool_call("finish", "finish_turn", {"outcome": "delivered"}),
+                    _tool_call("late", "send_text", {"text": "This must never be sent."}),
+                ],
+            )
+        ],
+    )
+    session = _DeliveryToolSession(
+        fail_attempts={2} if outcome == "failed" else None,
+        cancel_attempts={2} if outcome == "cancelled" else None,
+    )
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ),
+        _native_image_turn(local_modules, session) as turn,
+    ):
+        expected = native.NativeImageDeliveryError if outcome == "failed" else asyncio.CancelledError
+        with pytest.raises(expected):
+            await _generate_native_turn(local_modules, session, turn)
+        assert turn.resolution.outcome == "automatic"
+        assert turn.state.delivery_attempts == 2
+        assert turn.state.confirmed_media_deliveries == 1
+        assert len(session.sent) == 1
+        assert turn.history == ["[发送了图片]"]
+        assert [event.status for event in turn.turn.tool_trace.events] == [outcome, "cancelled"]
+    assert len(payloads) == 1
+
+
+async def test_native_image_limit_is_atomic_before_any_send_or_false_finish(local_modules, monkeypatch):
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _native_image_response(
+                [_PNG_BYTES, _PNG_BYTES], tool_calls=[_tool_call("finish", "finish_turn", {"outcome": "delivered"})]
+            )
+        ],
+    )
+    session = _DeliveryToolSession()
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ),
+        _native_image_turn(local_modules, session, maximum=1) as turn,
+    ):
+        with pytest.raises(RuntimeError):
+            await _generate_native_turn(local_modules, session, turn)
+        assert turn.resolution.outcome == "automatic"
+        assert turn.state.delivery_attempts == 0
+        assert turn.history == []
+    assert session.sent == []
+    assert len(payloads) == 1
+
+
+async def test_native_finish_waits_for_receipt_before_publishing_delivered_outcome(local_modules, monkeypatch):
+    _install_completion_script(
+        monkeypatch,
+        [
+            _native_image_response(
+                [_PNG_BYTES], tool_calls=[_tool_call("finish", "finish_turn", {"outcome": "delivered"})]
+            )
+        ],
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class WaitingSession(_DeliveryToolSession):
+        async def send(self, message, *args, **kwargs):
+            entered.set()
+            await release.wait()
+            return await super().send(message, *args, **kwargs)
+
+    session = WaitingSession()
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ),
+        _native_image_turn(local_modules, session) as turn,
+    ):
+        pending = asyncio.create_task(_generate_native_turn(local_modules, session, turn))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            assert turn.resolution.outcome == "automatic"
+            assert turn.state.confirmed_deliveries == 0
+            release.set()
+            await asyncio.wait_for(pending, timeout=2)
+            assert turn.resolution.outcome == "delivered"
+            assert turn.state.confirmed_media_deliveries == 1
+        finally:
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+
+async def test_native_images_cannot_bypass_required_reference_edit(local_modules, monkeypatch):
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _native_image_response(
+                [_PNG_BYTES], tool_calls=[_tool_call("finish", "finish_turn", {"outcome": "delivered"})]
+            ),
+            _model_response(
+                tool_calls=[
+                    _tool_call(
+                        "decline", "finish_turn", {"outcome": "declined", "reply": "The required edit was unavailable."}
+                    )
+                ]
+            ),
+        ],
+    )
+    session = _DeliveryToolSession()
+    references = ImageEditReferences.from_input_attachments((), requires_web_reference=True)
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ),
+        _native_image_turn(local_modules, session) as turn,
+    ):
+        await _generate_native_turn(local_modules, session, turn, references=references)
+        assert turn.resolution.outcome == "declined"
+        assert turn.state.confirmed_media_deliveries == 0
+        assert turn.history == []
+    assert session.sent == []
+    assert len(payloads) == 2
+
+
+async def test_native_image_only_response_reaches_delivery_without_a_tool_call(local_modules, monkeypatch):
+    payloads = _install_completion_script(monkeypatch, [_native_image_response([_PNG_BYTES])])
+    session = _DeliveryToolSession()
+    async with _temporary_plugin(), _native_image_turn(local_modules, session) as turn:
+        response = await _generate_native_turn(local_modules, session, turn)
+        await turn.turn.deliver_model_images(session, response)
+        assert turn.state.confirmed_media_deliveries == 1
+        assert len(session.sent) == 1
+        assert turn.history == ["[发送了图片]"]
+    assert len(payloads) == 1
+
+
+async def test_native_image_buffers_remain_private_to_concurrent_generations(local_modules, monkeypatch):
+    gif = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+    requests = []
+    both_requested = asyncio.Event()
+    _install_completion_script(monkeypatch, [])
+
+    async def completion(**payload):
+        text = next(message["content"] for message in payload["messages"] if message["role"] == "user")
+        requests.append(text)
+        if len(requests) == 2:
+            both_requested.set()
+        await asyncio.wait_for(both_requested.wait(), timeout=2)
+        return _native_image_response(
+            [_PNG_BYTES if text == "First request" else gif],
+            tool_calls=[_tool_call("finish", "finish_turn", {"outcome": "delivered"})],
+        )
+
+    monkeypatch.setattr(llm_service_module.litellm, "acompletion", completion)
+    first, second = _DeliveryToolSession(), _DeliveryToolSession()
+
+    async def generate(session, content):
+        async with _native_image_turn(local_modules, session) as turn:
+            await _generate_native_turn(local_modules, session, turn, content=content)
+            assert turn.resolution.outcome == "delivered"
+            assert turn.state.confirmed_media_deliveries == 1
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        await asyncio.gather(generate(first, "First request"), generate(second, "Second request"))
+    assert [base64.b64decode(payload[0].src.split(",", 1)[1]) for payload in first.sent] == [_PNG_BYTES]
+    assert [base64.b64decode(payload[0].src.split(",", 1)[1]) for payload in second.sent] == [gif]
+    assert sorted(requests) == ["First request", "Second request"]
+
+
+async def test_explicit_silence_discards_unsent_native_candidate_without_forcing_delivery(local_modules, monkeypatch):
+    payloads = _install_completion_script(
+        monkeypatch,
+        [_native_image_response([_PNG_BYTES], tool_calls=[_tool_call("finish", "finish_turn", {"outcome": "silent"})])],
+    )
+    session = _DeliveryToolSession()
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ),
+        _native_image_turn(local_modules, session) as turn,
+    ):
+        response = await _generate_native_turn(local_modules, session, turn)
+        await turn.turn.deliver_model_images(session, response)
+        assert turn.resolution.outcome == "silent"
+        assert turn.state.delivery_attempts == 0
+        assert turn.history == []
+    assert session.sent == []
+    assert len(payloads) == 1

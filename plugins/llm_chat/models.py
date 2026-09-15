@@ -195,8 +195,46 @@ class UserRelation(Base):
     resentment: Mapped[float] = mapped_column(default=0.0)
     familiarity: Mapped[float] = mapped_column(default=0.0)
     impression: Mapped[str] = mapped_column(default="")
-    eval_counter: Mapped[int] = mapped_column(default=0)
     last_interaction: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+
+class UserAffect(Base):
+    __tablename__ = "chat_user_affect"
+    user_id: Mapped[str] = mapped_column(primary_key=True)
+    channel_id: Mapped[str] = mapped_column(primary_key=True)
+    version: Mapped[int] = mapped_column(default=0)
+    description: Mapped[str] = mapped_column(Text, default="")
+    emotions_json: Mapped[str] = mapped_column(Text, default="[]")
+    processed_turn_id: Mapped[int] = mapped_column(default=0)
+    updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+
+class RelationshipIdentity(Base):
+    __tablename__ = "chat_relationship_identities"
+    source_user_id: Mapped[str] = mapped_column(primary_key=True)
+    channel_id: Mapped[str] = mapped_column(primary_key=True)
+    target_user_id: Mapped[str]
+    updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+
+class RelationshipEvidence(Base):
+    __tablename__ = "chat_relationship_evidence"
+    __table_args__ = (
+        Index("ix_chat_relationship_evidence_owner_status", "user_id", "channel_id", "status", "turn_id"),
+    )
+    turn_id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[str]
+    channel_id: Mapped[str]
+    persona_prompt: Mapped[str] = mapped_column(Text)
+    payload_json: Mapped[str] = mapped_column(Text)
+    event_id: Mapped[int]
+    status: Mapped[str] = mapped_column(default="pending")
+    evaluation_ref: Mapped[str] = mapped_column(default="")
+    attempts: Mapped[int] = mapped_column(default=0)
+    queued_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    claimed_at: Mapped[datetime | None] = mapped_column(default=None)
+    finished_at: Mapped[datetime | None] = mapped_column(default=None)
+    error: Mapped[str] = mapped_column(default="")
 
 
 class UserProfileFact(Base):

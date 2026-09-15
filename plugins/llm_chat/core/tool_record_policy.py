@@ -14,6 +14,7 @@ from .tool_trace_safety import safe_url, sanitize_json, external_source_type
 _MAX_RECORDED_TEXT = 50_000
 _MAX_GENERIC_TEXT = 16_000
 _PROJECTED_RESULT_TOOLS = {
+    "finish_turn",
     "capture_web_reference",
     "edit_image",
     "call_plugin",
@@ -47,6 +48,8 @@ def _text_descriptor(value: object) -> dict[str, JSONType]:
 def record_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> dict[str, JSONType]:
     """Return the durable, model-readable subset of one tool request."""
 
+    if tool_name == "finish_turn":
+        return _record_selected(arguments, "outcome")
     if tool_name in ARTIFACT_TOOLS:
         return project_artifact_arguments(tool_name, arguments)
     if tool_name in WORKSHOP_TOOLS:

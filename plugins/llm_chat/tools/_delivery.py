@@ -15,6 +15,7 @@ from ..core.delivery import (
     mark_delivery_attempt,
     mark_delivery_success,
 )
+from ..group_delivery import send_group_delivery
 
 
 async def send_with_delivery(
@@ -28,6 +29,8 @@ async def send_with_delivery(
 ) -> None:
     """Send one payload while recording delivery attempts and confirmations."""
 
+    if await send_group_delivery(session, payload, state, delay_seconds=delay_seconds, texts=texts, media=media):
+        return
     if state is not None:
         await wait_for_delivery(state, delay_seconds)
     try:
@@ -64,19 +67,15 @@ async def send_forward_fallback(
 
     total = len(messages)
     for index, text in enumerate(messages):
-        await wait_for_delivery(state, delay_seconds)
         try:
-            await session.send(text)
+            await send_with_delivery(session, text, state, delay_seconds=delay_seconds, texts=[text])
         except asyncio.CancelledError:
-            mark_delivery_attempt(state)
             raise
         except Exception:
-            mark_delivery_attempt(state)
             raise DeliveryError(
                 f"merged forward fallback confirmed {index}/{total} text messages before failure; "
                 "do not repeat the confirmed prefix"
             ) from None
-        mark_delivery_success(state, [text])
     return (
         f"合并转发不可用，已按顺序回退发送 {total} 条普通文本；"
         "不要在最终回复中重复，若无需补充只返回 [END_OF_RESPONSE]。"

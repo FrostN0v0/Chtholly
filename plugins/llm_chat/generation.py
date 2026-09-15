@@ -17,6 +17,7 @@ from agno.models.message import Message as AgnoMessage
 from arclet.entari.logger import log
 from entari_plugin_llm.config import ScopedModel, get_model_config
 
+from utils.turn_resolution_core import TurnResolution, turn_resolution_scope, current_turn_resolution
 from utils.llm_model_core.snapshot import current_main_model
 
 from .core.media import has_meaningful_text, strip_internal_media_records
@@ -49,6 +50,7 @@ from .core.media_delivery import (
 )
 from .model_audit_runtime import model_audit_scope, capture_completion
 from .core.artifact_access import is_artifact_request
+from .native_image_delivery import capture_native_images_scope
 from .core.tool_trace_safety import sanitize_json
 
 GenerationResponse = GenericResponse[None] | litellm.ModelResponse
@@ -94,12 +96,6 @@ _IMAGE_EDIT_RECOVERY_SUFFIX = (
     "若在剩余有界额度内 edit_image 仍未确认发送，"
     "最终普通文本必须以 [MEDIA_UNAVAILABLE] 开头并如实说明失败。"
 )
-_IMAGE_INPUT_REPLY_SUFFIX = (
-    "当前轮用户只发送或引用了图片，没有提供有意义的文字。不得把空文本解释为句号、一个点、沉默或无事发生；"
-    "请依据当前上下文中实际可见的图片或图片描述，补充一条简短自然的文字回应。"
-    "即使本轮已有媒体工具发送成功，也不得只输出 [END_OF_RESPONSE] 或复述已发送媒体；"
-    "只有图片内容确实不可用时，才自然请用户重新发送原图。不得再调用任何工具。"
-)
 _MODERATION_RECOVERY_SUFFIX = (
     "上一次请求没有返回可用候选。此次恢复只包含最新用户轮次，历史对话、画像、记忆、会话交接和图片像素均未提供。"
     "只依据当前仍可见的文字、系统生成的图片描述和实际工具结果行动，不得推测或复述被移除内容。"
@@ -143,8 +139,8 @@ def _has_visible_reply(response: object) -> bool:
     return has_meaningful_text(strip_trailing_end_of_response(visible))
 
 
-def _requires_visible_reply(delivery_state: DeliveryState, require_text_reply: bool) -> bool:
-    return delivery_state.delivery_attempts == 0 or (require_text_reply and not delivery_state.delivered_texts)
+def _requires_visible_reply(delivery_state: DeliveryState) -> bool:
+    return delivery_state.delivery_attempts == 0
 
 
 def _agno_messages(response: object) -> list[AgnoMessage]:
@@ -236,27 +232,18 @@ def _moderation_recovery_system(system: str) -> str:
     prefix, opening, remainder = system.partition(_RUNTIME_CONTEXT_OPEN)
     if not opening:
         return f"{system}\n\n{_MODERATION_RECOVERY_SUFFIX}"
-    raw_context, closing, suffix = remainder.partition(_RUNTIME_CONTEXT_CLOSE)
+    _, closing, suffix = remainder.partition(_RUNTIME_CONTEXT_CLOSE)
     if not closing:
         return f"{system}\n\n{_MODERATION_RECOVERY_SUFFIX}"
-    try:
-        parsed = json.loads(raw_context)
-    except ValueError:
-        parsed = {}
-    reply_intent = parsed.get("reply_intent", {}) if isinstance(parsed, dict) else {}
-    if not isinstance(reply_intent, dict):
-        reply_intent = {}
     safe_context = {
         "current_state": {},
         "current_speaker": "current user",
         "current_participant_ref": "",
-        "relationship_style": "",
+        "relationship": {},
         "self_reference_attached": False,
         "user_profile": {},
         "relevant_memories": [],
         "agent_session": {},
-        "recent_impression": "",
-        "reply_intent": reply_intent,
     }
     serialized = json.dumps(safe_context, ensure_ascii=False, separators=(",", ":"))
     return (
@@ -308,15 +295,18 @@ async def _generate_with_tools(
         request_options["max_retries"] = max_retries
     if parallel_tool_calls is not None:
         request_options["parallel_tool_calls"] = parallel_tool_calls
-    return cast(
-        GenericResponse[None],
-        await llm.generate(
-            cast(list[Any], messages),
-            system=system,
-            model=model,
-            **request_options,
-        ),
-    )
+    with capture_native_images_scope() as native_images:
+        response = cast(
+            GenericResponse[None],
+            await llm.generate(
+                cast(list[Any], messages),
+                system=system,
+                model=model,
+                **request_options,
+            ),
+        )
+        await native_images.complete(response)
+        return response
 
 
 def _response_metrics(response: object) -> object:
@@ -418,6 +408,10 @@ async def _recover_requested_media(
         if str(exc) == _TOOL_LOOP_EXHAUSTED:
             raise RuntimeError(_MEDIA_RECOVERY_FAILED) from exc
         raise
+    resolution = current_turn_resolution()
+    if resolution is not None and resolution.explicit:
+        _suppress_native_images(response)
+        return response
     if edit_required:
         if image_edit_references.edit_confirmed:
             _suppress_native_images(response)
@@ -439,13 +433,13 @@ async def generate_chat_response(
     web_limits: WebAccessLimits,
     delivery_state: DeliveryState,
     image_edit_references: ImageEditReferences | None = None,
-    require_text_reply: bool = False,
     channel_image_references: ChannelImageReferences | None = None,
     request_timeout: float = 90.0,
     media_request_timeout: float = 300.0,
     tool_trace: ToolTraceRecorder | None = None,
     agent_events: AgentTurnRecorder | None = None,
     agent_access: AgentAccessContext | None = None,
+    resolution: TurnResolution | None = None,
 ) -> GenerationResponse:
     """Generate with a longer single-attempt timeout for explicit media requests."""
 
@@ -479,6 +473,7 @@ async def generate_chat_response(
         or (image_edit_requested and active_image_edit_references.source_image_count > 0)
     )
     with (
+        turn_resolution_scope(resolution or TurnResolution()),
         agno_tool_call_limit_scope(tool_call_limit),
         agno_delivery_tool_scope(),
         llm_chat_web_access_scope(
@@ -549,6 +544,10 @@ async def generate_chat_response(
                     )
             else:
                 raise
+        active_resolution = resolution or current_turn_resolution()
+        if response is not None and active_resolution is not None and active_resolution.explicit:
+            _suppress_native_images(response)
+            return response
 
         if response is not None:
             transcript = _response_transcript(response, response_context)
@@ -589,18 +588,13 @@ async def generate_chat_response(
                     tool_trace=active_tool_trace,
                 )
             if _tool_call_limit_hit(response):
-                _LOGGER.warning("Agno tool call limit reached; finalizing once without tools")
-                visible_reply_required = _requires_visible_reply(delivery_state, require_text_reply)
+                visible_reply_required = _requires_visible_reply(delivery_state)
                 return await _finalize_without_tools(
                     transcript,
                     system=system,
                     model=model,
                     channel_id=channel_id,
-                    suffix=(
-                        _IMAGE_INPUT_REPLY_SUFFIX
-                        if require_text_reply and not delivery_state.delivered_texts
-                        else _FINALIZATION_SUFFIX
-                    ),
+                    suffix=_FINALIZATION_SUFFIX,
                     require_visible=visible_reply_required,
                     request_timeout=request_timeout,
                     agent_events=agent_events,
@@ -608,10 +602,7 @@ async def generate_chat_response(
                 )
             if _has_visible_reply(response):
                 return response
-            if delivery_state.delivery_attempts and not _requires_visible_reply(
-                delivery_state,
-                require_text_reply,
-            ):
+            if delivery_state.delivery_attempts:
                 return response
             _LOGGER.warning("model returned no visible reply; retrying once without tools")
             return await _finalize_without_tools(
@@ -619,11 +610,7 @@ async def generate_chat_response(
                 system=system,
                 model=model,
                 channel_id=channel_id,
-                suffix=(
-                    _IMAGE_INPUT_REPLY_SUFFIX
-                    if require_text_reply and not delivery_state.delivered_texts
-                    else _VISIBLE_RETRY_SUFFIX
-                ),
+                suffix=_VISIBLE_RETRY_SUFFIX,
                 require_visible=True,
                 request_timeout=request_timeout,
                 agent_events=agent_events,
@@ -632,17 +619,13 @@ async def generate_chat_response(
 
     if not tool_loop_exhausted:
         raise RuntimeError(_TOOL_LOOP_EXHAUSTED)
-    visible_reply_required = _requires_visible_reply(delivery_state, require_text_reply)
+    visible_reply_required = _requires_visible_reply(delivery_state)
     return await _finalize_without_tools(
         messages,
         system=system,
         model=model,
         channel_id=channel_id,
-        suffix=(
-            _IMAGE_INPUT_REPLY_SUFFIX
-            if require_text_reply and not delivery_state.delivered_texts
-            else _FINALIZATION_SUFFIX
-        ),
+        suffix=_FINALIZATION_SUFFIX,
         require_visible=visible_reply_required,
         request_timeout=request_timeout,
         agent_events=agent_events,

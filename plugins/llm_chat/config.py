@@ -111,10 +111,10 @@ class LLMChatConfig(BasicConfModel, extra="forbid"):
     """Provider compression percentage for JPEG and WebP output."""
     eval_request_timeout: float = 60.0
     """Per-completion timeout for the relationship evaluator."""
-    eval_every_n: int = 5
-    """Run the relationship evaluator every N bot replies (per user)."""
-    eval_context_window: int = 8
-    """Recent history lines included as evaluator context."""
+    relationship_eval_batch_size: int = 8
+    """Maximum complete, previously unprocessed interactions per evaluator request."""
+    relationship_eval_debounce_seconds: float = 2.0
+    """Bounded background coalescing window; the first interaction starts the timer."""
     memory_enabled: bool = True
     """Enable long-term profile and semantic memory retrieval."""
     memory_embedding_model: str = "volcengine/doubao-embedding-vision-251215"
