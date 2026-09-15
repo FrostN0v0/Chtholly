@@ -23,7 +23,6 @@ from .core.delivery import (
     mark_delivery_attempt,
     mark_delivery_success,
     normalize_delivery_delay,
-    reserve_attribution_text,
     delivery_interval_seconds,
 )
 from .reply_payload import quote_request, supports_reply
@@ -197,17 +196,6 @@ async def send_group_delivery(
         turn.sends.discard(task)
         turn.channel.sends.discard(task)
         turn.runtime.release(turn.key, turn.channel)
-
-
-async def finish_group_delivery(session: Session, state: DeliveryState) -> None:
-    """Attribute standalone non-quotable media only after all successful turn output."""
-    turn = _turn_for(session)
-    if turn is None or not turn.pending_attribution:
-        return
-    if state.delivery_attempts != state.confirmed_deliveries:
-        return
-    text = reserve_attribution_text(state, "Reply to this request.")
-    await send_group_delivery(session, text, state, texts=[text])
 
 
 def install_group_delivery(

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import asyncio
 from datetime import datetime
 from contextvars import ContextVar
+from unittest.mock import AsyncMock
 
 import pytest
 from satori import At, File, User, Audio, Event, Image, Login, Quote, Channel, EventType, ChannelType
@@ -24,9 +25,9 @@ from plugins.llm_chat.channel_turns import latest_participant_turn
 from plugins.llm_chat.core.delivery import DeliveryState
 from plugins.llm_chat.group_delivery import (
     group_delivery_scope,
-    finish_group_delivery,
     install_group_delivery,
 )
+from plugins.llm_chat.turn_lifecycle import ActiveChatTurn
 from plugins.llm_chat.tools._delivery import send_with_delivery, build_forward_chain
 
 _OWNER: ContextVar[str] = ContextVar("test_delivery_owner", default="outside")
@@ -105,6 +106,17 @@ async def transport(monkeypatch, tmp_path):
 
 def quotes(chain: MessageChain) -> list[str]:
     return [element.id for element in chain if isinstance(element, Quote)]
+
+
+def active_turn(session: Session, state: DeliveryState) -> ActiveChatTurn:
+    return ActiveChatTurn(
+        channel_id=session.channel.id,
+        user_message_id=1,
+        delivery_state=state,
+        append_history=AsyncMock(),
+        delete_history=AsyncMock(),
+        warn=pytest.fail,
+    )
 
 
 async def test_native_reply_target_is_immutable_and_continuation_is_not_requoted(transport) -> None:
@@ -241,7 +253,7 @@ async def test_empty_receipts_cannot_be_recorded_as_success(transport) -> None:
 
 
 @pytest.mark.parametrize("kind", ["audio", "forward", "file"])
-async def test_special_media_finishes_with_one_real_quote_not_an_empty_protocol_message(transport, kind) -> None:
+async def test_special_media_completes_without_quotes_or_synthetic_text(transport, kind) -> None:
     if kind == "audio":
         payload = MessageChain([Audio.of(raw=b"audio", mime="audio/wav")])
         expected_action = "send_group_msg"
@@ -252,16 +264,15 @@ async def test_special_media_finishes_with_one_real_quote_not_an_empty_protocol_
         payload = build_forward_chain(["first node", "second node"])
         expected_action = "send_group_forward_msg"
     session, state = transport.session("media-request"), transport.state()
+    turn = active_turn(session, state)
     with group_delivery_scope(session):
         await send_with_delivery(session, payload, state, media=kind != "forward")
-        assert len(transport.network.wire) == 1
-        assert quotes(transport.network.wire[0][0]) == []
-        await finish_group_delivery(session, state)
-    assert len(transport.network.wire) == 2
-    assert quotes(transport.network.wire[1][0]) == ["media-request"]
-    assert state.delivery_attempts == state.confirmed_deliveries == 2
-    assert state.text_messages == 1
-    assert state.text_chars == len(state.delivered_texts[0])
+        assert await turn.deliver_model_reply(session, "")
+    assert len(transport.network.wire) == 1
+    assert quotes(transport.network.wire[0][0]) == []
+    assert state.delivery_attempts == state.confirmed_deliveries == 1
+    assert state.text_messages == state.text_chars == 0
+    assert state.delivered_texts == []
     calls = []
 
     class Network:
@@ -272,8 +283,9 @@ async def test_special_media_finishes_with_one_real_quote_not_an_empty_protocol_
     for message, _ in transport.network.wire:
         encoder = OneBot11MessageEncoder(transport.login, Network(), "100")
         await encoder.send(str(message))
-    assert [action for action, _ in calls] == [expected_action, "send_group_msg"]
-    assert [part["type"] for part in calls[-1][1]["message"]] == ["reply", "text"]
+    assert [action for action, _ in calls] == [expected_action]
+    if kind == "audio":
+        assert [part["type"] for part in calls[0][1]["message"]] == ["record"]
 
 
 async def test_quoted_image_attributes_prior_audio_without_preempting_media_with_text(transport) -> None:
@@ -281,13 +293,28 @@ async def test_quoted_image_attributes_prior_audio_without_preempting_media_with
     with group_delivery_scope(session):
         await send_with_delivery(session, MessageChain([Audio.of(raw=b"audio", mime="audio/wav")]), state, media=True)
         await send_with_delivery(session, MessageChain([Image.of(raw=b"image", mime="image/png")]), state, media=True)
-        await finish_group_delivery(session, state)
+        assert await active_turn(session, state).deliver_model_reply(session, "")
     wire = transport.network.wire
     assert len(wire) == 2
     assert [quotes(chain) for chain, _ in wire] == [[], ["media"]]
     assert state.confirmed_media_deliveries == 2
     assert state.text_messages == 0
     assert state.delivered_texts == []
+
+
+async def test_audio_keeps_a_real_final_explanation_and_quotes_only_that_text(transport) -> None:
+    session, state = transport.session("voice-and-explanation"), transport.state()
+    explanation = "The spoken phrase uses a formal register."
+    with group_delivery_scope(session):
+        await send_with_delivery(session, MessageChain([Audio.of(raw=b"audio", mime="audio/wav")]), state, media=True)
+        assert await active_turn(session, state).deliver_model_reply(session, explanation)
+    wire = transport.network.wire
+    assert [quotes(chain) for chain, _ in wire] == [[], ["voice-and-explanation"]]
+    assert wire[0][0].get(Audio)
+    assert wire[1][0].extract_plain_text() == explanation
+    assert state.confirmed_media_deliveries == 1
+    assert state.delivery_attempts == state.confirmed_deliveries == 2
+    assert state.delivered_texts == [explanation]
 
 
 async def test_old_runtime_disposal_does_not_close_replacement_delivery(transport) -> None:

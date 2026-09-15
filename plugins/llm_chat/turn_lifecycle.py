@@ -18,7 +18,6 @@ from .core.delivery import (
     strip_trailing_end_of_response,
     reserve_media_messages_for_state,
 )
-from .group_delivery import finish_group_delivery
 from .core.tool_trace import ToolTraceRecorder
 from .tools._delivery import send_with_delivery
 from .core.agent_trace import AgentEventDraft, AgentTurnRecorder
@@ -206,9 +205,4 @@ class ActiveChatTurn:
                 except BaseException:
                     await self.preserve_and_rollback()
                     raise
-        try:
-            await finish_group_delivery(session, self.delivery_state)
-        except BaseException:
-            await self.preserve_and_rollback()
-            raise
         return True
