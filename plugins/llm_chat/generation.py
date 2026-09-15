@@ -50,6 +50,7 @@ from .core.media_delivery import (
 )
 from .model_audit_runtime import model_audit_scope, capture_completion
 from .core.artifact_access import is_artifact_request
+from .native_image_delivery import capture_native_images_scope
 from .core.tool_trace_safety import sanitize_json
 
 GenerationResponse = GenericResponse[None] | litellm.ModelResponse
@@ -294,15 +295,18 @@ async def _generate_with_tools(
         request_options["max_retries"] = max_retries
     if parallel_tool_calls is not None:
         request_options["parallel_tool_calls"] = parallel_tool_calls
-    return cast(
-        GenericResponse[None],
-        await llm.generate(
-            cast(list[Any], messages),
-            system=system,
-            model=model,
-            **request_options,
-        ),
-    )
+    with capture_native_images_scope() as native_images:
+        response = cast(
+            GenericResponse[None],
+            await llm.generate(
+                cast(list[Any], messages),
+                system=system,
+                model=model,
+                **request_options,
+            ),
+        )
+        await native_images.complete(response)
+        return response
 
 
 def _response_metrics(response: object) -> object:

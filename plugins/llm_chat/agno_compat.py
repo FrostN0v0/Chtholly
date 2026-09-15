@@ -43,6 +43,12 @@ from .model_audit_runtime import (
     current_model_audit,
     install_model_http_audit,
 )
+from .native_image_delivery import (
+    NativeImageDeliveryError,
+    capture_native_images,
+    send_pending_native_images,
+    check_native_image_delivery,
+)
 from .core.tool_trace_policy import DeliverySnapshot
 
 _MIN_TOOL_CALL_LIMIT = 8
@@ -72,6 +78,7 @@ _ORDERED_DELIVERY_TOOLS = frozenset(
     }
 )
 _IMAGE_EDIT_BLOCKED_TOOLS = _ORDERED_DELIVERY_TOOLS - {"capture_web_reference", "edit_image", "revoke_web_preview"}
+_NATIVE_IMAGE_FLUSH_TOOLS = _ORDERED_DELIVERY_TOOLS - {"capture_web_reference", "revoke_web_preview"}
 _READ_ONLY_TOOLS = frozenset(
     {
         "describe_channel_participant_avatar",
@@ -355,6 +362,8 @@ async def _run_local_tools(
                 and not references.edit_confirmed
             ):
                 raise ValueError("Invalid delivery order: edit_image must complete before any other delivery tool")
+            if name in _NATIVE_IMAGE_FLUSH_TOOLS:
+                await send_pending_native_images()
             if reaction is not None:
                 await reaction.tool_started(name)
             invocation = _Invocation(subscriber)
@@ -418,17 +427,17 @@ async def _run_local_tools(
         finally:
             await _flush_tool_events(audit, recorder)
 
-    def stop_remaining() -> None:
+    def stop_remaining(reason: str = "Tool was not executed because this turn deliberately ended") -> None:
         for pending_index, requirement in enumerate(requirements):
             if pending_index in finished:
                 continue
-            recorder.finish_skipped(calls[pending_index])
+            recorder.finish_skipped(calls[pending_index], reason=reason)
             finished.add(pending_index)
             requirement.set_external_execution_result(
                 json.dumps(
                     {
                         "ok": False,
-                        "error": "Tool was not executed because this turn deliberately ended",
+                        "error": reason,
                     }
                 )
             )
@@ -471,6 +480,7 @@ async def _run_local_tools(
                 else:
                     async with lock:
                         await execute_one(index)
+                check_native_image_delivery()
                 resolution = current_turn_resolution()
                 if resolution is not None and resolution.explicit:
                     stop_remaining()
@@ -486,6 +496,9 @@ async def _run_local_tools(
                 req.set_external_execution_result(json.dumps({"ok": False, "error": "Tool execution was cancelled"}))
             if req.tool_execution is not None:
                 req.tool_execution.tool_call_error = True
+        raise
+    except NativeImageDeliveryError:
+        stop_remaining("Tool was not executed because native image delivery failed")
         raise
     finally:
         await _flush_tool_events(audit, recorder)
@@ -527,7 +540,10 @@ def _wrap_litellm_model(previous_model: Any) -> Any:
             model_response = super()._parse_provider_response(response, **kwargs)
             if current_tool_trace() is not None:
                 images = extract_native_images(response)
-                if images:
+                if capture_native_images(self, images):
+                    # Agno 2.9 drops nonstream images from RunOutput; keep only the current response buffer.
+                    model_response.images = None
+                elif images:
                     model_response.images = list(images)
             return model_response
 

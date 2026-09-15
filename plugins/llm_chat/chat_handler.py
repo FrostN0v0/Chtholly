@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 import asyncio
+from functools import partial
 from contextlib import suppress
 
 from arclet.entari import At, Session, MessageCreatedEvent, plugin, plugin_config
@@ -52,6 +53,7 @@ from .tools._delivery import send_with_delivery
 from .agent_turn_setup import prepare_agent_turn
 from .agent_attachments import capture_user_input_images, remove_user_input_attachments
 from .reaction_feedback import MessageReactionFeedback, settle_reaction_update, llm_chat_reaction_scope
+from .native_image_delivery import native_image_delivery_scope
 
 _LOGGER = log.wrapper("[llm_chat]")
 _CHAT_FAILURE_REPLY = "这次回复没有成功，请稍后重试。"
@@ -227,23 +229,24 @@ async def _run_chat(
     try:
         try:
             await reaction.set_stage("thinking")
-            response = await generate_chat_response(
-                chat_messages,
-                system=system,
-                model=model_name,
-                channel_id=channel_id,
-                ctx=ctx,
-                web_limits=web_limits,
-                delivery_state=delivery_state,
-                channel_image_references=channel_image_references,
-                image_edit_references=image_edit_references,
-                request_timeout=config.model_request_timeout,
-                media_request_timeout=config.media_request_timeout,
-                tool_trace=turn.tool_trace,
-                agent_events=agent_events,
-                agent_access=agent_access,
-                resolution=resolution,
-            )
+            with native_image_delivery_scope(partial(turn.deliver_model_images, session)):
+                response = await generate_chat_response(
+                    chat_messages,
+                    system=system,
+                    model=model_name,
+                    channel_id=channel_id,
+                    ctx=ctx,
+                    web_limits=web_limits,
+                    delivery_state=delivery_state,
+                    channel_image_references=channel_image_references,
+                    image_edit_references=image_edit_references,
+                    request_timeout=config.model_request_timeout,
+                    media_request_timeout=config.media_request_timeout,
+                    tool_trace=turn.tool_trace,
+                    agent_events=agent_events,
+                    agent_access=agent_access,
+                    resolution=resolution,
+                )
         except asyncio.CancelledError:
             turn.capture_tool_events()
             turn_status = "partial" if delivery_state.confirmed_deliveries else "cancelled"

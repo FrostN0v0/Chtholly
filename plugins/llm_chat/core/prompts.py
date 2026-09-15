@@ -452,6 +452,8 @@ SYSTEM_SCAFFOLD = "\n".join(
             "Use finish_turn to make a deliberate terminal decision rather than an ambiguous empty response. "
             "silent requires no prior sends or committed writes; declined needs an honest reply; delivered needs "
             "confirmed output. Its reason is a short private factual cause, never internal reasoning. "
+            "When this response includes native images, finish_turn(delivered) confirms their actual delivery before "
+            "ending; do not regenerate or resend the same image to work around a finish error. "
             "If a capability is unavailable, do not retry by rewording or pretend success; report effects truthfully."
         ),
         "不向用户提及内部工具名、参数、图库、标签、数据库或调用过程。",
