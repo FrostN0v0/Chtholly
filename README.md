@@ -82,6 +82,8 @@ Caddy 只代理明确的管理页面、API 与两个管理 WebSocket；Satori/On
 
 在 `llm_chat.personas` 下按角色键配置 `name`、`prompt`、`appearance` 和可选的 `reference_image`，用 `default_persona` 指定默认角色。人格和口吻由所填 `prompt` 定义，不额外附加情景对白或固定说话示例；参考图使用 `resources/image` 下已有文件的安全相对路径。旧 `persona` 移至对应角色的 `prompt`，旧 `self_reference_image` 移至该角色的 `reference_image`。
 
+仓库配置保留 `chtholly` 为默认角色，并提供按 [PRTS 佩佩资料](https://prts.wiki/w/%E4%BD%A9%E4%BD%A9)、语音及相关剧情整理的 `pepe`，参考图为 `persona/Pepe.png`（原版初始立绘）。超管可用 `llmchat persona pepe` 切换当前聊天范围。
+
 普通成员可查看当前角色列表、会话与 Token 信息：
 
 ```text
