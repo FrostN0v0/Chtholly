@@ -9,6 +9,8 @@ from typing import Any
 from dataclasses import field, dataclass
 from collections.abc import Mapping
 
+from .tool_trace_safety import redact_reference_text
+
 ADMIN_ONLY_EVENT_TYPES = frozenset(
     {
         "model_request",
@@ -26,7 +28,7 @@ _SECRET_KEY = re.compile(
     re.I,
 )
 _PRIVATE_KEY = re.compile(
-    r"(?:reasoning_content|reasoning_details|thinking|chain_of_thought|thought_signature|encrypted_content|signature|b64_json|base64|image_url|image_data|image_bytes|image_paths|pixels|audio_data|file_path|local_path|inline_data|inlineData|file_data|fileData|(?:channel_|source_|reference_)?image_refs?|reference_image|participant_refs?|before_cursor)",
+    r"(?:reasoning_content|reasoning_details|thinking|chain_of_thought|thought_signature|encrypted_content|signature|b64_json|base64|image_url|image_data|image_bytes|image_paths|pixels|audio_data|file_path|local_path|inline_data|inlineData|file_data|fileData|(?:channel_|source_|reference_)?image_refs?|reference_image|(?:current_)?participant_refs?|media_refs?|participant_ids?|user_id|channel_id|account_id|self_id|before_cursor)",
     re.I,
 )
 _SECRET_TEXT = re.compile(
@@ -107,6 +109,10 @@ class _Snapshot:
             self.overflow = True
             return self.omit(path, "size_limit", value)
         self.remaining -= len(value)
+        redacted = redact_reference_text(value)
+        if redacted != value:
+            self.redactions.append({"path": path, "type": "ephemeral_reference"})
+            value = redacted
         stripped = value.lstrip()
         if stripped.startswith(("{", "[")):
             try:
@@ -200,6 +206,7 @@ class _Snapshot:
                             or key in {"preview_url", "download_url"}
                             or (key == "content" and value.get("encoding") == "base64")
                             or (key in {"analysis", "reasoning"} and isinstance(child, (str, list)))
+                            or (key in {"target", "id", "user"} and value.get("type") in ("mention", "at"))
                         ):
                             result[safe_key] = self.omit(child_path, "private_content", child)
                         else:

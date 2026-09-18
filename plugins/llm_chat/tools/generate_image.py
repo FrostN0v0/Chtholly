@@ -9,7 +9,7 @@ from arclet.entari import Session
 from arclet.letoderea import Subscriber
 from arclet.entari.plugin.model import PluginDispatcher
 
-from ._rendering import WarningSink, HistoryAppender, deliver_image_bytes
+from ._rendering import WarningSink, prepare_image_bytes
 from ..core.types import JSONType
 from ._registration import register_tool
 from ..core.delivery import DeliveryError
@@ -35,7 +35,6 @@ class ImageGenerationToolContext:
 
     resolve_model: ModelResolver
     generate: ImageProvider
-    append_history: HistoryAppender
     warn: WarningSink
     timeout_seconds: float
     quality: ImageQuality
@@ -48,29 +47,29 @@ def register_generate_image(
     dispatcher: PluginDispatcher[JSONType],
     runtime: ImageGenerationToolContext,
 ) -> Subscriber[JSONType]:
-    """Register provider-backed original image generation and delivery."""
+    """Register provider-backed original image generation and preparation."""
 
     async def generate_image(
         session: Session,
         prompt: str,
         size: ImageSize = DEFAULT_IMAGE_SIZE,
-    ) -> str:
-        """Generate and send exactly one new image with the server-configured image model.
+    ) -> dict[str, JSONType]:
+        """Generate and prepare one new image with the server-configured image model.
 
         Use this only for original visual content, never for editing a supplied image. When the current turn asks to
         modify a user image, call edit_image instead. When it requires a web visual reference, call
         capture_web_reference before edit_image. This tool is rejected at runtime for either edit path. Write a
         complete visual prompt containing only details needed for the requested image. Do not include secrets, private
         profile data, internal identifiers, local paths, tool instructions, or unrelated conversation history. Use
-        send_image for existing local reactions, send_external_image for an existing direct image URL,
+        prepare_image for existing local reactions, prepare_external_media for an existing direct image URL,
         screenshot_web_page for webpage rendering, and the deterministic rendering tools for tables, reports, or code
-        layouts.
+        layouts. Nothing is sent until you include the returned media_ref in a send_msg media segment.
 
         Args:
             prompt (str): Complete standalone prompt for one original image, at most 32000 characters.
             size (str): Output size: 1024x1024, 1536x1024, or 1024x1536.
         Returns:
-            str: Confirmed delivery status without exposing provider data.
+            dict[str, JSONType]: Prepared image resource containing a media_ref for send_msg.
         """
         edit_references = current_image_edit_references()
         if edit_references is not None and edit_references.requires_image_edit:
@@ -114,16 +113,11 @@ def register_generate_image(
             runtime.warn(f"generate_image failed: {type(exc).__name__}")
             raise DeliveryError("the configured image generation service is unavailable") from None
 
-        return await deliver_image_bytes(
+        return await prepare_image_bytes(
             session,
             data,
-            append_history=runtime.append_history,
             warn=runtime.warn,
             tool_name="generate_image",
-            success_message=(
-                "Generated image sent successfully. Do not claim another image was sent or repeat the prompt in the "
-                "final response; return [END_OF_RESPONSE] when no supplement is needed."
-            ),
         )
 
     return register_tool(dispatcher, generate_image)

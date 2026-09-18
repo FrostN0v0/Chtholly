@@ -1,27 +1,19 @@
-"""Shared context, authorization, serialization, and delivery helpers for artifact tools."""
+"""Shared context, authorization, serialization, and preparation for artifact tools."""
 
 from __future__ import annotations
 
 import re
 import json
-import asyncio
 from dataclasses import dataclass
 from collections.abc import Mapping, Callable
 
-from arclet.entari import File, Session, MessageChain
+from arclet.entari import File, Session
 
 from utils.web_artifacts_core import Artifact, ArtifactOwner, ArtifactFileInfo
 
-from ._delivery import send_with_delivery
-from ._rendering import HistoryAppender
 from ..agent_context import current_agent_access
-from ..core.delivery import (
-    DeliveryError,
-    reserve_text_message,
-    reserve_media_message,
-    normalize_delivery_text,
-    current_llm_chat_delivery,
-)
+from ..core.delivery import DeliveryError, current_llm_chat_delivery
+from ..prepared_media import prepare_media
 from ..core.tool_trace import record_tool_evidence
 from ..artifacts_runtime import ArtifactLinks, WebArtifactService
 
@@ -39,7 +31,6 @@ class ArtifactToolContext:
     """Dependencies shared by all five managed artifact tools."""
 
     service: WebArtifactService
-    append_history: HistoryAppender
     warn: WarningSink
     capture_width: int = 900
 
@@ -148,109 +139,48 @@ def build_source_file(artifact: Artifact, data: bytes) -> File:
         raise DeliveryError("source archive could not be prepared for delivery") from None
 
 
-def _upload_failure_is_safe_for_link_fallback(exc: BaseException) -> bool:
-    """Recognize only adapter capability failures, never unknown transport errors."""
-
-    if isinstance(exc, NotImplementedError):
-        return True
-    name = type(exc).__name__.casefold()
-    text = " ".join(str(exc).split()).casefold()
-    if "unsupported" in name or "notimplemented" in name:
-        return True
-    markers = (
-        "unsupported",
-        "not supported",
-        "unsupported file",
-        "file upload is not available",
-        "upload is unsupported",
-        "cannot serialize file",
-        "file messages are unavailable",
-    )
-    return any(marker in text for marker in markers)
-
-
-async def deliver_source_archive(
+def prepare_source_archive(
     session: Session,
-    runtime: ArtifactToolContext,
     artifact: Artifact,
     data: bytes,
     links: ArtifactLinks,
 ) -> dict[str, object]:
-    """Deliver ZIP bytes, with a narrowly-scoped confirmed link fallback."""
+    """Prepare exact immutable ZIP bytes without transport or link fallback."""
 
     payload = build_source_file(artifact, data)
-    state = current_llm_chat_delivery()
-    if state is not None:
-        state = reserve_media_message()
-    try:
-        await send_with_delivery(session, MessageChain([payload]), state, media=True)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        if not _upload_failure_is_safe_for_link_fallback(exc):
-            raise DeliveryError("source archive delivery failed without a confirmed fallback") from None
-        # File upload capability failures are the only unconfirmed outcome for
-        # which a text link is safe.  Unknown transport errors may have reached
-        # the remote side and must not be replayed.
-        if state is None:
-            link_text = normalize_delivery_text(links.download_url, field="download_url")
-            fallback_state = None
-        else:
-            fallback_state, link_text = reserve_text_message(links.download_url)
-        try:
-            await send_with_delivery(
-                session,
-                link_text,
-                fallback_state,
-                texts=[link_text],
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            raise DeliveryError("source archive upload was unsupported and link fallback was not confirmed") from None
+    metadata = artifact_metadata(artifact, include_hash=False)
+
+    async def record_confirmation() -> None:
         record_tool_evidence(
             {
-                "artifact": artifact_metadata(artifact, include_hash=False),
-                "delivery_mode": "link_fallback",
+                "artifact": metadata,
+                "delivery_mode": "file",
                 "delivery_confirmed": True,
             }
         )
-        return {
-            "mode": "link_fallback",
+
+    result: dict[str, object] = dict(
+        prepare_media(
+            session,
+            payload,
+            byte_count=len(data),
+            tool_name="prepare_artifact",
+            history_marker="[Sent source archive]",
+            on_confirm=record_confirmation,
+            metadata={"artifact": metadata},
+        )
+    )
+    result.update(
+        {
             "link": links.download_url,
-            "confirmed": True,
             "artifact_ref": artifact.artifact_ref,
             "version": artifact.version,
+            "title": artifact.title,
+            "zip_bytes": len(data),
             "expires_at": artifact.expires_at,
         }
-
-    try:
-        await runtime.append_history(
-            session.channel.id,
-            "",
-            "bot",
-            "assistant",
-            "[Sent source archive]",
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception as history_error:
-        runtime.warn(f"web artifact archive history failed: {type(history_error).__name__}")
-    record_tool_evidence(
-        {
-            "artifact": artifact_metadata(artifact, include_hash=False),
-            "delivery_mode": "file",
-            "delivery_confirmed": True,
-        }
     )
-    return {
-        "mode": "file",
-        "link": links.download_url,
-        "confirmed": True,
-        "artifact_ref": artifact.artifact_ref,
-        "version": artifact.version,
-        "expires_at": artifact.expires_at,
-    }
+    return result
 
 
 def find_file_info(artifact: Artifact, path: str) -> ArtifactFileInfo:
@@ -299,12 +229,11 @@ __all__ = [
     "ArtifactToolContext",
     "AuthorizedArtifactAccess",
     "ArtifactStoreError",
-    "HistoryAppender",
     "WarningSink",
     "artifact_evidence",
     "artifact_metadata",
     "build_source_file",
-    "deliver_source_archive",
+    "prepare_source_archive",
     "find_file_info",
     "is_text_artifact_file",
     "json_result",

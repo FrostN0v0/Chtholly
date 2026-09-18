@@ -147,7 +147,7 @@ _CONFIG_SCHEMA_TEXT = {
         "\u9700\u5148\u52a0\u8f7d\u5de5\u574a\uff1b\u539f\u751f\u6fc0\u6d3b\u9700\u8d85\u7ba1\u6279\u51c6\u3002",
     ),
     "tts_enabled": ("启用语音合成", "安装 tts_service 插件时，是否启用语音合成工具。"),
-    "tts_max_chars": ("语音合成字符上限", "speak 工具单次合成最多保留的字符数，优先在句子边界截断。"),
+    "tts_max_chars": ("语音合成字符上限", "synthesize_speech 工具单次合成最多保留的字符数，优先在句子边界截断。"),
     "image_tags_enabled": ("启用图片标注", "启动时是否使用视觉模型为本地图片生成检索标签。"),
     "image_tag_model": ("图片标注模型", "图片标注使用的模型别名或名称；留空时使用 LLM 插件默认模型。"),
     "image_tag_prompt": ("图片标注提示词", "视觉模型提取图片标签时使用的系统提示词。"),

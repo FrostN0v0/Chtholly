@@ -6,7 +6,7 @@ import json
 import time
 from typing import Any, cast
 import asyncio
-from contextlib import nullcontext
+from contextlib import AsyncExitStack, nullcontext
 from collections.abc import Callable, Awaitable
 
 import litellm
@@ -31,6 +31,7 @@ from .channel_images import (
     ChannelImageReferences,
     llm_chat_channel_image_scope,
 )
+from .prepared_media import list_prepared_media, prepared_media_scope
 from .core.tool_trace import ToolTraceRecorder, llm_chat_tool_trace_scope
 from .image_edit_refs import (
     ImageEditReferences,
@@ -74,27 +75,22 @@ _VISIBLE_RETRY_SUFFIX = (
     "也不得声称已经发送媒体；请直接给出一条自然、可见且符合当前对话的最终回复。"
 )
 _MEDIA_RECOVERY_SUFFIX = (
-    "当前用户明确要求实际发送或补发媒体，但上一条候选回复没有产生任何确认的媒体发送，因此不可直接交付。"
-    "现在重新完成本轮：若能从已有上下文或剩余的有界工具额度取得合法来源，必须实际调用对应媒体发送工具，"
-    "并以工具成功结果为准；不得用普通文字假装附件已经发出。"
-    "若经过有界尝试仍不能确认媒体发送成功，最终普通文本必须以 [MEDIA_UNAVAILABLE] 开头，"
-    "如实说明本轮未能发送，不得承诺下一轮必然成功；失败说明不得通过 send_text 或其他发送工具发送。"
+    "The user requested media but none was confirmed. Prepare the needed resource if absent, then call send_msg "
+    "with its media_ref. You choose whether text belongs in that same chain or in separate calls. Prepared is not "
+    "sent. Reuse existing prepared resources instead of regenerating. If delivery remains unavailable, return honest "
+    "final text starting with [MEDIA_UNAVAILABLE], never claim an attachment was sent."
 )
 _REFERENCE_EDIT_RECOVERY_SUFFIX = (
-    "当前用户明确要求从公开网页取得真实视觉参考后完成图片修改。"
-    "上一条候选回复没有通过 edit_image 确认发送合格结果，因此不可直接交付。"
-    "必须先用 web_search/read_web_page 选择公开来源，再调用 capture_web_reference 私下抓取并检查视觉描述，"
-    "确认与目标一致后把返回的 image_ref 传给 edit_image。generate_image 和模型原生图片输出不能满足本轮要求。"
-    "若在剩余有界额度内无法取得可靠参考或 edit_image 未确认发送，"
-    "最终普通文本必须以 [MEDIA_UNAVAILABLE] 开头并如实说明失败。"
+    "This turn requires an edit using real captured web references. Obtain authorized references through "
+    "capture_web_reference, prepare the edited source with edit_image, and confirm it through send_msg. "
+    "Use an already prepared edited resource when present. Native or newly generated unrelated images do not "
+    "satisfy this request. If unavailable, return honest final text starting with [MEDIA_UNAVAILABLE]."
 )
 _IMAGE_EDIT_RECOVERY_SUFFIX = (
-    "当前用户明确要求修改本轮提供的图片。"
-    "上一条候选回复没有通过 edit_image 确认发送合格结果，因此不可直接交付。"
-    "必须调用 edit_image，把本轮用户图片作为源图，只修改用户指定部分并保留其他构图细节。"
-    "generate_image 和模型原生图片输出不能冒充源图编辑结果。"
-    "若在剩余有界额度内 edit_image 仍未确认发送，"
-    "最终普通文本必须以 [MEDIA_UNAVAILABLE] 开头并如实说明失败。"
+    "This turn requires editing the provided source image. Prepare it with edit_image, then send its media_ref "
+    "through send_msg, alone or with your explanation. Use already prepared results rather than regenerating. "
+    "Native or unrelated generated images cannot replace the edit. If unavailable, return honest final text "
+    "starting with [MEDIA_UNAVAILABLE]."
 )
 _MODERATION_RECOVERY_SUFFIX = (
     "上一次请求没有返回可用候选。此次恢复只包含最新用户轮次，历史对话、画像、记忆、会话交接和图片像素均未提供。"
@@ -386,6 +382,9 @@ async def _recover_requested_media(
         warning = "requested media was not confirmed; retrying once with tools"
         recovery_suffix = _MEDIA_RECOVERY_SUFFIX
     _LOGGER.warning(warning)
+    prepared = list_prepared_media()
+    if prepared:
+        recovery_suffix += "\nPrepared resources (not sent): " + json.dumps(prepared, ensure_ascii=False)
     try:
         with agno_tool_call_limit_scope(_MEDIA_RECOVERY_TOOL_CALL_LIMIT):
             response = cast(
@@ -416,7 +415,7 @@ async def _recover_requested_media(
         if image_edit_references.edit_confirmed:
             _suppress_native_images(response)
             return response
-    elif delivery_state.confirmed_media_deliveries > 0 or response_images(response):
+    elif delivery_state.confirmed_media_deliveries > 0:
         return response
     if is_media_unavailable_reply(response_content(response)):
         return response
@@ -472,22 +471,24 @@ async def generate_chat_response(
         or active_image_edit_references.requires_web_reference
         or (image_edit_requested and active_image_edit_references.source_image_count > 0)
     )
-    with (
-        turn_resolution_scope(resolution or TurnResolution()),
-        agno_tool_call_limit_scope(tool_call_limit),
-        agno_delivery_tool_scope(),
-        llm_chat_web_access_scope(
-            web_limits,
-            allow_webpage_screenshots=webpage_screenshot_requested,
-            allow_reference_capture=active_image_edit_references.requires_web_reference,
-        ),
-        llm_chat_delivery_scope(delivery_state),
-        llm_chat_tool_trace_scope(active_tool_trace),
-        llm_chat_context_scope(ctx),
-        llm_chat_channel_image_scope(active_channel_image_references),
-        llm_chat_image_edit_scope(active_image_edit_references),
-        agent_access_scope(agent_access) if agent_access is not None else nullcontext(),
-    ):
+    async with AsyncExitStack() as scopes:
+        scopes.enter_context(turn_resolution_scope(resolution or TurnResolution()))
+        scopes.enter_context(agno_tool_call_limit_scope(tool_call_limit))
+        scopes.enter_context(agno_delivery_tool_scope())
+        scopes.enter_context(
+            llm_chat_web_access_scope(
+                web_limits,
+                allow_webpage_screenshots=webpage_screenshot_requested,
+                allow_reference_capture=active_image_edit_references.requires_web_reference,
+            )
+        )
+        scopes.enter_context(llm_chat_delivery_scope(delivery_state))
+        scopes.enter_context(llm_chat_tool_trace_scope(active_tool_trace))
+        scopes.enter_context(llm_chat_context_scope(ctx))
+        scopes.enter_context(llm_chat_channel_image_scope(active_channel_image_references))
+        scopes.enter_context(llm_chat_image_edit_scope(active_image_edit_references))
+        scopes.enter_context(agent_access_scope(agent_access) if agent_access is not None else nullcontext())
+        await scopes.enter_async_context(prepared_media_scope())
         response: GenericResponse[None] | None = None
         response_context = messages
         try:
@@ -568,9 +569,8 @@ async def generate_chat_response(
                     agent_events=agent_events,
                     tool_trace=active_tool_trace,
                 )
-            if native_images:
-                return response
-            if media_requested and (
+            native_prepared = any(item.get("source_tool") == "native_image" for item in list_prepared_media())
+            if (media_requested or native_prepared) and (
                 delivery_state.confirmed_media_deliveries == 0
                 or (
                     active_image_edit_references.requires_image_edit and not active_image_edit_references.edit_confirmed

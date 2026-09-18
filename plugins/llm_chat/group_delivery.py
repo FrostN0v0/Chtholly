@@ -139,7 +139,8 @@ async def send_group_delivery(
     *,
     delay_seconds: float | None = None,
     texts: Sequence[str] = (),
-    media: bool = False,
+    media: bool | int = False,
+    text_message: bool | None = None,
 ) -> bool:
     """Schedule prepared content only; preserve the caller's audit and authorization context."""
     turn = _turn_for(session)
@@ -185,7 +186,7 @@ async def send_group_delivery(
                     mark_delivery_attempt(state)
                 raise
             if state is not None:
-                mark_delivery_success(state, texts, media=media)
+                mark_delivery_success(state, texts, media=media, text_message=text_message)
             turn.last_send = turn.runtime.clock()
             if quoted:
                 turn.pending_attribution = False

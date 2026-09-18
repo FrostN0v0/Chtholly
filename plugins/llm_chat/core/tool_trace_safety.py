@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import json
 import math
 from typing import cast
@@ -17,6 +18,12 @@ MAX_WEB_SOURCES = 5
 _MAX_COLLECTION_ITEMS = 20
 _MAX_NESTING_DEPTH = 4
 _REDACTED = "[REDACTED]"
+_EPHEMERAL_REFERENCE = re.compile(
+    r"(?<!\w)(?:media_[0-9a-f]{32}|participant_[0-9a-f]{10}|web_ref_[0-9a-f]{24}|"
+    r"(?:input|reference|output)_[0-9a-f]{32})(?!\w)",
+    re.IGNORECASE,
+)
+_MENTION_MARKUP = re.compile(r"<at\b[^>]*?/?>", re.IGNORECASE)
 _SENSITIVE_KEY_PARTS = (
     "api_key",
     "apikey",
@@ -26,6 +33,13 @@ _SENSITIVE_KEY_PARTS = (
     "credential",
     "password",
     "secret",
+    "media_ref",
+    "participant_ref",
+    "participant_id",
+    "user_id",
+    "channel_id",
+    "account_id",
+    "self_id",
 )
 
 
@@ -64,6 +78,9 @@ def compact_tool_activity(
 
 def sanitize_json(value: object, *, max_text: int, depth: int = 0) -> JSONType:
     """Convert arbitrary boundary data to bounded redacted JSON values."""
+
+    if isinstance(value, Mapping) and value.get("type") == "mention":
+        return {"type": "mention", "target": "current_user" if value.get("target") == "current_user" else "participant"}
 
     if value is None or isinstance(value, (bool, int)):
         return value
@@ -157,10 +174,57 @@ def compact_text(value: object, limit: int) -> str:
         return ""
     if not isinstance(value, (str, int, float, bool)):
         return ""
-    normalized = " ".join(str(value).split())
+    normalized = " ".join(redact_reference_text(str(value)).split())
     if len(normalized) <= limit:
         return normalized
     return f"{normalized[: limit - 1]}…"
+
+
+def redact_reference_text(value: str) -> str:
+    """Remove generation capabilities even when embedded in free text or JSON strings."""
+
+    return _MENTION_MARKUP.sub(_REDACTED, _EPHEMERAL_REFERENCE.sub(_REDACTED, value))
+
+
+def project_message_arguments(arguments: Mapping[str, object], *, max_text: int) -> dict[str, JSONType]:
+    """Describe ordered composition without retaining reusable media or identity capabilities."""
+
+    raw_segments = arguments.get("segments")
+    segments = raw_segments if isinstance(raw_segments, list) else []
+    projected: list[JSONType] = []
+    text_chars = mention_count = media_count = 0
+    for segment in segments:
+        if not isinstance(segment, Mapping):
+            continue
+        kind = segment.get("type")
+        if not isinstance(kind, str) or kind not in {"text", "mention", "link", "emoji", "media", "break", "style"}:
+            continue
+        item: dict[str, JSONType] = {"type": kind}
+        if kind in {"text", "link", "style"}:
+            text = segment.get("text")
+            text_chars += text_length(text)
+            item["text"] = redact_reference_text(text)[:max_text] if isinstance(text, str) else ""
+        if kind == "mention":
+            mention_count += 1
+            item["target"] = "current_user" if segment.get("target") == "current_user" else "participant"
+        elif kind == "media":
+            media_count += 1
+        elif kind == "link":
+            item["url"] = safe_url(segment.get("url"))
+        elif kind == "style":
+            item["style"] = compact_text(segment.get("style"), 32)
+        elif kind == "emoji":
+            item["id"] = compact_text(segment.get("id"), 80)
+        if len(projected) < _MAX_COLLECTION_ITEMS:
+            projected.append(item)
+    return {
+        "segments": projected,
+        "segments_truncated": len(segments) > _MAX_COLLECTION_ITEMS,
+        "text_chars": text_chars,
+        "mention_count": mention_count,
+        "media_count": media_count,
+        **selected_arguments(arguments, "delay_seconds"),
+    }
 
 
 def text_length(value: object) -> int:

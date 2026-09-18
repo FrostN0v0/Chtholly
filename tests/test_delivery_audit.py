@@ -119,7 +119,7 @@ async def test_rendered_png_and_text_keep_actual_receipt_time_and_private_bytes(
     with delivery_audit.delivery_audit_scope(transport.session, warnings.append, attachment_root=tmp_path) as audit:
         audit.bind(recorder)
         clock[0] = 6.0
-        with llm_chat_tool_execution_scope("markdown2pic-execution"):
+        with llm_chat_tool_execution_scope("send_msg-execution"):
             result = await transport.session.send(MessageChain([Custom("audit-renderer")]))
         await audit.drain()
         first = _deliveries(recorder)[0]
@@ -133,7 +133,7 @@ async def test_rendered_png_and_text_keep_actual_receipt_time_and_private_bytes(
         assert path.read_bytes() == _PNG
         assert path.name.startswith("output_")
         assert attachment["mime"] == "image/png"
-        assert first.execution_ref == "markdown2pic-execution"
+        assert first.execution_ref == "send_msg-execution"
         assert first.payload["content"] == "[图片 1]rendered caption"
         assert "<img" in transport.state.wire[0]["content"]
         clock[0] = 70.0

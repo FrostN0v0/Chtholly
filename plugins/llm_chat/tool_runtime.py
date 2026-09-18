@@ -35,44 +35,42 @@ from .meme_store import import_meme_image
 from .perception import get_channel_perception
 from .tools._tts import TTSServiceLike
 from .agno_compat import register_llm_chat_tool
-from .tools.speak import SpeakToolContext, register_speak
 from .chat_context import collect_message_images
 from .core.delivery import (
     DeliveryError as DeliveryError,
     DeliveryState as DeliveryState,
     reserve_media_message as reserve_media_message,
 )
-from .persona.store import append_message
 from .tools.support import audio_mime_type
+from .prepared_media import list_prepared_media as _list_prepared_media
 from .tools.html2pic import register_html2pic
+from .tools.send_msg import SendMsgToolContext, register_send_msg
 from .tools.workshop import register_workshop_tools
 from .tools.artifacts import register_artifact_tools
 from .tools.jinja2pic import register_jinja2pic
-from .tools.send_text import SendTextToolContext, register_send_text
 from .tools.tag_image import TagImageToolContext, register_tag_image, cancel_pending_image_collections
 from .tools._rendering import RenderToolContext
 from .tools.edit_image import ImageEditToolContext, register_edit_image
-from .tools.send_audio import AudioToolContext, register_send_audio
-from .tools.send_image import ImageToolContext, register_send_image
 from .core.image_source import raw_to_image_data_url
 from .tools.call_plugin import CommandToolContext, register_call_plugin
 from .tools.finish_turn import register_finish_turn
 from .tools.pin_context import register_pin_context
 from .tools.markdown2pic import register_markdown2pic
+from .tools._registration import register_tool
 from .tools.list_sessions import register_list_sessions
+from .tools.prepare_audio import AudioToolContext, register_prepare_audio
+from .tools.prepare_image import ImageToolContext, register_prepare_image
 from .tools._image_catalog import ImageCatalog
 from .tools.generate_image import ImageGenerationToolContext, register_generate_image
 from .tools.get_local_time import LocalTimeToolContext, register_get_local_time
 from .tools.list_tts_voices import TTSVoiceToolContext, register_list_tts_voices
 from .tools.read_agent_event import register_read_agent_event
-from .tools.send_channel_image import ChannelImageToolContext, register_send_channel_image
+from .tools.synthesize_speech import SpeakToolContext, register_synthesize_speech
 from .tools.read_tool_execution import register_read_tool_execution
 from .tools.screenshot_web_page import (
     WebScreenshotToolContext,
     register_screenshot_web_page,
 )
-from .tools.send_external_image import ExternalImageToolContext, register_send_external_image
-from .tools.send_merged_forward import MergedForwardToolContext, register_send_merged_forward
 from .tools.list_image_resources import register_list_image_resources
 from .tools.list_tool_executions import register_list_tool_executions
 from .tools.read_session_handoff import register_read_session_handoff
@@ -81,8 +79,11 @@ from .tools.capture_web_reference import (
     WebReferenceToolContext,
     register_capture_web_reference,
 )
+from .tools.prepare_channel_image import ChannelImageToolContext, register_prepare_channel_image
 from .tools.read_channel_messages import register_read_channel_messages
 from .tools.describe_channel_image import ChannelImageDescriptionContext, register_describe_channel_image
+from .tools.prepare_external_media import ExternalImageToolContext, register_prepare_external_media
+from .tools.prepare_merged_forward import register_prepare_merged_forward
 from .tools.find_channel_participants import register_find_channel_participants
 from .tools.describe_channel_participant_avatar import register_describe_channel_participant_avatar
 
@@ -100,34 +101,40 @@ image_context = ImageToolContext(
     config=config,
     catalog=image_catalog,
     pick_image=pick_image,
-    append_history=append_message,
     warn=lambda message: _LOGGER.warning(message),
 )
-send_image = register_send_image(tools, image_context)
-registered_tools.append("send_image")
+prepare_image = register_prepare_image(tools, image_context)
+registered_tools.append("prepare_image")
 
 
 async def _resolve_text_mention(session: Session, participant_ref: str):
     return await get_channel_perception().refresh_participant(session, participant_ref)
 
 
-send_text_context = SendTextToolContext(resolve_participant=_resolve_text_mention)
-send_text = register_send_text(tools, send_text_context)
-registered_tools.append("send_text")
+send_msg_context = SendMsgToolContext(resolve_participant=_resolve_text_mention)
+send_msg = register_send_msg(tools, send_msg_context)
+registered_tools.append("send_msg")
 
-merged_forward_context = MergedForwardToolContext(warn=lambda message: _LOGGER.warning(message))
-send_merged_forward = register_send_merged_forward(tools, merged_forward_context)
-registered_tools.append("send_merged_forward")
+
+async def list_prepared_media() -> dict[str, JSONType]:
+    """List this generation's prepared but unsent media; use refs with send_msg, never show them to users."""
+    return {"media": list[JSONType](_list_prepared_media())}
+
+
+prepared_media_listing = register_tool(tools, list_prepared_media)
+registered_tools.append("list_prepared_media")
+
+prepare_merged_forward = register_prepare_merged_forward(tools)
+registered_tools.append("prepare_merged_forward")
 
 list_image_resources = register_list_image_resources(tools, image_catalog)
 registered_tools.append("list_image_resources")
 
 external_image_context = ExternalImageToolContext(
-    append_history=append_message,
     warn=lambda message: _LOGGER.warning(message),
 )
-send_external_image = register_send_external_image(tools, external_image_context)
-registered_tools.append("send_external_image")
+prepare_external_media = register_prepare_external_media(tools, external_image_context)
+registered_tools.append("prepare_external_media")
 
 
 def _resolve_image_generation_model(channel_id: str):
@@ -150,7 +157,6 @@ if config.image_generation_model:
     image_generation_context = ImageGenerationToolContext(
         resolve_model=_resolve_image_generation_model,
         generate=_generate_image_provider,
-        append_history=append_message,
         warn=lambda message: _LOGGER.warning(message),
         timeout_seconds=max(1.0, float(config.image_generation_timeout)),
         quality=config.image_generation_quality,
@@ -163,7 +169,6 @@ if config.image_generation_model:
     image_edit_context = ImageEditToolContext(
         resolve_model=_resolve_image_generation_model,
         edit=_edit_image_provider,
-        append_history=append_message,
         warn=lambda message: _LOGGER.warning(message),
         timeout_seconds=max(1.0, float(config.image_generation_timeout)),
         quality=config.image_generation_quality,
@@ -180,7 +185,6 @@ def _get_html_renderer() -> HtmlRenderer:
 
 render_context = RenderToolContext(
     get_renderer=_get_html_renderer,
-    append_history=append_message,
     warn=lambda message: _LOGGER.warning(message),
     template_root=RENDER_TEMPLATE_DIR,
 )
@@ -231,7 +235,6 @@ async def _describe_web_reference(data: bytes, purpose: str) -> ReferenceInspect
 
 web_screenshot_context = WebScreenshotToolContext(
     get_browser=_get_browser_service,
-    append_history=append_message,
     warn=lambda message: _LOGGER.warning(message),
     read_limit=max(0, config.web_page_max_calls_per_generation),
     total_limit=max(0, config.web_total_max_calls_per_generation),
@@ -274,11 +277,10 @@ registered_tools.append("describe_channel_image")
 
 channel_image_context = ChannelImageToolContext(
     get_perception=get_channel_perception,
-    append_history=append_message,
     warn=_LOGGER.warning,
 )
-send_channel_image = register_send_channel_image(tools, channel_image_context)
-registered_tools.append("send_channel_image")
+prepare_channel_image = register_prepare_channel_image(tools, channel_image_context)
+registered_tools.append("prepare_channel_image")
 
 describe_channel_participant_avatar = register_describe_channel_participant_avatar(
     tools,
@@ -287,10 +289,10 @@ describe_channel_participant_avatar = register_describe_channel_participant_avat
 )
 registered_tools.append("describe_channel_participant_avatar")
 
-audio_context = AudioToolContext(audio_dir=DINGGONG_DIR, append_history=append_message)
-if registered := register_send_audio(tools, audio_context):
-    send_audio = registered
-    registered_tools.append("send_audio")
+audio_context = AudioToolContext(audio_dir=DINGGONG_DIR)
+if registered := register_prepare_audio(tools, audio_context):
+    prepare_audio = registered
+    registered_tools.append("prepare_audio")
 
 
 def _get_tts_service() -> TTSServiceLike:
@@ -309,11 +311,10 @@ speak_context = SpeakToolContext(
     config=config,
     get_service=_get_tts_service,
     make_audio=lambda audio, suffix: Audio.of(raw=audio, mime=audio_mime_type(suffix)),
-    append_history=append_message,
 )
-if registered := register_speak(tools, speak_context):
-    speak = registered
-    registered_tools.append("speak")
+if registered := register_synthesize_speech(tools, speak_context):
+    synthesize_speech = registered
+    registered_tools.append("synthesize_speech")
 
 
 async def _execute_command(command_line: str, session: Session) -> object:

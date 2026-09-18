@@ -98,8 +98,9 @@ async def test_agent_sessions_api_exposes_timeline_context_payload_and_safe_rese
         tool_name="edit_image",
         execution_ref="exec_edit",
         status="succeeded",
-        effect="confirmed",
+        effect="none",
         payload={
+            "result": {"status": "prepared", "kind": "image", "bytes": len(output_bytes)},
             "evidence": {
                 "attachments": [
                     {
@@ -120,7 +121,7 @@ async def test_agent_sessions_api_exposes_timeline_context_payload_and_safe_rese
                         "label": "Edited image result",
                     },
                 ]
-            }
+            },
         },
         model_visible=True,
     )
@@ -129,7 +130,7 @@ async def test_agent_sessions_api_exposes_timeline_context_payload_and_safe_rese
     await session_manager.finish_turn(turn.id, status="completed", final_text="hi")
     service = AgentAdminService(
         LLMChatConfig(),
-        [{"name": "send_text", "source_hash": "send"}, {"name": "web_search", "source_hash": "web"}],
+        [{"name": "send_msg", "source_hash": "send"}, {"name": "web_search", "source_hash": "web"}],
         attachment_root=tmp_path,
     )
     app = FastAPI()
@@ -201,11 +202,9 @@ async def test_agent_sessions_api_exposes_timeline_context_payload_and_safe_rese
             assert inspection["usage"]["source"] == "not_recorded"
             assert inspection["tool_calls"][0]["result_event_ref"] == events[2]["event_ref"]
             assert [output["event_ref"] for output in inspection["outputs"]] == [
-                events[2]["event_ref"],
                 events[3]["event_ref"],
             ]
             assert all(output["source"] == "legacy_incomplete" for output in inspection["outputs"])
-            assert [image["url"] for image in inspection["outputs"][0]["images"]] == [edit_images[1]["url"]]
             detail = (await client.get(f"/api/llm-chat/sessions/sessions/{context_session.session_ref}")).json()["item"]
             assert detail["context"]["estimated_tokens"] == 100
             assert detail["context"]["max_input_tokens"] is None
@@ -438,8 +437,8 @@ async def test_confirmed_delivery_inspection_preserves_prefix_and_receipt_author
     )
     tool = recorder.append(
         "tool_result",
-        tool_name="markdown2pic",
-        execution_ref="render",
+        tool_name="send_msg",
+        execution_ref="send-message",
         status="succeeded",
         effect="unknown",
         payload={"evidence": {"attachments": [{"attachment_ref": reference_ref, "mime": "image/png"}]}},
@@ -447,7 +446,7 @@ async def test_confirmed_delivery_inspection_preserves_prefix_and_receipt_author
     image_delivery = recorder.append(
         "message_delivery",
         role="assistant",
-        execution_ref="render",
+        execution_ref="send-message",
         status="confirmed",
         effect="confirmed",
         duration_ms=3000,
@@ -1019,7 +1018,7 @@ async def test_relationship_evidence_navigation_survives_identity_migration_with
     [
         ("delivered", {"text_messages": 0, "media_messages": 1, "confirmed_deliveries": 1}, "media_only"),
         ("delivered", {"text_messages": 1, "media_messages": 0, "confirmed_deliveries": 1}, "text"),
-        ("delivered", {"text_messages": 1, "media_messages": 1, "confirmed_deliveries": 2}, "mixed"),
+        ("delivered", {"text_messages": 1, "media_messages": 1, "confirmed_deliveries": 1}, "mixed"),
         ("silent", {"text_messages": 0, "media_messages": 0, "confirmed_deliveries": 0}, "silent"),
         ("declined", {"text_messages": 1, "media_messages": 0, "confirmed_deliveries": 1}, "refusal"),
         ("declined", {"text_messages": 0, "media_messages": 0, "confirmed_deliveries": 0}, "unknown"),

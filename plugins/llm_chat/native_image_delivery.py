@@ -1,4 +1,4 @@
-"""Current-response native images across Agno pause/continue and confirmed delivery."""
+"""Capture native provider images for explicit model-controlled message composition."""
 
 from __future__ import annotations
 
@@ -57,32 +57,33 @@ class NativeImageBuffer:
         if self.failed:
             raise NativeImageDeliveryError("Native image delivery failed; do not replay the confirmed prefix")
 
-    async def deliver(self) -> None:
+    async def prepare(self) -> None:
         self.check()
         if not self.images:
             return
         if self.closed or self.sender is None:
             self.failed = True
-            raise NativeImageDeliveryError("Native images require an active confirmed-delivery boundary")
+            raise NativeImageDeliveryError("Native images require an active media preparation boundary")
         batch = _ImageBatch(tuple(self.images))
-        # Consume before awaiting: cancellation and unknown receipts must never replay this batch.
         self.images.clear()
         try:
             if not await self.sender(batch):
-                raise NativeImageDeliveryError("Native image delivery was not confirmed")
+                raise NativeImageDeliveryError("Native images could not be prepared")
         except BaseException:
             self.failed = True
             raise
 
     async def complete(self, response: object) -> None:
+        from .core.native_images import extract_native_images
+
         self.check()
         if self.owner is None:
-            return
-        if self.sender is not None:
-            await self.deliver()
-        # This is the existing extraction cache, not an alternative history or image store.
-        setattr(response, "_llm_chat_native_images", tuple(self.images))
-        self.images.clear()
+            images = extract_native_images(response)
+            if images:
+                self.capture(self, images)
+        await self.prepare()
+        # The actual bytes live only in the generation registry, never response replay.
+        setattr(response, "_llm_chat_native_images", ())
 
 
 _SENDER: ContextVar[NativeImageSender | None] = ContextVar("llm_chat_native_image_sender", default=None)
@@ -115,10 +116,10 @@ def capture_native_images(owner: object, images: tuple[Image, ...]) -> bool:
     return buffer.capture(owner, images) if buffer is not None else False
 
 
-async def send_pending_native_images() -> None:
+async def prepare_pending_native_images() -> None:
     buffer = _BUFFER.get()
     if buffer is not None:
-        await buffer.deliver()
+        await buffer.prepare()
 
 
 def discard_pending_native_images() -> None:

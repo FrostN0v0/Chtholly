@@ -7,7 +7,7 @@ import asyncio
 from dataclasses import field, dataclass
 from collections.abc import Callable, Sequence, Awaitable
 
-from arclet.entari import Session, MessageChain
+from arclet.entari import Session
 
 from .core.media import strip_internal_media_records
 from .core.delivery import (
@@ -16,13 +16,16 @@ from .core.delivery import (
     render_delivered_text,
     reserve_final_text_messages,
     strip_trailing_end_of_response,
-    reserve_media_messages_for_state,
 )
+from .prepared_media import ensure_media_capacity
 from .core.tool_trace import ToolTraceRecorder
 from .tools._delivery import send_with_delivery
 from .core.agent_trace import AgentEventDraft, AgentTurnRecorder
-from .core.native_images import to_entari_image, extract_native_images
+from .tools._rendering import prepare_image_bytes
+from .core.image_source import IMAGE_FETCH_MAX_BYTES
+from .core.native_images import extract_native_images
 from .core.media_delivery import strip_media_unavailable_marker
+from .tools.prepare_external_media import fetch_public_media
 
 HistoryAppender = Callable[[str, str, str, str, str], Awaitable[object]]
 HistoryDeleter = Callable[[int], Awaitable[object]]
@@ -133,42 +136,23 @@ class ActiveChatTurn:
         await self.persist_delivered_text(preserve_original=True)
         await self.rollback_if_unstarted()
 
-    async def deliver_model_images(self, session: Session, response: object) -> bool:
-        """Deliver safe native model images before any final text."""
-
+    async def prepare_model_images(self, session: Session, response: object) -> bool:
+        """Prepare native model output for send_msg without claiming delivery."""
         images = extract_native_images(response)
         if not images:
             return True
-        try:
-            reserve_media_messages_for_state(self.delivery_state, len(images))
-        except DeliveryError:
-            await self.preserve_and_rollback()
-            raise
-        total = len(images)
-        for index, image in enumerate(images):
-            try:
-                payload = MessageChain([to_entari_image(image)])
-                await send_with_delivery(session, payload, self.delivery_state, media=True)
-            except asyncio.CancelledError:
-                await self.persist_delivered_text(preserve_original=True)
-                raise
-            except Exception:
-                await self.persist_delivered_text(preserve_original=True)
-                if not self.delivery_state.delivery_attempts:
-                    await self.rollback_if_unstarted()
-                if index:
-                    raise DeliveryError(
-                        f"native image delivery confirmed {index}/{total} images before failure; "
-                        "do not repeat the confirmed prefix"
-                    ) from None
-                raise
-            self.agent_events.record_assistant_output("[发送了图片]")
-            try:
-                await self.append_history(self.channel_id, "", "bot", "assistant", "[发送了图片]")
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self.warn(f"native image delivery history failed: {type(exc).__name__}")
+        data: list[bytes] = []
+        for image in images:
+            if image.content is not None:
+                data.append(image.content)
+            elif image.url is not None:
+                raw = await fetch_public_media(image.url, max_bytes=IMAGE_FETCH_MAX_BYTES)
+                data.append(raw)
+            else:
+                raise DeliveryError("Native image has no usable content")
+        ensure_media_capacity(len(data), byte_count=sum(map(len, data)))
+        for raw in data:
+            await prepare_image_bytes(session, raw, warn=self.warn, tool_name="native_image")
         return True
 
     async def deliver_model_reply(self, session: Session, raw_reply: str) -> bool:

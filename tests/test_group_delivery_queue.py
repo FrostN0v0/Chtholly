@@ -74,14 +74,14 @@ async def test_ready_bursts_rotate_whole_turns_without_starving_a_third_particip
         await queue.wait_closed()
 
 
-async def test_turn_switch_and_standalone_fourth_message_start_new_quoted_groups() -> None:
+async def test_turn_switch_requotes_but_standalone_fourth_message_does_not() -> None:
     queue = DeliveryQueue()
     a, b = object(), object()
     replies = []
     for turn in (a, b, b, b, b):
         async with queue.slot(turn, interval=0) as permit:
             replies.append(permit.reply)
-    assert replies == [True, True, False, False, True]
+    assert replies == [True, True, False, False, False]
     queue.close()
     await queue.wait_closed()
 
@@ -131,7 +131,7 @@ async def test_time_quantum_starts_at_first_transport_not_at_its_completion() ->
     await queue.wait_closed()
 
 
-async def test_in_flight_interruption_and_idle_gap_each_require_a_fresh_quote() -> None:
+async def test_interruption_requires_a_fresh_quote_but_elapsed_time_does_not() -> None:
     clock = Clock()
     queue = DeliveryQueue(clock=clock, sleep=clock.sleep, max_group_seconds=100)
     turn = object()
@@ -143,7 +143,7 @@ async def test_in_flight_interruption_and_idle_gap_each_require_a_fresh_quote() 
         assert not continuous.reply
     clock.advance(8.0)
     async with queue.slot(turn, interval=0) as resumed:
-        assert resumed.reply
+        assert not resumed.reply
     queue.close()
     await queue.wait_closed()
 

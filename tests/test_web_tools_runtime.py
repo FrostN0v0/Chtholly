@@ -43,6 +43,7 @@ from utils.turn_resolution_core import TurnResolution
 from plugins.llm_chat.web.policy import WebAccessLimits, llm_chat_web_access_scope
 from utils.llm_model_core.snapshot import pin_main_model, main_model_scope
 from plugins.llm_chat.core.delivery import llm_chat_delivery_scope
+from plugins.llm_chat.prepared_media import prepare_media, resolve_media, list_prepared_media, prepared_media_scope
 from plugins.llm_chat.core.tool_trace import (
     ToolTraceRecorder,
     llm_chat_tool_trace_scope,
@@ -230,7 +231,7 @@ class _DeliveryToolSession(Session[Any]):
         if attempt in self.fail_attempts:
             raise RuntimeError("sanitized transport failure")
         self.sent.append(message)
-        return []
+        return [SimpleNamespace(id=f"message-{attempt}")]
 
 
 class _FakeHtmlRenderer:
@@ -295,6 +296,13 @@ def _tool_context(session: Session[Any]) -> Contexts:
     return context
 
 
+@asynccontextmanager
+async def _prepared_delivery_scope(state):
+    with llm_chat_delivery_scope(state):
+        async with prepared_media_scope():
+            yield state
+
+
 def _tool_callable(module: ModuleType, name: str) -> Callable[..., Any]:
     registered = getattr(module, name)
     return cast(Callable[..., Any], getattr(registered, "callable_target", registered))
@@ -347,7 +355,7 @@ def _load_local_modules() -> Iterator[SimpleNamespace]:
         channel_images = importlib.import_module("plugins.llm_chat.channel_images")
         participant_tools = importlib.import_module("plugins.llm_chat.tools.find_channel_participants")
         history_tools = importlib.import_module("plugins.llm_chat.tools.read_channel_messages")
-        channel_image_tools = importlib.import_module("plugins.llm_chat.tools.send_channel_image")
+        channel_image_tools = importlib.import_module("plugins.llm_chat.tools.prepare_channel_image")
         description_tools = importlib.import_module("plugins.llm_chat.tools.describe_channel_image")
         avatar_tools = importlib.import_module("plugins.llm_chat.tools.describe_channel_participant_avatar")
         yield SimpleNamespace(
@@ -503,7 +511,7 @@ def _model_response(
 
 def _install_completion_script(
     monkeypatch: pytest.MonkeyPatch,
-    script: Sequence[litellm.ModelResponse | BaseException],
+    script: Sequence[litellm.ModelResponse | BaseException | Callable[[dict[str, Any]], litellm.ModelResponse]],
 ) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
     index = 0
@@ -517,7 +525,7 @@ def _install_completion_script(
         index += 1
         if isinstance(item, BaseException):
             raise item
-        return item
+        return item(payload) if callable(item) else item
 
     monkeypatch.setattr(llm_service_module.litellm, "acompletion", scripted_acompletion)
     monkeypatch.setattr(
@@ -600,7 +608,7 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[object, ...]] = []
-    history_rows: list[tuple[str, str, str, str, str]] = []
+    state = local_modules.delivery.DeliveryState()
     warnings: list[str] = []
     described_sources: list[str] = []
     avatar_hash = sha256(_PNG_BYTES).hexdigest()
@@ -663,6 +671,8 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
     class ToolSession:
         def __init__(self) -> None:
             self.channel = SimpleNamespace(id="channel-1")
+            self.user = SimpleNamespace(id="user")
+            self.account = SimpleNamespace(platform="onebot", self_id="bot")
             self.downloads: list[str] = []
             self.sent: list[object] = []
 
@@ -678,10 +688,6 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
         described_sources.append(source)
         return "a blue chart"
 
-    async def append_history(channel_id: str, user_id: str, name: str, role: str, content: str) -> object:
-        history_rows.append((channel_id, user_id, name, role, content))
-        return object()
-
     monkeypatch.setattr(local_modules.description_tools, "describe_image", describe_image)
     perception = PerceptionStub()
     session = cast(Any, ToolSession())
@@ -691,7 +697,7 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
 
     config = local_modules.config.LLMChatConfig(channel_message_max_images=4)
     references = local_modules.channel_images.ChannelImageReferences()
-    async with _temporary_plugin() as harness:
+    async with _temporary_plugin() as harness, _prepared_delivery_scope(state):
         find_registered = local_modules.participant_tools.register_find_channel_participants(
             harness.dispatcher,
             provider,
@@ -708,11 +714,10 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
                 get_perception=provider,
             ),
         )
-        send_image_registered = local_modules.channel_image_tools.register_send_channel_image(
+        prepare_image_registered = local_modules.channel_image_tools.register_prepare_channel_image(
             harness.dispatcher,
             local_modules.channel_image_tools.ChannelImageToolContext(
                 get_perception=provider,
-                append_history=append_history,
                 warn=warnings.append,
             ),
         )
@@ -746,11 +751,11 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
             message_description = json.loads(
                 await describe_registered.callable_target(image_ref=message_image_ref, session=session)
             )
-            message_send_result = await send_image_registered.callable_target(
+            message_prepared = await prepare_image_registered.callable_target(
                 image_ref=message_image_ref,
                 session=session,
             )
-            avatar_send_result = await send_image_registered.callable_target(
+            avatar_prepared = await prepare_image_registered.callable_target(
                 image_ref=avatar_result["image_ref"],
                 session=session,
             )
@@ -782,13 +787,10 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
         "https://example.com/channel-image.png",
         "https://example.com/avatar.png",
     ]
-    assert len(session.sent) == 2
-    assert "已发送 1 张群聊图片" in message_send_result
-    assert "已发送 1 张群聊图片" in avatar_send_result
-    assert history_rows == [
-        ("channel-1", "", "bot", "assistant", "[发送了图片]"),
-        ("channel-1", "", "bot", "assistant", "[发送了图片]"),
-    ]
+    assert session.sent == []
+    assert message_prepared["status"] == avatar_prepared["status"] == "prepared"
+    assert message_prepared["media_ref"] != avatar_prepared["media_ref"]
+    assert state.delivery_attempts == state.confirmed_media_deliveries == 0
     public_payload = json.dumps(history_result, ensure_ascii=False)
     assert "https://" not in public_payload
     assert avatar_hash not in json.dumps(avatar_result, ensure_ascii=False)
@@ -823,31 +825,29 @@ async def test_screenshot_web_page_uses_public_url_budget_and_confirmed_media_de
 ) -> None:
     baseline = _registry_snapshot()
 
-    async with _temporary_plugin(
-        config={
-            "tts_enabled": False,
-            "allowed_commands": [],
-            "web_search_enabled": False,
-            "web_page_max_calls_per_generation": 1,
-            "web_total_max_calls_per_generation": 1,
-        },
-        module_path=_TOOL_RUNTIME_PATH,
-    ) as harness:
+    async with (
+        _temporary_plugin(
+            config={
+                "tts_enabled": False,
+                "allowed_commands": [],
+                "web_search_enabled": False,
+                "web_page_max_calls_per_generation": 1,
+                "web_total_max_calls_per_generation": 1,
+            },
+            module_path=_TOOL_RUNTIME_PATH,
+        ) as harness,
+        prepared_media_scope(),
+    ):
         runtime = harness.module
         captures: list[tuple[object, str, str, int]] = []
-        markers: list[str] = []
 
         async def capture(browser: object, url: str, section: str, width: int) -> WebScreenshot:
             captures.append((browser, url, section, width))
             return WebScreenshot(data=_PNG_BYTES, matched_section="技能", truncated=False)
 
-        async def append_history(_channel: str, _user: str, _name: str, _role: str, content: str) -> None:
-            markers.append(content)
-
         browser = object()
         runtime.web_screenshot_context.get_browser = lambda: browser
         runtime.web_screenshot_context.capture = capture
-        runtime.web_screenshot_context.append_history = append_history
         session = _DeliveryToolSession()
         target = _tool_callable(runtime, "screenshot_web_page")
         state = runtime.DeliveryState()
@@ -879,15 +879,18 @@ async def test_screenshot_web_page_uses_public_url_budget_and_confirmed_media_de
                 "  技能  ",
                 1200,
             )
+            assert result["status"] == "prepared"
+            assert session.sent == []
+            assert state.delivery_attempts == state.media_messages == 0
+            await _tool_callable(runtime, "send_msg")(session, [{"type": "media", "media_ref": result["media_ref"]}])
             with pytest.raises(local_modules.web_access.WebAccessError, match="budget exhausted"):
                 await target(session, "https://prts.wiki/w/%E6%BE%84%E9%97%AA", "技能", 1200)
 
         assert captures == [(browser, "https://prts.wiki/w/%E6%BE%84%E9%97%AA", "技能", 1200)]
-        assert markers == ["[发送了图片]"]
+        assert state.delivered_texts == ["[发送了图片]"]
         assert len(session.sent) == 1
         assert cast(MessageChain, session.sent[0]).get(Image)[0].src.startswith("data:image/png;base64,")
         assert state.media_messages == state.confirmed_media_deliveries == 1
-        assert "Do not repeat" in result
 
         with pytest.raises(local_modules.web_access.WebAccessError, match="valid public URL"):
             await target(session, "http://127.0.0.1/internal", "", 1200)
@@ -922,31 +925,29 @@ async def test_screenshot_web_page_delivers_three_requested_operations_in_one_ge
 ) -> None:
     baseline = _registry_snapshot()
 
-    async with _temporary_plugin(
-        config={
-            "tts_enabled": False,
-            "allowed_commands": [],
-            "web_search_enabled": False,
-            "web_page_max_calls_per_generation": 24,
-            "web_total_max_calls_per_generation": 32,
-            "delivery_max_media_messages_per_generation": 6,
-        },
-        module_path=_TOOL_RUNTIME_PATH,
-    ) as harness:
+    async with (
+        _temporary_plugin(
+            config={
+                "tts_enabled": False,
+                "allowed_commands": [],
+                "web_search_enabled": False,
+                "web_page_max_calls_per_generation": 24,
+                "web_total_max_calls_per_generation": 32,
+                "delivery_max_media_messages_per_generation": 6,
+            },
+            module_path=_TOOL_RUNTIME_PATH,
+        ) as harness,
+        prepared_media_scope(),
+    ):
         runtime = harness.module
         captures: list[str] = []
-        markers: list[str] = []
 
         async def capture(_browser: object, _url: str, section: str, _width: int) -> WebScreenshot:
             captures.append(section)
             return WebScreenshot(data=_PNG_BYTES, matched_section=section, truncated=False)
 
-        async def append_history(_channel: str, _user: str, _name: str, _role: str, content: str) -> None:
-            markers.append(content)
-
         runtime.web_screenshot_context.get_browser = object
         runtime.web_screenshot_context.capture = capture
-        runtime.web_screenshot_context.append_history = append_history
         session = _DeliveryToolSession()
         target = _tool_callable(runtime, "screenshot_web_page")
         state = runtime.DeliveryState()
@@ -963,12 +964,19 @@ async def test_screenshot_web_page_delivers_three_requested_operations_in_one_ge
                 await target(session, f"https://prts.wiki/w/stage-{index}", section, 1280)
                 for index, section in enumerate(sections, start=1)
             ]
+            assert session.sent == []
+            assert state.media_messages == state.delivery_attempts == 0
+            assert all(result["status"] == "prepared" for result in results)
+            await _tool_callable(runtime, "send_msg")(
+                session, [{"type": "media", "media_ref": result["media_ref"]} for result in results]
+            )
 
         assert captures == list(sections)
-        assert len(session.sent) == 3
-        assert markers == ["[发送了图片]"] * 3
+        assert len(session.sent) == 1
+        assert len(cast(MessageChain, session.sent[0]).get(Image)) == 3
+        assert state.delivered_texts == ["[发送了图片]" * 3]
         assert state.media_messages == state.confirmed_media_deliveries == 3
-        assert all("Do not repeat" in result for result in results)
+        assert state.confirmed_deliveries == 1
 
         await harness.dispose()
         _assert_registry_matches(baseline)
@@ -1052,24 +1060,26 @@ async def test_generate_image_uses_dedicated_model_and_confirms_delivery(
 ) -> None:
     baseline = _registry_snapshot()
 
-    async with _temporary_plugin(
-        config={
-            "model": "opus5",
-            "image_generation_model": "image",
-            "image_generation_timeout": 123.0,
-            "image_generation_quality": "high",
-            "image_generation_output_format": "webp",
-            "image_generation_output_compression": 82,
-            "tts_enabled": False,
-            "allowed_commands": [],
-            "web_search_enabled": False,
-        },
-        module_path=_TOOL_RUNTIME_PATH,
-    ) as harness:
+    async with (
+        _temporary_plugin(
+            config={
+                "model": "opus5",
+                "image_generation_model": "image",
+                "image_generation_timeout": 123.0,
+                "image_generation_quality": "high",
+                "image_generation_output_format": "webp",
+                "image_generation_output_compression": 82,
+                "tts_enabled": False,
+                "allowed_commands": [],
+                "web_search_enabled": False,
+            },
+            module_path=_TOOL_RUNTIME_PATH,
+        ) as harness,
+        prepared_media_scope(),
+    ):
         runtime = harness.module
         target = _tool_callable(runtime, "generate_image")
         requests: list[dict[str, object]] = []
-        markers: list[str] = []
         warnings: list[str] = []
         resolved_channels: list[str] = []
 
@@ -1086,18 +1096,18 @@ async def test_generate_image_uses_dedicated_model_and_confirms_delivery(
             requests.append(dict(kwargs))
             return SimpleNamespace(data=[SimpleNamespace(b64_json=base64.b64encode(_PNG_BYTES).decode("ascii"))])
 
-        async def append_history(_channel: str, _user: str, _name: str, _role: str, content: str) -> None:
-            markers.append(content)
-
         monkeypatch.setattr(runtime.image_generation_context, "resolve_model", resolve_model)
         monkeypatch.setattr(runtime.image_generation_context, "generate", generate)
-        monkeypatch.setattr(runtime.image_generation_context, "append_history", append_history)
         monkeypatch.setattr(runtime.image_generation_context, "warn", warnings.append)
 
         session = _DeliveryToolSession()
         state = runtime.DeliveryState()
         with llm_chat_delivery_scope(state):
             result = await target(session, "  A blue glass bird above a quiet lake  ", "1536x1024")
+            assert result["status"] == "prepared"
+            assert session.sent == []
+            assert state.media_messages == state.delivery_attempts == 0
+            await _tool_callable(runtime, "send_msg")(session, [{"type": "media", "media_ref": result["media_ref"]}])
 
         assert resolved_channels == ["12345"]
         assert requests == [
@@ -1119,11 +1129,10 @@ async def test_generate_image_uses_dedicated_model_and_confirms_delivery(
         assert len(session.sent) == 1
         sent_image = cast(MessageChain, session.sent[0]).get(Image)[0]
         assert sent_image.src.startswith("data:image/png;base64,")
-        assert markers == ["[发送了图片]"]
+        assert state.delivered_texts == ["[发送了图片]"]
         assert warnings == []
         assert state.media_messages == state.confirmed_deliveries == state.confirmed_media_deliveries == 1
-        assert "Generated image sent successfully" in result
-        assert "blue glass bird" not in result
+        assert "blue glass bird" not in json.dumps(result)
 
         invalid_state = runtime.DeliveryState()
         with llm_chat_delivery_scope(invalid_state):
@@ -1274,17 +1283,20 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
 ) -> None:
     baseline = _registry_snapshot()
 
-    async with _temporary_plugin(
-        config={
-            "image_generation_model": "image",
-            "image_generation_timeout": 123.0,
-            "image_generation_quality": "high",
-            "tts_enabled": False,
-            "allowed_commands": [],
-            "web_search_enabled": False,
-        },
-        module_path=_TOOL_RUNTIME_PATH,
-    ) as harness:
+    async with (
+        _temporary_plugin(
+            config={
+                "image_generation_model": "image",
+                "image_generation_timeout": 123.0,
+                "image_generation_quality": "high",
+                "tts_enabled": False,
+                "allowed_commands": [],
+                "web_search_enabled": False,
+            },
+            module_path=_TOOL_RUNTIME_PATH,
+        ) as harness,
+        prepared_media_scope(),
+    ):
         runtime = harness.module
         target = _tool_callable(runtime, "edit_image")
         generate_target = _tool_callable(runtime, "generate_image")
@@ -1321,7 +1333,6 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
         )
 
         requests: list[dict[str, object]] = []
-        history: list[str] = []
 
         def resolve_model(channel_id: str) -> SimpleNamespace:
             assert channel_id == "12345"
@@ -1336,12 +1347,8 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
             requests.append(dict(kwargs))
             return SimpleNamespace(data=[SimpleNamespace(b64_json=base64.b64encode(_PNG_BYTES).decode("ascii"))])
 
-        async def append_history(_channel: str, _user: str, _name: str, _role: str, content: str) -> None:
-            history.append(content)
-
         monkeypatch.setattr(runtime.image_edit_context, "resolve_model", resolve_model)
         monkeypatch.setattr(runtime.image_edit_context, "edit", edit_provider)
-        monkeypatch.setattr(runtime.image_edit_context, "append_history", append_history)
 
         session = _DeliveryToolSession()
         state = runtime.DeliveryState()
@@ -1361,13 +1368,12 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
             llm_chat_tool_execution_scope(call.execution_ref),
         ):
             result = await target(session, **arguments)
-        after = DeliverySnapshot(
-            active=True,
-            attempts=state.delivery_attempts,
-            confirmed=state.confirmed_deliveries,
-            confirmed_media=state.confirmed_media_deliveries,
-        )
-        recorder.finish_success(call, result, before=before, after=after)
+            assert result["status"] == "prepared"
+            assert references.edit_confirmed is False
+            assert session.sent == []
+            assert state.delivery_attempts == state.media_messages == 0
+            recorder.finish_success(call, result, before=before, after=DeliverySnapshot(active=True))
+            await _tool_callable(runtime, "send_msg")(session, [{"type": "media", "media_ref": result["media_ref"]}])
 
         assert len(requests) == 1
         request = requests[0]
@@ -1384,14 +1390,13 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
         assert arguments["prompt"] in cast(str, request["prompt"])
         assert reference_ref not in cast(str, request["prompt"])
         assert len(session.sent) == 1
-        assert history == ["[发送了图片]"]
+        assert state.delivered_texts == ["[发送了图片]"]
         assert state.confirmed_media_deliveries == 1
         assert references.edit_confirmed is True
-        assert "Edited image sent successfully" in result
 
         event = recorder.events[0]
         assert event.status == "succeeded"
-        assert event.effect == "confirmed"
+        assert event.effect == "none"
         assert event.arguments["reference_count"] == 1
         assert "web_ref_" not in json.dumps(event.recorded_arguments)
         assert "web_ref_" not in json.dumps(event.recorded_result)
@@ -1400,11 +1405,6 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
             "input",
             "reference",
             "output",
-        ]
-        assert [item["label"] for item in attachments] == [
-            "Source image sent to image model",
-            "Web reference 1 sent to image model",
-            "Edited image result",
         ]
         output_attachment = attachments[-1]
         assert (tmp_path / f"{output_attachment['attachment_ref']}.png").read_bytes() == _PNG_BYTES
@@ -1447,43 +1447,80 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
 
 
 @pytest.mark.asyncio
-async def test_send_external_image_supports_public_urls_and_bounded_base64(
+async def test_prepare_external_media_supports_public_urls_and_bounded_base64(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     baseline = _registry_snapshot()
 
-    async with _temporary_plugin(
-        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
-        module_path=_TOOL_RUNTIME_PATH,
-    ) as harness:
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ) as harness,
+        prepared_media_scope(),
+    ):
         runtime = harness.module
-        target = _tool_callable(runtime, "send_external_image")
-        markers: list[str] = []
+        target = _tool_callable(runtime, "prepare_external_media")
         warnings: list[str] = []
+        external_module = importlib.import_module("plugins.llm_chat.tools.prepare_external_media")
+        fetched_urls: list[str] = []
 
-        async def append_history(_channel: str, _user: str, _name: str, _role: str, content: str) -> None:
-            markers.append(content)
+        class HttpClient:
+            def __init__(self, *, connector, **_kwargs):
+                self.connector = connector
 
-        monkeypatch.setattr(runtime.external_image_context, "append_history", append_history)
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                await self.connector.close()
+
+            @asynccontextmanager
+            async def get(self, url, **_kwargs):
+                fetched_urls.append(url)
+
+                async def chunks(_size):
+                    yield _PNG_BYTES
+
+                yield SimpleNamespace(
+                    status=200,
+                    content_length=len(_PNG_BYTES),
+                    content=SimpleNamespace(iter_chunked=chunks),
+                )
+
+        monkeypatch.setattr(external_module, "ClientSession", HttpClient)
+
         monkeypatch.setattr(runtime.external_image_context, "warn", warnings.append)
         session = _DeliveryToolSession()
 
         url_state = runtime.DeliveryState()
         with llm_chat_delivery_scope(url_state):
             url_result = await target(session, "HTTPS://Images.Example.COM/picture.png#fragment")
+            assert url_result["status"] == "prepared"
+            assert session.sent == []
+            assert url_state.delivery_attempts == 0
+            await _tool_callable(runtime, "send_msg")(
+                session, [{"type": "media", "media_ref": url_result["media_ref"]}]
+            )
         url_image = cast(MessageChain, session.sent[-1]).get(Image)[0]
-        assert url_image.src == "https://images.example.com/picture.png"
-        assert "picture.png" not in url_result
+        assert url_image.src.startswith("data:image/png;base64,")
+        assert fetched_urls == ["https://images.example.com/picture.png"]
+        assert "picture.png" not in json.dumps(url_result)
         assert url_state.media_messages == url_state.confirmed_deliveries == url_state.confirmed_media_deliveries == 1
 
         encoded = base64.b64encode(_PNG_BYTES).decode("ascii")
         base64_state = runtime.DeliveryState()
         with llm_chat_delivery_scope(base64_state):
             base64_result = await target(session, encoded)
+            assert base64_result["status"] == "prepared"
+            assert base64_state.delivery_attempts == 0
+            await _tool_callable(runtime, "send_msg")(
+                session, [{"type": "media", "media_ref": base64_result["media_ref"]}]
+            )
         inline_image = cast(MessageChain, session.sent[-1]).get(Image)[0]
         assert inline_image.src.startswith("data:image/png;base64,")
-        assert encoded not in base64_result
+        assert encoded not in json.dumps(base64_result)
         assert (
             base64_state.media_messages
             == base64_state.confirmed_deliveries
@@ -1493,7 +1530,12 @@ async def test_send_external_image_supports_public_urls_and_bounded_base64(
 
         data_url_state = runtime.DeliveryState()
         with llm_chat_delivery_scope(data_url_state):
-            await target(session, f"data:image/jpeg;base64,{encoded}")
+            data_result = await target(session, f"data:image/jpeg;base64,{encoded}")
+            assert data_result["status"] == "prepared"
+            assert data_url_state.delivery_attempts == 0
+            await _tool_callable(runtime, "send_msg")(
+                session, [{"type": "media", "media_ref": data_result["media_ref"]}]
+            )
         data_url_image = cast(MessageChain, session.sent[-1]).get(Image)[0]
         assert data_url_image.src.startswith("data:image/png;base64,")
         assert (
@@ -1505,12 +1547,12 @@ async def test_send_external_image_supports_public_urls_and_bounded_base64(
 
         invalid_state = runtime.DeliveryState()
         with llm_chat_delivery_scope(invalid_state):
-            with pytest.raises(runtime.DeliveryError, match="public image URL"):
+            with pytest.raises(runtime.DeliveryError, match="public media URL"):
                 await target(session, "http://127.0.0.1/private.png")
             with pytest.raises(runtime.DeliveryError, match="invalid or too large"):
                 await target(session, "not-valid-base64")
         assert invalid_state.media_messages == 0
-        assert markers == ["[发送了图片]", "[发送了图片]", "[发送了图片]"]
+        assert all(state.delivered_texts == ["[发送了图片]"] for state in (url_state, base64_state, data_url_state))
         assert warnings == []
 
         await harness.dispose()
@@ -1524,19 +1566,16 @@ async def test_render_tools_use_htmlrender_contract_and_confirm_deliveries(
 ) -> None:
     baseline = _registry_snapshot()
 
-    async with _temporary_plugin(
-        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
-        module_path=_TOOL_RUNTIME_PATH,
-    ) as harness:
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ) as harness,
+        prepared_media_scope(),
+    ):
         runtime = harness.module
         renderer = _FakeHtmlRenderer()
-        markers: list[str] = []
-
-        async def append_history(_channel: str, _user: str, _name: str, _role: str, content: str) -> None:
-            markers.append(content)
-
         monkeypatch.setattr(runtime.render_context, "get_renderer", lambda: renderer)
-        monkeypatch.setattr(runtime.render_context, "append_history", append_history)
         session = _DeliveryToolSession()
         markdown_target = _tool_callable(runtime, "markdown2pic")
         html_target = _tool_callable(runtime, "html2pic")
@@ -1549,6 +1588,12 @@ async def test_render_tools_use_htmlrender_contract_and_confirm_deliveries(
                 "| Name | Value |\n| --- | --- |\n| CPU | 25% |",
                 760,
             )
+            assert markdown_result["status"] == "prepared"
+            assert session.sent == []
+            assert states[0].delivery_attempts == 0
+            await _tool_callable(runtime, "send_msg")(
+                session, [{"type": "media", "media_ref": markdown_result["media_ref"]}]
+            )
         with llm_chat_delivery_scope(states[1]):
             html_result = await html_target(
                 session,
@@ -1558,6 +1603,11 @@ async def test_render_tools_use_htmlrender_contract_and_confirm_deliveries(
 <body><main class="canvas"><h1>Status</h1><p>Healthy</p></main></body>
 </html>""",
                 820,
+            )
+            assert html_result["status"] == "prepared"
+            assert states[1].delivery_attempts == 0
+            await _tool_callable(runtime, "send_msg")(
+                session, [{"type": "media", "media_ref": html_result["media_ref"]}]
             )
         with llm_chat_delivery_scope(states[2]):
             jinja_result = await jinja_target(
@@ -1569,6 +1619,11 @@ async def test_render_tools_use_htmlrender_contract_and_confirm_deliveries(
                 [["Memory", "42%"]],
                 ["All services operational"],
                 960,
+            )
+            assert jinja_result["status"] == "prepared"
+            assert states[2].delivery_attempts == 0
+            await _tool_callable(runtime, "send_msg")(
+                session, [{"type": "media", "media_ref": jinja_result["media_ref"]}]
             )
 
         assert [call[0] for call in renderer.calls] == ["markdown", "prepared", "template"]
@@ -1593,14 +1648,13 @@ async def test_render_tools_use_htmlrender_contract_and_confirm_deliveries(
         assert variables["columns"] == ["Name", "Value"]
         assert variables["rows"] == [["Memory", "42%"]]
         assert variables["font_family"] == "Inter, Noto Sans SC, Noto Sans CJK SC, sans-serif"
-        assert markers == ["[发送了图片]", "[发送了图片]", "[发送了图片]"]
+        assert all(state.delivered_texts == ["[发送了图片]"] for state in states)
         assert len(session.sent) == 3
         assert all(
             cast(MessageChain, message).get(Image)[0].src.startswith("data:image/png;base64,")
             for message in session.sent
         )
         assert all(state.media_messages == state.confirmed_media_deliveries == 1 for state in states)
-        assert all("Do not repeat" in result for result in (markdown_result, html_result, jinja_result))
 
         invalid_state = runtime.DeliveryState()
         with llm_chat_delivery_scope(invalid_state):
@@ -1673,18 +1727,17 @@ async def test_get_local_time_returns_deterministic_local_and_iana_time(
 
 
 @pytest.mark.asyncio
-async def test_send_text_resolves_bounded_mentions_and_encodes_onebot_at_segments(
+async def test_send_msg_preserves_inline_mentions_and_media_in_onebot_order(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     baseline = _registry_snapshot()
-
     async with _temporary_plugin(
         config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
         module_path=_TOOL_RUNTIME_PATH,
     ) as harness:
         runtime = harness.module
-        target = _tool_callable(runtime, "send_text")
+        target = _tool_callable(runtime, "send_msg")
         session = _DeliveryToolSession()
         session.event.user.id = "20001"
         session.event.user.name = "CurrentName"
@@ -1699,29 +1752,44 @@ async def test_send_text_resolves_bounded_mentions_and_encodes_onebot_at_segment
                 return SimpleNamespace(platform_user_id="10001", display_name="Bot")
             return None
 
-        monkeypatch.setattr(runtime.send_text_context, "resolve_participant", resolve_participant)
-
+        monkeypatch.setattr(runtime.send_msg_context, "resolve_participant", resolve_participant)
         state = runtime.DeliveryState()
-        with llm_chat_delivery_scope(state):
-            result = await target(
+        async with _prepared_delivery_scope(state):
+            prepared = prepare_media(
                 session,
-                "一起看这个吧",
-                None,
-                ["current_user", "participant_0123abcdef", "participant_0123abcdef"],
+                Image(src=f"data:image/png;base64,{base64.b64encode(_PNG_BYTES).decode('ascii')}"),
+                byte_count=len(_PNG_BYTES),
+                tool_name="prepare_image",
+                history_marker="[image]",
             )
-
+            assert session.sent == []
+            assert (state.media_messages, state.delivery_attempts, state.delivered_texts) == (0, 0, [])
+            await target(
+                session,
+                segments=[
+                    {"type": "text", "text": "Look "},
+                    {"type": "mention", "target": "current_user"},
+                    {"type": "text", "text": ": "},
+                    {"type": "media", "media_ref": prepared["media_ref"]},
+                    {"type": "mention", "target": "participant_0123abcdef"},
+                    {"type": "text", "text": " and "},
+                    {"type": "mention", "target": "participant_0123abcdef"},
+                    {"type": "text", "text": "!"},
+                ],
+            )
+            with pytest.raises(runtime.DeliveryError):
+                resolve_media(session, [prepared["media_ref"]])
         assert resolver_calls == [(session, "participant_0123abcdef")]
         assert len(session.sent) == 1
         chain = cast(MessageChain, session.sent[0])
         assert [(at.id, at.name) for at in chain.get(At)] == [
             ("20001", "CurrentCard"),
             ("20002", "Alice"),
+            ("20002", "Alice"),
         ]
-        assert chain.extract_plain_text() == "  一起看这个吧"
-        assert state.delivered_texts == ["@CurrentCard @Alice 一起看这个吧"]
-        assert state.text_messages == state.confirmed_deliveries == 1
-        assert "已艾特 2 人" in result
-
+        assert chain.extract_plain_text() == "Look :  and !"
+        assert state.delivered_texts == ["Look @CurrentCard: [image]@Alice and @Alice!"]
+        assert state.confirmed_deliveries == state.confirmed_media_deliveries == 1
         network = _FakeOneBotNetwork()
         encoder = OneBot11MessageEncoder(
             Login(platform="onebot", user=User(id="10001", name="Bot")),
@@ -1729,34 +1797,30 @@ async def test_send_text_resolves_bounded_mentions_and_encodes_onebot_at_segment
             "12345",
         )
         await encoder.send(str(chain))
-
         assert len(network.calls) == 1
         action, params = network.calls[0]
         assert action == "send_group_msg"
         assert params["group_id"] == 12345
         segments = params["message"]
-        assert [segment["type"] for segment in segments] == ["at", "text", "at", "text"]
-        assert segments[0]["data"]["qq"] == "20001"
-        assert segments[1]["data"]["text"] == " "
-        assert segments[2]["data"]["qq"] == "20002"
-        assert segments[3]["data"]["text"] == " 一起看这个吧"
-
+        assert [segment["type"] for segment in segments] == [
+            "text",
+            "at",
+            "text",
+            "image",
+            "at",
+            "text",
+            "at",
+            "text",
+        ]
+        assert [segments[index]["data"]["qq"] for index in (1, 4, 6)] == ["20001", "20002", "20002"]
+        assert segments[3]["data"]["file"] == f"base64://{base64.b64encode(_PNG_BYTES).decode('ascii')}"
+        assert [segments[index]["data"]["text"] for index in (0, 2, 5, 7)] == ["Look ", ": ", " and ", "!"]
         rejected_state = runtime.DeliveryState()
         sent_before = list(session.sent)
-        with llm_chat_delivery_scope(rejected_state):
-            with pytest.raises(runtime.DeliveryError, match="invalid current-channel target"):
-                await target(session, "raw id", None, ["20002"])
-            with pytest.raises(runtime.DeliveryError, match="per-message limit"):
-                await target(
-                    session,
-                    "too many",
-                    None,
-                    ["current_user", "participant_0123abcdef", "participant_1111111111", "participant_2222222222"],
-                )
-            with pytest.raises(runtime.DeliveryError, match="unavailable in the current channel"):
-                await target(session, "missing", None, ["participant_1111111111"])
-            with pytest.raises(runtime.DeliveryError, match="cannot be the current bot"):
-                await target(session, "self", None, ["participant_deadbeef00"])
+        async with _prepared_delivery_scope(rejected_state):
+            for targets in (["20002"], ["current_user"] * 4, ["participant_1111111111"], ["participant_deadbeef00"]):
+                with pytest.raises(runtime.DeliveryError):
+                    await target(session, segments=[{"type": "mention", "target": value} for value in targets])
         assert session.sent == sent_before
         assert (
             rejected_state.text_messages,
@@ -1764,15 +1828,13 @@ async def test_send_text_resolves_bounded_mentions_and_encodes_onebot_at_segment
             rejected_state.delivery_attempts,
             rejected_state.confirmed_deliveries,
         ) == (0, 0, 0, 0)
-
         await harness.dispose()
         _assert_registry_matches(baseline)
-
     _assert_registry_matches(baseline)
 
 
 @pytest.mark.asyncio
-async def test_send_text_tool_loop_accepts_opaque_participant_mentions(
+async def test_send_msg_tool_loop_accepts_opaque_participant_mentions(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1783,8 +1845,13 @@ async def test_send_text_tool_loop_accepts_opaque_participant_mentions(
                 tool_calls=[
                     _tool_call(
                         "mention-1",
-                        "send_text",
-                        {"text": "轮到你啦", "mentions": ["participant_0123abcdef"]},
+                        "send_msg",
+                        {
+                            "segments": [
+                                {"type": "mention", "target": "participant_0123abcdef"},
+                                {"type": "text", "text": " Your turn"},
+                            ]
+                        },
                     )
                 ]
             ),
@@ -1809,7 +1876,7 @@ async def test_send_text_tool_loop_accepts_opaque_participant_mentions(
                 return SimpleNamespace(platform_user_id="20002", display_name="Alice")
             return None
 
-        monkeypatch.setattr(harness.module.send_text_context, "resolve_participant", resolve_participant)
+        monkeypatch.setattr(harness.module.send_msg_context, "resolve_participant", resolve_participant)
         response = await local_modules.generation.generate_chat_response(
             [{"role": "user", "content": "mention Alice"}],
             system="delivery system",
@@ -1824,14 +1891,13 @@ async def test_send_text_tool_loop_accepts_opaque_participant_mentions(
     assert len(session.sent) == 1
     chain = cast(MessageChain, session.sent[0])
     assert [(at.id, at.name) for at in chain.get(At)] == [("20002", "Alice")]
-    assert state.delivered_texts == ["@Alice 轮到你啦"]
+    assert state.delivered_texts == ["@Alice Your turn"]
     tool_result = json.loads(_tool_messages(payloads[1])[0]["content"])
     assert tool_result["ok"] is True
-    assert "已艾特 1 人" in tool_result["data"]
 
 
 @pytest.mark.asyncio
-async def test_send_text_tool_loop_paces_multiple_calls_without_final_duplicate(
+async def test_send_msg_tool_loop_paces_multiple_calls_without_final_duplicate(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1840,9 +1906,15 @@ async def test_send_text_tool_loop_paces_multiple_calls_without_final_duplicate(
         [
             _model_response(
                 tool_calls=[
-                    _tool_call("text-1", "send_text", {"text": "晚安", "delay_seconds": 0.2}),
-                    _tool_call("text-2", "send_text", {"text": "做个好梦", "delay_seconds": 2.0}),
-                    _tool_call("text-3", "send_text", {"text": "明天见", "delay_seconds": 1.2}),
+                    _tool_call(
+                        "text-1", "send_msg", {"segments": [{"type": "text", "text": "晚安"}], "delay_seconds": 0.2}
+                    ),
+                    _tool_call(
+                        "text-2", "send_msg", {"segments": [{"type": "text", "text": "做个好梦"}], "delay_seconds": 2.0}
+                    ),
+                    _tool_call(
+                        "text-3", "send_msg", {"segments": [{"type": "text", "text": "明天见"}], "delay_seconds": 1.2}
+                    ),
                 ]
             ),
             _model_response("[END_OF_RESPONSE]"),
@@ -1873,21 +1945,23 @@ async def test_send_text_tool_loop_paces_multiple_calls_without_final_duplicate(
         )
 
     assert local_modules.generation.response_content(response) == "[END_OF_RESPONSE]"
-    assert session.sent == ["晚安", "做个好梦", "明天见"]
+    assert [cast(MessageChain, chain).extract_plain_text() for chain in session.sent] == ["晚安", "做个好梦", "明天见"]
     assert clock.sleeps == [2.0, 1.2]
     assert state.delivered_texts == ["晚安", "做个好梦", "明天见"]
     assert len(payloads) == 2
     results = [json.loads(message["content"]) for message in _tool_messages(payloads[1])]
     assert [result["ok"] for result in results] == [True, True, True]
-    assert all("不要在最终回复中重复" in cast(str, result["data"]) for result in results)
 
 
 @pytest.mark.asyncio
-async def test_send_text_sixth_call_is_rejected_without_sending(
+async def test_send_msg_sixth_call_is_rejected_without_sending(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    tool_calls = [_tool_call(f"text-{index}", "send_text", {"text": f"segment-{index}"}) for index in range(1, 7)]
+    tool_calls = [
+        _tool_call(f"text-{index}", "send_msg", {"segments": [{"type": "text", "text": f"segment-{index}"}]})
+        for index in range(1, 7)
+    ]
     payloads = _install_completion_script(
         monkeypatch,
         [_model_response(tool_calls=tool_calls), _model_response("[END_OF_RESPONSE]")],
@@ -1909,12 +1983,13 @@ async def test_send_text_sixth_call_is_rejected_without_sending(
             delivery_state=state,
         )
 
-    assert session.sent == [f"segment-{index}" for index in range(1, 6)]
+    assert [cast(MessageChain, chain).extract_plain_text() for chain in session.sent] == [
+        f"segment-{index}" for index in range(1, 6)
+    ]
     assert state.text_messages == 5
-    assert state.delivered_texts == session.sent
+    assert state.delivered_texts == [f"segment-{index}" for index in range(1, 6)]
     results = [json.loads(message["content"]) for message in _tool_messages(payloads[1])]
     assert [result["ok"] for result in results] == [True, True, True, True, True, False]
-    assert "send_text budget exhausted; finish with one final reply" in results[-1]["error"]
 
 
 @pytest.mark.asyncio
@@ -1927,10 +2002,14 @@ async def test_malformed_delivery_tool_json_is_sanitized_and_side_effect_free(
         [
             _model_response(
                 tool_calls=[
-                    _tool_call("bad-text", "send_text", {"text": 7}),
-                    _tool_call("bad-container", "send_merged_forward", {"messages": "abc"}),
-                    _tool_call("bad-node", "send_merged_forward", {"messages": ["ok", 7]}),
-                    _tool_call("bad-delay", "send_text", {"text": "hidden", "delay_seconds": "fast"}),
+                    _tool_call("bad-text", "send_msg", {"segments": [{"type": "text", "text": 7}]}),
+                    _tool_call("bad-container", "prepare_merged_forward", {"messages": "abc"}),
+                    _tool_call("bad-node", "prepare_merged_forward", {"messages": ["ok", 7]}),
+                    _tool_call(
+                        "bad-delay",
+                        "send_msg",
+                        {"segments": [{"type": "text", "text": "hidden"}], "delay_seconds": "fast"},
+                    ),
                 ]
             ),
             _model_response("[END_OF_RESPONSE]"),
@@ -1972,23 +2051,18 @@ async def test_malformed_delivery_tool_json_is_sanitized_and_side_effect_free(
     results = [json.loads(message["content"]) for message in _tool_messages(payloads[1])]
     errors = [cast(str, result["error"]) for result in results]
     assert [result["ok"] for result in results] == [False, False, False, False]
-    assert "text must be a string" in errors[0]
-    assert "messages must be a list of strings" in errors[1]
-    assert "messages must be a list of strings" in errors[2]
-    assert "delay_seconds must be a number or null" in errors[3]
     assert all(value not in error for error in errors for value in ("abc", "fast", "hidden"))
-    assert session.sent == []
+    assert [cast(MessageChain, chain).extract_plain_text() for chain in session.sent] == []
     assert (
         state.mode,
         state.text_messages,
-        state.forward_calls,
         state.media_messages,
         state.text_chars,
         state.delivery_attempts,
         state.confirmed_deliveries,
         state.confirmed_media_deliveries,
         state.delivered_texts,
-    ) == (None, 0, 0, 0, 0, 0, 0, 0, [])
+    ) == (None, 0, 0, 0, 0, 0, 0, [])
 
 
 @pytest.mark.asyncio
@@ -2000,25 +2074,23 @@ async def test_merged_forward_handler_requires_an_exact_list_container(local_mod
         module_path=_TOOL_RUNTIME_PATH,
     ) as harness:
         runtime = harness.module
-        target = _tool_callable(runtime, "send_merged_forward")
+        target = _tool_callable(runtime, "prepare_merged_forward")
         state = runtime.DeliveryState()
         session = _DeliveryToolSession()
 
-        with llm_chat_delivery_scope(state):
+        async with _prepared_delivery_scope(state):
             for messages in (("one", "two"), {"one": "two"}):
                 before = (
                     state.mode,
                     state.text_messages,
-                    state.forward_calls,
                     state.text_chars,
                     tuple(state.delivered_texts),
                 )
-                with pytest.raises(runtime.DeliveryError, match="^messages must be a list of strings$"):
-                    await target(session, messages, None)
+                with pytest.raises(runtime.DeliveryError):
+                    await target(session, messages)
                 assert (
                     state.mode,
                     state.text_messages,
-                    state.forward_calls,
                     state.text_chars,
                     tuple(state.delivered_texts),
                 ) == before
@@ -2040,17 +2112,24 @@ async def test_merged_forward_uses_public_satori_shape_and_onebot_encoder(local_
     ) as harness:
         state_module = harness.module
         state = state_module.DeliveryState()
-        target = _tool_callable(state_module, "send_merged_forward")
+        target = _tool_callable(state_module, "prepare_merged_forward")
         messages = [f"node-{index}" for index in range(1, 7)]
-        with llm_chat_delivery_scope(state):
-            await target(session, messages, None)
+        async with _prepared_delivery_scope(state):
+            prepared = await target(session, messages)
+            assert prepared["status"] == "prepared"
+            assert session.sent == []
+            assert (state.media_messages, state.delivery_attempts, state.delivered_texts) == (0, 0, [])
+            await _tool_callable(state_module, "send_msg")(
+                session,
+                segments=[{"type": "media", "media_ref": prepared["media_ref"]}],
+            )
 
         assert len(session.sent) == 1
         chain = cast(MessageChain, session.sent[0])
         forward = cast(SatoriMessage, chain[0])
         assert forward.forward is True
         assert [cast(Text, node.children[0]).text for node in forward.children] == messages
-        assert state.delivered_texts == messages
+        assert state.delivered_texts == ["\n\n".join(messages)]
 
         network = _FakeOneBotNetwork()
         encoder = OneBot11MessageEncoder(
@@ -2077,59 +2156,52 @@ async def test_merged_forward_uses_public_satori_shape_and_onebot_encoder(local_
 
 
 @pytest.mark.asyncio
-async def test_merged_forward_fallbacks_are_paced_and_report_confirmed_prefix(
+async def test_merged_forward_rejects_unsupported_composition_without_fallback(
     local_modules: SimpleNamespace,
 ) -> None:
     baseline = _registry_snapshot()
-
     async with _temporary_plugin(
         config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
         module_path=_TOOL_RUNTIME_PATH,
     ) as harness:
         runtime = harness.module
-        target = _tool_callable(runtime, "send_merged_forward")
-        messages = [f"node-{index}" for index in range(1, 7)]
-
-        non_onebot_clock = _FakeClock()
-        non_onebot_state = runtime.DeliveryState(
-            sleep=non_onebot_clock.sleep,
-            clock=non_onebot_clock.monotonic,
-        )
-        non_onebot = _DeliveryToolSession(platform="satori")
-        with llm_chat_delivery_scope(non_onebot_state):
-            fallback_result = await target(non_onebot, messages, 0.2)
-        assert non_onebot.sent == messages
-        assert non_onebot_clock.sleeps == [1.1] * 5
-        assert "回退发送 6 条普通文本" in fallback_result
-
-        onebot_clock = _FakeClock()
-        onebot_state = runtime.DeliveryState(sleep=onebot_clock.sleep, clock=onebot_clock.monotonic)
-        onebot = _DeliveryToolSession(platform="onebot", unavailable_attempts={1})
-        with llm_chat_delivery_scope(onebot_state):
-            await target(onebot, messages, 0.2)
-        assert onebot.sent == messages
-        assert onebot_clock.sleeps == [1.1] * 6
-
-        partial_clock = _FakeClock()
-        partial_state = runtime.DeliveryState(sleep=partial_clock.sleep, clock=partial_clock.monotonic)
-        partial = _DeliveryToolSession(platform="onebot", unavailable_attempts={1}, fail_attempts={4})
-        with llm_chat_delivery_scope(partial_state):
-            with pytest.raises(runtime.DeliveryError):
-                await target(partial, messages, 0.2)
-        assert partial.sent == messages[:2]
-        assert partial_state.delivered_texts == messages[:2]
-        assert len(partial.attempts) == 4
-
-        unknown_state = runtime.DeliveryState()
-        unknown = _DeliveryToolSession(platform="onebot", fail_attempts={1})
-        with llm_chat_delivery_scope(unknown_state), pytest.raises(RuntimeError):
-            await target(unknown, messages, None)
-        assert unknown.sent == []
-        assert len(unknown.attempts) == 1
-        assert unknown_state.delivery_attempts == 1
-        assert unknown_state.confirmed_deliveries == 0
-        assert unknown_state.delivered_texts == []
-
+        prepare = _tool_callable(runtime, "prepare_merged_forward")
+        send = _tool_callable(runtime, "send_msg")
+        messages = ["first node", "second node"]
+        for platform in ("satori", "onebot"):
+            session = _DeliveryToolSession(platform=platform)
+            state = runtime.DeliveryState()
+            async with _prepared_delivery_scope(state):
+                if platform != "onebot":
+                    with pytest.raises(runtime.DeliveryError):
+                        await prepare(session, messages)
+                    assert list_prepared_media() == []
+                else:
+                    prepared = await prepare(session, messages)
+                    with pytest.raises(runtime.DeliveryError):
+                        await send(
+                            session,
+                            segments=[
+                                {"type": "text", "text": "Do not split this chain"},
+                                {"type": "media", "media_ref": prepared["media_ref"]},
+                            ],
+                        )
+                    assert resolve_media(session, [prepared["media_ref"]])[0].consumed is False
+            assert session.attempts == session.sent == []
+            assert (state.text_messages, state.media_messages, state.text_chars) == (0, 0, 0)
+            assert (state.delivery_attempts, state.confirmed_deliveries, state.delivered_texts) == (0, 0, [])
+        for failure in ({"unavailable_attempts": {1}}, {"fail_attempts": {1}}):
+            session = _DeliveryToolSession(platform="onebot", **failure)
+            state = runtime.DeliveryState()
+            async with _prepared_delivery_scope(state):
+                prepared = await prepare(session, messages)
+                with pytest.raises(RuntimeError):
+                    await send(session, segments=[{"type": "media", "media_ref": prepared["media_ref"]}])
+                with pytest.raises(runtime.DeliveryError):
+                    resolve_media(session, [prepared["media_ref"]])
+            assert session.sent == []
+            assert len(session.attempts) == 1
+            assert (state.delivery_attempts, state.confirmed_deliveries, state.delivered_texts) == (1, 0, [])
         await harness.dispose()
         _assert_registry_matches(baseline)
 
@@ -2139,46 +2211,44 @@ async def test_cancelled_delivery_attempts_are_recorded_without_false_confirmati
     local_modules: SimpleNamespace,
 ) -> None:
     baseline = _registry_snapshot()
-
     async with _temporary_plugin(
         config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
         module_path=_TOOL_RUNTIME_PATH,
     ) as harness:
         runtime = harness.module
-        send_text_target = _tool_callable(runtime, "send_text")
-        forward_target = _tool_callable(runtime, "send_merged_forward")
-
+        send = _tool_callable(runtime, "send_msg")
+        prepare_forward = _tool_callable(runtime, "prepare_merged_forward")
         text_state = runtime.DeliveryState()
         text_session = _DeliveryToolSession(cancel_attempts={1})
-        with llm_chat_delivery_scope(text_state):
+        async with _prepared_delivery_scope(text_state):
             with pytest.raises(asyncio.CancelledError):
-                await send_text_target(text_session, "possibly delivered", None)
-        assert text_state.delivery_attempts == 1
-        assert text_state.confirmed_deliveries == 0
-        assert text_state.delivered_texts == []
-
+                await send(text_session, segments=[{"type": "text", "text": "possibly delivered"}])
+        assert (text_state.delivery_attempts, text_state.confirmed_deliveries, text_state.delivered_texts) == (1, 0, [])
         forward_state = runtime.DeliveryState()
         forward_session = _DeliveryToolSession(platform="onebot", cancel_attempts={1})
-        with llm_chat_delivery_scope(forward_state):
+        async with _prepared_delivery_scope(forward_state):
+            prepared = await prepare_forward(forward_session, ["one", "two"])
             with pytest.raises(asyncio.CancelledError):
-                await forward_target(forward_session, ["one", "two"], None)
-        assert forward_state.delivery_attempts == 1
-        assert forward_state.confirmed_deliveries == 0
-        assert forward_state.delivered_texts == []
-
-        fallback_clock = _FakeClock()
-        fallback_state = runtime.DeliveryState(sleep=fallback_clock.sleep, clock=fallback_clock.monotonic)
-        fallback_session = _DeliveryToolSession(platform="satori", cancel_attempts={2})
-        with llm_chat_delivery_scope(fallback_state):
+                await send(forward_session, segments=[{"type": "media", "media_ref": prepared["media_ref"]}])
+            with pytest.raises(runtime.DeliveryError):
+                resolve_media(forward_session, [prepared["media_ref"]])
+        assert (forward_state.delivery_attempts, forward_state.confirmed_deliveries, forward_state.delivered_texts) == (
+            1,
+            0,
+            [],
+        )
+        clock = _FakeClock()
+        state = runtime.DeliveryState(sleep=clock.sleep, clock=clock.monotonic)
+        session = _DeliveryToolSession(cancel_attempts={2})
+        async with _prepared_delivery_scope(state):
+            await send(session, segments=[{"type": "text", "text": "confirmed"}])
             with pytest.raises(asyncio.CancelledError):
-                await forward_target(fallback_session, ["confirmed", "possibly delivered"], None)
-        assert fallback_state.delivery_attempts == 2
-        assert fallback_state.confirmed_deliveries == 1
-        assert fallback_state.delivered_texts == ["confirmed"]
-
+                await send(session, segments=[{"type": "text", "text": "possibly delivered"}])
+        assert state.delivery_attempts == 2
+        assert state.confirmed_deliveries == 1
+        assert state.delivered_texts == ["confirmed"]
         await harness.dispose()
         _assert_registry_matches(baseline)
-
     _assert_registry_matches(baseline)
 
 
@@ -2397,7 +2467,7 @@ async def test_image_picker_prioritizes_exact_tag_over_broader_semantic_match(
 
 
 @pytest.mark.asyncio
-async def test_delivery_scope_blocks_text_outside_generation_but_preserves_media_behavior(
+async def test_prepared_media_requires_generation_owner_and_expires_without_delivery(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2409,15 +2479,15 @@ async def test_delivery_scope_blocks_text_outside_generation_but_preserves_media
         module_path=_TOOL_RUNTIME_PATH,
     ) as harness:
         runtime = harness.module
-        send_text_target = _tool_callable(runtime, "send_text")
-        send_image_target = _tool_callable(runtime, "send_image")
+        send_target = _tool_callable(runtime, "send_msg")
+        prepare_target = _tool_callable(runtime, "prepare_image")
         session = _DeliveryToolSession()
 
         with pytest.raises(
             runtime.DeliveryError,
             match="^Delivery tools are unavailable outside llm_chat generation$",
         ):
-            await send_text_target(session, "outside", None)
+            await send_target(session, segments=[{"type": "text", "text": "outside"}])
         assert session.sent == []
 
         meme_dir = tmp_path / "memes"
@@ -2445,44 +2515,52 @@ async def test_delivery_scope_blocks_text_outside_generation_but_preserves_media
         async def fake_pick_image(*_args: Any, **_kwargs: Any) -> str:
             return relative_path
 
-        markers: list[tuple[Any, ...]] = []
-
-        async def fake_append_message(*args: Any) -> None:
-            markers.append(args)
-
         monkeypatch.setattr(runtime.image_catalog, "image_dir", tmp_path)
         monkeypatch.setattr(runtime.image_catalog, "session_factory", fake_get_session)
         monkeypatch.setattr(runtime.image_context, "pick_image", fake_pick_image)
-        monkeypatch.setattr(runtime.image_context, "append_history", fake_append_message)
-
-        outside_result = await send_image_target(session, "happy", [])
-        assert outside_result.startswith("已发送图片")
-        assert len(session.sent) == 1
-        assert markers[-1][-1] == "[发送了表情包: happy，smile]"
+        with pytest.raises(runtime.DeliveryError):
+            await prepare_target(session, context="happy")
+        assert session.sent == []
 
         clock = _FakeClock()
         state = runtime.DeliveryState(sleep=clock.sleep, clock=clock.monotonic)
-        scoped_session = _DeliveryToolSession()
-        with llm_chat_delivery_scope(state):
-            await send_image_target(scoped_session, "happy")
-            await send_text_target(scoped_session, "after image", None)
-            with pytest.raises(runtime.DeliveryError, match="^Media must be sent before text delivery$"):
-                await send_image_target(scoped_session, "happy")
-
-        assert len(scoped_session.sent) == 2
-        assert isinstance(scoped_session.sent[0], MessageChain)
-        assert scoped_session.sent[1] == "after image"
+        async with _prepared_delivery_scope(state):
+            prepared = await prepare_target(session, context="happy")
+            assert prepared["status"] == "prepared"
+            assert session.sent == []
+            assert (state.media_messages, state.delivery_attempts, state.delivered_texts) == (0, 0, [])
+            other_user = _DeliveryToolSession()
+            other_user.event.user.id = "20003"
+            other_channel = _DeliveryToolSession()
+            other_channel.event.channel.id = "54321"
+            for foreign_session in (other_user, other_channel):
+                with pytest.raises(runtime.DeliveryError):
+                    await send_target(foreign_session, segments=[{"type": "media", "media_ref": prepared["media_ref"]}])
+                assert foreign_session.attempts == []
+            assert resolve_media(session, [prepared["media_ref"]])[0].consumed is False
+            await send_target(session, segments=[{"type": "text", "text": "before image"}])
+            await send_target(session, segments=[{"type": "media", "media_ref": prepared["media_ref"]}])
+            abandoned = await prepare_target(session, context=relative_path)
+            with pytest.raises(runtime.DeliveryError):
+                await send_target(session, segments=[{"type": "media", "media_ref": prepared["media_ref"]}])
+        assert len(session.sent) == 2
+        assert cast(MessageChain, session.sent[0]).extract_plain_text() == "before image"
+        assert len(cast(MessageChain, session.sent[1]).get(Image)) == 1
         assert clock.sleeps == [1.2]
         assert state.media_messages == 1
-        assert state.delivered_texts == ["after image"]
-        assert len(markers) == 2
+        assert state.delivered_texts == ["before image", "[发送了表情包: happy，smile]"]
 
+        next_state = runtime.DeliveryState()
+        async with _prepared_delivery_scope(next_state):
+            with pytest.raises(runtime.DeliveryError):
+                await send_target(session, segments=[{"type": "media", "media_ref": abandoned["media_ref"]}])
+        assert (next_state.media_messages, next_state.delivery_attempts, next_state.delivered_texts) == (0, 0, [])
         await harness.dispose()
         _assert_registry_matches(baseline)
 
 
 @pytest.mark.asyncio
-async def test_tts_catalog_selection_sends_inline_audio_for_remote_onebot_transport(
+async def test_tts_catalog_selection_prepares_inline_audio_for_explicit_onebot_delivery(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2494,7 +2572,7 @@ async def test_tts_catalog_selection_sends_inline_audio_for_remote_onebot_transp
     ) as harness:
         runtime = harness.module
         catalog_target = _tool_callable(runtime, "list_tts_voices")
-        speak_target = _tool_callable(runtime, "speak")
+        synthesize_target = _tool_callable(runtime, "synthesize_speech")
         audio_bytes = b"ID3\x04\x00\x00fake-mp3"
         selection = TTSSynthesisSelection(
             version="v4",
@@ -2551,14 +2629,8 @@ async def test_tts_catalog_selection_sends_inline_audio_for_remote_onebot_transp
                 )
                 return audio_bytes
 
-        markers: list[tuple[Any, ...]] = []
-
-        async def fake_append_message(*args: Any) -> None:
-            markers.append(args)
-
         monkeypatch.setattr(runtime.voice_catalog_context, "get_service", FakeTTSService)
         monkeypatch.setattr(runtime.speak_context, "get_service", FakeTTSService)
-        monkeypatch.setattr(runtime.speak_context, "append_history", fake_append_message)
 
         catalog_payload = json.loads(await catalog_target(refresh=True))
         assert catalog_payload["provider"] == "gpt-sovits"
@@ -2567,8 +2639,8 @@ async def test_tts_catalog_selection_sends_inline_audio_for_remote_onebot_transp
 
         state = runtime.DeliveryState()
         session = _DeliveryToolSession()
-        with llm_chat_delivery_scope(state):
-            result = await speak_target(
+        async with _prepared_delivery_scope(state):
+            result = await synthesize_target(
                 session=session,
                 text="Take your time.",
                 version="v4",
@@ -2579,14 +2651,30 @@ async def test_tts_catalog_selection_sends_inline_audio_for_remote_onebot_transp
                 speed=1.1,
             )
 
-        assert result == "Speech sent: Take your time."
+            assert result["status"] == "prepared"
+            assert result["kind"] == "audio"
+            assert result["bytes"] == len(audio_bytes)
+            assert session.sent == []
+            assert (state.media_messages, state.delivery_attempts, state.delivered_texts) == (0, 0, [])
+            send = _tool_callable(runtime, "send_msg")
+            with pytest.raises(runtime.DeliveryError):
+                await send(
+                    session,
+                    segments=[
+                        {"type": "text", "text": "Do not split audio"},
+                        {"type": "media", "media_ref": result["media_ref"]},
+                    ],
+                )
+            assert resolve_media(session, [result["media_ref"]])[0].consumed is False
+            assert session.attempts == []
+            await send(session, segments=[{"type": "media", "media_ref": result["media_ref"]}])
         assert len(session.sent) == 1
         chain = cast(MessageChain, session.sent[0])
         sent_audio = chain.get(Audio)[0]
         assert sent_audio.src.startswith("data:audio/mpeg;base64,")
         assert "file://" not in sent_audio.src
         assert state.confirmed_media_deliveries == 1
-        assert markers[-1][-1] == "[用语音说: Take your time.]"
+        assert state.delivered_texts == ["[用语音说: Take your time.]"]
 
         network = _FakeOneBotNetwork()
         encoder = OneBot11MessageEncoder(
@@ -2608,7 +2696,7 @@ async def test_tts_catalog_selection_sends_inline_audio_for_remote_onebot_transp
 
 
 @pytest.mark.asyncio
-async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order(
+async def test_prepared_images_validate_atomically_and_compose_exact_repeated_order(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2620,7 +2708,7 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
         module_path=_TOOL_RUNTIME_PATH,
     ) as harness:
         runtime = harness.module
-        target = _tool_callable(runtime, "send_image")
+        target = _tool_callable(runtime, "prepare_image")
         meme_dir = tmp_path / "memes"
         meme_dir.mkdir()
         first_path = meme_dir / "first.png"
@@ -2649,134 +2737,145 @@ async def test_send_image_exact_paths_are_validated_and_sent_atomically_in_order
         async def fake_get_session() -> AsyncIterator[FakeDatabase]:
             yield FakeDatabase()
 
-        markers: list[tuple[Any, ...]] = []
-
-        async def fake_append_message(*args: Any) -> None:
-            markers.append(args)
-
         monkeypatch.setattr(runtime.image_catalog, "image_dir", tmp_path)
         monkeypatch.setattr(runtime.image_catalog, "session_factory", fake_get_session)
-        monkeypatch.setattr(runtime.image_context, "append_history", fake_append_message)
-
+        send = _tool_callable(runtime, "send_msg")
         clock = _FakeClock()
         state = runtime.DeliveryState(sleep=clock.sleep, clock=clock.monotonic)
         session = _DeliveryToolSession()
-        with llm_chat_delivery_scope(state):
-            result = await target(
-                image_paths=[second_relative_path, first_relative_path, second_relative_path],
-                session=session,
+        async with _prepared_delivery_scope(state):
+            second = await target(session=session, context=second_relative_path)
+            first = await target(session=session, context=first_relative_path)
+            assert [item["status"] for item in (second, first)] == ["prepared", "prepared"]
+            assert session.sent == []
+            assert (state.media_messages, state.delivery_attempts, state.delivered_texts) == (0, 0, [])
+            assert list(runtime.image_context.recent_images[session.channel.id]) == []
+            with pytest.raises(runtime.DeliveryError):
+                await send(
+                    session,
+                    segments=[
+                        {"type": "media", "media_ref": second["media_ref"]},
+                        {"type": "media", "media_ref": "media_" + "0" * 32},
+                    ],
+                )
+            assert session.attempts == []
+            assert resolve_media(session, [second["media_ref"], first["media_ref"]])[0].consumed is False
+            await send(
+                session,
+                segments=[
+                    {"type": "text", "text": "Start "},
+                    {"type": "media", "media_ref": second["media_ref"]},
+                    {"type": "text", "text": " between "},
+                    {"type": "media", "media_ref": first["media_ref"]},
+                    {"type": "media", "media_ref": second["media_ref"]},
+                    {"type": "text", "text": " end"},
+                ],
             )
-
-        assert result.startswith("已发送 2 张图片")
-        sent_chains = [cast(MessageChain, chain) for chain in session.sent]
-        sent_images = [chain.get(Image)[0].src for chain in sent_chains]
-        assert sent_images == [
-            f"data:image/png;base64,{base64.b64encode(_PNG_BYTES + b'second').decode('ascii')}",
-            f"data:image/png;base64,{base64.b64encode(_PNG_BYTES + b'first').decode('ascii')}",
+            for entry in (second, first):
+                with pytest.raises(runtime.DeliveryError):
+                    await send(session, segments=[{"type": "media", "media_ref": entry["media_ref"]}])
+        assert len(session.sent) == len(session.attempts) == 1
+        chain = cast(MessageChain, session.sent[0])
+        sent_images = [image.src for image in chain.get(Image)]
+        expected_sources = [
+            f"data:image/png;base64,{base64.b64encode(_PNG_BYTES + suffix).decode('ascii')}"
+            for suffix in (b"second", b"first", b"second")
         ]
-        assert all("file://" not in source for source in sent_images)
-
+        assert sent_images == expected_sources
+        assert state.media_messages == 3
+        assert state.confirmed_deliveries == 1
+        assert state.confirmed_media_deliveries == 3
+        assert list(runtime.image_context.recent_images[session.channel.id]) == [
+            second_relative_path,
+            first_relative_path,
+        ]
+        assert state.delivered_texts == [
+            "Start [发送了表情包: second-tag] between [发送了表情包: first-tag][发送了表情包: second-tag] end"
+        ]
+        assert clock.sleeps == []
         network = _FakeOneBotNetwork()
         encoder = OneBot11MessageEncoder(
             Login(platform="onebot", user=User(id="10001", name="Bot")),
             cast(Any, network),
             "12345",
         )
-        await encoder.send(str(sent_chains[0]))
+        await encoder.send(str(chain))
         assert len(network.calls) == 1
         action, params = network.calls[0]
         assert action == "send_group_msg"
-        segment = params["message"][0]
-        assert segment["type"] == "image"
-        assert segment["data"]["file"].startswith("base64://")
-        assert clock.sleeps == [1.2]
-        assert state.media_messages == 2
-        assert [marker[-1] for marker in markers] == [
-            "[发送了表情包: second-tag]",
-            "[发送了表情包: first-tag]",
+        assert [segment["type"] for segment in params["message"]] == ["text", "image", "text", "image", "image", "text"]
+        assert [segment["data"]["file"] for segment in params["message"] if segment["type"] == "image"] == [
+            "base64://" + source.split(",", 1)[1] for source in expected_sources
         ]
 
-        invalid_session = _DeliveryToolSession()
-        invalid_state = runtime.DeliveryState()
-        with llm_chat_delivery_scope(invalid_state):
-            with pytest.raises(runtime.DeliveryError, match="^Registered image path is unavailable$"):
-                await target(
-                    session=invalid_session,
-                    image_paths=[first_relative_path, "memes/missing.png"],
-                )
-        assert invalid_session.sent == []
-        assert invalid_state.media_messages == 0
         broken_path = meme_dir / "broken.png"
         broken_path.write_bytes(b"not-an-image")
         rows.append(SimpleNamespace(id=3, file_path="memes/broken.png", tags="broken-tag"))
-        broken_session = _DeliveryToolSession()
-        broken_state = runtime.DeliveryState()
-        with llm_chat_delivery_scope(broken_state):
-            with pytest.raises(
-                runtime.DeliveryError,
-                match="^Registered image file is unreadable, invalid, or too large$",
-            ):
-                await target(session=broken_session, image_paths=[first_relative_path, "memes/broken.png"])
-        assert broken_session.sent == []
-        assert broken_state.media_messages == 0
+        for invalid_path in ("memes/missing.png", "../outside.png", "memes/broken.png"):
+            invalid_session = _DeliveryToolSession()
+            invalid_state = runtime.DeliveryState()
+            async with _prepared_delivery_scope(invalid_state):
+                with pytest.raises(runtime.DeliveryError):
+                    await target(session=invalid_session, image_paths=[first_relative_path, invalid_path])
+                assert list_prepared_media() == []
+            assert invalid_session.attempts == invalid_session.sent == []
+            assert (invalid_state.media_messages, invalid_state.delivery_attempts, invalid_state.delivered_texts) == (
+                0,
+                0,
+                [],
+            )
+
+        ambiguous_state = runtime.DeliveryState()
+        async with _prepared_delivery_scope(ambiguous_state):
+            with pytest.raises(runtime.DeliveryError):
+                await target(session=session, context="happy", image_paths=[first_relative_path])
+            assert list_prepared_media() == []
+        assert (ambiguous_state.media_messages, ambiguous_state.delivery_attempts) == (0, 0)
 
         exhausted_session = _DeliveryToolSession()
         exhausted_state = runtime.DeliveryState()
-        with llm_chat_delivery_scope(exhausted_state):
+        async with _prepared_delivery_scope(exhausted_state):
+            prepared = await target(session=exhausted_session, context=first_relative_path)
             for _ in range(5):
                 runtime.reserve_media_message()
-            with pytest.raises(runtime.DeliveryError, match="^Media delivery budget exhausted$"):
-                await target(session=exhausted_session, image_paths=[first_relative_path, second_relative_path])
-        assert exhausted_session.sent == []
+            with pytest.raises(runtime.DeliveryError):
+                await send(
+                    exhausted_session,
+                    segments=[
+                        {"type": "media", "media_ref": prepared["media_ref"]},
+                        {"type": "media", "media_ref": prepared["media_ref"]},
+                    ],
+                )
+            assert resolve_media(exhausted_session, [prepared["media_ref"]])[0].consumed is False
+        assert exhausted_session.attempts == []
         assert exhausted_state.media_messages == 5
+        assert exhausted_state.delivery_attempts == 0
 
-        ambiguous_session = _DeliveryToolSession()
-        ambiguous_state = runtime.DeliveryState()
-        with llm_chat_delivery_scope(ambiguous_state):
-            with pytest.raises(
-                runtime.DeliveryError,
-                match="^Provide exactly one of context or image_paths$",
-            ):
-                await target(session=ambiguous_session, context="happy", image_paths=[first_relative_path])
-        assert ambiguous_session.sent == []
-        assert ambiguous_state.media_messages == 0
-
-        partial_session = _DeliveryToolSession(fail_attempts={2})
-        partial_state = runtime.DeliveryState()
-        with llm_chat_delivery_scope(partial_state):
-            with pytest.raises(
-                runtime.DeliveryError,
-                match=("^image delivery confirmed 1/2 images before failure; do not repeat the confirmed prefix$"),
-            ):
-                await target(session=partial_session, image_paths=[first_relative_path, second_relative_path])
-        assert len(partial_session.sent) == 1
-        assert partial_state.confirmed_deliveries == 1
-        assert partial_state.delivery_attempts == 2
-
-        marker_attempts = 0
-        marker_warnings: list[str] = []
-
-        async def flaky_append_message(*_args: Any) -> None:
-            nonlocal marker_attempts
-            marker_attempts += 1
-            if marker_attempts == 1:
-                raise RuntimeError("database unavailable")
-
-        monkeypatch.setattr(runtime.image_context, "append_history", flaky_append_message)
-        monkeypatch.setattr(runtime.image_context, "warn", marker_warnings.append)
-        marker_failure_session = _DeliveryToolSession()
-        marker_failure_state = runtime.DeliveryState()
-        with llm_chat_delivery_scope(marker_failure_state):
-            marker_failure_result = await target(
-                session=marker_failure_session,
-                image_paths=[first_relative_path, second_relative_path],
-            )
-        assert marker_failure_result.startswith("已发送 2 张图片")
-        assert len(marker_failure_session.sent) == 2
-        assert marker_failure_state.confirmed_deliveries == 2
-        assert marker_attempts == 2
-        assert marker_warnings == ["image delivery history failed: RuntimeError"]
-
+        failed_session = _DeliveryToolSession(fail_attempts={1})
+        failed_state = runtime.DeliveryState()
+        async with _prepared_delivery_scope(failed_state):
+            first = await target(session=failed_session, context=first_relative_path)
+            second = await target(session=failed_session, context=second_relative_path)
+            recent_before = list(runtime.image_context.recent_images[failed_session.channel.id])
+            with pytest.raises(RuntimeError):
+                await send(
+                    failed_session,
+                    segments=[
+                        {"type": "media", "media_ref": first["media_ref"]},
+                        {"type": "media", "media_ref": second["media_ref"]},
+                    ],
+                )
+            for entry in (first, second):
+                with pytest.raises(runtime.DeliveryError):
+                    resolve_media(failed_session, [entry["media_ref"]])
+            assert list(runtime.image_context.recent_images[failed_session.channel.id]) == recent_before
+        assert failed_session.sent == []
+        assert len(failed_session.attempts) == 1
+        assert (failed_state.delivery_attempts, failed_state.confirmed_deliveries, failed_state.delivered_texts) == (
+            1,
+            0,
+            [],
+        )
         await harness.dispose()
         _assert_registry_matches(baseline)
 
@@ -2813,7 +2912,11 @@ async def test_delivery_send_tool_success_survives_exact_loop_exhaustion_without
 
     factory = _MockClientFactory(local_modules.web_access.ExaWebClient, handler)
     script = [
-        _model_response(tool_calls=[_tool_call("text-1", "send_text", {"text": "EXHAUSTION_SENTINEL"})]),
+        _model_response(
+            tool_calls=[
+                _tool_call("text-1", "send_msg", {"segments": [{"type": "text", "text": "EXHAUSTION_SENTINEL"}]})
+            ]
+        ),
         *[
             _model_response(tool_calls=[_tool_call(f"search-{index}", "web_search", {"query": f"query {index}"})])
             for index in range(1, tool_limit + 1)
@@ -2862,7 +2965,7 @@ async def test_delivery_send_tool_success_survives_exact_loop_exhaustion_without
             )
 
         assert local_modules.generation.response_content(response) == "[END_OF_RESPONSE]"
-        assert session.sent == ["EXHAUSTION_SENTINEL"]
+        assert [str(message) for message in session.sent] == ["EXHAUSTION_SENTINEL"]
         assert state.delivered_texts == ["EXHAUSTION_SENTINEL"]
         assert search_calls == 8
         assert len(payloads) == tool_limit + 2
@@ -2871,7 +2974,7 @@ async def test_delivery_send_tool_success_survives_exact_loop_exhaustion_without
         assert "tool_choice" not in final_payload
         tool_messages = _tool_messages(final_payload)
         assert [message["name"] for message in tool_messages] == [
-            "send_text",
+            "send_msg",
             *("web_search" for _ in range(tool_limit)),
         ]
         first_result = json.loads(tool_messages[0]["content"])
@@ -2919,6 +3022,27 @@ async def test_web_research_keeps_tool_headroom_for_external_image_delivery(
         raise AssertionError(f"unexpected Exa path: {request.url.path}")
 
     factory = _MockClientFactory(local_modules.web_access.ExaWebClient, handler)
+    session = _DeliveryToolSession()
+
+    async def fetch_image(source: str, *, max_bytes: int) -> bytes:
+        assert source == "https://images.example.com/latest-skin.png"
+        return _PNG_BYTES
+
+    def compose_image(payload: dict[str, Any]) -> litellm.ModelResponse:
+        assert session.sent == []
+        prepared = json.loads(_tool_messages(payload)[-1]["content"])["data"]
+        assert prepared["status"] == "prepared"
+        return _model_response(
+            tool_calls=[
+                _tool_call(
+                    "deliver-image", "send_msg", {"segments": [{"type": "media", "media_ref": prepared["media_ref"]}]}
+                )
+            ]
+        )
+
+    source_module = importlib.import_module("plugins.llm_chat.tools.prepare_external_media")
+    monkeypatch.setattr(source_module, "fetch_public_media", fetch_image)
+
     payloads = _install_completion_script(
         monkeypatch,
         [
@@ -2950,11 +3074,12 @@ async def test_web_research_keeps_tool_headroom_for_external_image_delivery(
                 tool_calls=[
                     _tool_call(
                         "image-1",
-                        "send_external_image",
+                        "prepare_external_media",
                         {"source": "https://images.example.com/latest-skin.png"},
                     )
                 ]
             ),
+            compose_image,
             _model_response("[END_OF_RESPONSE]"),
         ],
     )
@@ -2964,7 +3089,6 @@ async def test_web_research_keeps_tool_headroom_for_external_image_delivery(
 
     monkeypatch.setattr(local_modules.generation, "get_model_config", unexpected_finalizer)
     state = local_modules.delivery.DeliveryState()
-    session = _DeliveryToolSession()
 
     try:
         async with _temporary_plugin(
@@ -2996,9 +3120,9 @@ async def test_web_research_keeps_tool_headroom_for_external_image_delivery(
         assert local_modules.generation.response_content(response) == "[END_OF_RESPONSE]"
         assert http_paths.count("/search") == 4
         assert http_paths.count("/contents") == 3
-        assert len(payloads) == 4
+        assert len(payloads) == 5
         image = cast(MessageChain, session.sent[-1]).get(Image)[0]
-        assert image.src == "https://images.example.com/latest-skin.png"
+        assert base64.b64decode(image.src.partition(",")[2]) == _PNG_BYTES
         assert state.media_messages == state.confirmed_deliveries == state.confirmed_media_deliveries == 1
     finally:
         await factory.aclose()
@@ -3029,6 +3153,27 @@ async def test_explicit_missing_image_request_retries_with_tools_instead_of_clai
         raise AssertionError(f"unexpected Exa path: {request.url.path}")
 
     factory = _MockClientFactory(local_modules.web_access.ExaWebClient, handler)
+    session = _DeliveryToolSession()
+
+    async def fetch_image(source: str, *, max_bytes: int) -> bytes:
+        assert source == "https://images.example.com/dumpling.png"
+        return _PNG_BYTES
+
+    def compose_image(payload: dict[str, Any]) -> litellm.ModelResponse:
+        assert session.sent == []
+        prepared = json.loads(_tool_messages(payload)[-1]["content"])["data"]
+        assert prepared["status"] == "prepared"
+        return _model_response(
+            tool_calls=[
+                _tool_call(
+                    "deliver-image", "send_msg", {"segments": [{"type": "media", "media_ref": prepared["media_ref"]}]}
+                )
+            ]
+        )
+
+    source_module = importlib.import_module("plugins.llm_chat.tools.prepare_external_media")
+    monkeypatch.setattr(source_module, "fetch_public_media", fetch_image)
+
     payloads = _install_completion_script(
         monkeypatch,
         [
@@ -3038,11 +3183,12 @@ async def test_explicit_missing_image_request_retries_with_tools_instead_of_clai
                 tool_calls=[
                     _tool_call(
                         "image-1",
-                        "send_external_image",
+                        "prepare_external_media",
                         {"source": "https://images.example.com/dumpling.png"},
                     )
                 ]
             ),
+            compose_image,
             _model_response("[END_OF_RESPONSE]"),
         ],
     )
@@ -3052,7 +3198,6 @@ async def test_explicit_missing_image_request_retries_with_tools_instead_of_clai
 
     monkeypatch.setattr(local_modules.generation, "get_model_config", unexpected_finalizer)
     state = local_modules.delivery.DeliveryState()
-    session = _DeliveryToolSession()
 
     try:
         async with _temporary_plugin(
@@ -3088,10 +3233,9 @@ async def test_explicit_missing_image_request_retries_with_tools_instead_of_clai
 
         assert local_modules.generation.response_content(response) == "[END_OF_RESPONSE]"
         assert http_paths == ["/search"]
-        assert len(payloads) == 4
-        assert "上一条候选回复没有产生任何确认的媒体发送" in payloads[1]["messages"][0]["content"]
+        assert len(payloads) == 5
         image = cast(MessageChain, session.sent[-1]).get(Image)[0]
-        assert image.src == "https://images.example.com/dumpling.png"
+        assert base64.b64decode(image.src.partition(",")[2]) == _PNG_BYTES
         assert state.media_messages == state.confirmed_deliveries == state.confirmed_media_deliveries == 1
     finally:
         await factory.aclose()
@@ -3677,16 +3821,18 @@ async def test_native_artifact_tools_publish_source_and_deliver_exact_zip(
     session = _DeliveryToolSession()
     state = local_modules.delivery.DeliveryState()
 
-    async def append_history(*_args: Any) -> None:
-        return None
-
     try:
-        async with _temporary_plugin() as harness:
+        async with (
+            _temporary_plugin(
+                config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+                module_path=_TOOL_RUNTIME_PATH,
+            ) as harness,
+            prepared_media_scope(),
+        ):
             register_artifact_tools(
                 harness.dispatcher,
                 local_modules.config.LLMChatConfig(web_artifacts_public_url=service.public_origin),
                 service=service,
-                append_history=append_history,
             )
             with (
                 agent_access_scope(AgentAccessContext(1, 2, 3, "alice")),
@@ -3707,18 +3853,57 @@ async def test_native_artifact_tools_publish_source_and_deliver_exact_zip(
                 assert result["ok"] is True, result
                 artifact = json.loads(result["data"])
                 delivery = _external_requirement(
-                    "send_artifact", {"artifact_ref": artifact["artifact_ref"]}, "send-source"
+                    "prepare_artifact", {"artifact_ref": artifact["artifact_ref"]}, "prepare-source"
                 )
                 await llm_service_module.run_llm_tools(RunOutput(requirements=[delivery]))
                 delivered = json.loads(delivery.external_execution_result)
                 assert delivered["ok"] is True, delivered
-                assert json.loads(delivered["data"])["mode"] == "file"
+                prepared = json.loads(delivered["data"])
+                assert prepared["status"] == "prepared"
+                assert session.sent == []
+                assert state.delivery_attempts == 0
+                delivery = _external_requirement(
+                    "send_msg", {"segments": [{"type": "media", "media_ref": prepared["media_ref"]}]}, "send-source"
+                )
+                await llm_service_module.run_llm_tools(RunOutput(requirements=[delivery]))
+                assert json.loads(delivery.external_execution_result)["ok"] is True
 
             data_url = session.sent[0][File][0].src
             with ZipFile(BytesIO(base64.b64decode(data_url.partition(",")[2]))) as archive:
                 assert {name: archive.read(name).decode() for name in archive.namelist()} == sources
     finally:
         await service.close()
+
+
+@pytest.mark.asyncio
+async def test_native_message_schema_accepts_ordered_segments_and_rejects_unsafe_fields(
+    local_modules: SimpleNamespace,
+) -> None:
+    from jsonschema import Draft202012Validator
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        validator = Draft202012Validator(available_functions["send_msg"][1].parameters)
+        validator.validate(
+            {
+                "segments": [
+                    {"type": "text", "text": "Before "},
+                    {"type": "mention", "target": "participant_0123abcdef"},
+                    {"type": "media", "media_ref": "media_" + "a" * 32},
+                    {"type": "link", "url": "https://example.com", "text": "Source"},
+                    {"type": "emoji", "id": "123"},
+                    {"type": "break"},
+                    {"type": "style", "style": "bold", "text": "End"},
+                ],
+                "delay_seconds": 1.2,
+            }
+        )
+        assert not validator.is_valid({"segments": [{"type": "mention", "target": "12345678"}]})
+        assert not validator.is_valid({"segments": [{"type": "media", "media_ref": "file:///private"}]})
+        assert not validator.is_valid({"segments": [{"type": "text", "text": "plain", "id": "123"}]})
+        assert not validator.is_valid({"segments": [{"type": "style", "style": "script", "text": "plain"}]})
 
 
 @pytest.mark.asyncio
@@ -3735,9 +3920,6 @@ async def test_native_submission_schemas_accept_real_payloads_and_reject_wrong_n
 
     def unused_service() -> Any:
         raise AssertionError("Schema validation must not submit a plugin")
-
-    async def append_history(*_args: Any) -> None:
-        return None
 
     manifest = {
         "title": "Menu",
@@ -3756,7 +3938,6 @@ async def test_native_submission_schemas_accept_real_payloads_and_reject_wrong_n
                 harness.dispatcher,
                 local_modules.config.LLMChatConfig(web_artifacts_public_url=service.public_origin),
                 service=service,
-                append_history=append_history,
             )
             plugin_schema = Draft202012Validator(available_functions["submit_plugin"][1].parameters)
             supplied = {"plugin_name": "dinner", "source_files": {"__init__.py": "pass"}, "manifest": manifest}
@@ -3945,43 +4126,55 @@ async def test_function_wire_schema_preserves_upstream_external_pause_and_contin
 
 
 @pytest.mark.asyncio
-async def test_same_batch_media_finishes_before_text_and_preserves_provider_call_ids(
+async def test_prepared_media_composition_preserves_model_order_and_provider_call_ids(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    session = _DeliveryToolSession()
+    recorder = ToolTraceRecorder()
+    state = local_modules.delivery.DeliveryState(sleep=_FakeClock().sleep)
+
+    def compose(payload: dict[str, Any]) -> litellm.ModelResponse:
+        assert session.sent == []
+        assert state.delivery_attempts == state.media_messages == 0
+        prepared = json.loads(_tool_messages(payload)[-1]["content"])["data"]
+        assert prepared["status"] == "prepared"
+        return _model_response(
+            tool_calls=[
+                _tool_call(
+                    "composed-message",
+                    "send_msg",
+                    {
+                        "segments": [
+                            {"type": "text", "text": "Image follows:"},
+                            {"type": "media", "media_ref": prepared["media_ref"]},
+                            {"type": "text", "text": "Caption after image."},
+                        ]
+                    },
+                )
+            ]
+        )
+
     payloads = _install_completion_script(
         monkeypatch,
         [
             _model_response(
                 tool_calls=[
-                    _tool_call("image-first", "send_external_image", {"source": base64.b64encode(_PNG_BYTES).decode()}),
-                    _tool_call("text-second", "send_text", {"text": "Image delivered."}),
+                    _tool_call(
+                        "prepare-image", "prepare_external_media", {"source": base64.b64encode(_PNG_BYTES).decode()}
+                    )
                 ]
             ),
+            compose,
             _model_response("[END_OF_RESPONSE]"),
         ],
     )
-    session = _DeliveryToolSession()
-    recorder = ToolTraceRecorder()
-    state = local_modules.delivery.DeliveryState(sleep=_FakeClock().sleep)
-
-    async def slow_image(_session: Session, _source: str) -> bytes:
-        await asyncio.sleep(0)
-        assert session.sent == []
-        return _PNG_BYTES
-
-    async def append_history(*_args: Any) -> None:
-        return None
-
     async with _temporary_plugin(
         config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
         module_path=_TOOL_RUNTIME_PATH,
-    ) as harness:
-        source_module = importlib.import_module("plugins.llm_chat.tools.send_external_image")
-        monkeypatch.setattr(source_module, "fetch_image_bytes", slow_image)
-        monkeypatch.setattr(harness.module.external_image_context, "append_history", append_history)
+    ):
         await local_modules.generation.generate_chat_response(
-            [{"role": "user", "content": "Send the image first, then text."}],
+            [{"role": "user", "content": "Put the image between the introduction and caption."}],
             system="delivery rules",
             model="test-model",
             channel_id="12345",
@@ -3990,15 +4183,19 @@ async def test_same_batch_media_finishes_before_text_and_preserves_provider_call
             delivery_state=state,
             tool_trace=recorder,
         )
-    assert cast(MessageChain, session.sent[0]).get(Image)
-    assert session.sent[1:] == ["Image delivered."]
-    assert (state.confirmed_media_deliveries, state.confirmed_deliveries) == (1, 2)
+    assert len(session.sent) == 1
+    chain = cast(MessageChain, session.sent[0])
+    assert str(chain[0]) == "Image follows:"
+    assert isinstance(chain[1], Image)
+    assert str(chain[2]) == "Caption after image."
+    assert (state.confirmed_media_deliveries, state.confirmed_deliveries) == (1, 1)
+    assert state.delivered_texts == ["Image follows:[发送了图片]Caption after image."]
     assert [(event.tool_call_id, event.status) for event in recorder.events] == [
-        ("image-first", "succeeded"),
-        ("text-second", "succeeded"),
+        ("prepare-image", "succeeded"),
+        ("composed-message", "succeeded"),
     ]
     assert len({event.execution_ref for event in recorder.events}) == 2
-    assert [message["tool_call_id"] for message in _tool_messages(payloads[1])] == ["image-first", "text-second"]
+    assert [message["tool_call_id"] for message in _tool_messages(payloads[2])] == ["prepare-image", "composed-message"]
     json.dumps(payloads)
 
 
@@ -4019,7 +4216,7 @@ async def test_external_session_di_is_isolated_between_simultaneous_generations(
     first, second = SimultaneousSession(), SimultaneousSession()
 
     async def send_one(session: Session, text: str) -> None:
-        requirement = _external_requirement("send_text", {"text": text}, text)
+        requirement = _external_requirement("send_msg", {"segments": [{"type": "text", "text": text}]}, text)
         recorder = ToolTraceRecorder()
         with (
             local_modules.agno_compat.agno_delivery_tool_scope(),
@@ -4036,8 +4233,8 @@ async def test_external_session_di_is_isolated_between_simultaneous_generations(
         module_path=_TOOL_RUNTIME_PATH,
     ):
         await asyncio.gather(send_one(first, "first participant"), send_one(second, "second participant"))
-    assert first.sent == ["first participant"]
-    assert second.sent == ["second participant"]
+    assert [str(message) for message in first.sent] == ["first participant"]
+    assert [str(message) for message in second.sent] == ["second participant"]
 
 
 @pytest.mark.asyncio
@@ -4085,7 +4282,7 @@ async def test_read_only_batch_cancellation_settles_audit_and_does_not_start_que
     requirements = [
         _external_requirement("web_search", {"query": "public fact"}, "search-cancel"),
         _external_requirement("read_web_page", {"url": "https://example.com", "focus": "fact"}, "read-cancel"),
-        _external_requirement("send_text", {"text": "must not send"}, "queued-send"),
+        _external_requirement("send_msg", {"segments": [{"type": "text", "text": "must not send"}]}, "queued-send"),
     ]
     async with _temporary_plugin() as harness:
         register = importlib.import_module("plugins.llm_chat.tools._registration").register_tool
@@ -4127,11 +4324,11 @@ async def test_staged_tool_replacement_retains_the_live_owner(
     session = _DeliveryToolSession()
 
     def register_sender(harness: _PluginHarness, prefix: str) -> None:
-        async def send_text(session: Session, text: str) -> str:
+        async def ownership_probe(session: Session, text: str) -> str:
             await session.send(prefix + text)
             return "sent"
 
-        register(harness.dispatcher, send_text)
+        register(harness.dispatcher, ownership_probe)
 
     async with _temporary_plugin() as original:
         register_sender(original, "old:")
@@ -4141,10 +4338,10 @@ async def test_staged_tool_replacement_retains_the_live_owner(
                 await original.dispose()
             else:
                 await staged.dispose()
-            requirement = _external_requirement("send_text", {"text": "live"}, "staged-send")
+            requirement = _external_requirement("ownership_probe", {"text": "live"}, "staged-send")
             with llm_chat_tool_trace_scope(ToolTraceRecorder()), llm_chat_context_scope(_tool_context(session)):
                 exposed = llm_service_module.get_agno_tools()
-                assert available_functions["send_text"][1] in exposed
+                assert available_functions["ownership_probe"][1] in exposed
                 assert await llm_service_module.run_llm_tools(RunOutput(requirements=[requirement])) is True
             assert json.loads(requirement.external_execution_result)["ok"] is True
             assert session.sent == ["new:live" if commit_replacement else "old:live"]
@@ -4157,9 +4354,11 @@ async def test_external_delivery_waits_for_reference_edit_and_rejects_internal_r
     session = _DeliveryToolSession()
     recorder = ToolTraceRecorder()
     references = ImageEditReferences.from_input_attachments((), requires_web_reference=True)
-    premature = _external_requirement("send_text", {"text": "premature"}, "before-edit")
-    allowed = _external_requirement("send_text", {"text": "after edit"}, "after-edit")
-    leaked = _external_requirement("send_text", {"text": "web_ref_0123456789abcdef01234567"}, "leaked-ref")
+    premature = _external_requirement("send_msg", {"segments": [{"type": "text", "text": "premature"}]}, "before-edit")
+    allowed = _external_requirement("send_msg", {"segments": [{"type": "text", "text": "after edit"}]}, "after-edit")
+    leaked = _external_requirement(
+        "send_msg", {"segments": [{"type": "text", "text": "web_ref_0123456789abcdef01234567"}]}, "leaked-ref"
+    )
     async with _temporary_plugin(
         config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
         module_path=_TOOL_RUNTIME_PATH,
@@ -4171,10 +4370,10 @@ async def test_external_delivery_waits_for_reference_edit_and_rejects_internal_r
             llm_chat_delivery_scope(local_modules.delivery.DeliveryState()),
         ):
             await llm_service_module.run_llm_tools(RunOutput(requirements=[premature]))
-            assert session.sent == []
+            assert [str(message) for message in session.sent] == []
             references.edit_confirmed = True
             await llm_service_module.run_llm_tools(RunOutput(requirements=[allowed, leaked]))
-    assert session.sent == ["after edit"]
+    assert [str(message) for message in session.sent] == ["after edit"]
     assert [json.loads(req.external_execution_result)["ok"] for req in (premature, allowed, leaked)] == [
         False,
         True,
@@ -4247,7 +4446,9 @@ async def test_native_readonly_batch_executes_following_delivery_exactly_once(
                 tool_calls=[
                     _tool_call("local", "get_local_time", {}),
                     _tool_call("utc", "get_local_time", {"timezone": "UTC"}),
-                    _tool_call("effect", "send_text", {"text": "Clock checks completed."}),
+                    _tool_call(
+                        "effect", "send_msg", {"segments": [{"type": "text", "text": "Clock checks completed."}]}
+                    ),
                 ]
             ),
             _model_response("[END_OF_RESPONSE]"),
@@ -4268,7 +4469,8 @@ async def test_native_readonly_batch_executes_following_delivery_exactly_once(
             delivery_state=local_modules.delivery.DeliveryState(),
         )
 
-    assert session.attempts == session.sent == ["Clock checks completed."]
+    assert session.attempts == session.sent
+    assert [str(message) for message in session.sent] == ["Clock checks completed."]
     results = _tool_messages(payloads[1])
     assert [result["tool_call_id"] for result in results] == ["local", "utc", "effect"]
     assert all(json.loads(result["content"])["ok"] for result in results)
@@ -4290,7 +4492,7 @@ async def test_native_finish_stops_queued_effects_with_matched_skipped_results(
 
     calls = []
     if outcome == "delivered":
-        calls.append(_tool_call("prefix", "send_text", {"text": "Confirmed output."}))
+        calls.append(_tool_call("prefix", "send_msg", {"segments": [{"type": "text", "text": "Confirmed output."}]}))
     calls.extend(
         [
             _tool_call(
@@ -4302,7 +4504,7 @@ async def test_native_finish_stops_queued_effects_with_matched_skipped_results(
                     "reply": "I cannot do that." if outcome == "declined" else "",
                 },
             ),
-            _tool_call("skipped", "send_text", {"text": "Must not escape."}),
+            _tool_call("skipped", "send_msg", {"segments": [{"type": "text", "text": "Must not escape."}]}),
         ]
     )
     payloads = _install_completion_script(monkeypatch, [_model_response(tool_calls=calls)])
@@ -4327,7 +4529,7 @@ async def test_native_finish_stops_queued_effects_with_matched_skipped_results(
             agent_events=events,
         )
 
-    assert session.sent == (["Confirmed output."] if outcome == "delivered" else [])
+    assert [str(message) for message in session.sent] == (["Confirmed output."] if outcome == "delivered" else [])
     assert len(payloads) == 1
     results = [message for message in response.messages if message.role == "tool"]
     assert [message.tool_call_id for message in results] == [call["id"] for call in calls]
@@ -4369,9 +4571,9 @@ async def test_native_rejected_finish_allows_corrective_tool_continuation(
 
     calls = []
     if rejection != "empty":
-        calls.append(_tool_call("prefix", "send_text", {"text": "Prefix"}))
+        calls.append(_tool_call("prefix", "send_msg", {"segments": [{"type": "text", "text": "Prefix"}]}))
     if rejection == "partial":
-        calls.append(_tool_call("failed", "send_text", {"text": "Unconfirmed"}))
+        calls.append(_tool_call("failed", "send_msg", {"segments": [{"type": "text", "text": "Unconfirmed"}]}))
     calls.append(
         _tool_call(
             "finish",
@@ -4386,7 +4588,9 @@ async def test_native_rejected_finish_allows_corrective_tool_continuation(
         monkeypatch,
         [
             _model_response(tool_calls=calls),
-            _model_response(tool_calls=[_tool_call("corrective", "send_text", {"text": "OK"})]),
+            _model_response(
+                tool_calls=[_tool_call("corrective", "send_msg", {"segments": [{"type": "text", "text": "OK"}]})]
+            ),
             _model_response("[END_OF_RESPONSE]"),
         ],
     )
@@ -4411,7 +4615,7 @@ async def test_native_rejected_finish_allows_corrective_tool_continuation(
         )
 
     assert resolution.outcome == "automatic"
-    assert session.sent == (["OK"] if rejection == "empty" else ["Prefix", "OK"])
+    assert [str(message) for message in session.sent] == (["OK"] if rejection == "empty" else ["Prefix", "OK"])
     assert response.content == "[END_OF_RESPONSE]"
     rejected = next(message for message in _tool_messages(payloads[1]) if message["tool_call_id"] == "finish")
     assert json.loads(rejected["content"])["ok"] is False
@@ -4517,8 +4721,36 @@ async def _native_image_turn(local_modules, session, *, maximum=6):
 
     turn = lifecycle.ActiveChatTurn("12345", 1, state, append, delete, lambda _message: None)
     resolution = TurnResolution()
-    with native.native_image_delivery_scope(partial(turn.deliver_model_images, session)):
+    with native.native_image_delivery_scope(partial(turn.prepare_model_images, session)):
         yield SimpleNamespace(turn=turn, state=state, resolution=resolution, history=history)
+
+
+def _native_prepared_resources(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    marker = "Prepared resources (not sent): "
+    for message in payload["messages"]:
+        if message["role"] == "system" and marker in message.get("content", ""):
+            resources, _ = json.JSONDecoder().raw_decode(message["content"].split(marker, 1)[1])
+            assert resources
+            assert all(item["status"] == "prepared" for item in resources)
+            return resources
+    result = next(message for message in reversed(_tool_messages(payload)) if message["name"] == "list_prepared_media")
+    resources = json.loads(result["content"])["data"]
+    assert resources
+    return resources
+
+
+def _native_composition_response(payload: dict[str, Any]) -> litellm.ModelResponse:
+    resources = _native_prepared_resources(payload)
+    return _model_response(
+        tool_calls=[
+            _tool_call(
+                "compose",
+                "send_msg",
+                {"segments": [{"type": "media", "media_ref": item["media_ref"]} for item in resources]},
+            ),
+            _tool_call("finish", "finish_turn", {"outcome": "delivered"}),
+        ]
+    )
 
 
 async def _generate_native_turn(local_modules, session, turn, *, references=None, content="Create an image."):
@@ -4537,19 +4769,26 @@ async def _generate_native_turn(local_modules, session, turn, *, references=None
     )
 
 
-async def test_native_images_finish_only_after_actual_delivery_without_another_model_request(
-    local_modules, monkeypatch
-):
+async def test_native_images_require_model_composition_before_delivered_finish(local_modules, monkeypatch):
     gif = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+    session = _DeliveryToolSession()
+
+    def compose(payload):
+        assert session.sent == []
+        assert turn.state.delivery_attempts == turn.state.confirmed_deliveries == 0
+        assert turn.history == []
+        return _native_composition_response(payload)
+
     payloads = _install_completion_script(
         monkeypatch,
         [
             _native_image_response(
-                [_PNG_BYTES, gif], tool_calls=[_tool_call("finish", "finish_turn", {"outcome": "delivered"})]
-            )
+                [_PNG_BYTES, gif], tool_calls=[_tool_call("premature-finish", "finish_turn", {"outcome": "delivered"})]
+            ),
+            _model_response("[END_OF_RESPONSE]"),
+            compose,
         ],
     )
-    session = _DeliveryToolSession()
     async with (
         _temporary_plugin(
             config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
@@ -4557,33 +4796,48 @@ async def test_native_images_finish_only_after_actual_delivery_without_another_m
         ),
         _native_image_turn(local_modules, session) as turn,
     ):
-        response = await _generate_native_turn(local_modules, session, turn)
+        await _generate_native_turn(local_modules, session, turn)
         assert turn.resolution.outcome == "delivered"
         assert turn.state.confirmed_media_deliveries == 2
-        assert turn.state.delivery_attempts == turn.state.confirmed_deliveries == 2
-        assert [base64.b64decode(payload[0].src.split(",", 1)[1]) for payload in session.sent] == [_PNG_BYTES, gif]
-        assert turn.history == ["[发送了图片]", "[发送了图片]"]
+        assert turn.state.delivery_attempts == turn.state.confirmed_deliveries == 1
+        assert [base64.b64decode(image.src.split(",", 1)[1]) for image in session.sent[0].get(Image)] == [
+            _PNG_BYTES,
+            gif,
+        ]
+        assert turn.history == []
+        await turn.turn.persist_delivered_text()
+        await turn.turn.persist_delivered_text()
+        assert turn.history == ["[发送了图片][发送了图片]"]
         results = [event for event in turn.turn.tool_trace.events if event.tool_name == "finish_turn"]
-        assert [(event.status, event.outcome) for event in results] == [("succeeded", {"outcome": "delivered"})]
-        await turn.turn.deliver_model_images(session, response)
-        assert len(session.sent) == 2
-    assert len(payloads) == 1
+        assert [event.status for event in results] == ["rejected", "succeeded"]
+        assert len(session.sent) == 1
+    assert len(payloads) == 3
 
 
-async def test_native_images_precede_same_batch_text_and_never_repeat_at_finalization(local_modules, monkeypatch):
-    payloads = _install_completion_script(
-        monkeypatch,
-        [
-            _native_image_response(
-                [_PNG_BYTES],
-                tool_calls=[
-                    _tool_call("text", "send_text", {"text": "A short caption."}),
-                    _tool_call("finish", "finish_turn", {"outcome": "delivered"}),
-                ],
-            )
-        ],
-    )
+async def test_native_image_position_is_model_controlled_and_history_is_not_repeated(local_modules, monkeypatch):
     session = _DeliveryToolSession()
+
+    def compose(payload):
+        resources = _native_prepared_resources(payload)
+        assert session.sent == []
+        return _model_response(
+            tool_calls=[
+                _tool_call(
+                    "composed",
+                    "send_msg",
+                    {
+                        "segments": [
+                            {"type": "text", "text": "A short caption."},
+                            {"type": "media", "media_ref": resources[0]["media_ref"]},
+                            {"type": "text", "text": "Image follows the caption."},
+                        ]
+                    },
+                ),
+                _tool_call("finish", "finish_turn", {"outcome": "delivered"}),
+            ]
+        )
+
+    payloads = _install_completion_script(monkeypatch, [_native_image_response([_PNG_BYTES]), compose])
     async with (
         _temporary_plugin(
             config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
@@ -4591,14 +4845,16 @@ async def test_native_images_precede_same_batch_text_and_never_repeat_at_finaliz
         ),
         _native_image_turn(local_modules, session) as turn,
     ):
-        response = await _generate_native_turn(local_modules, session, turn)
-        await turn.turn.deliver_model_images(session, response)
+        await _generate_native_turn(local_modules, session, turn)
         await turn.turn.persist_delivered_text()
-        assert isinstance(session.sent[0][0], Image)
-        assert session.sent[1:] == ["A short caption."]
-        assert turn.history == ["[发送了图片]", "A short caption."]
+        await turn.turn.persist_delivered_text()
+        assert len(session.sent) == 1
+        assert str(session.sent[0][0]) == "A short caption."
+        assert isinstance(session.sent[0][1], Image)
+        assert str(session.sent[0][2]) == "Image follows the caption."
+        assert turn.history == ["A short caption.[发送了图片]Image follows the caption."]
         assert turn.resolution.outcome == "delivered"
-    assert len(payloads) == 1
+    assert len(payloads) == 2
 
 
 async def test_native_images_survive_readonly_pause_and_image_only_terminal_response(local_modules, monkeypatch):
@@ -4607,6 +4863,7 @@ async def test_native_images_survive_readonly_pause_and_image_only_terminal_resp
         [
             _native_image_response([_PNG_BYTES], tool_calls=[_tool_call("time", "get_local_time", {})]),
             _model_response("[END_OF_RESPONSE]"),
+            _native_composition_response,
         ],
     )
     session = _DeliveryToolSession()
@@ -4617,33 +4874,49 @@ async def test_native_images_survive_readonly_pause_and_image_only_terminal_resp
         ),
         _native_image_turn(local_modules, session) as turn,
     ):
-        response = await _generate_native_turn(local_modules, session, turn)
-        await turn.turn.deliver_model_images(session, response)
+        await _generate_native_turn(local_modules, session, turn)
+        await turn.turn.persist_delivered_text()
         assert turn.state.confirmed_media_deliveries == 1
         assert len(session.sent) == 1
         assert turn.history == ["[发送了图片]"]
-    assert len(payloads) == 2
-    assert "data:image/" not in json.dumps(payloads[1]["messages"])
+    assert len(payloads) == 3
+    assert "data:image/" not in json.dumps([payload["messages"] for payload in payloads[1:]])
 
 
 @pytest.mark.parametrize("outcome", ["failed", "cancelled"])
-async def test_native_image_failure_stops_finish_and_queued_tools_without_replay(local_modules, monkeypatch, outcome):
-    native = importlib.import_module("plugins.llm_chat.native_image_delivery")
-    payloads = _install_completion_script(
-        monkeypatch,
-        [
-            _native_image_response(
-                [_PNG_BYTES, _PNG_BYTES],
-                tool_calls=[
-                    _tool_call("finish", "finish_turn", {"outcome": "delivered"}),
-                    _tool_call("late", "send_text", {"text": "This must never be sent."}),
-                ],
-            )
-        ],
-    )
+async def test_native_image_send_failure_prevents_false_finish_and_replay(local_modules, monkeypatch, outcome):
     session = _DeliveryToolSession(
         fail_attempts={2} if outcome == "failed" else None,
         cancel_attempts={2} if outcome == "cancelled" else None,
+    )
+
+    def compose(payload):
+        resources = _native_prepared_resources(payload)
+        assert session.sent == []
+        calls = [
+            _tool_call(f"image-{index}", "send_msg", {"segments": [{"type": "media", "media_ref": item["media_ref"]}]})
+            for index, item in enumerate(resources)
+        ]
+        calls.append(_tool_call("finish", "finish_turn", {"outcome": "delivered"}))
+        if outcome == "failed":
+            calls.append(
+                _tool_call(
+                    "replay", "send_msg", {"segments": [{"type": "media", "media_ref": resources[1]["media_ref"]}]}
+                )
+            )
+        else:
+            calls.append(
+                _tool_call("late", "send_msg", {"segments": [{"type": "text", "text": "This must never be sent."}]})
+            )
+        return _model_response(tool_calls=calls)
+
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _native_image_response([_PNG_BYTES, _PNG_BYTES]),
+            compose,
+            _model_response("[END_OF_RESPONSE]"),
+        ],
     )
     async with (
         _temporary_plugin(
@@ -4652,16 +4925,25 @@ async def test_native_image_failure_stops_finish_and_queued_tools_without_replay
         ),
         _native_image_turn(local_modules, session) as turn,
     ):
-        expected = native.NativeImageDeliveryError if outcome == "failed" else asyncio.CancelledError
-        with pytest.raises(expected):
+        if outcome == "cancelled":
+            with pytest.raises(asyncio.CancelledError):
+                await _generate_native_turn(local_modules, session, turn)
+        else:
             await _generate_native_turn(local_modules, session, turn)
         assert turn.resolution.outcome == "automatic"
         assert turn.state.delivery_attempts == 2
         assert turn.state.confirmed_media_deliveries == 1
         assert len(session.sent) == 1
+        await turn.turn.persist_delivered_text()
         assert turn.history == ["[发送了图片]"]
-        assert [event.status for event in turn.turn.tool_trace.events] == [outcome, "cancelled"]
-    assert len(payloads) == 1
+        events = {event.tool_call_id: event for event in turn.turn.tool_trace.events}
+        assert events["image-0"].status == "succeeded"
+        assert events["image-1"].effect == "unknown"
+        if outcome == "cancelled":
+            assert events["finish"].status == events["late"].status == "cancelled"
+        else:
+            assert events["finish"].status == events["replay"].status == "rejected"
+    assert len(payloads) == (2 if outcome == "cancelled" else 3)
 
 
 async def test_native_image_limit_is_atomic_before_any_send_or_false_finish(local_modules, monkeypatch):
@@ -4694,9 +4976,8 @@ async def test_native_finish_waits_for_receipt_before_publishing_delivered_outco
     _install_completion_script(
         monkeypatch,
         [
-            _native_image_response(
-                [_PNG_BYTES], tool_calls=[_tool_call("finish", "finish_turn", {"outcome": "delivered"})]
-            )
+            _native_image_response([_PNG_BYTES]),
+            _native_composition_response,
         ],
     )
     entered, release = asyncio.Event(), asyncio.Event()
@@ -4763,33 +5044,60 @@ async def test_native_images_cannot_bypass_required_reference_edit(local_modules
     assert len(payloads) == 2
 
 
-async def test_native_image_only_response_reaches_delivery_without_a_tool_call(local_modules, monkeypatch):
-    payloads = _install_completion_script(monkeypatch, [_native_image_response([_PNG_BYTES])])
+async def test_native_image_only_response_can_be_declined_without_implicit_delivery(local_modules, monkeypatch):
     session = _DeliveryToolSession()
-    async with _temporary_plugin(), _native_image_turn(local_modules, session) as turn:
-        response = await _generate_native_turn(local_modules, session, turn)
-        await turn.turn.deliver_model_images(session, response)
-        assert turn.state.confirmed_media_deliveries == 1
-        assert len(session.sent) == 1
-        assert turn.history == ["[发送了图片]"]
-    assert len(payloads) == 1
+
+    def decline(payload):
+        resources = _native_prepared_resources(payload)
+        assert len(resources) == 1
+        assert session.attempts == []
+        return _model_response(tool_calls=[_tool_call("finish", "finish_turn", {"outcome": "silent"})])
+
+    payloads = _install_completion_script(monkeypatch, [_native_image_response([_PNG_BYTES]), decline])
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ),
+        _native_image_turn(local_modules, session) as turn,
+    ):
+        await _generate_native_turn(local_modules, session, turn, content="Consider a visual if useful.")
+        assert turn.resolution.outcome == "silent"
+        assert turn.state.confirmed_media_deliveries == 0
+        assert session.attempts == []
+        assert turn.history == []
+    assert len(payloads) == 2
 
 
 async def test_native_image_buffers_remain_private_to_concurrent_generations(local_modules, monkeypatch):
     gif = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
     requests = []
+    references = {}
     both_requested = asyncio.Event()
+    both_prepared = asyncio.Event()
     _install_completion_script(monkeypatch, [])
 
     async def completion(**payload):
         text = next(message["content"] for message in payload["messages"] if message["role"] == "user")
-        requests.append(text)
-        if len(requests) == 2:
-            both_requested.set()
-        await asyncio.wait_for(both_requested.wait(), timeout=2)
-        return _native_image_response(
-            [_PNG_BYTES if text == "First request" else gif],
-            tool_calls=[_tool_call("finish", "finish_turn", {"outcome": "delivered"})],
+        if text not in requests:
+            requests.append(text)
+            if len(requests) == 2:
+                both_requested.set()
+            await asyncio.wait_for(both_requested.wait(), timeout=2)
+            return _native_image_response([_PNG_BYTES if text == "First request" else gif])
+        assert "data:image/" not in json.dumps(payload["messages"])
+        resources = _native_prepared_resources(payload)
+        references[text] = resources[0]["media_ref"]
+        if len(references) == 2:
+            both_prepared.set()
+        await asyncio.wait_for(both_prepared.wait(), timeout=2)
+        other = "Second request" if text == "First request" else "First request"
+        return _model_response(
+            tool_calls=[
+                _tool_call("foreign", "send_msg", {"segments": [{"type": "media", "media_ref": references[other]}]}),
+                _tool_call("own", "send_msg", {"segments": [{"type": "media", "media_ref": references[text]}]}),
+                _tool_call("finish", "finish_turn", {"outcome": "delivered"}),
+            ]
         )
 
     monkeypatch.setattr(llm_service_module.litellm, "acompletion", completion)
@@ -4799,7 +5107,10 @@ async def test_native_image_buffers_remain_private_to_concurrent_generations(loc
         async with _native_image_turn(local_modules, session) as turn:
             await _generate_native_turn(local_modules, session, turn, content=content)
             assert turn.resolution.outcome == "delivered"
-            assert turn.state.confirmed_media_deliveries == 1
+            assert turn.state.confirmed_media_deliveries == turn.state.delivery_attempts == 1
+            events = {event.tool_call_id: event for event in turn.turn.tool_trace.events}
+            assert events["foreign"].status == "rejected"
+            assert events["own"].status == "succeeded"
 
     async with _temporary_plugin(
         config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
@@ -4824,8 +5135,7 @@ async def test_explicit_silence_discards_unsent_native_candidate_without_forcing
         ),
         _native_image_turn(local_modules, session) as turn,
     ):
-        response = await _generate_native_turn(local_modules, session, turn)
-        await turn.turn.deliver_model_images(session, response)
+        await _generate_native_turn(local_modules, session, turn)
         assert turn.resolution.outcome == "silent"
         assert turn.state.delivery_attempts == 0
         assert turn.history == []

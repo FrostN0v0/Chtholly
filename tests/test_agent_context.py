@@ -125,7 +125,7 @@ async def test_agent_event_rebuild_preserves_tool_pair_and_externalizes_large_so
     call = trace.start("html2pic", {"html": source, "width": 900})
     trace.finish_success(
         call,
-        {"rendered": True, "width": 900},
+        {"status": "prepared", "media_ref": "media_0123456789abcdef", "kind": "image", "bytes": 68},
         before=DeliverySnapshot(),
         after=DeliverySnapshot(),
     )
@@ -719,7 +719,7 @@ async def test_running_turn_exposes_recorded_context_without_replaying_operator_
             }
         ],
         warn=lambda _message: None,
-        tool_schemas=[{"name": "send_text", "source_hash": "test"}],
+        tool_schemas=[{"name": "send_msg", "source_hash": "test"}],
     )
 
     assert appended == [("channel", "alice", "Alice", "user", "hello")]
@@ -919,24 +919,24 @@ async def test_cancelled_user_image_capture_removes_completed_files(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_send_image_records_delivered_paths_as_auditable_evidence() -> None:
+async def test_prepare_image_records_selected_path_without_confirming_delivery() -> None:
     trace = ToolTraceRecorder()
-    call = trace.start("send_image", {"context": "开心", "image_paths": ["memes/12.jpg"]})
+    call = trace.start("prepare_image", {"context": "happy", "image_paths": ["memes/12.jpg"]})
     tool_trace.record_tool_evidence({"images": [{"path": "memes/99.jpg", "meaning": "范围外", "text": ""}]})
     with tool_trace.llm_chat_tool_trace_scope(trace), tool_trace.llm_chat_tool_execution_scope(call.execution_ref):
         tool_trace.record_tool_evidence({"images": [{"path": "memes/12.jpg", "meaning": "开心大笑", "text": "哈哈"}]})
-        tool_trace.record_tool_evidence({"images": [{"path": "memes/34.gif", "meaning": "撒娇", "text": ""}]})
     trace.finish_success(
         call,
-        "已发送 2 张图片",
+        {"status": "prepared", "media_ref": "media_0123456789abcdef", "kind": "image", "bytes": 68},
         before=DeliverySnapshot(active=True),
-        after=DeliverySnapshot(active=True, attempts=2, confirmed=2, confirmed_media=2),
+        after=DeliverySnapshot(active=True),
     )
     event = trace.events[0]
-    assert event.recorded_arguments["image_paths"] == ["memes/12.jpg"]
+    assert event.status == "succeeded"
+    assert event.effect == "none"
+    assert "memes/12.jpg" not in json.dumps(event.recorded_arguments)
     assert [image["path"] for image in cast(list[dict[str, str]], event.evidence["images"])] == [
         "memes/12.jpg",
-        "memes/34.gif",
     ]
 
     recorder = AgentTurnRecorder()
@@ -945,7 +945,6 @@ async def test_send_image_records_delivered_paths_as_auditable_evidence() -> Non
     evidence = cast(dict[str, Any], result_event.payload["evidence"])
     assert [image["path"] for image in cast(list[dict[str, str]], evidence["images"])] == [
         "memes/12.jpg",
-        "memes/34.gif",
     ]
 
     view = serialize_event_view(
@@ -955,10 +954,10 @@ async def test_send_image_records_delivered_paths_as_auditable_evidence() -> Non
             sequence=2,
             event_type="tool_result",
             role="tool",
-            tool_name="send_image",
+            tool_name="prepare_image",
             payload_json=json.dumps(result_event.payload, ensure_ascii=False),
             status="succeeded",
-            effect="confirmed",
+            effect="none",
             duration_ms=120,
         ),
         result_event.payload,
@@ -966,12 +965,8 @@ async def test_send_image_records_delivered_paths_as_auditable_evidence() -> Non
     images = cast(list[dict[str, str]], cast(dict[str, Any], view["evidence"])["images"])
     assert [image["url"] for image in images] == [
         "/api/llm-chat/memes/files/12.jpg",
-        "/api/llm-chat/memes/files/34.gif",
     ]
     assert images[0]["meaning"] == "开心大笑"
-    assert view["title"] == "send_image"
-    assert view["preview"] == "已发送 2 张图片"
-    assert {"label": "耗时", "value": "120 ms"} in cast(list[dict[str, str]], view["details"])
 
 
 @pytest.mark.asyncio
@@ -1030,8 +1025,15 @@ async def test_background_tag_image_result_replaces_pending_event(agent_store: S
 @pytest.mark.asyncio
 async def test_event_view_inlines_key_content_without_extra_read_step() -> None:
     payload = {
-        "arguments": {"text": "先确认回滚点", "delay_seconds": 1.2},
-        "context_arguments": {"text_chars": 6},
+        "arguments": {"segments": [{"type": "text", "text": "先确认回滚点"}], "delay_seconds": 1.2},
+        "context_arguments": {
+            "segments": [{"type": "text", "text": "先确认回滚点"}],
+            "segments_truncated": False,
+            "text_chars": 6,
+            "mention_count": 0,
+            "media_count": 0,
+            "delay_seconds": 1.2,
+        },
     }
     event = AgentEvent(
         event_ref="event_call",
@@ -1039,17 +1041,16 @@ async def test_event_view_inlines_key_content_without_extra_read_step() -> None:
         sequence=1,
         event_type="assistant_tool_call",
         role="assistant",
-        tool_name="send_text",
+        tool_name="send_msg",
         payload_json=json.dumps(payload, ensure_ascii=False),
         status="requested",
         effect="none",
     )
     view = serialize_event_view(event, payload)
-    assert view["preview"] == "先确认回滚点"
+    assert "先确认回滚点" in view["preview"]
     assert view["arguments"] == payload["arguments"]
     assert view["evidence"] is None
     assert view["payload_chars"] == len(event.payload_json)
-    assert {"label": "文本", "value": "先确认回滚点"} in cast(list[dict[str, str]], view["details"])
 
     user_payload = {
         "content": json.dumps(
@@ -1183,10 +1184,10 @@ async def test_flushed_event_sequences_stay_frozen_against_earlier_tool_timestam
     assert recorder.pending_events() == ()
 
     trace = ToolTraceRecorder()
-    call = trace.start("send_text", {"text": "稍等"})
+    call = trace.start("send_msg", {"segments": [{"type": "text", "text": "Wait a moment"}]})
     trace.finish_success(
         call,
-        "已发送 1 条文本消息",
+        {"status": "delivered", "messages": 1, "media_count": 0},
         before=DeliverySnapshot(active=True),
         after=DeliverySnapshot(active=True, attempts=1, confirmed=1),
     )

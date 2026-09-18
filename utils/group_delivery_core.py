@@ -35,13 +35,11 @@ class DeliveryQueue:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         max_messages: int = 3,
         max_group_seconds: float = 4.0,
-        reply_after: float = 8.0,
     ) -> None:
         self._clock = clock
         self._sleep = sleep
         self._max_messages = max_messages
         self._max_seconds = max_group_seconds
-        self._reply_after = reply_after
         self._waiters: deque[_Waiter] = deque()
         self._pump: asyncio.Task[None] | None = None
         self._timer: asyncio.Future[None] | None = None
@@ -81,7 +79,6 @@ class DeliveryQueue:
             self._group_started is None
             or self._group_count >= self._max_messages
             or now - self._group_started >= self._max_seconds
-            or (self._last_send is not None and now - self._last_send >= self._reply_after)
         )
 
     def _choose(self, now: float) -> _Waiter | None:
@@ -141,8 +138,10 @@ class DeliveryQueue:
 
     def _start(self, waiter: _Waiter) -> DeliveryPermit:
         now = self._clock()
-        new_group = waiter.turn is not self._last_turn or self._boundary(now)
-        reply = new_group or self._force_reply or self._last_send is None
+        changed_turn = waiter.turn is not self._last_turn
+        new_group = changed_turn or self._boundary(now)
+        # Fairness boundaries do not interrupt the visible conversation.
+        reply = changed_turn or self._force_reply or self._last_send is None
         if new_group:
             # Rotate the entire previous turn, not just one request, for fair bursts.
             previous = self._last_turn

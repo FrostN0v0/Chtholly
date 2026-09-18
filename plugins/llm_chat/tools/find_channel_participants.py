@@ -28,7 +28,7 @@ def register_find_channel_participants(
         """Find participants in the current public channel.
 
         Use this to resolve a display name or earlier nickname into an opaque participant_ref before mentioning that
-        person with send_text, filtering message history, or describing an avatar. A non-empty query checks observed
+        person with send_msg, filtering message history, or describing an avatar. A non-empty query checks observed
         identities and, when supported, refreshes matching members from the current protocol roster. An empty query
         lists recently active participants. Never reveal participant_ref values or internal fields.
 

@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
-from typing import cast
 from hashlib import sha256
 from collections.abc import Mapping
 
 from .types import JSONType
 from .artifact_records import ARTIFACT_TOOLS, project_artifact_result, project_artifact_arguments
 from .workshop_records import WORKSHOP_TOOLS, project_workshop_result, project_workshop_arguments
-from .tool_trace_safety import safe_url, sanitize_json, external_source_type
+from .tool_trace_policy import _PREPARATION_TOOLS, project_prepared_result
+from .tool_trace_safety import (
+    safe_url,
+    sanitize_json,
+    external_source_type,
+    redact_reference_text,
+    project_message_arguments,
+)
 
 _MAX_RECORDED_TEXT = 50_000
 _MAX_GENERIC_TEXT = 16_000
@@ -23,9 +29,9 @@ _PROJECTED_RESULT_TOOLS = {
     "find_channel_participants",
     "list_image_resources",
     "read_channel_messages",
-    "send_audio",
-    "send_channel_image",
-    "send_image",
+    "prepare_audio",
+    "prepare_channel_image",
+    "prepare_image",
     "tag_image",
 }
 
@@ -33,7 +39,7 @@ _PROJECTED_RESULT_TOOLS = {
 def _exact_text(value: object, limit: int = _MAX_RECORDED_TEXT) -> str:
     if not isinstance(value, str):
         return ""
-    return value[:limit]
+    return redact_reference_text(value)[:limit]
 
 
 def _text_descriptor(value: object) -> dict[str, JSONType]:
@@ -71,18 +77,17 @@ def record_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> di
             "notes",
             "width",
         )
-    if tool_name == "send_external_image":
+    if tool_name == "prepare_external_media":
         source = arguments.get("source")
         return {
             "source_type": external_source_type(source),
             "source": safe_url(source) if external_source_type(source) == "public_url" else _text_descriptor(source),
         }
-    if tool_name == "send_image":
+    if tool_name == "prepare_image":
         paths = arguments.get("image_paths")
-        normalized_paths = [value for value in paths if isinstance(value, str)] if isinstance(paths, list) else []
         return {
             **_record_selected(arguments, "context"),
-            "image_paths": cast(JSONType, normalized_paths[:12]),
+            "path_count": len(paths) if isinstance(paths, list) else 0,
         }
     if tool_name == "read_channel_messages":
         return {
@@ -94,13 +99,13 @@ def record_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> di
         "describe_channel_image",
         "describe_channel_participant_avatar",
         "find_channel_participants",
-        "send_channel_image",
+        "prepare_channel_image",
         "list_image_resources",
-        "send_audio",
+        "prepare_audio",
         "tag_image",
     }:
         return {"requested": True}
-    if tool_name == "speak":
+    if tool_name == "synthesize_speech":
         return _record_selected(
             arguments,
             "text",
@@ -111,10 +116,10 @@ def record_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> di
             "text_language",
             "speed",
         )
-    if tool_name == "send_text":
-        return _record_selected(arguments, "text", "delay_seconds")
-    if tool_name == "send_merged_forward":
-        return _record_selected(arguments, "messages", "delay_seconds")
+    if tool_name == "send_msg":
+        return project_message_arguments(arguments, max_text=_MAX_GENERIC_TEXT)
+    if tool_name == "prepare_merged_forward":
+        return _record_selected(arguments, "messages")
     if tool_name == "read_web_page":
         return {"url": safe_url(arguments.get("url")), **_record_selected(arguments, "focus")}
     if tool_name == "capture_web_reference":
@@ -148,17 +153,17 @@ def record_tool_result(
 ) -> JSONType:
     """Return the durable, model-readable subset of one tool result."""
 
+    if tool_name in _PREPARATION_TOOLS:
+        if projected_result is not None:
+            return sanitize_json(projected_result, max_text=2000)
+        return project_prepared_result(result)
     if tool_name in ARTIFACT_TOOLS:
         return projected_result if projected_result is not None else project_artifact_result(result)
     if tool_name in WORKSHOP_TOOLS:
         return projected_result if projected_result is not None else project_workshop_result(result)
     if tool_name in _PROJECTED_RESULT_TOOLS and projected_result is not None:
         return projected_result
-    if tool_name in {"send_external_image", "generate_image", "edit_image"}:
-        sanitized = sanitize_json(result, max_text=2000)
-    else:
-        sanitized = sanitize_json(result, max_text=_MAX_GENERIC_TEXT)
-    return sanitized
+    return sanitize_json(result, max_text=_MAX_GENERIC_TEXT)
 
 
 def _record_selected(arguments: Mapping[str, object], *names: str) -> dict[str, JSONType]:

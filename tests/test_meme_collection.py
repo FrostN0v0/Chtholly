@@ -26,6 +26,7 @@ from arclet.entari.config import EntariConfig
 if not hasattr(EntariConfig, "instance"):
     setattr(EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.yml"))
 from satori import Message
+from satori.model import MessageObject
 from agno.run.agent import RunOutput
 from arclet.letoderea import Contexts
 from agno.models.response import ToolExecution
@@ -65,6 +66,7 @@ from plugins.llm_chat.meme_store import (
 from plugins.llm_chat.web.policy import DEFAULT_WEB_ACCESS_LIMITS
 from plugins.llm_chat.agent_context import AgentAccessContext, agent_access_scope
 from plugins.llm_chat.core.delivery import DeliveryState, llm_chat_delivery_scope
+from plugins.llm_chat.prepared_media import prepared_media_scope
 from plugins.llm_chat.core.tool_trace import ToolTraceRecorder, llm_chat_tool_trace_scope
 from plugins.llm_chat.runtime_context import llm_chat_context_scope
 from plugins.llm_chat.core.image_source import IMAGE_FETCH_MAX_BYTES
@@ -750,7 +752,7 @@ class _RuntimeSession(Session[Any]):
         )
         self.downloads = downloads or {}
         channel = SimpleNamespace(id="channel")
-        self.account = SimpleNamespace(platform="test")
+        self.account = SimpleNamespace(platform="test", self_id="bot")
         self.event = SimpleNamespace(user=SimpleNamespace(id="user"), channel=channel, message=None)
         self.sent: list[Any] = []
 
@@ -766,7 +768,7 @@ class _RuntimeSession(Session[Any]):
 
     async def send(self, message: Any, *_args: Any, **_kwargs: Any) -> list[Any]:
         self.sent.append(message)
-        return []
+        return [MessageObject(id=f"sent-{len(self.sent)}", content=str(message))]
 
 
 @pytest.mark.asyncio
@@ -1042,8 +1044,13 @@ async def test_scripted_collection_and_send_smoke(
 
         final_text = generation_module.response_content(response)
         assert final_text == "Visible collection reply"
-        await session.send(final_text)
-        await persona_store_module.append_message("channel", "", "bot", "assistant", final_text)
+        send_msg = _callable(tool_runtime.module, "send_msg")
+        reply_state = DeliveryState()
+        with llm_chat_delivery_scope(reply_state):
+            async with prepared_media_scope():
+                await send_msg(session, [{"type": "text", "text": final_text}])
+        for delivered_text in reply_state.delivered_texts:
+            await persona_store_module.append_message("channel", "", "bot", "assistant", delivered_text)
 
         relative_path = "memes/1.png"
         files = _stored_images(meme_env.meme_dir)
@@ -1083,21 +1090,39 @@ async def test_scripted_collection_and_send_smoke(
         async def no_sleep(_seconds: float) -> None:
             return None
 
-        send_image = _callable(tool_runtime.module, "send_image")
-        with llm_chat_delivery_scope(DeliveryState(sleep=no_sleep)):
-            send_result = await send_image(session=session, image_paths=catalog_paths)
-        assert send_result.startswith("已发送 2 张图片")
+        prepare_image = _callable(tool_runtime.module, "prepare_image")
+        batch_state = DeliveryState(sleep=no_sleep)
+        with llm_chat_delivery_scope(batch_state):
+            async with prepared_media_scope():
+                prepared = await prepare_image(session=session, image_paths=catalog_paths)
+                assert prepared["status"] == "prepared"
+                assert len(prepared["media"]) == 2
+                assert session.sent == [MessageChain(final_text)]
+                assert batch_state.media_messages == batch_state.delivery_attempts == 0
+                assert batch_state.delivered_texts == []
+                for item in prepared["media"]:
+                    assert item["kind"] == "image"
+                    await send_msg(session, [{"type": "media", "media_ref": item["media_ref"]}])
+        assert batch_state.confirmed_media_deliveries == 2
+        assert len(batch_state.delivered_texts) == 2
         sent_chains = [cast(MessageChain, value) for value in session.sent[-2:]]
+        assert [len(chain.get(Image)) for chain in sent_chains] == [1, 1]
         distractor_source = f"data:image/png;base64,{base64.b64encode(_PNG_BYTES + b'distractor').decode('ascii')}"
         collected_source = f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
         assert [chain.get(Image)[0].src for chain in sent_chains] == [distractor_source, collected_source]
         assert all("file://" not in chain.get(Image)[0].src for chain in sent_chains)
 
-        with llm_chat_delivery_scope(DeliveryState()):
-            explicit_result = await send_image(session, r"please send memes\2.png")
-        assert explicit_result.startswith("已发送图片")
+        explicit_state = DeliveryState()
+        with llm_chat_delivery_scope(explicit_state):
+            async with prepared_media_scope():
+                explicit_result = await prepare_image(session, r"please send memes\2.png")
+                assert explicit_result["status"] == "prepared"
+                assert explicit_state.media_messages == explicit_state.delivery_attempts == 0
+                await send_msg(session, [{"type": "media", "media_ref": explicit_result["media_ref"]}])
         explicit_chain = cast(MessageChain, session.sent[-1])
         assert explicit_chain.get(Image)[0].src == distractor_source
+        assert explicit_state.confirmed_media_deliveries == 1
+        assert explicit_state.delivered_texts == [batch_state.delivered_texts[0]]
 
         async with meme_env.session_factory() as database:
             sent_history = list(
@@ -1107,9 +1132,4 @@ async def test_scripted_collection_and_send_smoke(
                     )
                 ).scalars()
             )
-        assert [row.content for row in sent_history] == [
-            "Visible collection reply",
-            "[发送了表情包: reaction，happy，sticker]",
-            "[发送了表情包: reaction，happy，sticker]",
-            "[发送了表情包: reaction，happy，sticker]",
-        ]
+        assert [row.content for row in sent_history] == ["Visible collection reply"]

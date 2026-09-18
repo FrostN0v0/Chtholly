@@ -1,4 +1,4 @@
-"""Shared runtime and delivery primitives for rendered-image tools."""
+"""Shared runtime and preparation primitives for rendered-image tools."""
 
 from __future__ import annotations
 
@@ -8,16 +8,16 @@ from pathlib import Path
 from dataclasses import dataclass
 from collections.abc import Callable, Awaitable
 
-from arclet.entari import Image, Session, MessageChain
+from arclet.entari import Image, Session
 
-from ._delivery import send_with_delivery
-from ..core.delivery import DeliveryError, reserve_media_message, current_llm_chat_delivery
+from ..core.types import JSONType
+from ..core.delivery import DeliveryError
+from ..prepared_media import prepare_media
 from ..core.image_source import IMAGE_FETCH_MAX_BYTES
 
 if TYPE_CHECKING:
     from entari_plugin_htmlrender import HtmlRenderer, RasterOptions, RenderedImage
 
-HistoryAppender = Callable[[str, str, str, str, str], Awaitable[object]]
 RendererGetter = Callable[[], "HtmlRenderer"]
 WarningSink = Callable[[str], object]
 RenderCall = Callable[["HtmlRenderer", "RasterOptions", float], Awaitable["RenderedImage"]]
@@ -37,7 +37,6 @@ class RenderToolContext:
     """Runtime dependencies shared by image-rendering tools."""
 
     get_renderer: RendererGetter
-    append_history: HistoryAppender
     warn: WarningSink
     template_root: Path
     timeout_seconds: float = RENDER_TIMEOUT_SECONDS
@@ -60,16 +59,15 @@ def render_options(width: int) -> RasterOptions:
     return RasterOptions(width=normalize_render_width(width), device_pixel_ratio=1.5, format="png")
 
 
-async def deliver_image_bytes(
+async def prepare_image_bytes(
     session: Session,
     data: bytes | bytearray | memoryview,
     *,
-    append_history: HistoryAppender,
     warn: WarningSink,
     tool_name: str,
-    success_message: str | None = None,
-) -> str:
-    """Validate, send, and persist one generated image payload."""
+    edited: bool = False,
+) -> dict[str, JSONType]:
+    """Validate and register one image for explicit composition with send_msg."""
 
     raw = bytes(data)
     if not raw or len(raw) > IMAGE_FETCH_MAX_BYTES:
@@ -78,32 +76,28 @@ async def deliver_image_bytes(
         image = Image.of(raw=raw)
     except ValueError:
         raise DeliveryError("rendered output is not a supported image") from None
+    if image.src[5:].partition(";")[0] not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+        raise DeliveryError("rendered output is not a supported image")
 
-    delivery_state = current_llm_chat_delivery()
-    if delivery_state is not None:
-        delivery_state = reserve_media_message()
-    await send_with_delivery(session, MessageChain([image]), delivery_state, media=True)
-    try:
-        await append_history(session.channel.id, "", "bot", "assistant", _IMAGE_HISTORY_MARKER)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        warn(f"{tool_name} delivery history failed: {type(exc).__name__}")
-    return success_message or (
-        "Rendered image sent successfully. Do not repeat its content in the final response; "
-        "return [END_OF_RESPONSE] when no supplement is needed."
+    return prepare_media(
+        session,
+        image,
+        byte_count=len(raw),
+        tool_name=tool_name,
+        history_marker=_IMAGE_HISTORY_MARKER,
+        edited=edited,
     )
 
 
-async def render_and_deliver(
+async def render_and_prepare(
     session: Session,
     runtime: RenderToolContext,
     operation: RenderCall,
     *,
     tool_name: str,
     width: int,
-) -> str:
-    """Render, validate, send, and persist one confirmed image delivery."""
+) -> dict[str, JSONType]:
+    """Render and validate one image without sending or changing visible history."""
 
     from entari_plugin_htmlrender import HtmlRenderError
 
@@ -120,10 +114,9 @@ async def render_and_deliver(
         runtime.warn(f"{tool_name} render failed unexpectedly: {type(exc).__name__}")
         raise DeliveryError("the rendering service is unavailable") from None
 
-    return await deliver_image_bytes(
+    return await prepare_image_bytes(
         session,
         bytes(rendered),
-        append_history=runtime.append_history,
         warn=runtime.warn,
         tool_name=tool_name,
     )

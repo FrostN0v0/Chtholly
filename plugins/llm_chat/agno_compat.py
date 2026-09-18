@@ -32,7 +32,6 @@ from .core.delivery import (
     contains_internal_participant_reference,
 )
 from .core.tool_trace import current_tool_trace, llm_chat_tool_execution_scope
-from .image_edit_refs import current_image_edit_references
 from .runtime_context import copy_llm_chat_context
 from .core.model_audit import sanitize_audit_value
 from .reaction_feedback import current_reaction_feedback
@@ -46,8 +45,8 @@ from .model_audit_runtime import (
 from .native_image_delivery import (
     NativeImageDeliveryError,
     capture_native_images,
-    send_pending_native_images,
     check_native_image_delivery,
+    prepare_pending_native_images,
 )
 from .core.tool_trace_policy import DeliverySnapshot
 
@@ -67,18 +66,16 @@ _ORDERED_DELIVERY_TOOLS = frozenset(
         "publish_web_preview",
         "revoke_web_preview",
         "screenshot_web_page",
-        "send_audio",
-        "send_artifact",
-        "send_channel_image",
-        "send_external_image",
-        "send_image",
-        "send_merged_forward",
-        "send_text",
-        "speak",
+        "prepare_audio",
+        "prepare_artifact",
+        "prepare_channel_image",
+        "prepare_external_media",
+        "prepare_image",
+        "prepare_merged_forward",
+        "send_msg",
+        "synthesize_speech",
     }
 )
-_IMAGE_EDIT_BLOCKED_TOOLS = _ORDERED_DELIVERY_TOOLS - {"capture_web_reference", "edit_image", "revoke_web_preview"}
-_NATIVE_IMAGE_FLUSH_TOOLS = _ORDERED_DELIVERY_TOOLS - {"capture_web_reference", "revoke_web_preview"}
 _READ_ONLY_TOOLS = frozenset(
     {
         "describe_channel_participant_avatar",
@@ -87,6 +84,7 @@ _READ_ONLY_TOOLS = frozenset(
         "get_local_time",
         "list_image_resources",
         "list_tts_voices",
+        "list_prepared_media",
         "list_web_artifacts",
         "read_web_artifact",
         "read_channel_messages",
@@ -104,9 +102,9 @@ _INTERNAL_PARTICIPANT_REFERENCE_TOOLS = {
     "describe_channel_image",
     "find_channel_participants",
     "read_channel_messages",
-    "send_channel_image",
-    "send_merged_forward",
-    "send_text",
+    "prepare_channel_image",
+    "prepare_merged_forward",
+    "send_msg",
 }
 _INTERNAL_IMAGE_REFERENCE_TOOLS = {"edit_image"}
 _DELIVERY_TOOL_LOCK: ContextVar[asyncio.Lock | None] = ContextVar("llm_chat_agno_delivery_tool_lock", default=None)
@@ -354,16 +352,8 @@ async def _run_local_tools(
                     f"Invalid arguments for this tool. Required top-level fields: {required}. "
                     f"Allowed top-level fields: {allowed}. Pass these fields directly, not inside an arguments wrapper."
                 )
-            references = current_image_edit_references()
-            if (
-                name in _IMAGE_EDIT_BLOCKED_TOOLS
-                and references is not None
-                and references.requires_image_edit
-                and not references.edit_confirmed
-            ):
-                raise ValueError("Invalid delivery order: edit_image must complete before any other delivery tool")
-            if name in _NATIVE_IMAGE_FLUSH_TOOLS:
-                await send_pending_native_images()
+            if name in {"send_msg", "list_prepared_media"}:
+                await prepare_pending_native_images()
             if reaction is not None:
                 await reaction.tool_started(name)
             invocation = _Invocation(subscriber)

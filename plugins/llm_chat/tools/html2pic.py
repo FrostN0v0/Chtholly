@@ -6,7 +6,7 @@ from arclet.entari import Session
 from arclet.letoderea import Subscriber
 from arclet.entari.plugin.model import PluginDispatcher
 
-from ._rendering import DEFAULT_RENDER_WIDTH, RenderToolContext, render_and_deliver
+from ._rendering import DEFAULT_RENDER_WIDTH, RenderToolContext, render_and_prepare
 from ..core.types import JSONType
 from ._registration import register_tool
 from ._render_policy import prepare_html_source
@@ -16,22 +16,22 @@ def register_html2pic(
     dispatcher: PluginDispatcher[JSONType],
     runtime: RenderToolContext,
 ) -> Subscriber[JSONType]:
-    """Register bounded HTML-to-image delivery."""
+    """Register bounded HTML-to-image preparation."""
 
-    async def html2pic(session: Session, html: str, width: int = DEFAULT_RENDER_WIDTH) -> str:
-        """Render one self-contained HTML/CSS document as an image and send it.
+    async def html2pic(session: Session, html: str, width: int = DEFAULT_RENDER_WIDTH) -> dict[str, JSONType]:
+        """Render one self-contained HTML/CSS document and prepare an image for send_msg.
 
         Use this only when a custom visual layout, card, diagram, dashboard, or browser-style presentation is more
         useful than Markdown. Supply the full HTML and inline CSS. Put fixed dimensions and overflow clipping on an
         inner canvas instead of html/body; document-level height and overflow are normalized for full-page capture.
         Scripts, event handlers, iframes, navigation, remote or local resources, external fonts, and arbitrary file
-        paths are rejected. This tool sends the image itself and consumes one media delivery; do not repeat it.
+        paths are rejected. This tool does not send; include the returned media_ref in a send_msg media segment.
 
         Args:
             html (str): Complete self-contained HTML with optional inline CSS.
             width (int): Logical image width from 480 through 1200 pixels. Defaults to 900.
         Returns:
-            str: Confirmed delivery status without echoing the HTML source.
+            dict[str, JSONType]: Prepared image resource containing a media_ref for send_msg.
         """
 
         prepared = prepare_html_source(html, max_chars=runtime.max_source_chars)
@@ -46,6 +46,6 @@ def register_html2pic(
                 timeout_seconds=timeout,
             )
 
-        return await render_and_deliver(session, runtime, render, tool_name="html2pic", width=width)
+        return await render_and_prepare(session, runtime, render, tool_name="html2pic", width=width)
 
     return register_tool(dispatcher, html2pic)

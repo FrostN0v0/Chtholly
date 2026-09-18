@@ -80,11 +80,9 @@ from plugins.llm_chat.core.forward import (
     render_forwarded_storage,
 )
 from plugins.llm_chat.core.profile import MemoryItem
-from plugins.llm_chat.core.prompts import SYSTEM_SCAFFOLD
 from plugins.llm_chat.agent_context import AgentAccessContext
 from plugins.llm_chat.core.delivery import (
     DeliveryState,
-    reserve_text_message,
     mark_delivery_success,
     llm_chat_delivery_scope,
     normalize_delivery_limits,
@@ -92,6 +90,8 @@ from plugins.llm_chat.core.delivery import (
 from utils.relationship_core.models import AXIS_KEYS
 from plugins.llm_chat.channel_images import ChannelImageReferences
 from plugins.llm_chat.persona.runner import run_evaluation
+from plugins.llm_chat.prepared_media import prepare_media, prepared_media_scope
+from plugins.llm_chat.tools.send_msg import SendMsgToolContext, register_send_msg
 from plugins.llm_chat.turn_lifecycle import ActiveChatTurn
 from plugins.llm_chat.core.tool_trace import ToolTraceRecorder
 from plugins.llm_chat.image_edit_refs import ImageEditReferences
@@ -125,6 +125,20 @@ _PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
 _WEBP_BYTES = base64.b64decode("UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA")
+
+
+class _ToolDispatcher:
+    plugin = SimpleNamespace(module=SimpleNamespace(__name__=__name__))
+
+    def __call__(self, function: Any) -> Any:
+        return function
+
+
+async def _no_participant(_session: Session, _reference: str) -> None:
+    return None
+
+
+_send_msg = cast(Any, register_send_msg(cast(Any, _ToolDispatcher()), SendMsgToolContext(_no_participant)))
 
 
 class _EmbeddingConfig:
@@ -217,12 +231,16 @@ class _ChatSession:
         self.member = None
         self.elements = _ChatElements(text, mentions)
         self.quote = None
-        self.sent: list[str] = []
+        self.sent: list[Any] = []
         self.reactions: list[tuple[str, str]] = []
         self.event = SimpleNamespace(message=SimpleNamespace(id="current-message"))
 
-    async def send(self, content: str) -> None:
-        self.sent.append(content)
+    async def send(self, content: str | MessageChain) -> list[MessageObject]:
+        if isinstance(content, MessageChain) and all(isinstance(element, Text) for element in content):
+            self.sent.append(content.extract_plain_text())
+        else:
+            self.sent.append(content)
+        return [MessageObject(id=f"sent-{len(self.sent)}", content=str(content))]
 
     async def reaction_create(self, emoji_id: str, message_id: str | None = None) -> None:
         del message_id
@@ -261,11 +279,11 @@ class _FailingChatSession(_ChatSession):
         self.attempts = 0
         self.fail_attempt = fail_attempt
 
-    async def send(self, content: str) -> None:
+    async def send(self, content: str | MessageChain) -> list[MessageObject]:
         self.attempts += 1
         if self.attempts == self.fail_attempt:
             raise RuntimeError("final send failed")
-        await super().send(content)
+        return await super().send(content)
 
 
 class _HandlerClock:
@@ -510,10 +528,9 @@ async def _deliver_tool_texts(
     state.sleep = clock.sleep
     state.clock = clock.monotonic
     with llm_chat_delivery_scope(state):
-        for text in texts:
-            reserved, normalized = reserve_text_message(text)
-            await session.send(normalized)
-            mark_delivery_success(reserved, [normalized])
+        async with prepared_media_scope():
+            for text in texts:
+                await _send_msg(cast(Session, session), [{"type": "text", "text": text}])
 
 
 async def _settle_plugin_tasks(tasks: set[asyncio.Task[Any]] | None) -> None:
@@ -813,16 +830,6 @@ def test_build_chat_messages_keeps_mentioned_participants_structured() -> None:
 )
 def test_recent_channel_context_intent_is_narrow(text: str, expected: bool) -> None:
     assert requests_recent_channel_context(text) is expected
-
-
-def test_system_prompt_delegates_channel_history_and_image_recognition_to_tools() -> None:
-    assert "同频道群聊历史不会自动注入" in SYSTEM_SCAFFOLD
-    assert "当前消息和普通会话历史已经足够时不得调用 read_channel_messages" in SYSTEM_SCAFFOLD
-    assert "describe_channel_image" in SYSTEM_SCAFFOLD
-    assert "不会自动识别图片" in SYSTEM_SCAFFOLD
-    assert "send_channel_image" in SYSTEM_SCAFFOLD
-    assert "不得谎称只能描述、无法取得图片" in SYSTEM_SCAFFOLD
-    assert "不得把头像 URL 复制给 send_external_image" in SYSTEM_SCAFFOLD
 
 
 def test_build_chat_messages_keeps_forwarded_speakers_structured_and_attribution_safe():
@@ -2021,14 +2028,17 @@ def test_tool_argument_projection_redacts_secrets_and_large_payloads() -> None:
             "payload": b"binary-data",
         },
     )
-    external = project_tool_arguments("send_external_image", {"source": "data:image/png;base64,SECRET"})
-    image = project_tool_arguments("send_image", {"image_paths": ["memes/1.png", "memes/2.png"]})
+    external = project_tool_arguments("prepare_external_media", {"source": "data:image/png;base64,SECRET"})
+    image = project_tool_arguments("prepare_image", {"image_paths": ["memes/1.png", "memes/2.png"]})
     text = project_tool_arguments(
-        "send_text",
+        "send_msg",
         {
-            "text": "hello",
+            "segments": [
+                {"type": "text", "text": "hello"},
+                {"type": "mention", "target": "current_user"},
+                {"type": "mention", "target": "participant_0123abcdef"},
+            ],
             "delay_seconds": 1.5,
-            "mentions": ["current_user", "participant_0123abcdef"],
         },
     )
     history = project_tool_arguments(
@@ -2040,7 +2050,7 @@ def test_tool_argument_projection_redacts_secrets_and_large_payloads() -> None:
         {"image_ref": "channel_image_secret"},
     )
     channel_image = project_tool_arguments(
-        "send_channel_image",
+        "prepare_channel_image",
         {"image_ref": "channel_image_secret"},
     )
     avatar = project_tool_arguments(
@@ -2055,7 +2065,18 @@ def test_tool_argument_projection_redacts_secrets_and_large_payloads() -> None:
     }
     assert external == {"source_type": "inline_data", "source_chars": 28}
     assert image == {"selection_mode": "paths", "path_count": 2, "context": ""}
-    assert text == {"text_chars": 5, "mention_count": 2, "delay_seconds": 1.5}
+    assert text == {
+        "segments": [
+            {"type": "text", "text": "hello"},
+            {"type": "mention", "target": "current_user"},
+            {"type": "mention", "target": "participant"},
+        ],
+        "segments_truncated": False,
+        "text_chars": 5,
+        "mention_count": 2,
+        "media_count": 0,
+        "delay_seconds": 1.5,
+    }
     assert history == {"limit": 20, "filtered": True, "paged": True}
     assert description == {"requested": True}
     assert channel_image == {"requested": True}
@@ -2165,7 +2186,7 @@ def test_tool_trace_distinguishes_observation_rejection_and_partial_effect() -> 
         before=DeliverySnapshot(),
         after=DeliverySnapshot(),
     )
-    partial_call = recorder.start("send_merged_forward", {"messages": ["one", "two"]})
+    partial_call = recorder.start("send_msg", {"segments": [{"type": "text", "text": "one"}]})
     recorder.finish_error(
         partial_call,
         RuntimeError("transport failed"),
@@ -2610,7 +2631,6 @@ async def test_generation_retries_contextual_avatar_send_request_until_delivery_
     assert all(request["timeout"] == 45.0 for request in requests)
     assert all(request["max_retries"] == 0 for request in requests)
     assert all(request["parallel_tool_calls"] is False for request in requests)
-    assert "上一条候选回复没有产生任何确认的媒体发送" in requests[1]["system"]
     assert state.confirmed_media_deliveries == 1
 
 
@@ -2743,6 +2763,7 @@ async def test_generation_rejects_native_image_for_required_web_reference_until_
     authorization: list[tuple[bool, bool]] = []
     state = DeliveryState()
     references = ImageEditReferences.from_input_attachments((), requires_web_reference=False)
+    session = _ChatSession("Use a web reference to edit the source")
 
     async def fake_generate(_messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
         requests.append(kwargs)
@@ -2761,8 +2782,16 @@ async def test_generation_rejects_native_image_for_required_web_reference_until_
             response = _handler_response("")
             response.images = [SimpleNamespace(content=_PNG_BYTES, filepath=None, url=None)]
             return response
-        references.edit_confirmed = True
-        mark_delivery_success(state, media=True)
+        prepared = prepare_media(
+            cast(Session, session),
+            Image.of(raw=_PNG_BYTES, mime="image/png"),
+            byte_count=len(_PNG_BYTES),
+            tool_name="edit_image",
+            edited=True,
+        )
+        assert references.edit_confirmed is False
+        assert state.confirmed_media_deliveries == 0
+        await _send_msg(cast(Session, session), [{"type": "media", "media_ref": prepared["media_ref"]}])
         return _handler_response("[END_OF_RESPONSE]")
 
     monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
@@ -2793,8 +2822,6 @@ async def test_generation_rejects_native_image_for_required_web_reference_until_
     assert authorization == [(True, False)]
     assert len(requests) == 2
     assert all(request["parallel_tool_calls"] is False for request in requests)
-    assert "上一条候选回复没有通过 edit_image 确认发送合格结果" in requests[1]["system"]
-    assert "generate_image 和模型原生图片输出不能满足本轮要求" in requests[1]["system"]
     assert references.requires_web_reference is True
     assert references.requires_image_edit is True
     assert references.edit_confirmed is True
@@ -2812,6 +2839,7 @@ async def test_generation_rejects_native_image_for_required_source_edit_until_ed
         requires_web_reference=False,
         requires_image_edit=True,
     )
+    session = _ChatSession("Edit the supplied source")
 
     async def fake_generate(_messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
         requests.append(kwargs)
@@ -2819,8 +2847,16 @@ async def test_generation_rejects_native_image_for_required_source_edit_until_ed
             response = _handler_response("")
             response.images = [SimpleNamespace(content=_PNG_BYTES, filepath=None, url=None)]
             return response
-        references.edit_confirmed = True
-        mark_delivery_success(state, media=True)
+        prepared = prepare_media(
+            cast(Session, session),
+            Image.of(raw=_PNG_BYTES, mime="image/png"),
+            byte_count=len(_PNG_BYTES),
+            tool_name="edit_image",
+            edited=True,
+        )
+        assert references.edit_confirmed is False
+        assert state.confirmed_media_deliveries == 0
+        await _send_msg(cast(Session, session), [{"type": "media", "media_ref": prepared["media_ref"]}])
         return _handler_response("[END_OF_RESPONSE]")
 
     monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
@@ -2841,8 +2877,6 @@ async def test_generation_rejects_native_image_for_required_source_edit_until_ed
     assert generation_module.response_content(response) == "[END_OF_RESPONSE]"
     assert generation_module.response_images(response) == ()
     assert len(requests) == 2
-    assert "当前用户明确要求修改本轮提供的图片" in requests[1]["system"]
-    assert "generate_image 和模型原生图片输出不能冒充源图编辑结果" in requests[1]["system"]
     assert references.requires_web_reference is False
     assert references.edit_confirmed is True
     assert state.confirmed_media_deliveries == 1
@@ -2912,14 +2946,20 @@ async def test_generation_accepts_end_marker_after_confirmed_media_without_retry
 async def test_generation_accepts_media_only_image_turn_without_text_correction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from plugins.llm_chat.tools._delivery import send_with_delivery
-
     state = DeliveryState()
     session = _ChatSession("[Image]")
     media = MessageChain([Image.of(raw=_PNG_BYTES, mime="image/png")])
 
     async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
-        await send_with_delivery(cast(Session, session), media, state, media=True)
+        prepared = prepare_media(
+            cast(Session, session),
+            media[0],
+            byte_count=len(_PNG_BYTES),
+            tool_name="prepare_image",
+            history_marker="[发送了图片]",
+        )
+        assert state.delivery_attempts == state.confirmed_media_deliveries == 0
+        await _send_msg(cast(Session, session), [{"type": "media", "media_ref": prepared["media_ref"]}])
         return _handler_response("[END_OF_RESPONSE]")
 
     async def unexpected_correction(**_kwargs: Any) -> None:
@@ -2939,7 +2979,7 @@ async def test_generation_accepts_media_only_image_turn_without_text_correction(
 
     assert session.sent == [media]
     assert generation_module.response_content(response) == "[END_OF_RESPONSE]"
-    assert state.delivered_texts == []
+    assert state.delivered_texts == ["[发送了图片]"]
 
 
 @pytest.mark.asyncio
@@ -3410,7 +3450,7 @@ async def test_media_unavailable_marker_is_not_sent_or_persisted(
 
 
 @pytest.mark.asyncio
-async def test_multiline_final_reply_after_media_is_sent_as_paced_separate_messages(
+async def test_multiline_final_reply_after_media_stays_in_one_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with _temporary_chat_handler() as harness:
@@ -3423,7 +3463,16 @@ async def test_multiline_final_reply_after_media_is_sent_as_paced_separate_messa
             state = kwargs["delivery_state"]
             state.sleep = clock.sleep
             state.clock = clock.monotonic
-            mark_delivery_success(state, media=True)
+            with llm_chat_delivery_scope(state):
+                async with prepared_media_scope():
+                    image = prepare_media(
+                        cast(Session, session),
+                        Image.of(raw=_PNG_BYTES, mime="image/png"),
+                        byte_count=len(_PNG_BYTES),
+                        tool_name="prepare_image",
+                        history_marker="[发送了图片]",
+                    )
+                    await _send_msg(cast(Session, session), [{"type": "media", "media_ref": image["media_ref"]}])
             clock.now = 2.0
             return _handler_response("first beat\nsecond beat")
 
@@ -3431,11 +3480,13 @@ async def test_multiline_final_reply_after_media_is_sent_as_paced_separate_messa
 
         result = await module.on_chat.callable_target(session, SimpleNamespace())
 
-        aggregated = "first beat\n\nsecond beat"
+        aggregated = "[发送了图片]\n\nfirst beat\nsecond beat"
         assistant_rows = [row for row in records.appended if row[3] == "assistant"]
         assert result is BLOCK
-        assert session.sent == ["first beat", "second beat"]
-        assert clock.sleeps == [1.2]
+        assert len(session.sent) == 2
+        assert session.sent[0].get(Image)
+        assert session.sent[1] == "first beat\nsecond beat"
+        assert clock.sleeps == []
         assert assistant_rows == [("group-B", "", "bot", "assistant", aggregated)]
 
 
@@ -3494,8 +3545,6 @@ async def test_segmented_delivery_suppresses_final_supplement_outside_budget(
         assert result is BLOCK
         assert session.sent == ["12345"]
         assert assistant_rows == [("group-B", "", "bot", "assistant", "12345")]
-
-        assert "suppressed final supplement outside delivery budget" in warnings
 
 
 @pytest.mark.asyncio
@@ -3589,10 +3638,21 @@ async def test_delivery_media_only_completes_without_text(
         module = harness.module
         records = _install_handler_stubs(monkeypatch, module)
         session = _ChatSession("send only media")
-        image = SimpleNamespace(content=_PNG_BYTES, filepath=None, url=None)
 
-        async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
-            return SimpleNamespace(content=None, images=[image])
+        async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+            state = kwargs["delivery_state"]
+            with llm_chat_delivery_scope(state):
+                async with prepared_media_scope():
+                    image = prepare_media(
+                        cast(Session, session),
+                        Image.of(raw=_PNG_BYTES, mime="image/png"),
+                        byte_count=len(_PNG_BYTES),
+                        tool_name="prepare_image",
+                        history_marker="[发送了图片]",
+                    )
+                    assert session.sent == []
+                    await _send_msg(cast(Session, session), [{"type": "media", "media_ref": image["media_ref"]}])
+            return _handler_response("[END_OF_RESPONSE]")
 
         monkeypatch.setattr(module, "generate_chat_response", generate)
         result = await module.on_chat.callable_target(session, SimpleNamespace())
@@ -4183,7 +4243,7 @@ def test_is_command_allowed(command_line: str, allowed_commands: list[str], expe
 
 
 @pytest.mark.asyncio
-async def test_on_chat_delivers_native_images_before_text_and_persists_markers(
+async def test_on_chat_never_automatically_delivers_native_images(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with _temporary_chat_handler() as harness:
@@ -4201,28 +4261,37 @@ async def test_on_chat_delivers_native_images_before_text_and_persists_markers(
 
         assistant_rows = [row for row in records.appended if row[3] == "assistant"]
         assert result is BLOCK
-        assert isinstance(session.sent[0], MessageChain)
-        assert session.sent[1] == "final text"
-        assert assistant_rows == [
-            ("group-B", "", "bot", "assistant", "[发送了图片]"),
-            ("group-B", "", "bot", "assistant", "final text"),
-        ]
+        assert session.sent == ["final text"]
+        assert assistant_rows == [("group-B", "", "bot", "assistant", "final text")]
 
 
 @pytest.mark.asyncio
-async def test_on_chat_native_image_failure_blocks_without_evaluator_or_leaking_error(
+async def test_on_chat_prepared_image_unknown_send_preserves_prefix_without_evaluation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with _temporary_chat_handler() as harness:
         module = harness.module
         records = _install_handler_stubs(monkeypatch, module)
-        warnings: list[str] = []
-        monkeypatch.setattr(module._LOGGER, "warning", warnings.append)
         session = _FailingChatSession("native image transport failure", fail_attempt=2)
-        image = SimpleNamespace(content=_PNG_BYTES, filepath=None, url=None)
 
-        async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
-            return SimpleNamespace(content=None, images=[image, image])
+        async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+            state = kwargs["delivery_state"]
+            state.sleep = _HandlerClock().sleep
+            with llm_chat_delivery_scope(state):
+                async with prepared_media_scope():
+                    images = [
+                        prepare_media(
+                            cast(Session, session),
+                            Image.of(raw=_PNG_BYTES, mime="image/png"),
+                            byte_count=len(_PNG_BYTES),
+                            tool_name="native_image",
+                            history_marker="[发送了图片]",
+                        )
+                        for _ in range(2)
+                    ]
+                    await _send_msg(cast(Session, session), [{"type": "media", "media_ref": images[0]["media_ref"]}])
+                    await _send_msg(cast(Session, session), [{"type": "media", "media_ref": images[1]["media_ref"]}])
+            raise AssertionError("The unknown transport must stop generation")
 
         monkeypatch.setattr(module, "generate_chat_response", generate)
 
@@ -4233,10 +4302,7 @@ async def test_on_chat_native_image_failure_blocks_without_evaluator_or_leaking_
         assert len(session.sent) == 1
         assert assistant_rows == [("group-B", "", "bot", "assistant", "[发送了图片]")]
         assert records.evaluations == []
-        assert warnings == [
-            "native image delivery failed: DeliveryError: native image delivery confirmed 1/2 images before failure; "
-            "do not repeat the confirmed prefix"
-        ]
+        assert records.agent_statuses == ["partial"]
 
 
 @pytest.mark.asyncio
@@ -4289,8 +4355,6 @@ async def test_on_chat_explicit_finish_preserves_user_context_and_private_reason
 async def test_on_chat_partial_tool_transport_preserves_prefix_without_evaluation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from plugins.llm_chat.tools._delivery import send_with_delivery
-
     async with _temporary_chat_handler() as harness:
         module = harness.module
         records = _install_handler_stubs(monkeypatch, module)
@@ -4299,11 +4363,11 @@ async def test_on_chat_partial_tool_transport_preserves_prefix_without_evaluatio
         async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
             state = kwargs["delivery_state"]
             state.sleep = _HandlerClock().sleep
-            await send_with_delivery(cast(Session, session), "Confirmed prefix", state, texts=["Confirmed prefix"])
-            with pytest.raises(RuntimeError):
-                await send_with_delivery(
-                    cast(Session, session), "Unconfirmed suffix", state, texts=["Unconfirmed suffix"]
-                )
+            with llm_chat_delivery_scope(state):
+                async with prepared_media_scope():
+                    await _send_msg(cast(Session, session), [{"type": "text", "text": "Confirmed prefix"}])
+                    with pytest.raises(RuntimeError):
+                        await _send_msg(cast(Session, session), [{"type": "text", "text": "Unconfirmed suffix"}])
             return _handler_response("Do not bless the failed transport.")
 
         monkeypatch.setattr(module, "generate_chat_response", generate)

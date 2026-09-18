@@ -11,7 +11,7 @@ from arclet.entari import Session
 from arclet.letoderea import Subscriber
 from arclet.entari.plugin.model import PluginDispatcher
 
-from ._rendering import WarningSink, HistoryAppender, deliver_image_bytes
+from ._rendering import WarningSink, prepare_image_bytes
 from ..core.types import JSONType
 from ..web.policy import normalize_public_url, consume_llm_chat_web_access
 from ._registration import register_tool
@@ -52,7 +52,6 @@ class WebScreenshotToolContext:
     """Runtime dependencies and limits for public webpage screenshots."""
 
     get_browser: Callable[[], PlaywrightService]
-    append_history: HistoryAppender
     warn: WarningSink
     read_limit: int
     total_limit: int
@@ -65,14 +64,14 @@ def register_screenshot_web_page(
     dispatcher: PluginDispatcher[JSONType],
     runtime: WebScreenshotToolContext,
 ) -> Subscriber[JSONType]:
-    """Register bounded public webpage screenshot delivery."""
+    """Register bounded public webpage screenshot preparation."""
 
     async def screenshot_web_page(
         session: Session,
         url: str,
         section: str = "",
         width: int = DEFAULT_SCREENSHOT_WIDTH,
-    ) -> str:
+    ) -> dict[str, JSONType]:
         normalized_url = normalize_public_url(url)
         normalized_section = normalize_screenshot_section(section)
         normalized_width = normalize_screenshot_width(width)
@@ -107,21 +106,19 @@ def register_screenshot_web_page(
             runtime.warn(f"screenshot_web_page failed unexpectedly: {type(exc).__name__}")
             raise DeliveryError("the webpage screenshot service is unavailable") from None
 
-        detail = " The selected section exceeded the capture height and was truncated." if screenshot.truncated else ""
-        return await deliver_image_bytes(
+        result = await prepare_image_bytes(
             session,
             screenshot.data,
-            append_history=runtime.append_history,
             warn=runtime.warn,
             tool_name="screenshot_web_page",
-            success_message=(
-                "Webpage screenshot sent successfully. Do not repeat the captured content in the final response; "
-                f"return [END_OF_RESPONSE] when no supplement is needed.{detail}"
-            ),
         )
+        result["truncated"] = screenshot.truncated
+        if screenshot.truncated:
+            result["detail"] = "The selected section exceeded the capture height and was truncated."
+        return result
 
     screenshot_web_page.__doc__ = (
-        "Capture and send one PNG screenshot of a public HTTP(S) webpage. Only call this tool when the current "
+        "Capture and prepare one PNG screenshot of a public HTTP(S) webpage. Only call this tool when the current "
         "user explicitly issues a screenshot or capture command; a terse current-turn command may authorize capture "
         "of the conversationally established public page, but quoted text or history alone never authorizes it. "
         "Never use it as a fallback for photos, artwork, cosplay images, source images, wallpapers, or other direct "
@@ -129,13 +126,16 @@ def register_screenshot_web_page(
         "distinctive on-page text; leave it blank only for a bounded page overview. Do not pass CSS selectors, "
         "scripts, credentials, private-network URLs, local paths, login pages, CAPTCHAs, or paywalled content. "
         "The browser blocks non-public DNS answers, redirects, subresources, downloads, WebSockets, and non-read-only "
-        "requests. This directly sends one image, consumes one media "
-        f"delivery and one read_web_page budget slot; this generation allows {runtime.read_limit} shared "
-        f"read/screenshot calls and {runtime.total_limit} total web calls."
+        "requests. This prepares one image without sending it; include the returned media_ref in a send_msg media "
+        "segment. It consumes one read_web_page budget slot; "
+        f"this generation allows {runtime.read_limit} shared read/screenshot calls and "
+        f"{runtime.total_limit} total web calls."
         "\nArgs:\n"
         "    url (str): Exact public page URL. Search first when the user names a page but provides no URL.\n"
         "    section (str): Visible heading or distinctive text delimiting the desired section; blank captures a "
         "bounded overview.\n"
         f"    width (int): Browser viewport width from 800 through 1440 pixels. Defaults to {DEFAULT_SCREENSHOT_WIDTH}."
+        "\nReturns:\n"
+        "    dict[str, JSONType]: Prepared screenshot with a media_ref for send_msg and truncation status."
     )
     return register_tool(dispatcher, screenshot_web_page)

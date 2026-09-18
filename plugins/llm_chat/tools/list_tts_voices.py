@@ -33,10 +33,10 @@ def register_list_tts_voices(
     async def list_tts_voices(refresh: bool = False) -> str:
         """List current TTS provider capabilities and selectable GPT-SoVITS voices.
 
-        Call this before speak whenever the user names a character/model, version, reference language, or emotion, or
-        when choosing a GPT-SoVITS voice for expressive delivery. The returned version, model_name, reference language,
+        Call this before synthesize_speech when the user names a voice/model, version, reference language, or emotion,
+        or when choosing an expressive GPT-SoVITS voice. The returned version, model_name, reference language,
         emotion, text language, and speed values are authoritative and may change at runtime. Pass exact values to
-        speak. Never invent a missing option or silently substitute another character. Fish Audio reports no selectable
+        synthesize_speech. Never invent a missing option or substitute another character. Fish Audio has no selectable
         catalog and instead indicates whether inline style tags are supported.
 
         Args:

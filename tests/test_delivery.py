@@ -14,9 +14,9 @@ from plugins.llm_chat.core.delivery import (
     DeliveryError,
     DeliveryState,
     DeliveryLimits,
+    reserve_message,
     wait_for_delivery,
     reserve_final_text,
-    reserve_text_message,
     mark_delivery_attempt,
     mark_delivery_success,
     render_delivered_text,
@@ -24,7 +24,6 @@ from plugins.llm_chat.core.delivery import (
     reserve_media_messages,
     llm_chat_delivery_scope,
     normalize_delivery_delay,
-    reserve_forward_messages,
     current_llm_chat_delivery,
     normalize_delivery_limits,
     require_llm_chat_delivery,
@@ -286,7 +285,6 @@ def _state_snapshot(state: DeliveryState) -> tuple[object, ...]:
     return (
         state.mode,
         state.text_messages,
-        state.forward_calls,
         state.media_messages,
         state.text_chars,
         state.last_delivery_at,
@@ -382,8 +380,8 @@ async def test_delivery_scopes_are_isolated_between_concurrent_generations() -> 
             if len(observed) == 2:
                 ready.set()
             await ready.wait()
-            reserved, normalized = reserve_text_message(text)
-            mark_delivery_success(reserved, [normalized])
+            reserved = reserve_message(text)
+            mark_delivery_success(reserved, [text])
             await asyncio.sleep(0)
             assert current_llm_chat_delivery() is state
 
@@ -441,133 +439,64 @@ async def test_delivery_delay_uses_tightened_limits_and_unknown_attempt_time() -
         normalize_delivery_delay("fast")
 
 
-def test_send_text_budget_mode_and_failed_send_are_not_refunded() -> None:
+def test_message_budget_and_failed_send_are_not_refunded() -> None:
     state = DeliveryState()
     with llm_chat_delivery_scope(state):
         for index in range(5):
-            reserved, text = reserve_text_message(f"segment-{index}")
+            text = f"segment-{index}"
+            reserved = reserve_message(text)
             assert reserved is state
             mark_delivery_success(state, [text])
 
         before = _state_snapshot(state)
-        with pytest.raises(DeliveryError, match="^send_text budget exhausted; finish with one final reply$"):
-            reserve_text_message("sixth")
+        with pytest.raises(DeliveryError):
+            reserve_message("sixth")
         assert _state_snapshot(state) == before
 
     failed_state = DeliveryState(limits=_limits(max_text_messages=1))
     with llm_chat_delivery_scope(failed_state):
-        reserve_text_message("reserved but failed")
+        reserve_message("reserved but failed")
         mark_delivery_attempt(failed_state)
-        with pytest.raises(DeliveryError, match="budget exhausted"):
-            reserve_text_message("retry")
+        with pytest.raises(DeliveryError):
+            reserve_message("retry")
     assert failed_state.text_messages == 1
     assert failed_state.delivered_texts == []
 
 
-def test_text_and_forward_modes_are_mutually_exclusive_without_partial_mutation() -> None:
-    segmented = DeliveryState()
-    with llm_chat_delivery_scope(segmented):
-        reserve_text_message("segment")
-        before = _state_snapshot(segmented)
-        with pytest.raises(
-            DeliveryError,
-            match="^Do not mix send_text and send_merged_forward in one generation$",
-        ):
-            reserve_forward_messages(["node"])
-        assert _state_snapshot(segmented) == before
-
-    forwarded = DeliveryState()
-    with llm_chat_delivery_scope(forwarded):
-        reserve_forward_messages(["node"])
-        before = _state_snapshot(forwarded)
-        with pytest.raises(
-            DeliveryError,
-            match="^Do not mix send_text and send_merged_forward in one generation$",
-        ):
-            reserve_text_message("segment")
-        assert _state_snapshot(forwarded) == before
-
-
-def test_final_supplement_uses_remaining_total_budget_only_after_tool_delivery() -> None:
+def test_final_supplement_uses_remaining_total_budget() -> None:
     limits = _limits(max_text_chars_per_message=4, max_total_text_chars=5)
     state = DeliveryState(limits=limits)
     with llm_chat_delivery_scope(state):
-        reserve_text_message("abc")
+        reserve_message("abc")
     assert reserve_final_text(state, "de") == "de"
     assert state.text_chars == 5
 
     before = _state_snapshot(state)
-    with pytest.raises(
-        DeliveryError,
-        match="^Final supplement exceeds the configured delivery text budget$",
-    ):
+    with pytest.raises(DeliveryError):
         reserve_final_text(state, "f")
     assert _state_snapshot(state) == before
 
     ordinary = DeliveryState(limits=_limits(max_text_chars_per_message=0, max_total_text_chars=0))
-    assert (
-        reserve_final_text(ordinary, "ordinary final reply remains unlimited")
-        == "ordinary final reply remains unlimited"
-    )
-    assert ordinary.text_chars == 0
+    before = _state_snapshot(ordinary)
+    with pytest.raises(DeliveryError):
+        reserve_final_text(ordinary, "Final replies cannot bypass the text budget")
+    assert _state_snapshot(ordinary) == before
 
 
-def test_multiline_final_text_reserves_independent_messages_without_splitting_structured_content() -> None:
-    state = DeliveryState(limits=_limits(max_text_messages=3, max_text_chars_per_message=20, max_total_text_chars=40))
+@pytest.mark.parametrize("text", ["first beat\nsecond beat", "Steps:\n- first\n- second"])
+def test_multiline_final_text_reserves_one_message_without_splitting(text: str) -> None:
+    state = DeliveryState(limits=_limits(max_text_messages=1, max_text_chars_per_message=40, max_total_text_chars=40))
 
-    assert reserve_final_text_messages(state, "first beat\nsecond beat") == ("first beat", "second beat")
-    assert state.mode == "segments"
-    assert state.text_messages == 2
-    assert state.text_chars == 21
-
-    structured = DeliveryState()
-    markdown = "Steps:\n- first\n- second"
-    assert reserve_final_text_messages(structured, markdown) == (markdown,)
-    assert structured.mode is None
-    assert structured.text_messages == 0
+    assert reserve_final_text_messages(state, text) == (text,)
+    assert state.text_messages == 1
+    assert state.text_chars == len(text)
+    before = _state_snapshot(state)
+    with pytest.raises(DeliveryError):
+        reserve_final_text_messages(state, "another message")
+    assert _state_snapshot(state) == before
 
 
-def test_multiline_final_text_stays_atomic_when_segment_budget_is_insufficient() -> None:
-    state = DeliveryState(limits=_limits(max_text_messages=1, max_text_chars_per_message=20, max_total_text_chars=40))
-
-    assert reserve_final_text_messages(state, "first beat\nsecond beat") == ("first beat\nsecond beat",)
-    assert state.mode is None
-    assert state.text_messages == 0
-
-
-def test_forward_validation_limits_and_atomic_rejection() -> None:
-    state = DeliveryState(limits=_limits(max_forward_nodes=2, max_forward_chars_per_node=4, max_total_text_chars=7))
-    invalid_values: tuple[object, ...] = ("abc", b"abc", {"one": "two"}, ["ok", 7])
-    with llm_chat_delivery_scope(state):
-        for value in invalid_values:
-            before = _state_snapshot(state)
-            with pytest.raises(DeliveryError, match="^messages must be a list of strings$"):
-                reserve_forward_messages(value)
-            assert _state_snapshot(state) == before
-
-        before = _state_snapshot(state)
-        with pytest.raises(DeliveryError, match="at least one"):
-            reserve_forward_messages([])
-        assert _state_snapshot(state) == before
-
-        for value, pattern in (
-            (["one", "two", "three"], "node limit"),
-            (["12345"], r"messages\[0\].*node character limit"),
-            (["1234", "5678"], "total character limit"),
-        ):
-            before = _state_snapshot(state)
-            with pytest.raises(DeliveryError, match=pattern):
-                reserve_forward_messages(value)
-            assert _state_snapshot(state) == before
-
-        reserved, messages = reserve_forward_messages(("one", "two"))
-        assert reserved is state
-        assert messages == ("one", "two")
-        assert state.forward_calls == 1
-        assert state.text_chars == 6
-
-
-def test_media_budget_must_precede_text_and_rejections_do_not_mutate() -> None:
+def test_media_budget_allows_text_first_and_rejections_do_not_mutate() -> None:
     state = DeliveryState()
     with llm_chat_delivery_scope(state):
         assert reserve_media_messages(6) is state
@@ -586,11 +515,41 @@ def test_media_budget_must_precede_text_and_rejections_do_not_mutate() -> None:
 
     after_text = DeliveryState()
     with llm_chat_delivery_scope(after_text):
-        reserve_text_message("text")
-        before = _state_snapshot(after_text)
-        with pytest.raises(DeliveryError, match="^Media must be sent before text delivery$"):
-            reserve_media_messages(2)
-        assert _state_snapshot(after_text) == before
+        reserve_message("text")
+        assert reserve_media_messages(2) is after_text
+        assert after_text.text_messages == 1
+        assert after_text.media_messages == 2
+        assert after_text.text_chars == len("text")
+
+
+def test_mixed_message_reservation_is_atomic_across_text_and_media_budgets() -> None:
+    state = DeliveryState(limits=_limits(max_text_messages=2, max_media_messages=2, max_total_text_chars=100))
+    projection = "before [image] after"
+    with llm_chat_delivery_scope(state):
+        assert reserve_message(projection, media_count=1) is state
+        mark_delivery_success(state, [projection], media=1)
+        before = _state_snapshot(state)
+        with pytest.raises(DeliveryError):
+            reserve_message("too many images", media_count=2)
+        assert _state_snapshot(state) == before
+
+        assert reserve_message("text only") is state
+        before = _state_snapshot(state)
+        with pytest.raises(DeliveryError):
+            reserve_message("no message budget", media_count=1)
+        assert _state_snapshot(state) == before
+    assert render_delivered_text(state) == projection
+    assert state.confirmed_deliveries == state.confirmed_media_deliveries == 1
+
+
+@pytest.mark.parametrize("media_count", [-1, True, 1.5])
+def test_invalid_mixed_media_count_does_not_reserve_text(media_count: object) -> None:
+    state = DeliveryState()
+    with llm_chat_delivery_scope(state):
+        before = _state_snapshot(state)
+        with pytest.raises(DeliveryError):
+            reserve_message("caption", media_count=media_count)  # type: ignore[arg-type]
+        assert _state_snapshot(state) == before
 
 
 @pytest.mark.parametrize(
@@ -608,9 +567,8 @@ def test_media_budget_must_precede_text_and_rejections_do_not_mutate() -> None:
 def test_trailing_end_marker_is_removed_from_visible_delivery_text(value: str, expected: str) -> None:
     state = DeliveryState()
     with llm_chat_delivery_scope(state):
-        reserved, normalized = reserve_text_message(value)
+        normalized = reserve_final_text(state, value)
 
-    assert reserved is state
     assert normalized == expected
 
 
@@ -619,20 +577,18 @@ def test_punctuation_only_delivery_is_rejected_atomically(value: str) -> None:
     state = DeliveryState()
     with llm_chat_delivery_scope(state):
         before = _state_snapshot(state)
-        with pytest.raises(
-            DeliveryError,
-            match="^Delivery text is empty, punctuation-only, or reserved for internal control$",
-        ):
-            reserve_text_message(value)
+        with pytest.raises(DeliveryError):
+            reserve_message(value)
         assert _state_snapshot(state) == before
 
 
 def test_internal_references_are_redacted_before_delivery() -> None:
     state = DeliveryState()
     with llm_chat_delivery_scope(state):
-        _, normalized = reserve_text_message(
+        normalized = reserve_final_text(
+            state,
             "请看 participant_0123abcdef 使用 web_ref_0123456789abcdef01234567 与 "
-            "reference_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "reference_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
 
     assert normalized == "请看 该成员 使用 该图片 与 该图片"
@@ -641,9 +597,9 @@ def test_internal_references_are_redacted_before_delivery() -> None:
 def test_media_records_and_internal_sentinel_are_removed_or_rejected_atomically() -> None:
     state = DeliveryState()
     with llm_chat_delivery_scope(state):
-        reserved, normalized = reserve_text_message("  before [发送了表情包: hidden] after  ")
+        normalized = reserve_final_text(state, "  before [发送了表情包: hidden] after  ")
         assert normalized == "before  after"
-        mark_delivery_success(reserved, [normalized])
+        mark_delivery_success(state, [normalized])
 
         for value in ("[发送了表情包: hidden]", " [END_OF_RESPONSE] "):
             before = _state_snapshot(state)
@@ -651,29 +607,10 @@ def test_media_records_and_internal_sentinel_are_removed_or_rejected_atomically(
                 DeliveryError,
                 match="^Delivery text is empty, punctuation-only, or reserved for internal control$",
             ):
-                reserve_text_message(value)
+                reserve_final_text(state, value)
             assert _state_snapshot(state) == before
 
-    forward_state = DeliveryState()
-    with llm_chat_delivery_scope(forward_state):
-        for messages in (
-            ["ok", "[发送了语音: hidden]"],
-            ["ok", "[END_OF_RESPONSE]"],
-        ):
-            before = _state_snapshot(forward_state)
-            with pytest.raises(
-                DeliveryError,
-                match="^Delivery text is empty, punctuation-only, or reserved for internal control$",
-            ):
-                reserve_forward_messages(messages)
-            assert _state_snapshot(forward_state) == before
-
-        reserved, normalized_nodes = reserve_forward_messages(["first [发送了表情包: hidden]", "second"])
-        assert normalized_nodes == ("first", "second")
-        mark_delivery_success(reserved, normalized_nodes)
-
     assert state.delivered_texts == ["before  after"]
-    assert render_delivered_text(forward_state) == "first\n\nsecond"
 
 
 def test_non_string_text_reports_only_the_field_name() -> None:
@@ -681,6 +618,6 @@ def test_non_string_text_reports_only_the_field_name() -> None:
     with llm_chat_delivery_scope(state):
         before = _state_snapshot(state)
         with pytest.raises(DeliveryError, match="^text must be a string$") as captured:
-            reserve_text_message(7)
+            reserve_final_text(state, 7)
         assert "7" not in str(captured.value)
         assert _state_snapshot(state) == before

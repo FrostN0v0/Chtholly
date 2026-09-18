@@ -229,7 +229,7 @@ async def _run_chat(
     try:
         try:
             await reaction.set_stage("thinking")
-            with native_image_delivery_scope(partial(turn.deliver_model_images, session)):
+            with native_image_delivery_scope(partial(turn.prepare_model_images, session)):
                 response = await generate_chat_response(
                     chat_messages,
                     system=system,
@@ -318,7 +318,7 @@ async def _run_chat(
                     "source": resolution.source,
                     "reason": resolution.reason[:240],
                     "actual_delivery": {
-                        "text_messages": len(delivery_state.delivered_texts),
+                        "text_messages": delivery_state.confirmed_text_deliveries,
                         "media_messages": delivery_state.confirmed_media_deliveries,
                         "confirmed_deliveries": delivery_state.confirmed_deliveries,
                     },
@@ -341,7 +341,7 @@ async def _run_chat(
                     "source": resolution.source,
                     "reason": resolution.reason[:240],
                     "actual_delivery": {
-                        "text_messages": len(delivery_state.delivered_texts),
+                        "text_messages": delivery_state.confirmed_text_deliveries,
                         "media_messages": delivery_state.confirmed_media_deliveries,
                         "confirmed_deliveries": delivery_state.confirmed_deliveries,
                     },
@@ -349,17 +349,6 @@ async def _run_chat(
             )
             turn_status = "completed"
             await reaction.finish("success")
-            return BLOCK
-        try:
-            if not await turn.deliver_model_images(session, response):
-                await reaction.finish("partial" if delivery_state.confirmed_deliveries else "failed")
-                return BLOCK
-        except asyncio.CancelledError:
-            turn_status = "partial" if delivery_state.confirmed_deliveries else "cancelled"
-            raise
-        except Exception as exc:
-            _LOGGER.warning(f"native image delivery failed: {summarize_exception(exc)}")
-            await reaction.finish("partial" if delivery_state.confirmed_deliveries else "failed")
             return BLOCK
         if not await turn.deliver_model_reply(session, response_content(response)):
             await reaction.finish("partial" if delivery_state.confirmed_deliveries else "failed")
@@ -374,7 +363,7 @@ async def _run_chat(
                 "source": "runtime",
                 "reason": "",
                 "actual_delivery": {
-                    "text_messages": len(delivery_state.delivered_texts),
+                    "text_messages": delivery_state.confirmed_text_deliveries,
                     "media_messages": delivery_state.confirmed_media_deliveries,
                     "confirmed_deliveries": delivery_state.confirmed_deliveries,
                 },

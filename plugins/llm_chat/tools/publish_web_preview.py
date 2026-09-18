@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict, cast
+from typing import cast
 import asyncio
 from collections.abc import Mapping
 
@@ -21,26 +21,21 @@ from ._artifacts import (
     record_artifact_evidence,
     require_authorized_access,
 )
-from ._rendering import deliver_image_bytes
+from ._rendering import prepare_image_bytes
 from ..core.types import JSONType
 from ._registration import register_tool
 from ..core.delivery import DeliveryError
-from ..artifacts_runtime import ArtifactCaptureError, ArtifactCaptureUnavailable
+from ..artifacts_runtime import ArtifactCaptureError, ArtifactCaptureUnavailable, _wait_for_task
 from ._submission_models import WebSourceFile
 
 
-class _ThumbnailResult(TypedDict, total=False):
-    status: Literal["unavailable", "failed", "captured_not_delivered", "sent"]
-    bytes: int
-
-
-async def _capture_and_deliver_thumbnail(
+async def _capture_and_prepare_thumbnail(
     session: Session,
     runtime: ArtifactToolContext,
     artifact: Artifact,
     owner: ArtifactOwner,
-) -> _ThumbnailResult:
-    """Capture, persist, and optionally send one real PNG derivative."""
+) -> dict[str, JSONType]:
+    """Capture, persist, and prepare a PNG without delivering or revoking it."""
 
     try:
         data = await runtime.service.capture_preview(artifact, width=runtime.capture_width)
@@ -67,26 +62,24 @@ async def _capture_and_deliver_thumbnail(
         return {"status": "failed"}
 
     try:
-        await deliver_image_bytes(
+        return await prepare_image_bytes(
             session,
             data,
-            append_history=runtime.append_history,
             warn=runtime.warn,
             tool_name="publish_web_preview",
         )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        runtime.warn(f"web artifact thumbnail delivery failed: {type(exc).__name__}")
-        return {"status": "captured_not_delivered", "bytes": len(data)}
-    return {"status": "sent", "bytes": len(data)}
+        runtime.warn(f"web artifact thumbnail preparation failed: {type(exc).__name__}")
+        return {"status": "captured_not_prepared", "bytes": len(data)}
 
 
 def register_publish_web_preview(
     dispatcher: PluginDispatcher[JSONType],
     runtime: ArtifactToolContext,
 ) -> Subscriber[JSONType]:
-    """Register immutable project publication and optional real thumbnail delivery."""
+    """Register immutable publication and optional real thumbnail preparation."""
 
     async def publish_web_preview(
         session: Session,
@@ -109,8 +102,10 @@ def register_publish_web_preview(
         revisions and ``delete_paths`` for inherited files omitted from the
         new version; existing versions remain unchanged.  Anyone holding the
         returned links can access the project until expiry or revocation.
-        Capture failures leave the source and links valid.  Deliver exact
-        links through final text and use send_artifact for source delivery.
+        Capture failures leave the source and links valid. Use send_msg to
+        deliver exact links, expiry, and any prepared thumbnail in your chosen
+        order. Use prepare_artifact then send_msg for a source ZIP. Publication
+        alone does not deliver a message; unused thumbnails do not revoke it.
         """
 
         access = require_authorized_access()
@@ -150,8 +145,19 @@ def register_publish_web_preview(
             delete_paths=normalized_deletes,
             on_commit=_record_commit,
         )
-        links = links_payload(runtime.service, artifact)
-        thumbnail = await _capture_and_deliver_thumbnail(session, runtime, artifact, access.owner)
+        try:
+            links = links_payload(runtime.service, artifact)
+            thumbnail = await _capture_and_prepare_thumbnail(session, runtime, artifact, access.owner)
+        except asyncio.CancelledError:
+            compensation = asyncio.create_task(runtime.service.revoke(artifact.artifact_ref, access.owner))
+            try:
+                revoked = await _wait_for_task(compensation, propagate_cancellation=False)
+            except Exception as exc:
+                runtime.warn(f"web artifact interrupted publication cleanup failed: {type(exc).__name__}")
+            else:
+                if revoked:
+                    record_artifact_evidence(artifact, artifact_effect="revoked")
+            raise
 
         record_artifact_evidence(
             artifact,
@@ -166,9 +172,10 @@ def register_publish_web_preview(
                 "expires_at": artifact.expires_at,
                 "thumbnail_status": thumbnail.get("status", "unavailable"),
                 "thumbnail_bytes": thumbnail.get("bytes", 0),
+                "thumbnail": thumbnail,
                 "delivery_guidance": (
-                    "Deliver both exact links and the expiry after all requested media; "
-                    "use send_artifact when a source ZIP is requested."
+                    "Use send_msg to deliver the exact links, expiry and optional thumbnail in your chosen order; "
+                    "use prepare_artifact then a standalone media send_msg for the source ZIP."
                 ),
             }
         )

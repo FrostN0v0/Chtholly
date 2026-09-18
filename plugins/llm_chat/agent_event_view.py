@@ -12,6 +12,7 @@ from .models import AgentEvent
 from .core.types import JSONType
 from .agent_events import load_event_payload
 from .agent_attachments import is_agent_attachment, event_attachment_metadata
+from .core.tool_trace_safety import project_message_arguments
 
 _INLINE_OBJECT_CHARS = 8000
 _PREVIEW_CHARS = 400
@@ -227,10 +228,35 @@ def _unwrap_user_turn(value: str) -> str:
     return f"{speaker}：{inner}" if isinstance(speaker, str) and speaker else inner
 
 
+def _message_preview(arguments: Mapping[str, object]) -> str:
+    projection = project_message_arguments(arguments, max_text=_PREVIEW_CHARS)
+    segments = projection["segments"]
+    if not isinstance(segments, list):
+        return ""
+    parts: list[str] = []
+    for segment in segments:
+        if not isinstance(segment, Mapping):
+            continue
+        kind = segment.get("type")
+        if kind in {"text", "link", "style"}:
+            parts.append(str(segment.get("text") or segment.get("url") or ""))
+        elif kind == "break":
+            parts.append("\n")
+        elif kind == "mention":
+            parts.append("@participant")
+        elif kind in {"media", "emoji"}:
+            parts.append(f"[{kind}]")
+    return _compact("".join(parts), _PREVIEW_CHARS)
+
+
 def event_preview(event: AgentEvent, payload: Mapping[str, JSONType]) -> str:
     """Return the most informative plain-text content of one event."""
 
     source = _preview_source(event, payload)
+    if event.tool_name == "send_msg" and isinstance(source, Mapping):
+        preview = _message_preview(source)
+        if preview:
+            return preview
     if isinstance(source, str):
         return _compact(source, _PREVIEW_CHARS)
     for key in _PREVIEW_KEYS:

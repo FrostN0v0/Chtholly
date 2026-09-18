@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 
-from satori import Text, Message
 from arclet.entari import Session, MessageChain
 
 from ..core.delivery import (
@@ -25,16 +24,21 @@ async def send_with_delivery(
     *,
     delay_seconds: float | None = None,
     texts: Sequence[str] = (),
-    media: bool = False,
+    media: bool | int = False,
+    text_message: bool | None = None,
 ) -> None:
     """Send one payload while recording delivery attempts and confirmations."""
 
-    if await send_group_delivery(session, payload, state, delay_seconds=delay_seconds, texts=texts, media=media):
+    if await send_group_delivery(
+        session, payload, state, delay_seconds=delay_seconds, texts=texts, media=media, text_message=text_message
+    ):
         return
     if state is not None:
         await wait_for_delivery(state, delay_seconds)
     try:
-        await session.send(payload)
+        receipts = await asyncio.wait_for(session.send(payload), timeout=30.0)
+        if not receipts:
+            raise DeliveryError("Transport returned no confirmed delivery receipt")
     except asyncio.CancelledError:
         if state is not None:
             mark_delivery_attempt(state)
@@ -44,39 +48,4 @@ async def send_with_delivery(
             mark_delivery_attempt(state)
         raise
     if state is not None:
-        mark_delivery_success(state, texts, media=media)
-
-
-def build_forward_chain(messages: Sequence[str]) -> MessageChain:
-    """Build one OneBot-compatible merged-forward chain."""
-
-    forward = Message(
-        forward=True,
-        content=[Message(content=[Text(text)]) for text in messages],
-    )
-    return MessageChain([forward])
-
-
-async def send_forward_fallback(
-    session: Session,
-    state: DeliveryState,
-    messages: Sequence[str],
-    delay_seconds: float | None,
-) -> str:
-    """Send a merged-forward payload as paced text with prefix-aware failures."""
-
-    total = len(messages)
-    for index, text in enumerate(messages):
-        try:
-            await send_with_delivery(session, text, state, delay_seconds=delay_seconds, texts=[text])
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            raise DeliveryError(
-                f"merged forward fallback confirmed {index}/{total} text messages before failure; "
-                "do not repeat the confirmed prefix"
-            ) from None
-    return (
-        f"合并转发不可用，已按顺序回退发送 {total} 条普通文本；"
-        "不要在最终回复中重复，若无需补充只返回 [END_OF_RESPONSE]。"
-    )
+        mark_delivery_success(state, texts, media=media, text_message=text_message)

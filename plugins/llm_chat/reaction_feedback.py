@@ -68,12 +68,12 @@ _MEDIA_TOOLS = frozenset(
         "list_tts_voices",
         "markdown2pic",
         "publish_web_preview",
-        "send_artifact",
-        "send_audio",
-        "send_channel_image",
-        "send_external_image",
-        "send_image",
-        "speak",
+        "prepare_artifact",
+        "prepare_audio",
+        "prepare_channel_image",
+        "prepare_external_media",
+        "prepare_image",
+        "synthesize_speech",
         "tag_image",
     }
 )

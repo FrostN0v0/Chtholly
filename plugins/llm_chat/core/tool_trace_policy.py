@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 
 from .types import JSONType
 from .errors import summarize_exception
+from .delivery import DeliveryRejected
 from .artifact_records import ARTIFACT_TOOLS, project_artifact_result, project_artifact_arguments
 from .workshop_records import WORKSHOP_TOOLS, project_workshop_result, project_workshop_arguments
 from .tool_trace_safety import (
@@ -24,26 +25,27 @@ from .tool_trace_safety import (
     parse_json_object,
     selected_arguments,
     external_source_type,
+    project_message_arguments,
 )
 
 ToolStatus = Literal["succeeded", "pending", "failed", "rejected", "cancelled"]
 ToolEffect = Literal["observed", "confirmed", "partial", "none", "unknown"]
 
-_DELIVERY_TOOLS = {
+_DELIVERY_TOOLS = {"send_msg", "call_plugin"}
+_PREPARATION_TOOLS = {
     "edit_image",
     "generate_image",
     "html2pic",
     "jinja2pic",
     "markdown2pic",
     "screenshot_web_page",
-    "send_audio",
-    "send_artifact",
-    "send_external_image",
-    "send_channel_image",
-    "send_image",
-    "send_merged_forward",
-    "send_text",
-    "speak",
+    "prepare_audio",
+    "prepare_artifact",
+    "prepare_external_media",
+    "prepare_channel_image",
+    "prepare_image",
+    "prepare_merged_forward",
+    "synthesize_speech",
 }
 _OBSERVATION_TOOLS = {
     "describe_channel_participant_avatar",
@@ -51,6 +53,7 @@ _OBSERVATION_TOOLS = {
     "find_channel_participants",
     "get_local_time",
     "list_image_resources",
+    "list_prepared_media",
     "list_tts_voices",
     "list_sessions",
     "list_tool_executions",
@@ -115,25 +118,16 @@ def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> d
         return {"requested": bool(arguments.get("image_ref"))}
     if tool_name == "describe_channel_participant_avatar":
         return {"requested": bool(arguments.get("participant_ref"))}
-    if tool_name == "send_text":
-        mentions = arguments.get("mentions")
-        normalized_mentions = (
-            mentions if isinstance(mentions, Sequence) and not isinstance(mentions, (str, bytes)) else ()
-        )
-        return {
-            "text_chars": text_length(arguments.get("text")),
-            "mention_count": min(3, len(normalized_mentions)),
-            **selected_arguments(arguments, "delay_seconds"),
-        }
-    if tool_name == "send_merged_forward":
+    if tool_name == "send_msg":
+        return project_message_arguments(arguments, max_text=MAX_ARGUMENT_TEXT)
+    if tool_name == "prepare_merged_forward":
         messages = arguments.get("messages")
         normalized = messages if isinstance(messages, Sequence) and not isinstance(messages, (str, bytes)) else ()
         return {
             "message_count": len(normalized),
             "total_chars": sum(text_length(message) for message in normalized),
-            **selected_arguments(arguments, "delay_seconds"),
         }
-    if tool_name == "send_image":
+    if tool_name == "prepare_image":
         paths = arguments.get("image_paths")
         path_count = len(paths) if isinstance(paths, Sequence) and not isinstance(paths, (str, bytes)) else 0
         return {
@@ -141,10 +135,10 @@ def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> d
             "path_count": path_count,
             "context": compact_text(arguments.get("context"), MAX_ARGUMENT_TEXT) if not path_count else "",
         }
-    if tool_name == "send_external_image":
+    if tool_name == "prepare_external_media":
         source = arguments.get("source")
         return {"source_type": external_source_type(source), "source_chars": text_length(source)}
-    if tool_name == "send_channel_image":
+    if tool_name == "prepare_channel_image":
         return {"requested": bool(arguments.get("image_ref"))}
     if tool_name == "edit_image":
         references = arguments.get("reference_image_refs")
@@ -158,9 +152,9 @@ def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> d
             "reference_count": len(normalized_references),
             **selected_arguments(arguments, "size"),
         }
-    if tool_name == "send_audio":
+    if tool_name == "prepare_audio":
         return selected_arguments(arguments, "context")
-    if tool_name == "speak":
+    if tool_name == "synthesize_speech":
         projected = selected_arguments(
             arguments,
             "version",
@@ -208,6 +202,11 @@ def project_tool_success(
         if outcome.get("artifact_ref"):
             return "succeeded", "confirmed", outcome
         return "failed", "none", outcome
+    if tool_name in _PREPARATION_TOOLS:
+        return ("succeeded" if outcome.get("status") == "prepared" else "failed"), "none", outcome
+    if tool_name == "call_plugin":
+        effect = delivery_effect(before, after, terminal_status="succeeded")
+        return "succeeded", effect, outcome
     if tool_name in _DELIVERY_TOOLS:
         effect = delivery_effect(before, after, terminal_status="succeeded")
         if before.active and effect == "none":
@@ -236,6 +235,13 @@ def classify_tool_error(exc: BaseException, *, delivery_attempted: bool) -> tupl
         return "rejected", "budget_exhausted"
     if delivery_attempted:
         return "failed", "delivery_failed"
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(seen) < 6:
+        seen.add(id(current))
+        if isinstance(current, DeliveryRejected):
+            return "rejected", "invalid_request"
+        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
     if "timed out" in summary or "timeout" in summary:
         return "failed", "timeout"
     if "unavailable" in summary or "service" in summary and "failed" in summary:
@@ -268,7 +274,7 @@ def delivery_effect(
         return "unknown"
     confirmed_delta = max(0, after.confirmed - before.confirmed)
     if confirmed_delta == 0:
-        return "none"
+        return "unknown" if after.attempts > before.attempts else "none"
     return "confirmed" if terminal_status == "succeeded" else "partial"
 
 
@@ -281,9 +287,28 @@ def tool_error_effect(
 ) -> ToolEffect:
     """Return partial delivery only for side-effect tools with confirmed prefixes."""
 
-    if tool_name not in _DELIVERY_TOOLS and tool_name != "publish_web_preview":
+    if tool_name not in _DELIVERY_TOOLS and tool_name not in {"publish_web_preview", "call_plugin"}:
         return "none"
     return delivery_effect(before, after, terminal_status=terminal_status)
+
+
+def project_prepared_result(result: object) -> dict[str, JSONType]:
+    """Retain preparation metadata, not resource capabilities or a claimed delivery."""
+
+    parsed = parse_json_object(result)
+    projected: dict[str, JSONType] = {"confirmed_deliveries": 0, "confirmed_media_deliveries": 0}
+    if parsed is None or parsed.get("status") != "prepared":
+        return {**projected, "status": "unavailable", "summary": compact_text(result, MAX_ARGUMENT_TEXT)}
+    projected.update(selected_arguments(parsed, "status", "kind", "bytes", "count", "message_count"))
+    media = parsed.get("media")
+    if isinstance(media, list):
+        projected["count"] = len(media)
+        projected["media"] = [
+            selected_arguments(item, "status", "kind", "bytes") for item in media[:20] if isinstance(item, Mapping)
+        ]
+        if len(media) > 20:
+            projected["media_truncated"] = True
+    return projected
 
 
 def _project_tool_result(
@@ -293,6 +318,8 @@ def _project_tool_result(
     before: DeliverySnapshot,
     after: DeliverySnapshot,
 ) -> dict[str, JSONType]:
+    if tool_name in _PREPARATION_TOOLS:
+        return project_prepared_result(result)
     if tool_name in ARTIFACT_TOOLS:
         return {
             **project_artifact_result(result),

@@ -10,7 +10,7 @@ from arclet.entari import Session
 from arclet.letoderea import Subscriber
 from arclet.entari.plugin.model import PluginDispatcher
 
-from ._rendering import WarningSink, HistoryAppender, deliver_image_bytes
+from ._rendering import WarningSink, prepare_image_bytes
 from ..core.types import JSONType
 from ._registration import register_tool
 from ..core.delivery import DeliveryError
@@ -46,7 +46,6 @@ class ImageEditToolContext:
 
     resolve_model: ModelResolver
     edit: ImageProvider
-    append_history: HistoryAppender
     warn: WarningSink
     timeout_seconds: float
     quality: ImageQuality
@@ -65,15 +64,16 @@ def register_edit_image(
         source_image_index: int = 1,
         reference_image_refs: list[str] = cast(list[str], None),
         size: ImageSize = DEFAULT_IMAGE_SIZE,
-    ) -> str:
-        """Edit one current-turn user image and send exactly one result through the configured image model.
+    ) -> dict[str, JSONType]:
+        """Edit one current-turn user image and prepare one result through the configured image model.
 
         The runtime supplies the selected current user image as the first provider input. Pass only image_ref values
         returned by capture_web_reference in reference_image_refs; those private images follow the source as visual
         identity references and cannot be guessed or reused across generations. When the user explicitly requires a
         real web reference, at least one captured reference is mandatory and generate_image must not be used. State
         precisely what to replace and what source details to preserve. Never place URLs, base64, local paths, secrets,
-        internal IDs, or unrelated conversation history in prompt.
+        internal IDs, or unrelated conversation history in prompt. This does not send the image: include the returned
+        media_ref in a send_msg media segment to deliver it.
 
         Args:
             prompt (str): Complete source-preserving edit instruction, at most 32000 characters.
@@ -81,7 +81,7 @@ def register_edit_image(
             reference_image_refs (list[str]): Zero to four current-generation refs from capture_web_reference.
             size (str): Output size: 1024x1024, 1536x1024, or 1024x1536.
         Returns:
-            str: Confirmed delivery status without exposing provider data or private image references.
+            dict[str, JSONType]: Prepared edited image resource containing a media_ref for send_msg.
         """
 
         references = current_image_edit_references()
@@ -127,10 +127,10 @@ def register_edit_image(
                 kind="output",
                 source="image_edit",
                 index=1,
-                label="Edited image result",
+                label="Prepared edited image",
                 description=(
-                    f"Edited source image {source_image_index} with {len(web_references)} captured web reference"
-                    f"{'s' if len(web_references) != 1 else ''}."
+                    f"Prepared an edit of source image {source_image_index} with {len(web_references)} captured web "
+                    f"reference{'s' if len(web_references) != 1 else ''}; not yet delivered."
                 ),
                 root=references.attachment_root,
             )
@@ -165,19 +165,13 @@ def register_edit_image(
             runtime.warn(f"edit_image failed: {type(exc).__name__}")
             raise DeliveryError("the configured image editing service is unavailable") from None
 
-        result = await deliver_image_bytes(
+        return await prepare_image_bytes(
             session,
             data,
-            append_history=runtime.append_history,
             warn=runtime.warn,
             tool_name="edit_image",
-            success_message=(
-                "Edited image sent successfully. Do not claim another image was sent or expose reference IDs; return "
-                "[END_OF_RESPONSE] when no supplement is needed."
-            ),
+            edited=True,
         )
-        references.edit_confirmed = True
-        return result
 
     return register_tool(dispatcher, edit_image)
 

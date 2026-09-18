@@ -44,7 +44,7 @@ def register_describe_channel_participant_avatar(
         Call find_channel_participants first when the user refers to someone by name. Pass only its exact
         participant_ref. The result describes the current avatar pixels, not the person's identity or stable traits.
         Avatar data is refreshed from the protocol when possible and cached only while image bytes remain unchanged.
-        When image_ref is present, pass it only to send_channel_image if the user asks for the original avatar.
+        For an available image_ref, use prepare_channel_image and send_msg to send the original avatar.
         Never reveal participant_ref, image_ref, avatar URLs, hashes, platform IDs, or cache details to the user.
 
         Args:

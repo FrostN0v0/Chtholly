@@ -182,9 +182,9 @@ class LLMChatConfig(BasicConfModel, extra="forbid"):
     delivery_max_interval_seconds: float = DEFAULT_DELIVERY_LIMITS.max_interval_seconds
     """Maximum model-requested paced interval."""
     delivery_max_text_messages_per_generation: int = DEFAULT_DELIVERY_LIMITS.max_text_messages
-    """Maximum send_text calls reserved in one generation."""
+    """Maximum text-bearing send_msg calls reserved in one generation."""
     delivery_max_text_chars_per_message: int = DEFAULT_DELIVERY_LIMITS.max_text_chars_per_message
-    """Maximum normalized characters in one send_text message."""
+    """Maximum visible characters in one text-bearing send_msg message."""
     delivery_max_forward_nodes: int = DEFAULT_DELIVERY_LIMITS.max_forward_nodes
     """Maximum normalized nodes in one merged forward."""
     delivery_max_forward_chars_per_node: int = DEFAULT_DELIVERY_LIMITS.max_forward_chars_per_node
@@ -198,7 +198,7 @@ class LLMChatConfig(BasicConfModel, extra="forbid"):
     tts_enabled: bool = True
     """Effective only when the tts_service plugin is installed."""
     tts_max_chars: int = 80
-    """speak() truncates text to at most this many chars (sentence boundary)."""
+    """synthesize_speech truncates text to this limit at sentence boundaries."""
     image_tags_enabled: bool = True
     """Tag local images with vision keywords on startup."""
     image_tag_model: str | None = None

@@ -1,36 +1,35 @@
-"""send_image LLM tool implementation."""
+"""Registered reaction image preparation."""
 
 from __future__ import annotations
 
 from typing import cast
-import asyncio
+from hashlib import sha256
 from pathlib import Path
 from collections import deque
 from dataclasses import field, dataclass
 from collections.abc import Callable, Sequence, Awaitable
 
-from arclet.entari import Image, Session, MessageChain
+from arclet.entari import Image, Session
 from arclet.letoderea import Subscriber
 from arclet.entari.plugin.model import PluginDispatcher
 
 from ..config import LLMChatConfig
 from ..models import ImageTag
-from ._delivery import send_with_delivery
 from ..core.types import JSONType
 from ._registration import register_tool
-from ..core.delivery import DeliveryError, reserve_media_messages, current_llm_chat_delivery
+from ..core.delivery import DeliveryError
 from ._image_catalog import (
     ImageCatalog,
     find_image_row,
     find_explicit_image_row,
     normalize_image_reference,
 )
+from ..prepared_media import prepare_media, ensure_media_capacity, prepared_media_metadata
 from ..core.tool_trace import record_tool_evidence
-from ..core.image_source import image_file_to_data_url
+from ..core.image_source import IMAGE_FETCH_MAX_BYTES
 from ..core.image_tag_metadata import image_tag_history_hint, parse_image_tag_metadata
 
 ImagePicker = Callable[[LLMChatConfig, Sequence[ImageTag], str, deque[str]], Awaitable[str | None]]
-HistoryAppender = Callable[[str, str, str, str, str], Awaitable[object]]
 
 
 @dataclass
@@ -40,30 +39,29 @@ class ImageToolContext:
     config: LLMChatConfig
     catalog: ImageCatalog
     pick_image: ImagePicker
-    append_history: HistoryAppender
     warn: Callable[[str], object]
     recent_window: int = 5
     recent_images: dict[str, deque[str]] = field(default_factory=dict)
 
 
-def register_send_image(
+def register_prepare_image(
     dispatcher: PluginDispatcher[JSONType],
     runtime: ImageToolContext,
 ) -> Subscriber[JSONType]:
-    """Register local registered-image delivery."""
+    """Register local registered-image preparation."""
 
-    async def send_image(
+    async def prepare_image(
         session: Session,
         context: str = "",
         image_paths: list[str] = cast(list[str], None),
-    ) -> str:
-        """Send registered local reaction images or stickers.
+    ) -> JSONType:
+        """Prepare registered local reaction images or stickers without sending them.
 
         Provide compact positive emotion, scenario, and subject keywords in context for one semantic match. Never add
         negations, exclusions, directory names, or internal paths to context. When list_image_resources returns
         registered resources, provide exact registered relative paths through image_paths.
-        Send multiple images in order. Exact paths are internal tool data and must never be revealed to the user.
-        Provide exactly one selection mode: non-empty context or non-empty image_paths. Duplicate paths are sent once.
+        Prepare multiple images in order. Exact paths are internal tool data and must never be revealed to the user.
+        Provide exactly one selection mode: non-empty context or non-empty image_paths. Duplicate paths prepare once.
         Use proactively for explicit requests and natural emotional reactions in casual conversation. Examples
         include greetings, teasing, embarrassment, affection, comfort, celebration, surprise, jealousy,
         exasperation, or light complaints. Do not wait for an explicit sticker request when a fitting image would
@@ -71,9 +69,9 @@ def register_send_image(
 
         Args:
             context (str): Compact emotion/scenario tags or one exact registered relative path. Defaults to empty.
-            image_paths (list[str] | None): Exact registered relative paths to send in order. Defaults to none.
+            image_paths (list[str] | None): Exact registered relative paths to prepare in order. Defaults to none.
         Returns:
-            str: Sanitized delivery result without paths, tags, hashes, or database details.
+            dict | str: Prepared reference, ordered media entries, or a safe no-match result. Use send_msg to send.
         """
 
         normalized_context = context.strip() if isinstance(context, str) else ""
@@ -113,7 +111,13 @@ def register_send_image(
         else:
             row = find_explicit_image_row(rows, normalized_context)
             if row is None:
-                relative_path = await runtime.pick_image(runtime.config, rows, normalized_context, recent)
+                pending_keys = {
+                    item.get("catalog_key") for item in prepared_media_metadata() if item.get("catalog_key")
+                }
+                candidates = [
+                    item for item in rows if sha256(item.file_path.encode("utf-8")).hexdigest() not in pending_keys
+                ]
+                relative_path = await runtime.pick_image(runtime.config, candidates, normalized_context, recent)
                 if relative_path is None:
                     return "没有合适的图片"
                 row = find_image_row(rows, relative_path)
@@ -123,64 +127,51 @@ def register_send_image(
             if full is None or not full.is_file():
                 return "图片文件已丢失"
             selected.append((row, full))
-        prepared: list[tuple[ImageTag, Image]] = []
+        prepared: list[tuple[ImageTag, Image, int]] = []
         for row, full in selected:
-            data_url = image_file_to_data_url(full)
-            if data_url is None:
-                raise DeliveryError("Registered image file is unreadable, invalid, or too large")
-            prepared.append((row, Image.of(url=data_url)))
-
-        delivery_state = current_llm_chat_delivery()
-        if delivery_state is not None:
-            delivery_state = reserve_media_messages(len(prepared))
-
-        total = len(prepared)
-        for index, (row, image) in enumerate(prepared):
             try:
-                await send_with_delivery(
-                    session,
-                    MessageChain([image]),
-                    delivery_state,
-                    media=True,
+                with full.open("rb") as source:
+                    data = source.read(IMAGE_FETCH_MAX_BYTES + 1)
+                if not data or len(data) > IMAGE_FETCH_MAX_BYTES:
+                    raise ValueError
+                image = Image.of(raw=data)
+                if image.src[5:].partition(";")[0] not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+                    raise ValueError
+            except (OSError, ValueError):
+                raise DeliveryError("Registered image file is unreadable, invalid, or too large") from None
+            prepared.append((row, image, len(data)))
+
+        ensure_media_capacity(len(prepared), byte_count=sum(size for _, _, size in prepared))
+        entries: list[JSONType] = []
+        for row, image, byte_count in prepared:
+
+            async def on_confirm(row: ImageTag = row) -> None:
+                recent.append(row.file_path)
+                metadata = parse_image_tag_metadata(row.tags)
+                record_tool_evidence(
+                    {
+                        "images": [
+                            {
+                                "path": row.file_path.replace("\\", "/"),
+                                "meaning": metadata.meaning if metadata is not None else "",
+                                "text": metadata.text if metadata is not None else "",
+                            }
+                        ]
+                    }
                 )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                if index:
-                    raise DeliveryError(
-                        f"image delivery confirmed {index}/{total} images before failure; "
-                        "do not repeat the confirmed prefix"
-                    ) from None
-                raise
-            recent.append(row.file_path)
-            metadata = parse_image_tag_metadata(row.tags)
-            record_tool_evidence(
-                {
-                    "images": [
-                        {
-                            "path": row.file_path.replace("\\", "/"),
-                            "meaning": metadata.meaning if metadata is not None else "",
-                            "text": metadata.text if metadata is not None else "",
-                        }
-                    ]
-                }
+
+            entry = prepare_media(
+                session,
+                image,
+                byte_count=byte_count,
+                tool_name="prepare_image",
+                history_marker=f"[发送了表情包: {image_tag_history_hint(row.tags)}]",
+                on_confirm=on_confirm,
+                metadata={"catalog_key": sha256(row.file_path.encode("utf-8")).hexdigest()},
             )
-            tag_hint = image_tag_history_hint(row.tags)
-            try:
-                await runtime.append_history(
-                    session.channel.id,
-                    "",
-                    "bot",
-                    "assistant",
-                    f"[发送了表情包: {tag_hint}]",
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                runtime.warn(f"image delivery history failed: {type(exc).__name__}")
-
+            entries.append(entry)
         if paths_provided:
-            return f"已发送 {total} 张图片；不要在最终回复中重复，若无需补充只返回 [END_OF_RESPONSE]。"
-        return f"已发送图片（{normalized_context}）"
+            return {"status": "prepared", "media": entries}
+        return entries[0]
 
-    return register_tool(dispatcher, send_image)
+    return register_tool(dispatcher, prepare_image)

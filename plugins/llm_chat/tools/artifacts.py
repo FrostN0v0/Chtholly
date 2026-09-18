@@ -13,10 +13,8 @@ from utils.web_artifacts_core import ArtifactStore
 
 from ..config import LLMChatConfig
 from ._artifacts import ArtifactToolContext
-from ._rendering import HistoryAppender
 from ..core.types import JSONType
-from .send_artifact import register_send_artifact
-from ..persona.store import append_message
+from .prepare_artifact import register_prepare_artifact
 from .read_web_artifact import register_read_web_artifact
 from ..artifacts_runtime import CaptureClient, WebArtifactService, normalize_public_origin
 from .list_web_artifacts import register_list_web_artifacts
@@ -34,7 +32,6 @@ def register_artifact_tools(
     service: WebArtifactService | None = None,
     store: ArtifactStore | None = None,
     capture_client: CaptureClient | None = None,
-    append_history: HistoryAppender = append_message,
     warn: WarningSink | None = None,
 ) -> list[str]:
     """Register all five artifact tools when a public HTTPS origin is configured."""
@@ -72,15 +69,15 @@ def register_artifact_tools(
     elif service.public_origin != normalized_origin:
         raise ValueError("injected web artifact service origin does not match configured origin")
 
-    runtime = ArtifactToolContext(service=service, append_history=append_history, warn=warning)
+    runtime = ArtifactToolContext(service=service, warn=warning)
     register_publish_web_preview(dispatcher, runtime)
-    register_send_artifact(dispatcher, runtime)
+    register_prepare_artifact(dispatcher, runtime)
     register_list_web_artifacts(dispatcher, runtime)
     register_read_web_artifact(dispatcher, runtime)
     register_revoke_web_preview(dispatcher, runtime)
     names = [
         "publish_web_preview",
-        "send_artifact",
+        "prepare_artifact",
         "list_web_artifacts",
         "read_web_artifact",
         "revoke_web_preview",

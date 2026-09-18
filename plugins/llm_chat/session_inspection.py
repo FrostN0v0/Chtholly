@@ -438,7 +438,7 @@ def project_outputs(events: Sequence[AgentEvent]) -> list[dict[str, object]]:
             continue
         if not audited and not (
             (event.event_type == "assistant_output" and event.effect == "confirmed")
-            or (event.event_type == "tool_result" and (event.effect == "confirmed" or event.status == "succeeded"))
+            or (event.event_type == "tool_result" and event.effect == "confirmed")
         ):
             continue
         payload = load_event_payload(event)

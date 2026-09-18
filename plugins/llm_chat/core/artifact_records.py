@@ -11,7 +11,7 @@ from .tool_trace_safety import safe_int, sanitize_json, parse_json_object
 ARTIFACT_TOOLS = frozenset(
     {
         "publish_web_preview",
-        "send_artifact",
+        "prepare_artifact",
         "list_web_artifacts",
         "read_web_artifact",
         "revoke_web_preview",
@@ -33,6 +33,8 @@ _SUMMARY_FIELDS = (
     "confirmed",
     "revoked",
     "thumbnail_status",
+    "kind",
+    "bytes",
 )
 
 

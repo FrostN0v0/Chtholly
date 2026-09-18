@@ -18,16 +18,26 @@ from collections.abc import Mapping, Sequence
 from importlib.machinery import ModuleSpec
 
 import pytest
+from satori.model import MessageObject
 from arclet.entari import File, Session, MessageChain
 from arclet.entari.plugin.model import Plugin, PluginDispatcher
 
-from utils.web_artifacts_core import Artifact, ArtifactOwner, ArtifactStore, ArtifactFileInfo, ArtifactAccessDenied
+from utils.web_artifacts_core import (
+    Artifact,
+    ArtifactOwner,
+    ArtifactStore,
+    ArtifactFileInfo,
+    ArtifactNotFound,
+    ArtifactAccessDenied,
+)
 from plugins.llm_chat.agent_context import AgentAccessContext, agent_access_scope
 from plugins.llm_chat.core.delivery import DeliveryError, DeliveryState, llm_chat_delivery_scope
-from plugins.llm_chat.tools._artifacts import ArtifactToolContext, deliver_source_archive
-from plugins.llm_chat.artifacts_runtime import ArtifactLinks, WebArtifactService
-from plugins.llm_chat.tools.send_artifact import register_send_artifact
+from plugins.llm_chat.prepared_media import prepared_media_scope
+from plugins.llm_chat.tools.send_msg import SendMsgToolContext, register_send_msg
+from plugins.llm_chat.tools._artifacts import ArtifactToolContext
+from plugins.llm_chat.artifacts_runtime import CaptureClient, WebArtifactService
 from plugins.llm_chat.core.artifact_access import ArtifactAccessError, is_artifact_request, require_artifact_revocation
+from plugins.llm_chat.tools.prepare_artifact import register_prepare_artifact
 from plugins.llm_chat.tools.read_web_artifact import register_read_web_artifact
 from plugins.llm_chat.tools.list_web_artifacts import register_list_web_artifacts
 from plugins.llm_chat.tools.revoke_web_preview import register_revoke_web_preview
@@ -156,6 +166,8 @@ async def test_service_scope_reauthorization_does_not_cross_users(tmp_path: Path
 class _UnsupportedFileSession:
     def __init__(self) -> None:
         self.channel = SimpleNamespace(id="channel-1")
+        self.account = SimpleNamespace(platform="test", self_id="bot")
+        self.user = SimpleNamespace(id="alice")
         self.attempts: list[object] = []
         self.sent: list[object] = []
 
@@ -172,53 +184,39 @@ class _FailingTransportSession(_UnsupportedFileSession):
         raise RuntimeError("remote transport failure")
 
 
-async def _append_link_history(target: list[str], *_args: object) -> None:
-    target.append("[Sent source archive]")
-
-
 @pytest.mark.asyncio
-async def test_send_archive_uses_exact_link_only_for_explicit_upload_unsupported() -> None:
-    artifact = _artifact()
-    history: list[str] = []
-    warnings: list[str] = []
-    runtime = ArtifactToolContext(
-        service=SimpleNamespace(),  # type: ignore[arg-type]
-        append_history=lambda *args: _append_link_history(history, *args),
-        warn=warnings.append,
-    )
-    session = _UnsupportedFileSession()
-    links = ArtifactLinks(
-        "https://preview.example/p/token/",
-        "https://preview.example/p/token/source.zip",
-        "https://preview.example/p/token/preview.png",
-    )
-    result = await deliver_source_archive(cast(Session, session), runtime, artifact, b"PK\x03\x04source", links)
-    assert result["mode"] == "link_fallback"
-    assert result["confirmed"] is True
-    assert session.sent == [links.download_url]
-    assert history == []
-    assert warnings == []
-
-
-@pytest.mark.asyncio
-async def test_send_archive_does_not_replay_unknown_transport_failure() -> None:
-    artifact = _artifact()
-    history: list[str] = []
-    runtime = ArtifactToolContext(
-        service=SimpleNamespace(),  # type: ignore[arg-type]
-        append_history=lambda *args: _append_link_history(history, *args),
-        warn=lambda _message: None,
-    )
-    session = _FailingTransportSession()
-    links = ArtifactLinks(
-        "https://preview.example/p/token/",
-        "https://preview.example/p/token/source.zip",
-        "https://preview.example/p/token/preview.png",
-    )
-    with pytest.raises(DeliveryError):
-        await deliver_source_archive(cast(Session, session), runtime, artifact, b"PK\x03\x04source", links)
-    assert len(session.attempts) == 1
-    assert history == []
+@pytest.mark.parametrize("session_type", [_UnsupportedFileSession, _FailingTransportSession])
+async def test_archive_send_does_not_fallback_or_replay_unknown_transport(
+    tmp_path: Path,
+    session_type: type[_UnsupportedFileSession],
+) -> None:
+    session = session_type()
+    state = DeliveryState()
+    async with _artifact_tools(tmp_path) as tools:
+        artifact = await tools.service.publish(
+            ArtifactOwner(1, "alice"), "Demo", [{"path": "index.html", "content": "<p>Source</p>"}]
+        )
+        with (
+            agent_access_scope(AgentAccessContext(1, 2, 3, "alice")),
+            llm_chat_delivery_scope(state),
+        ):
+            async with prepared_media_scope():
+                prepared = json.loads(await tools.prepare(session, artifact.artifact_ref))
+                assert prepared["status"] == "prepared"
+                assert prepared["kind"] == "file"
+                assert session.attempts == []
+                assert state.media_messages == state.delivery_attempts == 0
+                assert state.delivered_texts == []
+                segments = [{"type": "media", "media_ref": prepared["media_ref"]}]
+                with pytest.raises(DeliveryError):
+                    await tools.send_msg(session, segments)
+                with pytest.raises(DeliveryError):
+                    await tools.send_msg(session, segments)
+        assert len(session.attempts) == 1
+        assert session.sent == []
+        assert state.delivery_attempts == 1
+        assert state.confirmed_deliveries == 0
+        assert state.delivered_texts == []
 
 
 class _ArtifactToolEvent:
@@ -226,7 +224,7 @@ class _ArtifactToolEvent:
 
 
 @asynccontextmanager
-async def _artifact_tools(root: Path):
+async def _artifact_tools(root: Path, *, capture_client: CaptureClient | None = None):
     name = f"artifact_autonomy_{uuid4().hex}"
     module = ModuleType(name)
     module.__file__ = __file__
@@ -235,18 +233,21 @@ async def _artifact_tools(root: Path):
     plugin = Plugin(name, module, config={})
     setattr(module, "__plugin__", plugin)
     dispatcher = PluginDispatcher(plugin, _ArtifactToolEvent)
-    service = WebArtifactService(root, public_origin="https://preview.example")
-    history: list[str] = []
+    service = WebArtifactService(root, public_origin="https://preview.example", capture_client=capture_client)
     runtime = ArtifactToolContext(
         service=service,
-        append_history=lambda *args: _append_link_history(history, *args),
         warn=lambda _message: None,
     )
+
+    async def resolve_participant(_session: Session, _ref: str) -> None:
+        raise AssertionError("Artifact tests must not resolve mentions")
+
     try:
         yield SimpleNamespace(
             service=service,
             publish=register_publish_web_preview(dispatcher, runtime),
-            send=register_send_artifact(dispatcher, runtime),
+            prepare=register_prepare_artifact(dispatcher, runtime),
+            send_msg=register_send_msg(dispatcher, SendMsgToolContext(resolve_participant=resolve_participant)),
             list=register_list_web_artifacts(dispatcher, runtime),
             read=register_read_web_artifact(dispatcher, runtime),
             revoke=register_revoke_web_preview(dispatcher, runtime),
@@ -267,10 +268,13 @@ async def _artifact_tools(root: Path):
 class _FileSession:
     def __init__(self) -> None:
         self.channel = SimpleNamespace(id="channel-1")
+        self.account = SimpleNamespace(platform="test", self_id="bot")
+        self.user = SimpleNamespace(id="alice")
         self.sent: list[object] = []
 
-    async def send(self, payload: object) -> None:
+    async def send(self, payload: object) -> list[MessageObject]:
         self.sent.append(payload)
+        return [MessageObject(id=f"sent-{len(self.sent)}", content=str(payload))]
 
 
 @pytest.mark.asyncio
@@ -280,25 +284,69 @@ class _FileSession:
 async def test_model_selected_artifact_workflow_needs_no_request_keywords(tmp_path: Path, text: str) -> None:
     session = _FileSession()
     source = "<html><body><button>Toggle theme</button></body></html>"
+    state = DeliveryState()
     async with _artifact_tools(tmp_path) as tools:
         with (
             agent_access_scope(AgentAccessContext(1, 2, 3, "alice", raw_user_text=text)),
-            llm_chat_delivery_scope(DeliveryState()),
+            llm_chat_delivery_scope(state),
         ):
-            published = json.loads(await tools.publish(session, "Demo", [{"path": "index.html", "content": source}]))
-            ref = published["artifact_ref"]
-            listed = json.loads(await tools.list(session))
-            assert [item["artifact_ref"] for item in listed["artifacts"]] == [ref]
-            result = json.loads(await tools.read(session, ref))
-            assert result["content"] == source
-            sent = json.loads(await tools.send(session, ref))
-            assert sent["mode"] == "file"
-            assert sent["confirmed"] is True
+            async with prepared_media_scope():
+                published = json.loads(
+                    await tools.publish(session, "Demo", [{"path": "index.html", "content": source}])
+                )
+                ref = published["artifact_ref"]
+                listed = json.loads(await tools.list(session))
+                assert [item["artifact_ref"] for item in listed["artifacts"]] == [ref]
+                result = json.loads(await tools.read(session, ref))
+                assert result["content"] == source
+                prepared = json.loads(await tools.prepare(session, ref))
+                assert prepared["status"] == "prepared"
+                assert prepared["kind"] == "file"
+                assert session.sent == []
+                assert state.media_messages == state.delivery_attempts == 0
+                assert state.delivered_texts == []
+                await tools.send_msg(session, [{"type": "media", "media_ref": prepared["media_ref"]}])
+                assert state.confirmed_media_deliveries == 1
+        assert len(session.sent) == 1
         payload = session.sent[0]
         assert isinstance(payload, MessageChain)
         data_url = payload[File][0].src
         with ZipFile(BytesIO(base64.b64decode(data_url.partition(",")[2]))) as archive:
             assert archive.read("index.html") == source.encode()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_thumbnail_preparation_revokes_unobserved_publication(tmp_path: Path) -> None:
+    started = asyncio.Event()
+
+    async def capture(_token: str, _width: int) -> bytes:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("Cancelled capture must not finish")
+
+    async def close() -> None:
+        return None
+
+    client = cast(CaptureClient, SimpleNamespace(capture=capture, close=close))
+    owner = ArtifactOwner(1, "alice")
+    session = _FileSession()
+    state = DeliveryState()
+    async with _artifact_tools(tmp_path, capture_client=client) as tools:
+        with agent_access_scope(AgentAccessContext(1, 2, 3, "alice")), llm_chat_delivery_scope(state):
+            async with prepared_media_scope():
+                task = asyncio.create_task(
+                    tools.publish(session, "Interrupted", [{"path": "index.html", "content": "<p>Draft</p>"}])
+                )
+                await asyncio.wait_for(started.wait(), timeout=5)
+                (artifact,) = await tools.service.list_owned(owner)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert await tools.service.list_owned(owner) == []
+                with pytest.raises(ArtifactNotFound):
+                    await tools.service.get_owned(artifact.artifact_ref, owner)
+    assert session.sent == []
+    assert state.delivery_attempts == 0
 
 
 @pytest.mark.asyncio
@@ -316,19 +364,20 @@ async def test_model_selected_tools_still_require_active_generation(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_artifact_autonomy_preserves_ownership_and_explicit_revocation(tmp_path: Path) -> None:
-    async with _artifact_tools(tmp_path) as tools:
+    async with _artifact_tools(tmp_path) as tools, prepared_media_scope():
         owner = ArtifactOwner(1, "alice")
         artifact = await tools.service.publish(
             owner, "Demo", [{"path": "index.html", "content": "<p>Private source</p>"}]
         )
         session = _FileSession()
-        with llm_chat_delivery_scope(DeliveryState()):
+        state = DeliveryState()
+        with llm_chat_delivery_scope(state):
             for access in [AgentAccessContext(1, 2, 4, "bob"), AgentAccessContext(2, 2, 4, "alice", is_operator=True)]:
                 with agent_access_scope(access):
                     with pytest.raises(DeliveryError):
                         await tools.read(session, artifact.artifact_ref)
                     with pytest.raises(DeliveryError):
-                        await tools.send(session, artifact.artifact_ref)
+                        await tools.prepare(session, artifact.artifact_ref)
             with agent_access_scope(AgentAccessContext(1, 2, 4, "alice", raw_user_text="Looks good.")):
                 with pytest.raises(DeliveryError):
                     await tools.revoke(session, artifact.artifact_ref)
@@ -342,6 +391,8 @@ async def test_artifact_autonomy_preserves_ownership_and_explicit_revocation(tmp
                 assert result["revoked"] is True
                 assert await tools.service.list_owned(owner) == []
         assert session.sent == []
+        assert state.media_messages == state.delivery_attempts == 0
+        assert state.delivered_texts == []
 
 
 __all__ = []
