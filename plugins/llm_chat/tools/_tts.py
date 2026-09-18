@@ -44,6 +44,7 @@ def _selection_payload(selection: TTSSynthesisSelection | None) -> dict[str, obj
 
 
 def serialize_voice_catalog(catalog: TTSVoiceCatalog) -> str:
+    default_error = catalog.default_selection_error
     return json.dumps(
         {
             "provider": catalog.provider,
@@ -57,6 +58,11 @@ def serialize_voice_catalog(catalog: TTSVoiceCatalog) -> str:
                 "default": catalog.speed_default,
             },
             "default_selection": _selection_payload(catalog.default_selection),
+            "default_selection_error": (
+                {"code": default_error.code, "field": default_error.field, "message": default_error.message}
+                if default_error is not None
+                else None
+            ),
             "voices": [
                 {
                     "version": voice.version,

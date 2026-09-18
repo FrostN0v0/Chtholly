@@ -42,14 +42,14 @@ _PREPARATION_TOOLS = {
     "prepare_audio",
     "prepare_artifact",
     "prepare_external_media",
-    "prepare_channel_image",
+    "prepare_image_ref",
     "prepare_image",
     "prepare_merged_forward",
     "synthesize_speech",
 }
 _OBSERVATION_TOOLS = {
-    "describe_channel_participant_avatar",
-    "describe_channel_image",
+    "get_channel_avatar",
+    "inspect_image",
     "find_channel_participants",
     "get_local_time",
     "list_image_resources",
@@ -62,6 +62,8 @@ _OBSERVATION_TOOLS = {
     "read_tool_execution",
     "list_web_artifacts",
     "read_web_artifact",
+    "list_workshop_plugins",
+    "read_workshop_plugin",
     "read_channel_messages",
     "read_web_page",
     "capture_web_reference",
@@ -113,10 +115,11 @@ def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> d
             **selected_arguments(arguments, "limit"),
             "filtered": bool(arguments.get("participant_ref")),
             "paged": bool(arguments.get("before_cursor")),
+            "exact": bool(arguments.get("message_ref")),
         }
-    if tool_name == "describe_channel_image":
+    if tool_name == "inspect_image":
         return {"requested": bool(arguments.get("image_ref"))}
-    if tool_name == "describe_channel_participant_avatar":
+    if tool_name == "get_channel_avatar":
         return {"requested": bool(arguments.get("participant_ref"))}
     if tool_name == "send_msg":
         return project_message_arguments(arguments, max_text=MAX_ARGUMENT_TEXT)
@@ -138,17 +141,16 @@ def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> d
     if tool_name == "prepare_external_media":
         source = arguments.get("source")
         return {"source_type": external_source_type(source), "source_chars": text_length(source)}
-    if tool_name == "prepare_channel_image":
+    if tool_name == "prepare_image_ref":
         return {"requested": bool(arguments.get("image_ref"))}
-    if tool_name == "edit_image":
+    if tool_name in {"generate_image", "edit_image"}:
         references = arguments.get("reference_image_refs")
         normalized_references = (
             references if isinstance(references, Sequence) and not isinstance(references, (str, bytes)) else ()
         )
-        source_image_index = arguments.get("source_image_index")
         return {
             "prompt": compact_text(arguments.get("prompt"), MAX_RESULT_TEXT),
-            "source_image_index": source_image_index if type(source_image_index) is int else 1,
+            "has_source": bool(arguments.get("source_image_ref")),
             "reference_count": len(normalized_references),
             **selected_arguments(arguments, "size", "use_persona_reference"),
         }
@@ -186,6 +188,8 @@ def project_tool_success(
     """Normalize one handler return into execution and effect semantics."""
 
     outcome = _project_tool_result(tool_name, result, before=before, after=after)
+    if tool_name in {"list_workshop_plugins", "read_workshop_plugin"}:
+        return "succeeded", "observed", outcome
     if tool_name == "finish_turn":
         return "succeeded", "none", outcome
     if tool_name in WORKSHOP_TOOLS:
@@ -413,13 +417,13 @@ def _project_tool_result(
             "has_older": bool(parsed.get("next_cursor")),
             "truncated": parsed.get("truncated") is True,
         }
-    if tool_name == "describe_channel_image" and parsed is not None:
+    if tool_name == "inspect_image" and parsed is not None:
         return {
             "available": parsed.get("available") is True,
             "reason": compact_text(parsed.get("reason"), MAX_ARGUMENT_TEXT),
             "description_chars": text_length(parsed.get("description")),
         }
-    if tool_name == "describe_channel_participant_avatar" and parsed is not None:
+    if tool_name == "get_channel_avatar" and parsed is not None:
         return {
             "available": parsed.get("available") is True,
             "reason": compact_text(parsed.get("reason"), MAX_ARGUMENT_TEXT),

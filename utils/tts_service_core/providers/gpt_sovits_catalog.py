@@ -12,6 +12,7 @@ from ..voice_catalog import (
     TTSReferenceOption,
     TTSSynthesisRequest,
     TTSSynthesisSelection,
+    TTSDefaultSelectionError,
 )
 
 GPT_SOVITS_TEXT_LANGUAGES = (
@@ -37,21 +38,26 @@ SPEED_MAX = 2.0
 
 def string_items(value: object) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        return ()
-    return tuple(item for item in value if isinstance(item, str) and item)
+        raise TTSSynthesisError("GPT-SoVITS catalog expected a string array")
+    items: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise TTSSynthesisError("GPT-SoVITS catalog contains an invalid string option")
+        items.append(item)
+    return tuple(items)
 
 
 def parse_voices(version: str, value: object) -> tuple[TTSVoiceOption, ...]:
     if not isinstance(value, Mapping):
-        return ()
+        raise TTSSynthesisError("GPT-SoVITS catalog models must be an object")
     voices: list[TTSVoiceOption] = []
     for model_name, raw_references in value.items():
-        if not isinstance(model_name, str) or not isinstance(raw_references, Mapping):
-            continue
+        if not isinstance(model_name, str) or not model_name.strip() or not isinstance(raw_references, Mapping):
+            raise TTSSynthesisError("GPT-SoVITS catalog contains an invalid voice model")
         references: list[TTSReferenceOption] = []
         for language, raw_emotions in raw_references.items():
-            if not isinstance(language, str):
-                continue
+            if not isinstance(language, str) or not language.strip():
+                raise TTSSynthesisError("GPT-SoVITS catalog contains an invalid reference language")
             emotions = string_items(raw_emotions)
             if emotions:
                 references.append(TTSReferenceOption(language=language, emotions=emotions))
@@ -60,11 +66,20 @@ def parse_voices(version: str, value: object) -> tuple[TTSVoiceOption, ...]:
     return tuple(voices)
 
 
-def _selection_error(field: str, value: str, options: Sequence[str]) -> TTSSynthesisError:
+class _SelectionError(TTSSynthesisError):
+    """Selection failure distinct from transport or malformed catalog failures."""
+
+    def __init__(self, field: str, message: str) -> None:
+        super().__init__(message)
+        self.field = field
+
+
+def _selection_error(field: str, value: str, options: Sequence[str]) -> _SelectionError:
     available = ", ".join(options[:20]) or "none"
     if len(options) > 20:
         available = f"{available}, ..."
-    return TTSSynthesisError(f"Unsupported {field} {value!r}; available values: {available}")
+    parameter = {"model": "model_name", "reference language": "reference_language", "text language": "text_language"}
+    return _SelectionError(parameter.get(field, field), f"Unsupported {field} {value!r}; available values: {available}")
 
 
 def resolve_selection(
@@ -113,10 +128,10 @@ def resolve_selection(
 
     speed_value = default_speed if request.speed is None else request.speed
     if isinstance(speed_value, bool) or not isinstance(speed_value, (int, float)):
-        raise TTSSynthesisError("GPT-SoVITS speed must be numeric")
+        raise _SelectionError("speed", "GPT-SoVITS speed must be numeric")
     speed = float(speed_value)
     if not catalog.speed_min <= speed <= catalog.speed_max:
-        raise TTSSynthesisError(f"GPT-SoVITS speed must be between {catalog.speed_min} and {catalog.speed_max}")
+        raise _SelectionError("speed", f"GPT-SoVITS speed must be between {catalog.speed_min} and {catalog.speed_max}")
     return TTSSynthesisSelection(
         version=version,
         model_name=model_name,
@@ -150,14 +165,24 @@ def build_catalog(
     )
     if not voices:
         return catalog
-    selection = resolve_selection(
-        TTSSynthesisRequest(text=""),
-        catalog,
-        default_version=default_version,
-        default_model=default_model,
-        default_reference_language=default_reference_language,
-        default_emotion=default_emotion,
-        default_text_language=default_text_language,
-        default_speed=default_speed,
-    )
+    try:
+        selection = resolve_selection(
+            TTSSynthesisRequest(text=""),
+            catalog,
+            default_version=default_version,
+            default_model=default_model,
+            default_reference_language=default_reference_language,
+            default_emotion=default_emotion,
+            default_text_language=default_text_language,
+            default_speed=default_speed,
+        )
+    except _SelectionError as exc:
+        return replace(
+            catalog,
+            default_selection_error=TTSDefaultSelectionError(
+                code="invalid_default_selection",
+                field=exc.field,
+                message="Configured defaults are invalid; explicitly select valid values from this catalog.",
+            ),
+        )
     return replace(catalog, default_selection=selection)

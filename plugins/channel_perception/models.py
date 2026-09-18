@@ -63,6 +63,7 @@ class AmbientMessage(Base):
     display_name: Mapped[str] = mapped_column(default="")
     content: Mapped[str] = mapped_column(Text, default="")
     reply_to_message_id: Mapped[str] = mapped_column(default="")
+    mentions_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     image_count: Mapped[int] = mapped_column(default=0)
     directed_to_bot: Mapped[bool] = mapped_column(default=False)
     is_command: Mapped[bool] = mapped_column(default=False)

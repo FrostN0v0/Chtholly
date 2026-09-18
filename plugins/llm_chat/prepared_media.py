@@ -16,7 +16,7 @@ from arclet.entari import Session
 from .core.types import JSONType
 from .core.delivery import DeliveryRejected, require_llm_chat_delivery
 from .core.tool_trace import record_tool_evidence, current_tool_execution_ref
-from .image_edit_refs import current_image_edit_references
+from .core.media_delivery import ImageProvenance, current_media_requirements
 
 _Callback = Callable[[], Awaitable[None]]
 _MAX_ITEM_BYTES = 10 * 1024 * 1024
@@ -32,7 +32,7 @@ class PreparedMedia:
     byte_count: int
     tool_name: str
     history_marker: str
-    edited: bool
+    provenance: ImageProvenance | None
     execution_ref: str
     metadata: dict[str, object]
     on_confirm: _Callback | None = None
@@ -100,7 +100,7 @@ def prepare_media(
     tool_name: str,
     history_marker: str = "",
     on_confirm: _Callback | None = None,
-    edited: bool = False,
+    provenance: ImageProvenance | None = None,
     metadata: Mapping[str, object] | None = None,
 ) -> dict[str, JSONType]:
     """Store validated bytes without sending, reserving delivery, or publishing history."""
@@ -119,7 +119,7 @@ def prepare_media(
         byte_count,
         tool_name,
         history_marker,
-        edited,
+        provenance,
         current_tool_execution_ref(),
         dict(metadata or {}),
         on_confirm,
@@ -173,10 +173,9 @@ async def confirm_media(items: Sequence[PreparedMedia]) -> None:
         if not item.consumed:
             raise DeliveryRejected("Cannot confirm media before its send attempt")
         item.confirmed = True
-        if item.edited:
-            references = current_image_edit_references()
-            if references is not None:
-                references.edit_confirmed = True
+        requirements = current_media_requirements()
+        if requirements is not None and requirements.accepts(item.provenance):
+            requirements.confirmed = True
         record_tool_evidence(
             {
                 "prepared_media": [

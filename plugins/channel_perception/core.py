@@ -19,10 +19,19 @@ MAX_NORMALIZED_CONTENT_CHARS = 10_000
 
 
 @dataclass(frozen=True, slots=True)
+class NativeMention:
+    position: int
+    kind: str
+    target_id: str
+    display_name: str
+
+
+@dataclass(frozen=True, slots=True)
 class NormalizedMessage:
     content: str
     reply_to_message_id: str
     image_count: int
+    mentions: tuple[NativeMention, ...] = ()
 
 
 def clean_text(value: object) -> str:
@@ -34,15 +43,13 @@ def display_name(group_card: str, platform_nickname: str, fallback: str) -> str:
 
 
 def collect_image_sources(elements: Iterable[Element]) -> list[str]:
-    """Collect non-empty image sources in message order without persisting them."""
+    """Collect original image positions without persisting transport sources."""
     sources: list[str] = []
     for element in elements:
         if isinstance(element, Quote):
             continue
         if isinstance(element, Image):
-            source = clean_text(element.src)
-            if source:
-                sources.append(source)
+            sources.append(clean_text(element.src))
         if element.children:
             sources.extend(collect_image_sources(element.children))
     return sources
@@ -59,6 +66,7 @@ def is_prefixed_command(text: str, prefixes: Sequence[str], nickname: str) -> bo
 def _render_elements(
     elements: Iterable[Element],
     text_parts: list[str],
+    mentions: list[NativeMention],
 ) -> tuple[str, int]:
     reply_to = ""
     image_count = 0
@@ -67,6 +75,15 @@ def _render_elements(
             text_parts.append(element.text)
             continue
         if isinstance(element, At):
+            kind = element.type if element.type in {"all", "here"} else "role" if element.role else "member"
+            mentions.append(
+                NativeMention(
+                    len(mentions),
+                    kind,
+                    clean_text(element.role if kind == "role" else element.id),
+                    clean_text(element.name),
+                )
+            )
             label = clean_text(element.name) or "member"
             text_parts.append(f"@{label}")
             continue
@@ -81,7 +98,7 @@ def _render_elements(
                 image_count += 1
             continue
         if element.children:
-            nested_reply, nested_images = _render_elements(element.children, text_parts)
+            nested_reply, nested_images = _render_elements(element.children, text_parts, mentions)
             reply_to = nested_reply or reply_to
             image_count += nested_images
     return reply_to, image_count
@@ -89,7 +106,8 @@ def _render_elements(
 
 def normalize_message(elements: Iterable[Element], *, max_chars: int) -> NormalizedMessage:
     text_parts: list[str] = []
-    reply_to, image_count = _render_elements(elements, text_parts)
+    mentions: list[NativeMention] = []
+    reply_to, image_count = _render_elements(elements, text_parts, mentions)
     content = _WHITESPACE_RE.sub(" ", " ".join(text_parts)).strip()
     limit = min(MAX_NORMALIZED_CONTENT_CHARS, max(1, int(max_chars)))
     if len(content) > limit:
@@ -98,4 +116,5 @@ def normalize_message(elements: Iterable[Element], *, max_chars: int) -> Normali
         content=content,
         reply_to_message_id=reply_to,
         image_count=image_count,
+        mentions=tuple(mentions),
     )

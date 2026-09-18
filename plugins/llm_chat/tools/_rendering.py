@@ -14,6 +14,7 @@ from ..core.types import JSONType
 from ..core.delivery import DeliveryError
 from ..prepared_media import prepare_media
 from ..core.image_source import IMAGE_FETCH_MAX_BYTES
+from ..core.media_delivery import ImageProvenance
 
 if TYPE_CHECKING:
     from entari_plugin_htmlrender import HtmlRenderer, RasterOptions, RenderedImage
@@ -65,7 +66,7 @@ async def prepare_image_bytes(
     *,
     warn: WarningSink,
     tool_name: str,
-    edited: bool = False,
+    provenance: ImageProvenance | None = None,
 ) -> dict[str, JSONType]:
     """Validate and register one image for explicit composition with send_msg."""
 
@@ -85,7 +86,7 @@ async def prepare_image_bytes(
         byte_count=len(raw),
         tool_name=tool_name,
         history_marker=_IMAGE_HISTORY_MARKER,
-        edited=edited,
+        provenance=provenance,
     )
 
 

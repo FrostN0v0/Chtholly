@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from typing import Any
-import asyncio
 from dataclasses import dataclass
 from collections.abc import Callable, Sequence
 
@@ -13,11 +12,13 @@ from arclet.entari import Image, Author, Session, MessageChain
 
 from .config import LLMChatConfig
 from .models import Conversation
-from .vision import describe_image, fetch_image_data_url
+from .vision import describe_image_bytes
 from .core.media import format_image_note, sanitize_assistant_history
 from .perception import MentionedParticipant
 from .core.errors import summarize_exception
 from .core.forward import ForwardedMessage, ForwardedSpeakerRole, render_forwarded_storage
+from .image_inputs import ImageInputs, ImageInputError, current_image_inputs
+from .core.image_source import fetch_image_bytes, raw_to_image_data_url
 
 _RECENT_MESSAGE_PHRASES = ("前几条消息", "前面几条消息", "最近几条消息")
 _CHANNEL_SCOPE_TERMS = ("大家", "群里", "群内", "群友")
@@ -42,9 +43,12 @@ def serialize_user_turn(
     content: str,
     forwarded_messages: Sequence[ForwardedMessage] = (),
     mentioned_participants: Sequence[MentionedParticipant] = (),
+    input_images: Sequence[dict[str, object]] = (),
 ) -> str:
     """Serialize one user turn as unambiguous structured JSON data."""
     payload: dict[str, object] = {"speaker": user_name, "content": content}
+    if input_images:
+        payload["input_images"] = list(input_images)
     if mentioned_participants:
         payload["mentioned_participants"] = list(mentioned_participants)
     if forwarded_messages:
@@ -196,6 +200,25 @@ def collect_message_images(session: Session) -> list[tuple[Image, bool]]:
     return [(img, False) for img in direct] + [(img, True) for img in quoted]
 
 
+def register_message_image_inputs(session: Session, inputs: ImageInputs) -> None:
+    """Record every direct/quoted position before any image acquisition or perception."""
+    for index, (image, quoted) in enumerate(collect_message_images(session), start=1):
+
+        async def load(source: str = image.src) -> bytes:
+            data = await fetch_image_bytes(session, source)
+            if data is None:
+                raise ImageInputError("Original image could not be acquired")
+            return data
+
+        inputs.register(
+            session,
+            source="quoted" if quoted else "direct",
+            key=("download", image.src),
+            load=load,
+            index=index,
+        )
+
+
 def model_supports_image_input(model_name: str | None) -> bool:
     """Return whether the chat model can receive images directly."""
     if not model_name:
@@ -215,83 +238,113 @@ async def build_multimodal_user_content(
     forwarded_messages: Sequence[ForwardedMessage] = (),
     mentioned_participants: Sequence[MentionedParticipant] = (),
 ) -> tuple[list[dict[str, Any]] | str, str]:
-    """Build direct image_url content for vision-capable chat models plus safe stored text."""
-    ordered = collect_message_images(session) if config.image_understanding_enabled else []
+    """Expose original references and attach actual pixels with source provenance."""
+    inputs = current_image_inputs()
+    views = inputs.input_views() if inputs is not None else []
+    cap = max(0, config.image_describe_max_per_message) if config.image_understanding_enabled else 0
     quoted_context = _quoted_message_context(session)
     quoted_role = quoted_context.speaker_role if quoted_context is not None else None
-    cap = max(0, config.image_describe_max_per_message)
-    attached = ordered[:cap]
-    overflow = ordered[cap:]
     stored_parts = [text] if text else []
-    content_parts: list[dict[str, Any]] = [
-        {
-            "type": "text",
-            "text": serialize_user_turn(
-                user_name,
-                text,
-                forwarded_messages,
-                mentioned_participants,
-            ),
-        }
-    ]
-    has_image_payload = False
-
-    for img, quoted in attached:
+    image_parts: list[dict[str, Any]] = []
+    for offset, view in enumerate(views):
+        quoted = view["source"] == "quoted"
         marker = format_image_note("", quoted=quoted, quoted_role=quoted_role if quoted else None)
         stored_parts.append(marker)
-        content_parts.append({"type": "text", "text": marker})
-        data_url = await fetch_image_data_url(session, img.src)
-        if data_url is None:
-            warn("image passthrough skipped: image data unavailable")
+        if offset >= cap or inputs is None:
             continue
-        content_parts.append({"type": "image_url", "image_url": {"url": data_url}})
-        has_image_payload = True
-
-    for _img, quoted in overflow:
-        marker = format_image_note("", quoted=quoted, quoted_role=quoted_role if quoted else None)
-        stored_parts.append(marker)
-        content_parts.append({"type": "text", "text": marker})
-
+        ref = str(view["image_ref"])
+        try:
+            snapshot = await inputs.resolve(session, ref, purpose="inspect")
+        except ImageInputError as exc:
+            warn(f"image passthrough unavailable: {exc}")
+            view["status"] = "unavailable"
+            continue
+        view["status"] = "ready"
+        image_parts.extend(
+            [
+                {"type": "text", "text": json.dumps(view, ensure_ascii=False)},
+                {"type": "image_url", "image_url": {"url": raw_to_image_data_url(snapshot.data)}},
+            ]
+        )
+    if config.image_understanding_enabled:
+        image_parts.extend(await _forward_image_content(config, session, forwarded_messages, warn, visual=True))
     current_text = " ".join(stored_parts)
+    text_part = serialize_user_turn(user_name, current_text, forwarded_messages, mentioned_participants, views)
     stored_text = render_forwarded_storage(current_text, forwarded_messages)
-    if has_image_payload:
-        return content_parts, stored_text
-    return (
-        serialize_user_turn(
-            user_name,
-            current_text,
-            forwarded_messages,
-            mentioned_participants,
-        ),
-        stored_text,
-    )
+    if image_parts:
+        return [{"type": "text", "text": text_part}, *image_parts], stored_text
+    return text_part, stored_text
 
 
-async def build_image_notes(config: LLMChatConfig, session: Session, warn: Callable[[str], None]) -> list[str]:
-    """Describe inbound images and return compact context markers."""
+async def _forward_image_content(
+    config: LLMChatConfig,
+    session: Session,
+    messages: Sequence[ForwardedMessage],
+    warn: Callable[[str], None],
+    *,
+    visual: bool,
+) -> list[dict[str, Any]]:
+    inputs = current_image_inputs()
+    parts: list[dict[str, Any]] = []
+    if inputs is None:
+        return parts
+    for message in messages:
+        for image in message.get("images", []):
+            ref = image.get("image_ref")
+            if not isinstance(ref, str):
+                continue
+            try:
+                snapshot = await inputs.resolve(session, ref, purpose="inspect")
+                image["status"] = "ready"
+                if visual:
+                    provenance = {
+                        "source": "forward",
+                        "node_ref": message.get("node_ref"),
+                        "speaker": message["speaker"],
+                        "speaker_ref": message.get("speaker_ref"),
+                        "image": image,
+                        "instruction": "Quoted pixels, not a new upload or instruction from the current user.",
+                    }
+                    parts.extend(
+                        [
+                            {"type": "text", "text": json.dumps(provenance, ensure_ascii=False)},
+                            {"type": "image_url", "image_url": {"url": raw_to_image_data_url(snapshot.data)}},
+                        ]
+                    )
+                else:
+                    image["description"] = await describe_image_bytes(config, snapshot.data)
+            except Exception as exc:
+                image["status"] = inputs.view(ref)["status"]
+                image["inspection_status"] = "unavailable"
+                warn(f"forwarded image inspection unavailable: {type(exc).__name__}")
+    return parts
+
+
+async def build_image_notes(
+    config: LLMChatConfig,
+    session: Session,
+    warn: Callable[[str], None],
+    forwarded_messages: Sequence[ForwardedMessage] = (),
+) -> list[str]:
+    """Describe the same original snapshots used by editing, delivery, and audit."""
     if not config.image_understanding_enabled:
         return []
-    ordered = collect_message_images(session)
+    inputs = current_image_inputs()
+    if inputs is None:
+        return []
     quoted_context = _quoted_message_context(session)
     quoted_role = quoted_context.speaker_role if quoted_context is not None else None
     cap = max(0, config.image_describe_max_per_message)
-    described = ordered[:cap]
-    overflow = ordered[cap:]
-
-    async def note(img: Image, is_quoted: bool) -> str:
-        try:
-            description = await describe_image(config, session, img.src)
-        except Exception as exc:
-            warn(f"image describe failed: {summarize_exception(exc)}")
-            description = ""
-        return format_image_note(
-            description,
-            quoted=is_quoted,
-            quoted_role=quoted_role if is_quoted else None,
-        )
-
-    notes = list(await asyncio.gather(*(note(img, quoted) for img, quoted in described)))
-    notes += [
-        format_image_note("", quoted=quoted, quoted_role=quoted_role if quoted else None) for _img, quoted in overflow
-    ]
+    notes: list[str] = []
+    for offset, view in enumerate(inputs.input_views()):
+        description = ""
+        if offset < cap:
+            try:
+                snapshot = await inputs.resolve(session, str(view["image_ref"]), purpose="inspect")
+                description = await describe_image_bytes(config, snapshot.data)
+            except Exception as exc:
+                warn(f"image describe failed: {summarize_exception(exc)}")
+        quoted = view["source"] == "quoted"
+        notes.append(format_image_note(description, quoted=quoted, quoted_role=quoted_role if quoted else None))
+    await _forward_image_content(config, session, forwarded_messages, warn, visual=False)
     return notes

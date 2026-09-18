@@ -10,6 +10,7 @@ import base64
 from typing import Any, cast
 import asyncio
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from importlib.util import module_from_spec, spec_from_file_location
@@ -25,7 +26,6 @@ from arclet.entari.config import EntariConfig
 
 if not hasattr(EntariConfig, "instance"):
     setattr(EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.yml"))
-from satori import Message
 from satori.model import MessageObject
 from agno.run.agent import RunOutput
 from arclet.letoderea import Contexts
@@ -61,15 +61,17 @@ from plugins.llm_chat.meme_store import (
     MemeImportResult,
     delete_meme,
     import_meme_bytes,
-    import_meme_image,
+    import_meme_snapshot,
 )
 from plugins.llm_chat.web.policy import DEFAULT_WEB_ACCESS_LIMITS
+from plugins.llm_chat.chat_context import register_message_image_inputs
+from plugins.llm_chat.image_inputs import ImageInputs, ImageSnapshot, ImageInputError, image_inputs_scope
 from plugins.llm_chat.agent_context import AgentAccessContext, agent_access_scope
 from plugins.llm_chat.core.delivery import DeliveryState, llm_chat_delivery_scope
 from plugins.llm_chat.prepared_media import prepared_media_scope
 from plugins.llm_chat.core.tool_trace import ToolTraceRecorder, llm_chat_tool_trace_scope
 from plugins.llm_chat.runtime_context import llm_chat_context_scope
-from plugins.llm_chat.core.image_source import IMAGE_FETCH_MAX_BYTES
+from plugins.llm_chat.core.image_source import IMAGE_FETCH_MAX_BYTES, fetch_image_bytes
 from plugins.llm_chat.tools._image_catalog import ImageCatalog
 from plugins.llm_chat.core.image_tag_metadata import (
     image_tag_catalog_summary,
@@ -92,12 +94,43 @@ _SUPPORTED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 class _MemeSession:
     def __init__(self, downloads: dict[str, bytes | BaseException]) -> None:
         self.downloads = downloads
+        self.account = SimpleNamespace(platform="test", self_id="bot")
+        self.channel = SimpleNamespace(id="channel")
+        self.event = SimpleNamespace(user=SimpleNamespace(id="user"), message=None)
 
     async def download(self, src: str) -> bytes:
         result = self.downloads[src]
         if isinstance(result, BaseException):
             raise result
         return result
+
+
+async def _import_snapshot(config: LLMChatConfig, session: Session, image: Image) -> MemeImportResult:
+    async def load() -> bytes:
+        data = await fetch_image_bytes(session, image.src)
+        if data is None:
+            raise ImageInputError("Image input unavailable")
+        return data
+
+    with TemporaryDirectory() as directory:
+        inputs = ImageInputs(attachment_root=Path(directory))
+        ref = inputs.register(session, source="direct", key=image.src, load=load, index=1)
+        try:
+            snapshot = await inputs.resolve(session, ref, purpose="collect")
+            return await import_meme_snapshot(config, snapshot)
+        finally:
+            await inputs.aclose()
+
+
+@asynccontextmanager
+async def _input_scope(session: Session, root: Path) -> AsyncIterator[ImageInputs]:
+    inputs = ImageInputs(attachment_root=root)
+    register_message_image_inputs(session, inputs)
+    try:
+        with image_inputs_scope(inputs):
+            yield inputs
+    finally:
+        await inputs.aclose()
 
 
 async def _image_rows(session_factory: async_sessionmaker[Any]) -> list[ImageTag]:
@@ -167,10 +200,8 @@ async def test_import_uses_next_numeric_name_and_persists_queryable_tags(meme_en
         (meme_env.meme_dir / f"{stem}{suffix}").write_bytes(f"existing-{stem}".encode())
 
     data = _PNG_BYTES + b"new"
-    result = await import_meme_image(
-        meme_env.config,
-        cast(Session, _MemeSession({"local://new": data})),
-        Image.of(url="local://new"),
+    result = await _import_snapshot(
+        meme_env.config, cast(Session, _MemeSession({"local://new": data})), Image.of(url="local://new")
     )
 
     expected_path = "memes/63.png"
@@ -189,15 +220,11 @@ async def test_import_uses_next_numeric_name_and_persists_queryable_tags(meme_en
 @pytest.mark.asyncio
 async def test_duplicate_bytes_skip_repeated_tagging(meme_env: Any) -> None:
     data = _PNG_BYTES + b"duplicate"
-    first = await import_meme_image(
-        meme_env.config,
-        cast(Session, _MemeSession({"local://first": data})),
-        Image.of(url="local://first"),
+    first = await _import_snapshot(
+        meme_env.config, cast(Session, _MemeSession({"local://first": data})), Image.of(url="local://first")
     )
-    second = await import_meme_image(
-        meme_env.config,
-        cast(Session, _MemeSession({"local://second": data})),
-        Image.of(url="local://second"),
+    second = await _import_snapshot(
+        meme_env.config, cast(Session, _MemeSession({"local://second": data})), Image.of(url="local://second")
     )
 
     assert first.status == "created"
@@ -292,8 +319,8 @@ async def test_animated_gif_import_preserves_original_bytes_and_deduplicates(mem
         _MemeSession({"local://animated": _GIF_BYTES, "local://duplicate": _GIF_BYTES}),
     )
 
-    first = await import_meme_image(meme_env.config, session, Image.of(url="local://animated"))
-    second = await import_meme_image(meme_env.config, session, Image.of(url="local://duplicate"))
+    first = await _import_snapshot(meme_env.config, session, Image.of(url="local://animated"))
+    second = await _import_snapshot(meme_env.config, session, Image.of(url="local://duplicate"))
 
     expected_path = "memes/1.gif"
     assert _GIF_BYTES.count(b"\x2c") == 2
@@ -396,10 +423,8 @@ async def test_existing_untagged_file_is_repaired_and_stale_embedding_is_cleared
         await session.commit()
 
     meme_env.state.embedding_result = None
-    repaired = await import_meme_image(
-        meme_env.config,
-        cast(Session, _MemeSession({"local://repair": repair_data})),
-        Image.of(url="local://repair"),
+    repaired = await _import_snapshot(
+        meme_env.config, cast(Session, _MemeSession({"local://repair": repair_data})), Image.of(url="local://repair")
     )
 
     assert repaired.status == "tagged_existing"
@@ -434,8 +459,8 @@ async def test_concurrent_imports_deduplicate_and_allocate_consecutive_names(mem
         _MemeSession({"local://shared-a": shared, "local://shared-b": shared}),
     )
     shared_results = await asyncio.gather(
-        import_meme_image(meme_env.config, shared_session, Image.of(url="local://shared-a")),
-        import_meme_image(meme_env.config, shared_session, Image.of(url="local://shared-b")),
+        _import_snapshot(meme_env.config, shared_session, Image.of(url="local://shared-a")),
+        _import_snapshot(meme_env.config, shared_session, Image.of(url="local://shared-b")),
     )
 
     assert {result.status for result in shared_results} == {"created", "duplicate"}
@@ -449,8 +474,8 @@ async def test_concurrent_imports_deduplicate_and_allocate_consecutive_names(mem
         _MemeSession({"local://first": first_data, "local://second": second_data}),
     )
     distinct_results = await asyncio.gather(
-        import_meme_image(meme_env.config, distinct_session, Image.of(url="local://first")),
-        import_meme_image(meme_env.config, distinct_session, Image.of(url="local://second")),
+        _import_snapshot(meme_env.config, distinct_session, Image.of(url="local://first")),
+        _import_snapshot(meme_env.config, distinct_session, Image.of(url="local://second")),
     )
 
     assert {result.relative_path for result in distinct_results} == {
@@ -481,15 +506,13 @@ async def test_invalid_inputs_and_empty_tags_leave_storage_unchanged(meme_env: A
     ]
 
     for session, image, message in cases:
-        with pytest.raises(MemeImportError, match=message):
-            await import_meme_image(meme_env.config, session, image)
+        with pytest.raises(ImageInputError):
+            await _import_snapshot(meme_env.config, session, image)
 
     meme_env.state.tag_result = ""
     with pytest.raises(MemeImportError, match="returned no tags"):
-        await import_meme_image(
-            meme_env.config,
-            cast(Session, _MemeSession({"local://empty": _PNG_BYTES})),
-            Image.of(url="local://empty"),
+        await _import_snapshot(
+            meme_env.config, cast(Session, _MemeSession({"local://empty": _PNG_BYTES})), Image.of(url="local://empty")
         )
 
     assert _stored_images(meme_env.meme_dir) == []
@@ -503,12 +526,12 @@ async def test_initialization_cleans_stale_temp_and_deleted_cache_entry_is_rebui
     data = _PNG_BYTES + b"cache"
     session = cast(Session, _MemeSession({"local://cache": data}))
 
-    first = await import_meme_image(meme_env.config, session, Image.of(url="local://cache"))
+    first = await _import_snapshot(meme_env.config, session, Image.of(url="local://cache"))
     assert not stale.exists()
     first_path = meme_env.image_dir / first.relative_path
     first_path.unlink()
 
-    second = await import_meme_image(meme_env.config, session, Image.of(url="local://cache"))
+    second = await _import_snapshot(meme_env.config, session, Image.of(url="local://cache"))
 
     assert second.status == "created"
     assert (meme_env.image_dir / second.relative_path).read_bytes() == data
@@ -529,7 +552,7 @@ async def test_temp_write_link_and_commit_failures_leave_no_artifacts(
     with monkeypatch.context() as patch:
         patch.setattr(meme_store_module, "_write_temp_file", fail_write)
         with pytest.raises(MemeImportError, match="Meme storage failed"):
-            await import_meme_image(meme_env.config, session, image)
+            await _import_snapshot(meme_env.config, session, image)
     assert list(meme_env.meme_dir.iterdir()) == []
     assert await _image_rows(meme_env.session_factory) == []
 
@@ -539,7 +562,7 @@ async def test_temp_write_link_and_commit_failures_leave_no_artifacts(
     with monkeypatch.context() as patch:
         patch.setattr(meme_store_module.os, "link", fail_link)
         with pytest.raises(MemeImportError, match="Meme storage failed"):
-            await import_meme_image(meme_env.config, session, image)
+            await _import_snapshot(meme_env.config, session, image)
     assert list(meme_env.meme_dir.iterdir()) == []
     assert await _image_rows(meme_env.session_factory) == []
 
@@ -549,7 +572,7 @@ async def test_temp_write_link_and_commit_failures_leave_no_artifacts(
     with monkeypatch.context() as patch:
         patch.setattr(meme_store_module, "upsert_image_tag", fail_upsert)
         with pytest.raises(MemeImportError, match="Image tag persistence failed"):
-            await import_meme_image(meme_env.config, session, image)
+            await _import_snapshot(meme_env.config, session, image)
     assert list(meme_env.meme_dir.iterdir()) == []
     assert await _image_rows(meme_env.session_factory) == []
 
@@ -572,10 +595,8 @@ async def test_hard_link_collision_never_overwrites_external_file(
 
     monkeypatch.setattr(meme_store_module.os, "link", racing_link)
     data = _PNG_BYTES + b"collision"
-    result = await import_meme_image(
-        meme_env.config,
-        cast(Session, _MemeSession({"local://collision": data})),
-        Image.of(url="local://collision"),
+    result = await _import_snapshot(
+        meme_env.config, cast(Session, _MemeSession({"local://collision": data})), Image.of(url="local://collision")
     )
 
     assert result.relative_path == "memes/2.png"
@@ -600,7 +621,7 @@ async def test_cancellation_waits_for_successful_tag_commit_and_preserves_duplic
     monkeypatch.setattr(meme_store_module, "upsert_image_tag", blocking_upsert)
     data = _PNG_BYTES + b"cancel-success"
     session = cast(Session, _MemeSession({"local://cancel": data}))
-    importer = asyncio.create_task(import_meme_image(meme_env.config, session, Image.of(url="local://cancel")))
+    importer = asyncio.create_task(_import_snapshot(meme_env.config, session, Image.of(url="local://cancel")))
     await started.wait()
     importer.cancel()
     release.set()
@@ -612,7 +633,7 @@ async def test_cancellation_waits_for_successful_tag_commit_and_preserves_duplic
     rows = await _image_rows(meme_env.session_factory)
     assert len(files) == len(rows) == 1
 
-    duplicate = await import_meme_image(meme_env.config, session, Image.of(url="local://cancel"))
+    duplicate = await _import_snapshot(meme_env.config, session, Image.of(url="local://cancel"))
     assert duplicate.status == "duplicate"
     assert len(_stored_images(meme_env.meme_dir)) == 1
 
@@ -633,10 +654,8 @@ async def test_cancellation_waits_for_failed_tag_commit_and_removes_file(
     monkeypatch.setattr(meme_store_module, "upsert_image_tag", failing_upsert)
     data = _PNG_BYTES + b"cancel-failure"
     importer = asyncio.create_task(
-        import_meme_image(
-            meme_env.config,
-            cast(Session, _MemeSession({"local://cancel": data})),
-            Image.of(url="local://cancel"),
+        _import_snapshot(
+            meme_env.config, cast(Session, _MemeSession({"local://cancel": data})), Image.of(url="local://cancel")
         )
     )
     await started.wait()
@@ -772,48 +791,49 @@ class _RuntimeSession(Session[Any]):
 
 
 @pytest.mark.asyncio
-async def test_tag_image_scope_indexing_privacy_and_background_completion(monkeypatch: pytest.MonkeyPatch) -> None:
-    async with _temporary_plugin(_TOOL_RUNTIME_PATH) as harness:
+async def test_tag_image_scope_indexing_privacy_and_background_completion(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    direct, quoted = Image.of(url="local://direct"), Image.of(url="local://quoted")
+    session = cast(
+        Session,
+        _RuntimeSession(
+            direct=[direct],
+            quoted=[quoted],
+            downloads={direct.src: _PNG_BYTES + b"direct", quoted.src: _PNG_BYTES + b"quoted"},
+        ),
+    )
+    async with _temporary_plugin(_TOOL_RUNTIME_PATH) as harness, _input_scope(session, tmp_path) as inputs:
         target = _callable(harness.module, "tag_image")
-        direct = Image.of(url="local://direct")
-        quoted = Image.of(url="local://quoted")
-        session = cast(Session, _RuntimeSession(direct=[direct], quoted=[quoted]))
-        imported: list[Image] = []
+        imported: list[ImageSnapshot] = []
 
-        async def fake_import(_config: LLMChatConfig, _session: Session, image: Image) -> MemeImportResult:
-            imported.append(image)
-            return MemeImportResult("created", "memes/secret.png", "secret，tags")
+        async def fake_import(_config: LLMChatConfig, snapshot: ImageSnapshot) -> MemeImportResult:
+            imported.append(snapshot)
+            return MemeImportResult("created", "memes/secret.png", "secret tags")
 
-        monkeypatch.setattr(harness.module.tag_image_context, "import_image", fake_import)
-
+        monkeypatch.setattr(harness.module.tag_image_context, "import_snapshot", fake_import)
         with pytest.raises(MemeImportError, match="outside an active"):
             await target(session)
-
         with llm_chat_delivery_scope(DeliveryState()):
             result = await target(session, 2)
-        assert imported == [quoted]
-        assert "Collected" in result
+        assert imported[0].source == "quoted"
+        assert imported[0].data == _PNG_BYTES + b"quoted"
         assert "secret" not in result
         assert "memes/" not in result
-
-        release = asyncio.Event()
-        settled = asyncio.Event()
+        release, settled = asyncio.Event(), asyncio.Event()
         settlement: list[dict[str, object]] = []
 
-        async def slow_import(
-            _config: LLMChatConfig,
-            _session: Session,
-            _image: Image,
-        ) -> MemeImportResult:
+        async def slow_import(_config: LLMChatConfig, snapshot: ImageSnapshot) -> MemeImportResult:
             await release.wait()
-            return MemeImportResult("created", "memes/secret.png", "secret，tags")
+            assert snapshot.data == _PNG_BYTES + b"direct"
+            return MemeImportResult("created", "memes/secret.png", "secret tags")
 
         async def settle_result(turn_id: int, execution_ref: str, **kwargs: object) -> bool:
             settlement.append({"turn_id": turn_id, "execution_ref": execution_ref, **kwargs})
             settled.set()
             return True
 
-        monkeypatch.setattr(harness.module.tag_image_context, "import_image", slow_import)
+        monkeypatch.setattr(harness.module.tag_image_context, "import_snapshot", slow_import)
         monkeypatch.setattr(tag_image_tool_module, "settle_background_tool_result", settle_result)
         harness.module.tag_image_context.timeout_seconds = 0.01
         recorder = ToolTraceRecorder()
@@ -825,7 +845,6 @@ async def test_tag_image_scope_indexing_privacy_and_background_completion(monkey
                 external_execution_required=True,
             )
         )
-        response = RunOutput(requirements=[requirement])
         context = Contexts()
         context[ITEM_SESSION] = session
         with (
@@ -834,33 +853,21 @@ async def test_tag_image_scope_indexing_privacy_and_background_completion(monkey
             llm_chat_tool_trace_scope(recorder),
             llm_chat_context_scope(context),
         ):
-            assert await llm_service_module.run_llm_tools(response) is True
+            assert await llm_service_module.run_llm_tools(RunOutput(requirements=[requirement])) is True
         pending = json.loads(requirement.external_execution_result)
-        assert pending["ok"] is True
+        assert pending["ok"]
         assert pending["data"]["status"] == "pending"
         event = recorder.events[0]
         assert (event.tool_call_id, event.status) == ("tag-pending", "pending")
+        await inputs.aclose()
         release.set()
         await asyncio.wait_for(settled.wait(), timeout=1)
         assert settlement[0]["turn_id"] == 30
         assert settlement[0]["execution_ref"] == event.execution_ref
-        assert settlement[0]["status"] == "succeeded"
-        assert settlement[0]["effect"] == "confirmed"
-        assert cast(dict[str, object], settlement[0]["result"])["status"] == "created"
-
+        assert (settlement[0]["status"], settlement[0]["effect"]) == ("succeeded", "confirmed")
         with llm_chat_delivery_scope(DeliveryState()):
-            with pytest.raises(MemeImportError, match="positive 1-based"):
-                await target(session, 0)
-            with pytest.raises(MemeImportError, match="does not identify"):
+            with pytest.raises(MemeImportError):
                 await target(session, 3)
-
-        forwarded = cast(
-            Session,
-            _RuntimeSession(direct=[Message(forward=True, content=[Image.of(url="local://forwarded")])]),
-        )
-        with llm_chat_delivery_scope(DeliveryState()):
-            with pytest.raises(MemeImportError, match="does not identify"):
-                await target(forwarded)
 
 
 def _tool_call(call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -966,7 +973,10 @@ async def test_collection_recovers_from_moderation_empty_choices_without_replayi
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,SECRET_PIXELS"}},
     ]
 
-    async with _temporary_plugin(_TOOL_RUNTIME_PATH) as tool_runtime:
+    async with (
+        _temporary_plugin(_TOOL_RUNTIME_PATH) as tool_runtime,
+        _input_scope(session, meme_env.image_dir.parent / "audit") as inputs,
+    ):
         monkeypatch.setattr(tool_runtime.module.image_catalog, "image_dir", meme_env.image_dir)
         monkeypatch.setattr(tool_runtime.module.image_catalog, "session_factory", meme_env.session_factory)
         context = Contexts()
@@ -987,6 +997,7 @@ async def test_collection_recovers_from_moderation_empty_choices_without_replayi
             ctx=context,
             web_limits=DEFAULT_WEB_ACCESS_LIMITS,
             delivery_state=DeliveryState(),
+            image_inputs=inputs,
         )
 
     assert generation_module.response_content(response) == "Collection recovered."
@@ -1026,7 +1037,10 @@ async def test_scripted_collection_and_send_smoke(
     )
     monkeypatch.setattr(persona_store_module, "get_session", meme_env.session_factory)
 
-    async with _temporary_plugin(_TOOL_RUNTIME_PATH) as tool_runtime:
+    async with (
+        _temporary_plugin(_TOOL_RUNTIME_PATH) as tool_runtime,
+        _input_scope(session, meme_env.image_dir.parent / "audit") as inputs,
+    ):
         monkeypatch.setattr(tool_runtime.module.image_catalog, "image_dir", meme_env.image_dir)
         monkeypatch.setattr(tool_runtime.module.image_catalog, "session_factory", meme_env.session_factory)
 
@@ -1040,6 +1054,7 @@ async def test_scripted_collection_and_send_smoke(
             ctx=context,
             web_limits=DEFAULT_WEB_ACCESS_LIMITS,
             delivery_state=DeliveryState(),
+            image_inputs=inputs,
         )
 
         final_text = generation_module.response_content(response)

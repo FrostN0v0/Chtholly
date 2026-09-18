@@ -36,6 +36,40 @@ def authorized_workshop_actor(*, administrator: bool = False) -> tuple[Actor, st
     ), access.raw_user_text
 
 
+def workshop_metadata(record: VersionRecord) -> dict[str, object]:
+    """Public revision identity, without private principals or acceptance source."""
+    return {
+        "plugin_name": record.plugin_name,
+        "version": record.version,
+        "source_hash": record.source_hash,
+        "title": record.manifest.title,
+        "created_at": record.created_at,
+        "validation_status": record.validation_status,
+        "approved": record.approved_by is not None,
+        "active": record.active,
+    }
+
+
+def read_window(text: str, *, offset: int, max_chars: int, content_sha256: str = "") -> dict[str, object]:
+    """Return exact UTF-8 text, never audit-sanitized or newline-normalized."""
+    encoded = text.encode("utf-8")
+    digest = sha256(encoded).hexdigest()
+    if content_sha256 and content_sha256 != digest:
+        raise DeliveryError("The requested content changed; restart reading at offset zero")
+    chunk = text[offset : offset + max_chars]
+    end = offset + len(chunk)
+    return {
+        "content": chunk,
+        "encoding": "utf-8",
+        "size": len(encoded),
+        "total_chars": len(text),
+        "content_sha256": digest,
+        "offset": offset,
+        "next_offset": end if end < len(text) else None,
+        "truncated": end < len(text),
+    }
+
+
 def candidate_evidence(record: VersionRecord) -> None:
     record_tool_evidence(
         {

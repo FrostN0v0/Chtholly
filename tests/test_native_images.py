@@ -18,6 +18,7 @@ if not hasattr(EntariConfig, "instance"):
 
 from plugins.llm_chat import generation
 from plugins.llm_chat.core.media import sanitize_assistant_history, strip_internal_media_records
+from plugins.llm_chat.agent_context import AgentAccessContext
 from plugins.llm_chat.core.delivery import DeliveryError, DeliveryState, llm_chat_delivery_scope
 from plugins.llm_chat.prepared_media import list_prepared_media, prepared_media_scope
 from plugins.llm_chat.tools.send_msg import SendMsgToolContext, register_send_msg
@@ -134,6 +135,7 @@ async def test_native_output_requires_tool_enabled_confirmation(
             ctx=None,
             web_limits=generation.WebAccessLimits(0, 0, 0),
             delivery_state=state,
+            agent_access=AgentAccessContext(1, 1, 1, "user", raw_user_text=user_text),
             request_timeout=12.5,
             media_request_timeout=45.0,
         )

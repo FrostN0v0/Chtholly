@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from .models import AgentEvent
 from .core.types import JSONType
 from .agent_events import load_event_payload
-from .agent_attachments import is_agent_attachment, event_attachment_metadata
+from .agent_attachments import MAX_INPUT_AUDIT_ATTACHMENTS, is_agent_attachment, event_attachment_metadata
 from .core.tool_trace_safety import project_message_arguments
 
 _INLINE_OBJECT_CHARS = 8000
@@ -611,10 +611,13 @@ def event_images(
     """Project event-authorized private images into authenticated WebUI URLs."""
 
     images: list[dict[str, JSONType]] = []
-    for raw in event_attachment_metadata(cast(Mapping[str, object], payload))[:_MAX_EVIDENCE_IMAGES]:
+    maximum = MAX_INPUT_AUDIT_ATTACHMENTS if event.event_type == "user_input" else _MAX_EVIDENCE_IMAGES
+    for raw in event_attachment_metadata(cast(Mapping[str, object], payload))[:maximum]:
         attachment_ref = raw.get("attachment_ref")
         mime = raw.get("mime")
-        if not is_agent_attachment(attachment_ref, mime):
+        recorded = is_agent_attachment(attachment_ref, mime)
+        missing = raw.get("audit_status") == "unrecorded" or raw.get("status") == "unavailable"
+        if not recorded and not missing:
             continue
         if (output_only or event.event_type == "message_delivery") and not str(attachment_ref).startswith("output_"):
             continue
@@ -624,12 +627,24 @@ def event_images(
         configured_label = raw.get("label")
         if isinstance(configured_label, str) and configured_label.strip():
             label = configured_label.strip()
-        elif str(attachment_ref).startswith("reference_"):
-            label = f"网页参考图 {ordinal}"
-        elif str(attachment_ref).startswith("output_"):
-            label = f"生成结果 {ordinal}"
+        elif str(attachment_ref).startswith("output_") or source in {"image_edit", "image_generation"}:
+            label = f"\u751f\u6210\u7ed3\u679c {ordinal}"
         else:
-            label = f"{'引用' if source == 'quoted' else '用户'}图片 {ordinal}"
+            category = {
+                "direct": "\u7528\u6237\u56fe\u7247",
+                "quoted": "\u5f15\u7528\u56fe\u7247",
+                "forward": "\u8f6c\u53d1\u56fe\u7247",
+                "channel": "\u9891\u9053\u5386\u53f2\u56fe\u7247",
+                "avatar": "\u53c2\u4e0e\u8005\u5934\u50cf",
+                "persona": "\u89d2\u8272\u53c2\u8003\u56fe",
+                "web": "\u7f51\u9875\u53c2\u8003\u56fe",
+            }.get(
+                source,
+                "\u7f51\u9875\u53c2\u8003\u56fe"
+                if str(attachment_ref).startswith("reference_")
+                else "\u7528\u6237\u56fe\u7247",
+            )
+            label = f"{category} {ordinal}"
         description = raw.get("description")
         images.append(
             cast(
@@ -637,12 +652,19 @@ def event_images(
                 {
                     "name": label,
                     "source": source,
+                    "status": "recorded"
+                    if recorded
+                    else "unavailable"
+                    if raw.get("status") == "unavailable"
+                    else "unrecorded",
                     "mime": cast(str, mime),
                     "bytes": raw.get("bytes") if isinstance(raw.get("bytes"), int) else 0,
                     "text": description if isinstance(description, str) else "",
                     "url": (
                         f"{_INPUT_ATTACHMENT_ENDPOINT}/{quote(event.event_ref, safe='')}"
                         f"/attachments/{quote(cast(str, attachment_ref), safe='')}"
+                        if recorded
+                        else None
                     ),
                 },
             )

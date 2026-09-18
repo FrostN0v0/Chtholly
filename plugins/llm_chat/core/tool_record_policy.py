@@ -24,13 +24,13 @@ _PROJECTED_RESULT_TOOLS = {
     "capture_web_reference",
     "edit_image",
     "call_plugin",
-    "describe_channel_image",
-    "describe_channel_participant_avatar",
+    "inspect_image",
+    "get_channel_avatar",
     "find_channel_participants",
     "list_image_resources",
     "read_channel_messages",
     "prepare_audio",
-    "prepare_channel_image",
+    "prepare_image_ref",
     "prepare_image",
     "tag_image",
 }
@@ -94,12 +94,13 @@ def record_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> di
             "limit": _safe_integer(arguments.get("limit"), 10),
             "filtered": bool(arguments.get("participant_ref")),
             "paged": bool(arguments.get("before_cursor")),
+            "exact": bool(arguments.get("message_ref")),
         }
     if tool_name in {
-        "describe_channel_image",
-        "describe_channel_participant_avatar",
+        "inspect_image",
+        "get_channel_avatar",
         "find_channel_participants",
-        "prepare_channel_image",
+        "prepare_image_ref",
         "list_image_resources",
         "prepare_audio",
         "tag_image",
@@ -129,12 +130,11 @@ def record_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> di
         }
     if tool_name == "web_search":
         return _record_selected(arguments, "query")
-    if tool_name == "generate_image":
-        return _record_selected(arguments, "prompt", "size", "use_persona_reference")
-    if tool_name == "edit_image":
+    if tool_name in {"generate_image", "edit_image"}:
         references = arguments.get("reference_image_refs")
         return {
-            **_record_selected(arguments, "prompt", "source_image_index", "size", "use_persona_reference"),
+            **_record_selected(arguments, "prompt", "size", "use_persona_reference"),
+            "has_source": bool(arguments.get("source_image_ref")),
             "reference_count": len(references) if isinstance(references, list) else 0,
         }
     if tool_name == "call_plugin":

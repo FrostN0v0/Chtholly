@@ -51,9 +51,9 @@ _CONFIG_SCHEMA_TEXT = {
     "merged_forward_max_messages": ("合并转发节点上限", "单次生成最多读取的合并转发消息节点数。"),
     "merged_forward_max_chars_per_message": ("单节点字符上限", "每个合并转发节点规范化后最多保留的字符数。"),
     "merged_forward_max_total_chars": ("合并转发总字符上限", "单次生成中合并转发内容的总字符上限。"),
-    "merged_forward_max_described_images": (
-        "合并转发图片理解上限",
-        "单次生成最多交给视觉模型描述的合并转发图片数。",
+    "merged_forward_max_images": (
+        "\u5408\u5e76\u8f6c\u53d1\u56fe\u7247\u8bfb\u53d6\u4e0a\u9650",
+        "\u5355\u6b21\u751f\u6210\u6700\u591a\u8bfb\u53d6\u7684\u8f6c\u53d1\u539f\u56fe\u6570\u91cf\uff0c\u89c6\u89c9\u6a21\u578b\u76f4\u63a5\u4f7f\u7528\u539f\u56fe\u3002",
     ),
     "channel_message_max_images": ("频道历史图片上限", "每页频道历史中最多作为本轮引用暴露的图片数。"),
     "model": ("主聊天模型", "会话使用的模型别名；留空时使用 LLM 插件默认模型。"),

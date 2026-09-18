@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterator, Awaitable
 from agno.media import Image
 
 from .core.delivery import DEFAULT_DELIVERY_LIMITS, DeliveryError, current_llm_chat_delivery
-from .image_edit_refs import current_image_edit_references
+from .core.media_delivery import current_media_requirements
 
 NativeImageSender = Callable[[object], Awaitable[bool]]
 
@@ -39,8 +39,8 @@ class NativeImageBuffer:
             self.owner = owner
         if self.owner is not owner:
             return False
-        references = current_image_edit_references()
-        if references is not None and (references.requires_image_edit or references.edit_confirmed):
+        requirements = current_media_requirements()
+        if requirements is not None and requirements.intent.requires_provenance:
             return True
         state = current_llm_chat_delivery()
         remaining = (

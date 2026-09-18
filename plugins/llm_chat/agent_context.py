@@ -9,6 +9,27 @@ from collections.abc import Iterator
 
 
 @dataclass(frozen=True, slots=True)
+class ContextReadReference:
+    """An exact descriptor emitted by the host, never recovered from message text."""
+
+    event_ref: str
+    path: str
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class ContextReadGrant:
+    scope_id: int
+    session_id: int
+    generation_session_id: int
+    generation_turn_id: int
+    event_ref: str
+    execution_ref: str
+    path: str
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class AgentAccessContext:
     scope_id: int
     session_id: int
@@ -19,6 +40,7 @@ class AgentAccessContext:
     allow_context_pin: bool = False
     raw_user_text: str = ""
     is_operator: bool = False
+    context_read_grants: tuple[ContextReadGrant, ...] = ()
 
 
 _ACTIVE_AGENT_CONTEXT: ContextVar[AgentAccessContext | None] = ContextVar(

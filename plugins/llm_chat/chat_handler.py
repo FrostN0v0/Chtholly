@@ -33,12 +33,15 @@ from .generation import response_content, generate_chat_response
 from .core.errors import summarize_exception
 from .chat_context import (
     build_image_notes,
+    serialize_user_turn,
     collect_message_images,
     collect_quoted_message,
     model_supports_image_input,
     build_multimodal_user_content,
+    register_message_image_inputs,
 )
 from .core.forward import render_forwarded_storage
+from .image_inputs import ImageInputs, image_inputs_scope, current_image_inputs
 from .tool_runtime import registered_tool_schemas
 from .channel_turns import (
     latest_participant_turn,
@@ -51,7 +54,7 @@ from .chat_evaluation import cancel_pending_evaluations, schedule_relationship_e
 from .forward_context import resolve_merged_forward_messages
 from .tools._delivery import send_with_delivery
 from .agent_turn_setup import prepare_agent_turn
-from .agent_attachments import capture_user_input_images, remove_user_input_attachments
+from .agent_attachments import capture_user_input_images
 from .reaction_feedback import MessageReactionFeedback, settle_reaction_update, llm_chat_reaction_scope
 from .native_image_delivery import native_image_delivery_scope
 
@@ -100,11 +103,13 @@ plugin.collect_disposes(cancel_pending_evaluations)
 @latest_participant_turn
 async def on_chat(session: Session, ctx: Contexts):
     reaction = MessageReactionFeedback(session, _LOGGER.warning)
+    inputs = ImageInputs(warn=_LOGGER.warning)
     with (
         group_delivery_scope(session),
         delivery_audit_scope(session, _LOGGER.warning),
         llm_chat_reaction_scope(reaction),
         main_model_scope(),
+        image_inputs_scope(inputs),
     ):
         try:
             await reaction.set_stage("processing")
@@ -121,6 +126,13 @@ async def on_chat(session: Session, ctx: Contexts):
         except Exception:
             await settle_reaction_update(reaction.finish("failed"))
             raise
+        finally:
+            close_task = asyncio.create_task(inputs.aclose())
+            try:
+                await asyncio.shield(close_task)
+            except asyncio.CancelledError:
+                await close_task
+                raise
 
 
 async def _run_chat(
@@ -132,6 +144,10 @@ async def _run_chat(
     raw_user_text = model_text
     message_images = collect_message_images(session)
     channel_id = session.channel.id
+    inputs = current_image_inputs()
+    if inputs is None:
+        raise RuntimeError("Chat image inputs were not bound")
+    register_message_image_inputs(session, inputs)
 
     try:
         forwarded_messages = await resolve_merged_forward_messages(config, session, _LOGGER.warning)
@@ -153,6 +169,7 @@ async def _run_chat(
         _LOGGER.warning(f"channel model resolve failed, using global default: {summarize_exception(exc)}")
         model_name = None
     supports_image_input = model_supports_image_input(model_name)
+    inputs.supports_image_input = supports_image_input
 
     try:
         identity = await resolve_chat_identity(session)
@@ -177,39 +194,44 @@ async def _run_chat(
             mentioned_participants=mentioned_participants,
         )
     else:
-        image_notes = await build_image_notes(config, session, _LOGGER.warning)
+        image_notes = await build_image_notes(config, session, _LOGGER.warning, forwarded_messages)
         if image_notes:
             model_text = " ".join(part for part in [model_text, *image_notes] if part)
         content = render_forwarded_storage(model_text, forwarded_messages)
+        current_content = serialize_user_turn(
+            user_name,
+            model_text,
+            forwarded_messages,
+            mentioned_participants,
+            inputs.input_views(),
+        )
 
     if not content:
         await reaction.finish("failed")
         return BLOCK
     input_attachments = await capture_user_input_images(
         session,
-        message_images,
+        inputs,
         warn=_LOGGER.warning,
     )
-    try:
-        prepared = await prepare_agent_turn(
-            config,
-            session,
-            identity,
-            model_name=model_name,
-            model_text=model_text,
-            raw_user_text=raw_user_text,
-            content=content,
-            current_content=current_content,
-            forwarded_messages=forwarded_messages,
-            mentioned_participants=mentioned_participants,
-            warn=_LOGGER.warning,
-            tool_schemas=registered_tool_schemas,
-            input_attachments=input_attachments,
-            is_operator=await _is_operator(session),
-        )
-    except BaseException:
-        remove_user_input_attachments(input_attachments)
-        raise
+    prepared = await prepare_agent_turn(
+        config,
+        session,
+        identity,
+        model_name=model_name,
+        model_text=model_text,
+        raw_user_text=raw_user_text,
+        content=content,
+        current_content=current_content,
+        forwarded_messages=forwarded_messages,
+        mentioned_participants=mentioned_participants,
+        warn=_LOGGER.warning,
+        tool_schemas=registered_tool_schemas,
+        input_attachments=input_attachments,
+        image_inputs=inputs,
+        is_operator=await _is_operator(session),
+    )
+    inputs.commit_input_audit()
     delivery_audit = current_delivery_audit()
     if delivery_audit is not None:
         delivery_audit.bind(prepared.agent_events)
@@ -218,8 +240,7 @@ async def _run_chat(
     media_requested = prepared.media_requested
     web_limits = prepared.web_limits
     delivery_state = prepared.delivery_state
-    channel_image_references = prepared.channel_image_references
-    image_edit_references = prepared.image_edit_references
+    image_inputs = prepared.image_inputs
     turn = prepared.lifecycle
     resolution = prepared.resolution
     agent_events = prepared.agent_events
@@ -237,8 +258,8 @@ async def _run_chat(
                     ctx=ctx,
                     web_limits=web_limits,
                     delivery_state=delivery_state,
-                    channel_image_references=channel_image_references,
-                    image_edit_references=image_edit_references,
+                    image_inputs=image_inputs,
+                    media_intent=prepared.media_intent,
                     request_timeout=config.model_request_timeout,
                     media_request_timeout=config.media_request_timeout,
                     tool_trace=turn.tool_trace,

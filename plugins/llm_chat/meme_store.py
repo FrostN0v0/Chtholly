@@ -10,7 +10,6 @@ import hashlib
 from pathlib import Path, PurePosixPath
 from dataclasses import dataclass
 
-from arclet.entari import Image, Session
 from arclet.entari.logger import log
 
 from utils.path import MEME_DIR, IMAGE_DIR
@@ -19,7 +18,8 @@ from .config import LLMChatConfig
 from .vision import generate_image_tags
 from .image_tags import get_image_tag, delete_image_tag, upsert_image_tag
 from .core.errors import summarize_exception
-from .core.image_source import IMAGE_FETCH_MAX_BYTES, fetch_image_bytes, raw_to_image_data_url
+from .image_inputs import ImageSnapshot
+from .core.image_source import IMAGE_FETCH_MAX_BYTES, raw_to_image_data_url
 from .core.image_tag_metadata import normalize_generated_image_tags
 
 MemeImportStatus = Literal["created", "duplicate", "tagged_existing"]
@@ -301,17 +301,11 @@ async def import_meme_bytes(
         return MemeImportResult("created", relative_path, tags)
 
 
-async def import_meme_image(
-    config: LLMChatConfig,
-    session: Session,
-    image: Image,
-) -> MemeImportResult:
-    """Download and atomically import one reaction image."""
-
-    data = await fetch_image_bytes(session, image.src)
-    if data is None:
-        raise MemeImportError("Image data is unavailable, invalid, or too large")
-    return await import_meme_bytes(config, data)
+async def import_meme_snapshot(config: LLMChatConfig, snapshot: ImageSnapshot) -> MemeImportResult:
+    """Import the authorized original pixels, including during detached managed work."""
+    if snapshot.source not in {"direct", "quoted"}:
+        raise MemeImportError("Only current direct or quoted images can be collected")
+    return await import_meme_bytes(config, snapshot.data)
 
 
 def _resolve_managed_path(relative_path: str) -> Path:

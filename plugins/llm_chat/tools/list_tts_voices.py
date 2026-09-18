@@ -36,8 +36,10 @@ def register_list_tts_voices(
         Call this before synthesize_speech when the user names a voice/model, version, reference language, or emotion,
         or when choosing an expressive GPT-SoVITS voice. The returned version, model_name, reference language,
         emotion, text language, and speed values are authoritative and may change at runtime. Pass exact values to
-        synthesize_speech. Never invent a missing option or substitute another character. Fish Audio has no selectable
-        catalog and instead indicates whether inline style tags are supported.
+        synthesize_speech. Never invent a missing option or substitute another character. A null default_selection
+        with default_selection_error means the listed voices remain usable: explicitly select valid values instead
+        of relying on invalid defaults. Fish Audio has no selectable catalog and instead indicates whether inline
+        style tags are supported.
 
         Args:
             refresh (bool): Bypass the short provider catalog cache only when newly installed voices are expected.

@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Literal
-import asyncio
+from typing import TYPE_CHECKING, Literal
 from pathlib import Path
 from secrets import token_hex
 from collections.abc import Mapping, Callable, Sequence
 
-from arclet.entari import Image, Session, local_data
+from arclet.entari import Session, local_data
 
-from .core.image_source import IMAGE_FETCH_MAX_BYTES, fetch_image_bytes, raw_to_image_data_url
+from .core.forward import MAX_FORWARD_IMAGES
+from .core.image_source import IMAGE_FETCH_MAX_BYTES, raw_to_image_data_url
+
+if TYPE_CHECKING:
+    from .image_inputs import ImageInputs
 
 AttachmentKind = Literal["input", "reference", "output"]
 MAX_INPUT_ATTACHMENTS = 6
+MAX_INPUT_AUDIT_ATTACHMENTS = MAX_INPUT_ATTACHMENTS + MAX_FORWARD_IMAGES
 MAX_EVENT_ATTACHMENTS = 8
 _ATTACHMENT_REF = re.compile(r"(?P<kind>input|reference|output)_[0-9a-f]{32}\Z")
 _MIME_SUFFIXES = {
@@ -115,63 +119,23 @@ def store_agent_attachment(
     return metadata
 
 
-async def _capture_one(
-    session: Session,
-    image: Image,
-    *,
-    quoted: bool,
-    index: int,
-    root: Path | None,
-) -> dict[str, object] | None:
-    data = await fetch_image_bytes(session, image.src)
-    if data is None:
-        return None
-    try:
-        return store_agent_attachment(
-            data,
-            kind="input",
-            source="quoted" if quoted else "direct",
-            index=index,
-            root=root,
-        )
-    except ValueError:
-        return None
-
-
 async def capture_user_input_images(
     session: Session,
-    candidates: Sequence[tuple[Image, bool]],
+    inputs: ImageInputs,
     *,
     maximum: int = MAX_INPUT_ATTACHMENTS,
     warn: Callable[[str], object] | None = None,
-    root: Path | None = None,
 ) -> list[dict[str, object]]:
-    """Copy bounded current-message images into private AgentEvent storage."""
+    """Capture evidence from authoritative snapshots, never refetch their sources."""
+    from .image_inputs import ImageInputError
 
-    selected = list(candidates[: max(0, min(MAX_INPUT_ATTACHMENTS, maximum))])
-    if not selected:
-        return []
-    tasks = [
-        asyncio.create_task(_capture_one(session, image, quoted=quoted, index=index, root=root))
-        for index, (image, quoted) in enumerate(selected, start=1)
-    ]
-    try:
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-    except asyncio.CancelledError:
-        for task in tasks:
-            task.cancel()
-        settled = await asyncio.gather(*tasks, return_exceptions=True)
-        remove_agent_attachments([result for result in settled if isinstance(result, dict)], root=root)
-        raise
-    captured: list[dict[str, object]] = []
-    for result in results:
-        if isinstance(result, BaseException):
+    for view in inputs.input_views()[: max(0, min(MAX_INPUT_ATTACHMENTS, maximum))]:
+        try:
+            await inputs.resolve(session, str(view["image_ref"]), purpose="inspect")
+        except ImageInputError as exc:
             if warn is not None:
-                warn(f"user image attachment failed: {type(result).__name__}")
-            continue
-        if result is not None:
-            captured.append(result)
-    return captured
+                warn(f"user image attachment unavailable: {exc}")
+    return inputs.input_audit_views()
 
 
 def resolve_agent_attachment(
@@ -204,13 +168,13 @@ def event_attachment_metadata(payload: Mapping[str, object]) -> list[Mapping[str
     attachments: list[Mapping[str, object]] = []
     direct = payload.get("attachments")
     if isinstance(direct, Sequence) and not isinstance(direct, (str, bytes)):
-        attachments.extend(item for item in direct if isinstance(item, Mapping))
+        attachments.extend([item for item in direct if isinstance(item, Mapping)][:MAX_INPUT_AUDIT_ATTACHMENTS])
     evidence = payload.get("evidence")
     if isinstance(evidence, Mapping):
         related = evidence.get("attachments")
         if isinstance(related, Sequence) and not isinstance(related, (str, bytes)):
-            attachments.extend(item for item in related if isinstance(item, Mapping))
-    return attachments[:MAX_EVENT_ATTACHMENTS]
+            attachments.extend([item for item in related if isinstance(item, Mapping)][:MAX_EVENT_ATTACHMENTS])
+    return attachments
 
 
 def remove_agent_attachments(
@@ -233,13 +197,3 @@ def remove_agent_attachments(
             path.unlink(missing_ok=True)
         except OSError:
             continue
-
-
-def remove_user_input_attachments(
-    attachments: Sequence[Mapping[str, object]],
-    *,
-    root: Path | None = None,
-) -> None:
-    """Backward-compatible user-input attachment compensation."""
-
-    remove_agent_attachments(attachments, root=root)

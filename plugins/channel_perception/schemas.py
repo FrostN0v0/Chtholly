@@ -94,3 +94,5 @@ class MessageView(TypedDict):
     directed_to_bot: bool
     is_bot: bool
     reply_to_cursor: str
+    reply_to_status: str
+    mentions: list[dict[str, object]] | None

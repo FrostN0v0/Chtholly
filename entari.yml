@@ -164,6 +164,8 @@ plugins:
     web_artifacts_capture_token: ${{ env.get('WEB_ARTIFACT_CAPTURE_TOKEN', '') }}
     web_artifacts_ttl_hours: 24
     channel_message_max_images: 12
+    # Bound original forwarded images, not automatic vision descriptions.
+    merged_forward_max_images: 12
     web_search_enabled: true
     web_search_max_calls_per_generation: 16
     web_page_max_calls_per_generation: 24

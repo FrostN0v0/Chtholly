@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import time
 import asyncio
+from contextvars import Context
 from dataclasses import dataclass
-from collections.abc import Callable, Sequence, Awaitable
+from collections.abc import Callable, Awaitable
 
-from arclet.entari import Image, Session
+from arclet.entari import Session
 from arclet.letoderea import Subscriber
 from arclet.entari.logger import log
 from arclet.entari.plugin.model import PluginDispatcher
@@ -17,13 +18,13 @@ from ..core.types import JSONType
 from ..meme_store import MemeImportError, MemeImportResult
 from ..core.errors import summarize_exception
 from ..agent_events import settle_background_tool_result
+from ..image_inputs import ImageSnapshot, ImageInputError, current_image_inputs
 from ._registration import register_tool
 from ..agent_context import current_agent_access
 from ..core.delivery import current_llm_chat_delivery
 from ..core.tool_trace import current_tool_execution_ref
 
-ImageCollector = Callable[[Session], Sequence[tuple[Image, bool]]]
-MemeImporter = Callable[[LLMChatConfig, Session, Image], Awaitable[MemeImportResult]]
+MemeImporter = Callable[[LLMChatConfig, ImageSnapshot], Awaitable[MemeImportResult]]
 
 _LOGGER = log.wrapper("[llm_chat.tag_image]")
 _PENDING_COLLECTIONS: set[asyncio.Task[None]] = set()
@@ -34,8 +35,7 @@ class TagImageToolContext:
     """Mutable dependencies for generation-scoped meme collection."""
 
     config: LLMChatConfig
-    collect_images: ImageCollector
-    import_image: MemeImporter
+    import_snapshot: MemeImporter
     timeout_seconds: float = 15.0
 
 
@@ -131,7 +131,8 @@ def _continue_in_background(
     execution_ref: str,
     started: float,
 ) -> None:
-    task = asyncio.create_task(
+    task = Context().run(
+        asyncio.create_task,
         _settle_background_collection(
             import_task,
             turn_id=turn_id,
@@ -141,7 +142,7 @@ def _continue_in_background(
         name=f"llm-chat-tag-image:{execution_ref or 'untracked'}",
     )
     _PENDING_COLLECTIONS.add(task)
-    task.add_done_callback(_PENDING_COLLECTIONS.discard)
+    task.add_done_callback(_PENDING_COLLECTIONS.discard, context=Context())
 
 
 def cancel_pending_image_collections() -> None:
@@ -176,15 +177,20 @@ def register_tag_image(
         if type(image_index) is not int or image_index < 1:
             raise MemeImportError("image_index must be a positive 1-based integer")
 
-        candidates = runtime.collect_images(session)
-        if image_index > len(candidates):
-            raise MemeImportError("image_index does not identify a current direct or replied image")
+        inputs = current_image_inputs()
+        if inputs is None:
+            raise MemeImportError("Image collection requires current original image inputs")
+        try:
+            snapshot = await inputs.resolve(session, inputs.input_ref(image_index), purpose="collect")
+        except ImageInputError as exc:
+            raise MemeImportError(str(exc)) from exc
 
         async def run_import() -> MemeImportResult:
-            return await runtime.import_image(runtime.config, session, candidates[image_index - 1][0])
+            return await runtime.import_snapshot(runtime.config, snapshot)
 
         started = time.monotonic()
-        import_task = asyncio.create_task(
+        import_task = Context().run(
+            asyncio.create_task,
             run_import(),
             name="llm-chat-tag-image-import",
         )

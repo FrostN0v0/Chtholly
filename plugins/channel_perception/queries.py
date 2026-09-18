@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from sqlalchemy import select
 from entari_plugin_database import get_session
 
+from .config import ChannelPerceptionConfig
 from .models import AmbientMessage, ChannelParticipant
 from .schemas import MessageView, ParticipantView, PerceptionScope, ParticipantSnapshot
+from .message_store import MAX_RETENTION_DAYS, MAX_MESSAGES_PER_CHANNEL
 from .participant_store import participant_snapshot
 
 
@@ -57,7 +59,122 @@ async def get_participant(scope: PerceptionScope, public_ref: str) -> Participan
         return participant_snapshot(row) if row is not None else None
 
 
-async def get_message_image_target(scope: PerceptionScope, cursor: str) -> tuple[str, int] | None:
+def _readable_filters(scope: PerceptionScope, config: ChannelPerceptionConfig | None = None):
+    config = config or ChannelPerceptionConfig()
+    retained = (
+        select(AmbientMessage.id)
+        .where(*_scope_filters(AmbientMessage, scope))
+        .order_by(AmbientMessage.created_at.desc(), AmbientMessage.id.desc())
+        .limit(min(MAX_MESSAGES_PER_CHANNEL, max(1, int(config.max_messages_per_channel))))
+    )
+    cutoff = datetime.utcnow() - timedelta(days=min(MAX_RETENTION_DAYS, max(1, int(config.retention_days))))
+    return (
+        *_scope_filters(AmbientMessage, scope),
+        AmbientMessage.deleted_at.is_(None),
+        AmbientMessage.is_command.is_(False),
+        AmbientMessage.created_at >= cutoff,
+        AmbientMessage.id.in_(retained),
+    )
+
+
+def _native_mentions(row: AmbientMessage) -> list[dict[str, object]] | None:
+    if row.mentions_json is None:
+        return None
+    try:
+        value = json.loads(row.mentions_json)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, list) and all(isinstance(item, dict) for item in value) else None
+
+
+async def _message_views(
+    session, scope: PerceptionScope, rows: list[AmbientMessage], config: ChannelPerceptionConfig | None
+) -> list[MessageView]:
+    reply_ids = {row.reply_to_message_id for row in rows if row.reply_to_message_id}
+    targets = (
+        dict(
+            (
+                await session.execute(
+                    select(AmbientMessage.message_id, AmbientMessage.id).where(
+                        *_readable_filters(scope, config), AmbientMessage.message_id.in_(reply_ids)
+                    )
+                )
+            ).all()
+        )
+        if reply_ids
+        else {}
+    )
+    native = [_native_mentions(row) for row in rows]
+    member_ids = {
+        str(item.get("target_id", ""))
+        for items in native
+        if items is not None
+        for item in items
+        if item.get("kind") == "member" and item.get("target_id")
+    }
+    members = (
+        dict(
+            (
+                await session.execute(
+                    select(ChannelParticipant.platform_user_id, ChannelParticipant.public_ref).where(
+                        *_scope_filters(ChannelParticipant, scope), ChannelParticipant.platform_user_id.in_(member_ids)
+                    )
+                )
+            ).all()
+        )
+        if member_ids
+        else {}
+    )
+    page_ids = {row.id for row in rows}
+    now = datetime.now(timezone.utc)
+    views: list[MessageView] = []
+    for row, items in zip(rows, native):
+        mentions: list[dict[str, object]] | None = None
+        if items is not None:
+            mentions = []
+            for position, item in enumerate(items):
+                kind = str(item.get("kind", "unknown"))
+                target_id = str(item.get("target_id", ""))
+                mention: dict[str, object] = {
+                    "position": position,
+                    "kind": kind,
+                    "display_name": str(item.get("display_name", "")),
+                }
+                if kind == "member":
+                    if target_id == scope.account_id:
+                        mention.update(kind="bot", participant_ref="bot", status="available")
+                    elif target_id in members:
+                        mention.update(participant_ref=members[target_id], status="available")
+                    else:
+                        mention["status"] = "unknown"
+                else:
+                    mention["status"] = "available" if kind in {"all", "here", "role"} else "unknown"
+                mentions.append(mention)
+        target = targets.get(row.reply_to_message_id)
+        views.append(
+            {
+                "cursor": str(row.id),
+                "participant_ref": "bot" if row.is_bot else row.participant_ref,
+                "display_name": "bot" if row.is_bot else row.display_name,
+                "content": row.content or "[Message unavailable]",
+                "image_count": row.image_count,
+                "created_at": _utc_iso(row.created_at),
+                "minutes_ago": _minutes_ago(row.created_at, now),
+                "directed_to_bot": row.directed_to_bot,
+                "is_bot": row.is_bot,
+                "mentions": mentions,
+                "reply_to_cursor": str(target) if target is not None else "",
+                "reply_to_status": ("available" if target in page_ids else "outside_page")
+                if target is not None
+                else ("unavailable" if row.reply_to_message_id else "none"),
+            }
+        )
+    return views
+
+
+async def get_message_image_target(
+    scope: PerceptionScope, cursor: str, *, config: ChannelPerceptionConfig | None = None
+) -> tuple[str, int] | None:
     try:
         message_row_id = int(cursor)
     except ValueError:
@@ -66,9 +183,8 @@ async def get_message_image_target(scope: PerceptionScope, cursor: str) -> tuple
         row = (
             await session.execute(
                 select(AmbientMessage.message_id, AmbientMessage.image_count).where(
-                    *_scope_filters(AmbientMessage, scope),
+                    *_readable_filters(scope, config),
                     AmbientMessage.id == message_row_id,
-                    AmbientMessage.deleted_at.is_(None),
                 )
             )
         ).one_or_none()
@@ -124,15 +240,10 @@ async def get_recent_messages(
     limit: int,
     before_cursor: str = "",
     participant_ref: str = "",
-    include_commands: bool = False,
+    config: ChannelPerceptionConfig | None = None,
 ) -> tuple[list[MessageView], str]:
     bounded_limit = min(50, max(1, int(limit)))
-    filters = [
-        *_scope_filters(AmbientMessage, scope),
-        AmbientMessage.deleted_at.is_(None),
-    ]
-    if not include_commands:
-        filters.append(AmbientMessage.is_command.is_(False))
+    filters = list(_readable_filters(scope, config))
     if participant_ref:
         filters.append(AmbientMessage.participant_ref == participant_ref)
     if before_cursor:
@@ -151,28 +262,29 @@ async def get_recent_messages(
             .scalars()
             .all()
         )
-    has_more = len(rows) > bounded_limit
-    selected = rows[:bounded_limit]
-    selected.reverse()
-    message_cursors = {row.message_id: str(row.id) for row in selected}
-    now = datetime.now(timezone.utc)
-    views: list[MessageView] = [
-        {
-            "cursor": str(row.id),
-            "participant_ref": "bot" if row.is_bot else row.participant_ref,
-            "display_name": "bot" if row.is_bot else row.display_name,
-            "content": row.content or "[Message unavailable]",
-            "image_count": row.image_count,
-            "created_at": _utc_iso(row.created_at),
-            "minutes_ago": _minutes_ago(row.created_at, now),
-            "directed_to_bot": row.directed_to_bot,
-            "is_bot": row.is_bot,
-            "reply_to_cursor": message_cursors.get(row.reply_to_message_id, ""),
-        }
-        for row in selected
-    ]
+        has_more = len(rows) > bounded_limit
+        selected = list(reversed(rows[:bounded_limit]))
+        views = await _message_views(session, scope, selected, config)
     next_cursor = str(selected[0].id) if has_more and selected else ""
     return views, next_cursor
+
+
+async def get_exact_message(
+    scope: PerceptionScope, cursor: str, *, config: ChannelPerceptionConfig | None = None
+) -> MessageView | None:
+    try:
+        row_id = int(cursor)
+    except ValueError:
+        return None
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                select(AmbientMessage).where(*_readable_filters(scope, config), AmbientMessage.id == row_id)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return (await _message_views(session, scope, [row], config))[0]
 
 
 async def get_ambient_context(
@@ -181,16 +293,15 @@ async def get_ambient_context(
     max_messages: int,
     max_chars: int,
     exclude_message_id: str = "",
+    config: ChannelPerceptionConfig | None = None,
 ) -> list[dict[str, object]]:
     message_limit = min(20, max(0, int(max_messages)))
     char_limit = min(12000, max(0, int(max_chars)))
     if message_limit == 0 or char_limit == 0:
         return []
     filters = [
-        *_scope_filters(AmbientMessage, scope),
-        AmbientMessage.deleted_at.is_(None),
+        *_readable_filters(scope, config),
         AmbientMessage.directed_to_bot.is_(False),
-        AmbientMessage.is_command.is_(False),
         AmbientMessage.is_bot.is_(False),
     ]
     if exclude_message_id:
@@ -205,17 +316,18 @@ async def get_ambient_context(
             .scalars()
             .all()
         )
-    now = datetime.now(timezone.utc)
+        views = await _message_views(session, scope, rows, config)
     selected: list[dict[str, object]] = []
     used = 2
-    for row in rows:
+    for row, view in zip(rows, views):
         item: dict[str, object] = {
             "participant_ref": row.participant_ref,
             "display_name": row.display_name,
             "content": row.content or "[Message unavailable]",
             "cursor": str(row.id),
             "image_count": row.image_count,
-            "minutes_ago": _minutes_ago(row.created_at, now),
+            "minutes_ago": view["minutes_ago"],
+            "mentions": view["mentions"],
             "replies_to_recent_message": bool(row.reply_to_message_id),
         }
         size = len(json.dumps(item, ensure_ascii=False, separators=(",", ":"))) + (1 if selected else 0)

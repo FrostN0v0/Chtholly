@@ -19,6 +19,7 @@ from ..core.delivery import (
     reserve_final_text_messages,
 )
 from ..core.tool_trace import current_tool_trace
+from ..core.media_delivery import current_media_requirements
 from ..core.tool_trace_policy import _DELIVERY_TOOLS, _OBSERVATION_TOOLS, _PREPARATION_TOOLS
 
 _MAX_REASON = 240
@@ -97,6 +98,9 @@ async def finish_turn(
             raise DeliveryRejected("Delivered finish does not accept replacement text")
         if state.confirmed_deliveries <= 0:
             raise DeliveryRejected("Delivered finish requires confirmed output")
+        requirements = current_media_requirements()
+        if requirements is not None and requirements.intent.requires_provenance and not requirements.confirmed:
+            raise DeliveryRejected("Delivered finish requires a confirmed image satisfying the requested provenance")
     resolution.set(outcome, reason=reason, reply=reply, source="model")
     return {"outcome": outcome}
 

@@ -25,31 +25,27 @@ from .core.types import ChatMessage
 from .web.policy import WebAccessLimits, llm_chat_web_access_scope
 from .agno_compat import agno_delivery_tool_scope, agno_tool_call_limit_scope, recommended_tool_call_limit
 from .core.errors import is_moderation_empty_choices_error
+from .image_inputs import ImageInputs, image_inputs_scope, current_image_inputs
 from .agent_context import AgentAccessContext, agent_access_scope
 from .core.delivery import DeliveryState, llm_chat_delivery_scope, strip_trailing_end_of_response
-from .channel_images import (
-    ChannelImageReferences,
-    llm_chat_channel_image_scope,
-)
 from .prepared_media import list_prepared_media, prepared_media_scope
 from .core.tool_trace import ToolTraceRecorder, llm_chat_tool_trace_scope
-from .image_edit_refs import (
-    ImageEditReferences,
-    llm_chat_image_edit_scope,
-)
 from .runtime_context import llm_chat_context_scope
 from .core.agent_trace import AgentTurnRecorder
 from .core.model_audit import sanitize_audit_value
 from .core.native_images import extract_native_images
 from .core.media_delivery import (
+    MediaIntent,
+    MediaDeliveryRequirements,
+    build_media_intent,
+    media_intent_scope,
     is_media_unavailable_reply,
     latest_user_requests_media,
     strip_media_unavailable_marker,
-    latest_user_requests_image_edit,
-    latest_user_requests_webpage_screenshot,
-    latest_user_requests_web_image_reference,
+    requests_contextual_media_delivery,
 )
 from .model_audit_runtime import model_audit_scope, capture_completion
+from .channel_message_refs import ChannelMessageReferences, channel_message_scope
 from .core.artifact_access import is_artifact_request
 from .native_image_delivery import capture_native_images_scope
 from .core.tool_trace_safety import sanitize_json
@@ -80,11 +76,12 @@ _MEDIA_RECOVERY_SUFFIX = (
     "sent. Reuse existing prepared resources instead of regenerating. If delivery remains unavailable, return honest "
     "final text starting with [MEDIA_UNAVAILABLE], never claim an attachment was sent."
 )
-_REFERENCE_EDIT_RECOVERY_SUFFIX = (
-    "This turn requires an edit using real captured web references. Obtain authorized references through "
-    "capture_web_reference, prepare the edited source with edit_image, and confirm it through send_msg. "
-    "Use an already prepared edited resource when present. Native or newly generated unrelated images do not "
-    "satisfy this request. If unavailable, return honest final text starting with [MEDIA_UNAVAILABLE]."
+_REFERENCE_GENERATION_RECOVERY_SUFFIX = (
+    "This turn requires actual matched web reference pixels. Obtain authorized references through "
+    "capture_web_reference and pass their image_refs to generate_image for a new creation, or to edit_image "
+    "with the required source_image_ref when editing a source. Confirm the prepared result through send_msg. "
+    "Reuse an already prepared matching result. Native or unreferenced images cannot satisfy this request. "
+    "If unavailable, return honest final text starting with [MEDIA_UNAVAILABLE]."
 )
 _IMAGE_EDIT_RECOVERY_SUFFIX = (
     "This turn requires editing the provided source image. Prepare it with edit_image, then send its media_ref "
@@ -363,17 +360,21 @@ async def _recover_requested_media(
     system: str,
     model: str | None,
     delivery_state: DeliveryState,
-    image_edit_references: ImageEditReferences,
+    media_requirements: MediaDeliveryRequirements,
     request_timeout: float,
     max_retries: int | None,
     agent_events: AgentTurnRecorder | None,
     tool_trace: ToolTraceRecorder,
 ) -> GenericResponse[None]:
-    reference_required = image_edit_references.requires_web_reference
-    edit_required = image_edit_references.requires_image_edit
+    if delivery_state.delivery_attempts > delivery_state.confirmed_deliveries:
+        raise RuntimeError("Media delivery outcome is unknown; do not replay the send attempt")
+    reference_required = media_requirements.intent.requires_web_reference
+    edit_required = media_requirements.intent.requires_source_edit
     if reference_required:
-        warning = "required reference image edit was not confirmed; retrying once with tools"
-        recovery_suffix = _REFERENCE_EDIT_RECOVERY_SUFFIX
+        warning = "required web-reference image was not confirmed; retrying once with tools"
+        recovery_suffix = _REFERENCE_GENERATION_RECOVERY_SUFFIX
+        if edit_required:
+            recovery_suffix += " " + _IMAGE_EDIT_RECOVERY_SUFFIX
     elif edit_required:
         warning = "required source image edit was not confirmed; retrying once with tools"
         recovery_suffix = _IMAGE_EDIT_RECOVERY_SUFFIX
@@ -410,8 +411,8 @@ async def _recover_requested_media(
     if resolution is not None and resolution.explicit:
         _suppress_native_images(response)
         return response
-    if edit_required:
-        if image_edit_references.edit_confirmed:
+    if media_requirements.intent.requires_provenance:
+        if media_requirements.confirmed:
             _suppress_native_images(response)
             return response
     elif delivery_state.confirmed_media_deliveries > 0:
@@ -430,8 +431,8 @@ async def generate_chat_response(
     ctx: Contexts | None,
     web_limits: WebAccessLimits,
     delivery_state: DeliveryState,
-    image_edit_references: ImageEditReferences | None = None,
-    channel_image_references: ChannelImageReferences | None = None,
+    image_inputs: ImageInputs | None = None,
+    media_intent: MediaIntent | None = None,
     request_timeout: float = 90.0,
     media_request_timeout: float = 300.0,
     tool_trace: ToolTraceRecorder | None = None,
@@ -446,46 +447,47 @@ async def generate_chat_response(
         delivery_state.limits.max_text_messages,
         delivery_state.limits.max_media_messages,
     )
-    media_requested = latest_user_requests_media(messages)
     raw_user_text = agent_access.raw_user_text if agent_access is not None else ""
+    active_inputs = image_inputs if image_inputs is not None else current_image_inputs()
+    owns_inputs = active_inputs is None
+    if active_inputs is None:
+        active_inputs = ImageInputs()
+    intent = (
+        media_intent
+        if media_intent is not None
+        else build_media_intent(raw_user_text, has_image_inputs=bool(active_inputs.input_views()))
+    )
     artifact_requested = is_artifact_request(raw_user_text)
+    if media_intent is None and artifact_requested:
+        intent = MediaIntent(media_requested=intent.media_requested)
+    media_requested = intent.media_requested or requests_contextual_media_delivery(raw_user_text, messages)
     delivery_requested = media_requested or artifact_requested or is_artifact_request(raw_user_text, "send")
-    image_edit_requested = not artifact_requested and latest_user_requests_image_edit(messages)
-    webpage_screenshot_requested = latest_user_requests_webpage_screenshot(messages)
-    web_reference_requested = not artifact_requested and latest_user_requests_web_image_reference(messages)
-    generation_timeout = media_request_timeout if delivery_requested else request_timeout
+    # Enriched/history text may extend a timeout, but never authorizes a sensitive operation.
+    media_timeout_hint = latest_user_requests_media(messages)
+    generation_timeout = media_request_timeout if delivery_requested or media_timeout_hint else request_timeout
     generation_max_retries = 0 if delivery_requested else None
     tool_loop_exhausted = False
     active_tool_trace = tool_trace or ToolTraceRecorder()
-    active_channel_image_references = channel_image_references or ChannelImageReferences()
-    active_image_edit_references = image_edit_references or ImageEditReferences.from_input_attachments(
-        (),
-        requires_web_reference=web_reference_requested,
-    )
-    active_image_edit_references.requires_web_reference = (
-        active_image_edit_references.requires_web_reference or web_reference_requested
-    )
-    active_image_edit_references.requires_image_edit = (
-        active_image_edit_references.requires_image_edit
-        or active_image_edit_references.requires_web_reference
-        or (image_edit_requested and active_image_edit_references.source_image_count > 0)
-    )
+    active_message_references = ChannelMessageReferences()
     async with AsyncExitStack() as scopes:
+        if owns_inputs:
+            scopes.push_async_callback(active_inputs.aclose)
+        scopes.enter_context(image_inputs_scope(active_inputs))
+        active_media_requirements = scopes.enter_context(media_intent_scope(intent))
+        scopes.enter_context(channel_message_scope(active_message_references))
         scopes.enter_context(turn_resolution_scope(resolution or TurnResolution()))
         scopes.enter_context(agno_tool_call_limit_scope(tool_call_limit))
         scopes.enter_context(agno_delivery_tool_scope())
         scopes.enter_context(
             llm_chat_web_access_scope(
                 web_limits,
-                allow_webpage_screenshots=webpage_screenshot_requested,
-                allow_reference_capture=active_image_edit_references.requires_web_reference,
+                allow_webpage_screenshots=intent.webpage_screenshot_requested,
+                allow_reference_capture=intent.requires_web_reference,
             )
         )
         scopes.enter_context(llm_chat_delivery_scope(delivery_state))
         scopes.enter_context(llm_chat_tool_trace_scope(active_tool_trace))
         scopes.enter_context(llm_chat_context_scope(ctx))
-        scopes.enter_context(llm_chat_channel_image_scope(active_channel_image_references))
-        scopes.enter_context(llm_chat_image_edit_scope(active_image_edit_references))
         scopes.enter_context(agent_access_scope(agent_access) if agent_access is not None else nullcontext())
         await scopes.enter_async_context(prepared_media_scope())
         response: GenericResponse[None] | None = None
@@ -526,17 +528,14 @@ async def generate_chat_response(
                 tool_loop_exhausted = True
                 if media_requested and (
                     delivery_state.confirmed_media_deliveries == 0
-                    or (
-                        active_image_edit_references.requires_image_edit
-                        and not active_image_edit_references.edit_confirmed
-                    )
+                    or (intent.requires_provenance and not active_media_requirements.confirmed)
                 ):
                     return await _recover_requested_media(
                         messages,
                         system=system,
                         model=model,
                         delivery_state=delivery_state,
-                        image_edit_references=active_image_edit_references,
+                        media_requirements=active_media_requirements,
                         request_timeout=generation_timeout,
                         max_retries=generation_max_retries,
                         agent_events=agent_events,
@@ -552,17 +551,17 @@ async def generate_chat_response(
         if response is not None:
             transcript = _response_transcript(response, response_context)
             native_images = response_images(response)
-            if active_image_edit_references.edit_confirmed:
+            if intent.requires_provenance and active_media_requirements.confirmed:
                 _suppress_native_images(response)
                 native_images = ()
-            elif native_images and active_image_edit_references.requires_image_edit:
+            elif native_images and intent.requires_provenance:
                 _suppress_native_images(response)
                 return await _recover_requested_media(
                     _without_invalid_tail(transcript),
                     system=system,
                     model=model,
                     delivery_state=delivery_state,
-                    image_edit_references=active_image_edit_references,
+                    media_requirements=active_media_requirements,
                     request_timeout=generation_timeout,
                     max_retries=generation_max_retries,
                     agent_events=agent_events,
@@ -571,16 +570,14 @@ async def generate_chat_response(
             native_prepared = any(item.get("source_tool") == "native_image" for item in list_prepared_media())
             if (media_requested or native_prepared) and (
                 delivery_state.confirmed_media_deliveries == 0
-                or (
-                    active_image_edit_references.requires_image_edit and not active_image_edit_references.edit_confirmed
-                )
+                or (intent.requires_provenance and not active_media_requirements.confirmed)
             ):
                 return await _recover_requested_media(
                     _without_invalid_tail(transcript),
                     system=system,
                     model=model,
                     delivery_state=delivery_state,
-                    image_edit_references=active_image_edit_references,
+                    media_requirements=active_media_requirements,
                     request_timeout=generation_timeout,
                     max_retries=generation_max_retries,
                     agent_events=agent_events,

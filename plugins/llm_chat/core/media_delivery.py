@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import re
 import json
-from collections.abc import Mapping, Sequence
+from typing import Literal
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from collections.abc import Mapping, Iterator, Sequence
+
+from utils.request_text import request_clauses
 
 from .types import ChatMessage
 
@@ -50,17 +56,7 @@ _IMAGE_EDIT_PATTERN = re.compile(
     rf"(?=.{{0,160}}{_IMAGE_OUTPUT_TERM})(?:把|将|帮我|请|给我)?.{{0,100}}{_IMAGE_EDIT_ACTION}.{{0,80}}",
     re.IGNORECASE,
 )
-_NEGATED_IMAGE_EDIT_REQUEST = re.compile(
-    rf"(?:别|不要|不用|无需|禁止|不是(?:让|要)?)\s*(?:再|继续)?\s*(?:把|将)?\s*.{{0,4}}{_IMAGE_EDIT_ACTION}",
-    re.IGNORECASE,
-)
 
-_SELF_IMAGE_REQUEST_PATTERN = re.compile(
-    rf"(?=.{{0,160}}(?:你(?:自己|的)?|自己|珂朵莉|chtholly))(?=.{{0,160}}{_IMAGE_OUTPUT_TERM})"
-    rf"(?:来|发|传|给我|让我看|想看|看看|看下|瞧瞧|{_IMAGE_EDIT_ACTION}).{{0,160}}"
-    r"|(?:show|send|share).{0,32}(?:image|picture|photo).{0,32}(?:of\s+)?(?:you|yourself)",
-    re.IGNORECASE,
-)
 _MEDIA_REQUEST_PATTERNS = (
     *_IMAGE_GENERATION_PATTERNS,
     _IMAGE_EDIT_PATTERN,
@@ -139,25 +135,192 @@ _WEBPAGE_SCREENSHOT_REQUEST = re.compile(
     r"(?:webpage|web page|page|site|website|url|link)(?:.{0,16}(?:for|to)\s+me)?",
     re.IGNORECASE,
 )
-_WEB_IMAGE_LOOKUP_TERM = r"(?:搜索|搜一下|搜|查找|找一下|找(?:一|两|几)?(?:张|个)?|寻找|获取|从网上|网上|网页|网络|web)"
+_WEB_IMAGE_LOOKUP_TERM = (
+    r"(?:搜索|搜一下|搜|查找|找一下|找(?:一|两|几)?(?:张|个)?|寻找|获取|从网上|网上|网页|网络|web|online|search|find)"
+)
 _WEB_IMAGE_REFERENCE_TERM = (
     r"(?:参考图|参照图|作为(?:视觉)?(?:参考|参照)|用作(?:视觉)?(?:参考|参照)|视觉(?:参考|参照)|"
-    r"以.{0,16}为(?:参考|参照)|照着|仿照|based on|reference)"
-)
-_NEGATED_WEB_IMAGE_REFERENCE_REQUEST = re.compile(
-    rf"(?:别|不要(?!只)|不用|无需|禁止|不是(?:让|要)?).{{0,24}}{_WEB_IMAGE_LOOKUP_TERM}"
-    rf".{{0,24}}{_WEB_IMAGE_REFERENCE_TERM}"
-    r"|(?:do not|don't|dont|without).{0,24}(?:search|find|use).{0,24}(?:web|online)"
-    r".{0,24}(?:reference image|image reference|reference)",
-    re.IGNORECASE,
+    r"以.{0,16}为(?:参考|参照)|参考|照着|仿照|based on|reference)"
 )
 _WEB_IMAGE_REFERENCE_REQUEST = re.compile(
     rf"(?=.*{_WEB_IMAGE_LOOKUP_TERM})"
     r"(?=.*(?:图片|照片|立绘|形象|截图|image|picture|photo))"
     rf"(?=.*{_WEB_IMAGE_REFERENCE_TERM})"
-    r"(?=.*(?:替换|换掉|编辑|修改|重绘|重画|生成|画|edit|replace|redraw|generate))",
+    r"(?=.*(?:替换|换掉|编辑|修改|重绘|重画|生成|创作|绘制|画|edit|replace|redraw|generate|create|draw))",
     re.IGNORECASE,
 )
+
+
+MAX_IMAGE_REFERENCES = 4
+
+
+@dataclass(frozen=True, slots=True)
+class MediaIntent:
+    """Host decisions derived only from the current unquoted user request."""
+
+    media_requested: bool = False
+    requires_source_edit: bool = False
+    requires_web_reference: bool = False
+    webpage_screenshot_requested: bool = False
+
+    @property
+    def requires_provenance(self) -> bool:
+        return self.requires_source_edit or self.requires_web_reference
+
+
+@dataclass(frozen=True, slots=True)
+class ImageProvenance:
+    """Evidence of the actual immutable pixels uploaded by an image tool."""
+
+    kind: Literal["generated", "edited"]
+    source_image_ref: str | None = None
+    reference_image_refs: tuple[str, ...] = ()
+    reference_sources: tuple[str, ...] = ()
+
+    def satisfies(self, intent: MediaIntent) -> bool:
+        if intent.requires_source_edit and (self.kind != "edited" or not self.source_image_ref):
+            return False
+        if len(self.reference_image_refs) != len(self.reference_sources):
+            return False
+        if intent.requires_web_reference and not any(
+            ref and source == "web" for ref, source in zip(self.reference_image_refs, self.reference_sources)
+        ):
+            return False
+        return True
+
+
+@dataclass(slots=True)
+class MediaDeliveryRequirements:
+    intent: MediaIntent
+    confirmed: bool = False
+
+    def accepts(self, provenance: ImageProvenance | None) -> bool:
+        return not self.intent.requires_provenance or (provenance is not None and provenance.satisfies(self.intent))
+
+
+_MEDIA_REQUIREMENTS: ContextVar[MediaDeliveryRequirements | None] = ContextVar(
+    "llm_chat_media_requirements", default=None
+)
+
+
+@contextmanager
+def media_intent_scope(intent: MediaIntent) -> Iterator[MediaDeliveryRequirements]:
+    requirements = MediaDeliveryRequirements(intent)
+    token = _MEDIA_REQUIREMENTS.set(requirements)
+    try:
+        yield requirements
+    finally:
+        _MEDIA_REQUIREMENTS.reset(token)
+
+
+def current_media_requirements() -> MediaDeliveryRequirements | None:
+    return _MEDIA_REQUIREMENTS.get()
+
+
+_DISCUSSION = re.compile(
+    r"(?:如何|怎么|怎样|为什么|是什么|什么意思|教程|原理|能否介绍|是否支持|讨论|假如|如果|假设)"
+    r"|\b(?:how (?:do|to|can)|what (?:is|does)|why|tutorial|discuss|suppose|if)\b",
+    re.IGNORECASE,
+)
+_CANCEL = re.compile(
+    r"^(?:算了|取消(?:吧|了)?|不必了|不用了|先别(?:做|弄)?了?|别做了|停止(?:吧)?)$"
+    r"|^(?:never mind|nevermind|cancel(?: that)?|stop|do not do (?:it|that))$",
+    re.IGNORECASE,
+)
+_NEGATED_ACTION = re.compile(
+    r"(?:别|不要(?!只)|不用|无需|禁止|不是(?:让|要)?|不需要).{0,60}"
+    r"(?:删|移除|消除|去掉|抹掉|擦除|替换|换|改|调整|修正|编辑|重绘|重画|画|生成|参考|搜索|截图|发)"
+    r"|\b(?:do not|don't|dont|without|no need to|stop)\b",
+    re.IGNORECASE,
+)
+_SOURCE_TARGET = re.compile(
+    r"(?:这|那|原|源|上传|提供|刚才|群里).{0,12}(?:图|照片|头像)|头像|背景|底图|图中|图里|图片中"
+    r"|\b(?:this|that|source|original|uploaded)\s+(?:image|picture|photo)|\b(?:avatar|background)\b",
+    re.IGNORECASE,
+)
+_EDIT_COMMAND = re.compile(
+    r"^(?:(?:请(?:你)?|帮我|给我|麻烦(?:你)?|能不能|可以|能否)\s*)*(?:把|将).{0,100}"
+    r"(?:删(?:掉|除)?|移除|消除|去掉|抹掉|擦除|替换|换(?:掉|成)?|修改|调整|修正|编辑|重绘|重画|改成)"
+    r"|^(?:(?:请(?:你)?|帮我|给我|麻烦(?:你)?|直接)\s*)*(?:删(?:掉|除)?|移除|消除|去掉|抹掉|擦除|替换|换(?:掉|成)?|修改|调整|修正|编辑|重绘|重画).{0,100}"
+    r"|^(?:please\s+)?(?:edit|replace|remove|erase|change|redraw|modify)\b",
+    re.IGNORECASE,
+)
+
+
+def build_media_intent(raw_user_text: str, *, has_image_inputs: bool = False) -> MediaIntent:
+    """Parse once before enrichment; observations and historical text confer no rights."""
+
+    media = edit = web = screenshot = False
+    active_clauses: list[str] = []
+    for clause in request_clauses(raw_user_text):
+        if _CANCEL.search(clause):
+            media = edit = web = screenshot = False
+            active_clauses.clear()
+            continue
+        if _DISCUSSION.search(clause):
+            continue
+        if _NEGATED_ACTION.search(clause):
+            if re.search(
+                r"(?:别|不要(?!只)|不用|无需|不需要).{0,12}(?:画|绘制|生成|创作|发|发送)"
+                r"|\b(?:do not|don't|dont|stop|no need to)\s+(?:send|show|share|draw|generate|create)\b",
+                clause,
+                re.IGNORECASE,
+            ):
+                media = edit = web = screenshot = False
+                active_clauses.clear()
+                continue
+            if re.search(r"参考|搜索|网上|网页|\b(?:web|online|reference)\b", clause, re.IGNORECASE):
+                web = False
+                active_clauses.clear()
+            if re.search(
+                r"删|移除|消除|去掉|擦除|替换|换|改|编辑|重绘|重画|\b(?:edit|replace|remove|erase|change|redraw|modify)\b",
+                clause,
+                re.IGNORECASE,
+            ):
+                edit = False
+            if _WEBPAGE_SCREENSHOT_NEGATION.search(clause):
+                screenshot = False
+            if _NEGATED_MEDIA_REQUEST.search(clause) or not (edit or web or screenshot):
+                media = False
+            continue
+        active_clauses.append(clause)
+        command = bool(_EDIT_COMMAND.search(clause))
+        edit = edit or (command and (has_image_inputs or bool(_SOURCE_TARGET.search(clause))))
+        screenshot = screenshot or bool(
+            _WEBPAGE_SCREENSHOT_REQUEST.search(clause) and not _WEBPAGE_SCREENSHOT_REFERENCE.search(clause)
+        )
+        web = web or bool(_WEB_IMAGE_REFERENCE_REQUEST.search(" ".join(active_clauses)))
+        media = (
+            media
+            or edit
+            or screenshot
+            or web
+            or any(pattern.search(clause) for pattern in _MEDIA_REQUEST_PATTERNS if pattern is not _IMAGE_EDIT_PATTERN)
+        )
+    return MediaIntent(media, edit, web, screenshot)
+
+
+def requests_contextual_media_delivery(raw_user_text: str, messages: Sequence[ChatMessage]) -> bool:
+    """Use history only to resolve the target of an explicit current send request."""
+    clauses = request_clauses(raw_user_text)
+    if not clauses or not _CONTEXTUAL_MEDIA_DELIVERY.fullmatch(clauses[-1]):
+        return False
+    latest = next(
+        (index for index in range(len(messages) - 1, -1, -1) if messages[index].get("role") == "user"), len(messages)
+    )
+    for message in reversed(messages[max(0, latest - 4) : latest]):
+        if message.get("role") not in {"user", "assistant"}:
+            continue
+        text = _user_text(message.get("content"))
+        if re.search(
+            r"代码|源码|文本|文字|文件|脚本|报告|链接|\b(?:code|source|text|file|script|report|link)\b",
+            text,
+            re.IGNORECASE,
+        ):
+            return False
+        if _RECENT_MEDIA_CONTEXT.search(text):
+            return True
+    return False
 
 
 def _user_text(content: object) -> str:
@@ -182,36 +345,8 @@ def _user_text(content: object) -> str:
     return ""
 
 
-def latest_user_requests_image_generation(messages: Sequence[ChatMessage]) -> bool:
-    """Return whether the latest turn may need the trusted self image reference."""
-
-    for message in reversed(messages):
-        if message.get("role") != "user":
-            continue
-        text = _user_text(message.get("content")).strip()
-        if not text or _NEGATED_MEDIA_REQUEST.search(text):
-            return False
-        return any(pattern.search(text) for pattern in _IMAGE_GENERATION_PATTERNS) or bool(
-            _SELF_IMAGE_REQUEST_PATTERN.search(text)
-        )
-    return False
-
-
-def latest_user_requests_image_edit(messages: Sequence[ChatMessage]) -> bool:
-    """Return whether the latest user explicitly requests editing a supplied image."""
-
-    for message in reversed(messages):
-        if message.get("role") != "user":
-            continue
-        text = _user_text(message.get("content")).strip()
-        if not text or _NEGATED_IMAGE_EDIT_REQUEST.search(text):
-            return False
-        return bool(_IMAGE_EDIT_PATTERN.search(text))
-    return False
-
-
 def latest_user_requests_media(messages: Sequence[ChatMessage]) -> bool:
-    """Return whether the latest user turn requests media directly or by recent reference."""
+    """Return a timeout hint only; enriched messages must never grant operation authority."""
     if latest_user_requests_webpage_screenshot(messages):
         return True
 
@@ -232,7 +367,7 @@ def latest_user_requests_media(messages: Sequence[ChatMessage]) -> bool:
 
 
 def latest_user_requests_webpage_screenshot(messages: Sequence[ChatMessage]) -> bool:
-    """Return whether the latest user explicitly requests a webpage screenshot."""
+    """Return a screenshot timeout hint from model-visible text, not an authorization grant."""
 
     for message in reversed(messages):
         if message.get("role") != "user":
@@ -241,19 +376,6 @@ def latest_user_requests_webpage_screenshot(messages: Sequence[ChatMessage]) -> 
         if not text or _WEBPAGE_SCREENSHOT_NEGATION.search(text) or _WEBPAGE_SCREENSHOT_REFERENCE.search(text):
             return False
         return bool(_WEBPAGE_SCREENSHOT_REQUEST.search(text))
-    return False
-
-
-def latest_user_requests_web_image_reference(messages: Sequence[ChatMessage]) -> bool:
-    """Return whether the latest user explicitly requires a web visual reference for image work."""
-
-    for message in reversed(messages):
-        if message.get("role") != "user":
-            continue
-        text = _user_text(message.get("content")).strip()
-        if not text or _NEGATED_MEDIA_REQUEST.search(text) or _NEGATED_WEB_IMAGE_REFERENCE_REQUEST.search(text):
-            return False
-        return bool(_WEB_IMAGE_REFERENCE_REQUEST.search(text))
     return False
 
 

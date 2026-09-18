@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Iterator
 
 from sqlalchemy import select
 from entari_plugin_database import get_session
 
 from .models import AgentTurn, AgentEvent, ContextSession
-from .agent_events import get_event_by_ref, load_event_payload, select_payload_path
-from .agent_context import AgentAccessContext
+from .agent_events import get_event_by_ref
+from .agent_context import ContextReadGrant, AgentAccessContext
+from .context_reads import payload_digest, public_payload_path, model_readable_payload
 from .session_manager import pin_event, get_session_by_ref, list_scope_sessions
 from .core.model_audit import ADMIN_ONLY_EVENT_TYPES
 
@@ -43,12 +44,17 @@ async def _event_session(event_id: int) -> ContextSession | None:
         ).scalar_one_or_none()
 
 
-def _authorize_session(access: AgentAccessContext, context_session: ContextSession) -> None:
+def _authorize_session(
+    access: AgentAccessContext,
+    context_session: ContextSession,
+    *,
+    exact_grant: bool = False,
+) -> None:
     if context_session.scope_id != access.scope_id:
         raise AgentQueryError("Session is outside llm_chat scope and is not allowed")
     if context_session.status == "sealed":
         raise AgentQueryError("Sealed session access is not allowed")
-    if context_session.id != access.session_id and not access.allow_archived_sessions:
+    if context_session.id != access.session_id and not access.allow_archived_sessions and not exact_grant:
         raise AgentQueryError("Archived session access is not allowed for the current user request")
 
 
@@ -169,6 +175,91 @@ def _bounded_payload(value: object, *, max_chars: int, offset: int) -> dict[str,
     }
 
 
+async def _readable_event(
+    access: AgentAccessContext,
+    event: AgentEvent,
+) -> tuple[ContextSession, dict[str, object]]:
+    if event.event_type in ADMIN_ONLY_EVENT_TYPES or not event.model_visible:
+        raise AgentQueryError("Private audit events are not model-readable")
+    context_session = await _event_session(event.id)
+    if context_session is None:
+        raise AgentQueryError("Event has no context session")
+    if context_session.scope_id != access.scope_id or context_session.status == "sealed":
+        raise AgentQueryError("Event session is sealed or outside llm_chat scope")
+    if context_session.id != access.session_id:
+        async with get_session() as db:
+            generation_session = await db.get(ContextSession, access.session_id)
+            if (
+                generation_session is None
+                or generation_session.scope_id != access.scope_id
+                or generation_session.status == "sealed"
+            ):
+                raise AgentQueryError("Generation session is sealed or outside llm_chat scope")
+    return context_session, model_readable_payload(event)
+
+
+def _matching_grants(
+    access: AgentAccessContext,
+    event: AgentEvent,
+    context_session: ContextSession,
+    payload: Mapping[str, object],
+    *,
+    path: str,
+) -> Iterator[ContextReadGrant]:
+    for grant in access.context_read_grants:
+        if (
+            grant.scope_id != access.scope_id
+            or grant.session_id != context_session.id
+            or grant.generation_session_id != access.session_id
+            or grant.generation_turn_id != access.turn_id
+            or grant.event_ref != event.event_ref
+            or grant.execution_ref != event.execution_ref
+            or (path and path != grant.path and not path.startswith(grant.path + "."))
+        ):
+            continue
+        try:
+            if payload_digest(public_payload_path(payload, grant.path)) == grant.sha256:
+                yield grant
+        except KeyError:
+            continue
+
+
+def _authorized_payload(
+    access: AgentAccessContext,
+    event: AgentEvent,
+    context_session: ContextSession,
+    payload: Mapping[str, object],
+    *,
+    path: str,
+    offset: int,
+    max_chars: int,
+) -> dict[str, object]:
+    if path:
+        try:
+            selected = public_payload_path(payload, path)
+        except KeyError as exc:
+            raise AgentQueryError("Unknown or private event payload path is not model-readable") from exc
+        granted = next(_matching_grants(access, event, context_session, payload, path=path), None) is not None
+        _authorize_session(access, context_session, exact_grant=granted)
+        if not granted and not access.allow_payload_delivery:
+            raise AgentQueryError("Stored payload access is not allowed for the current user request")
+        return _bounded_payload(selected, max_chars=max(256, max_chars), offset=offset)
+    grants = tuple(_matching_grants(access, event, context_session, payload, path=""))
+    _authorize_session(access, context_session, exact_grant=bool(grants))
+    compact: dict[str, object]
+    if context_session.id != access.session_id and not access.allow_archived_sessions:
+        # Exact references never authorize a parent object or sibling field.
+        compact = {
+            "references": [
+                {"event_ref": grant.event_ref, "path": grant.path, "sha256": grant.sha256, "stored": True}
+                for grant in grants
+            ]
+        }
+    else:
+        compact = model_readable_payload(event, compact=True)
+    return _bounded_payload(compact, max_chars=max(256, max_chars), offset=0)
+
+
 async def read_event_payload(
     access: AgentAccessContext | None,
     *,
@@ -181,30 +272,16 @@ async def read_event_payload(
     event = await get_event_by_ref(event_ref.strip())
     if event is None:
         raise AgentQueryError("Unknown event_ref")
-    if event.event_type in ADMIN_ONLY_EVENT_TYPES or not event.model_visible:
-        raise AgentQueryError("Private audit events are not model-readable")
-    context_session = await _event_session(event.id)
-    if context_session is None:
-        raise AgentQueryError("Event has no context session")
-    _authorize_session(current, context_session)
-    payload = load_event_payload(event)
-    if path:
-        if path.split(".", 1)[0] in {"attachments", "audit_arguments", "audit_result"}:
-            raise AgentQueryError("Private audit payloads are not model-readable")
-        if not current.allow_payload_delivery:
-            raise AgentQueryError("Stored payload access is not allowed for the current user request")
-        try:
-            selected = select_payload_path(payload, path)
-        except KeyError as exc:
-            raise AgentQueryError("Unknown event payload path") from exc
-        data = _bounded_payload(selected, max_chars=max(256, max_chars), offset=offset)
-    else:
-        compact = {
-            "arguments": payload.get("context_arguments", payload.get("arguments", {})),
-            "result": payload.get("context_result", payload.get("result", {})),
-            "content": payload.get("content", ""),
-        }
-        data = _bounded_payload(compact, max_chars=max(256, max_chars), offset=0)
+    context_session, payload = await _readable_event(current, event)
+    data = _authorized_payload(
+        current,
+        event,
+        context_session,
+        payload,
+        path=path,
+        offset=offset,
+        max_chars=max_chars,
+    )
     return {
         "event_ref": event.event_ref,
         "event_type": event.event_type,
@@ -245,29 +322,56 @@ async def read_tool_execution_payload(
     result_event = next((event for event in events if event.event_type == "tool_result"), None)
     if call_event is None or result_event is None:
         raise AgentQueryError("Unknown execution_ref")
-    context_session = await _event_session(result_event.id)
-    if context_session is None:
-        raise AgentQueryError("Event has no context session")
-    _authorize_session(current, context_session)
-    call_payload = load_event_payload(call_event)
-    result_payload = load_event_payload(result_event)
-    payload = {
-        "arguments": call_payload.get("arguments", {}),
-        "result": result_payload.get("result", {}),
-    }
+    call_session, call_payload = await _readable_event(current, call_event)
+    result_session, result_payload = await _readable_event(current, result_event)
+    if (
+        call_event.turn_id != result_event.turn_id
+        or call_event.attempt != result_event.attempt
+        or call_session.id != result_session.id
+    ):
+        raise AgentQueryError("Execution events do not belong to the same turn")
     if path:
-        if not current.allow_payload_delivery:
-            raise AgentQueryError("Stored payload access is not allowed for the current user request")
-        try:
-            selected = select_payload_path(payload, path)
-        except KeyError as exc:
-            raise AgentQueryError("Unknown event payload path") from exc
-        data = _bounded_payload(selected, max_chars=max(256, max_chars), offset=offset)
+        root = path.split(".", 1)[0]
+        if root not in {"arguments", "result"}:
+            raise AgentQueryError("Unknown or private event payload path")
+        target, owner, payload = (
+            (call_event, call_session, call_payload)
+            if root == "arguments"
+            else (result_event, result_session, result_payload)
+        )
+        data = _authorized_payload(
+            current,
+            target,
+            owner,
+            payload,
+            path=path,
+            offset=offset,
+            max_chars=max_chars,
+        )
     else:
-        compact = {
-            "arguments": call_payload.get("context_arguments", payload["arguments"]),
-            "result": result_payload.get("context_result", payload["result"]),
-        }
+        granted_events = [
+            (event, owner, payload)
+            for event, owner, payload in (
+                (call_event, call_session, call_payload),
+                (result_event, result_session, result_payload),
+            )
+            if next(_matching_grants(current, event, owner, payload, path=""), None) is not None
+        ]
+        _authorize_session(current, result_session, exact_grant=bool(granted_events))
+        compact: dict[str, object]
+        if result_session.id != current.session_id and not current.allow_archived_sessions:
+            compact = {
+                "references": [
+                    {"event_ref": grant.event_ref, "path": grant.path, "sha256": grant.sha256, "stored": True}
+                    for event, owner, payload in granted_events
+                    for grant in _matching_grants(current, event, owner, payload, path="")
+                ]
+            }
+        else:
+            compact = {
+                "arguments": model_readable_payload(call_event, compact=True).get("arguments", {}),
+                "result": model_readable_payload(result_event, compact=True).get("result", {}),
+            }
         data = _bounded_payload(compact, max_chars=max(256, max_chars), offset=0)
     return {
         "execution_ref": result_event.execution_ref,

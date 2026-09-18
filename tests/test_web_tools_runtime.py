@@ -41,6 +41,7 @@ from satori.adapters.onebot11.message import OneBot11MessageEncoder
 
 from utils.turn_resolution_core import TurnResolution
 from plugins.llm_chat.web.policy import WebAccessLimits, llm_chat_web_access_scope
+from plugins.llm_chat.image_inputs import ImageInputs, image_inputs_scope
 from utils.llm_model_core.snapshot import pin_main_model, main_model_scope
 from plugins.llm_chat.core.delivery import llm_chat_delivery_scope
 from plugins.llm_chat.prepared_media import prepare_media, resolve_media, list_prepared_media, prepared_media_scope
@@ -49,15 +50,15 @@ from plugins.llm_chat.core.tool_trace import (
     llm_chat_tool_trace_scope,
     llm_chat_tool_execution_scope,
 )
-from plugins.llm_chat.image_edit_refs import ImageEditReferences, llm_chat_image_edit_scope
 from plugins.llm_chat.runtime_context import llm_chat_context_scope
-from plugins.llm_chat.agent_attachments import store_agent_attachment
+from plugins.llm_chat.core.media_delivery import MediaIntent, ImageProvenance, media_intent_scope
 from utils.tts_service_core.voice_catalog import (
     TTSVoiceOption,
     TTSVoiceCatalog,
     TTSReferenceOption,
     TTSSynthesisSelection,
 )
+from plugins.llm_chat.channel_message_refs import ChannelMessageReferences, channel_message_scope
 from plugins.llm_chat.web.reference_capture import WebReferenceCapture
 from plugins.llm_chat.web.screenshot_models import WebScreenshot
 from plugins.llm_chat.core.tool_trace_policy import DeliverySnapshot
@@ -352,12 +353,12 @@ def _load_local_modules() -> Iterator[SimpleNamespace]:
         web_tools = importlib.import_module("plugins.llm_chat.tools.web")
         agno_compat = importlib.import_module("plugins.llm_chat.agno_compat")
         generation = importlib.import_module("plugins.llm_chat.generation")
-        channel_images = importlib.import_module("plugins.llm_chat.channel_images")
+        image_inputs = importlib.import_module("plugins.llm_chat.image_inputs")
         participant_tools = importlib.import_module("plugins.llm_chat.tools.find_channel_participants")
         history_tools = importlib.import_module("plugins.llm_chat.tools.read_channel_messages")
-        channel_image_tools = importlib.import_module("plugins.llm_chat.tools.prepare_channel_image")
-        description_tools = importlib.import_module("plugins.llm_chat.tools.describe_channel_image")
-        avatar_tools = importlib.import_module("plugins.llm_chat.tools.describe_channel_participant_avatar")
+        image_tools = importlib.import_module("plugins.llm_chat.tools.prepare_image_ref")
+        inspection_tools = importlib.import_module("plugins.llm_chat.tools.inspect_image")
+        avatar_tools = importlib.import_module("plugins.llm_chat.tools.get_channel_avatar")
         yield SimpleNamespace(
             web_access=web_access,
             delivery=delivery,
@@ -365,11 +366,11 @@ def _load_local_modules() -> Iterator[SimpleNamespace]:
             web_tools=web_tools,
             agno_compat=agno_compat,
             generation=generation,
-            channel_images=channel_images,
+            image_inputs=image_inputs,
             participant_tools=participant_tools,
             history_tools=history_tools,
-            channel_image_tools=channel_image_tools,
-            description_tools=description_tools,
+            image_tools=image_tools,
+            inspection_tools=inspection_tools,
             avatar_tools=avatar_tools,
         )
     finally:
@@ -606,11 +607,12 @@ async def test_registration_gates_leave_real_registries_unchanged_and_missing_ke
 async def test_channel_perception_tools_use_current_session_and_hide_transport_identifiers(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     calls: list[tuple[object, ...]] = []
     state = local_modules.delivery.DeliveryState()
     warnings: list[str] = []
-    described_sources: list[str] = []
+    described_pixels: list[bytes] = []
     avatar_hash = sha256(_PNG_BYTES).hexdigest()
     participant = SimpleNamespace(
         display_name="Alice",
@@ -684,11 +686,11 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
             self.sent.append(message)
             return []
 
-    async def describe_image(_config: object, _session: object, source: str) -> str:
-        described_sources.append(source)
+    async def describe_image(_config: object, data: bytes) -> str:
+        described_pixels.append(data)
         return "a blue chart"
 
-    monkeypatch.setattr(local_modules.description_tools, "describe_image", describe_image)
+    monkeypatch.setattr(local_modules.inspection_tools, "describe_image_bytes", describe_image)
     perception = PerceptionStub()
     session = cast(Any, ToolSession())
 
@@ -696,7 +698,8 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
         return perception
 
     config = local_modules.config.LLMChatConfig(channel_message_max_images=4)
-    references = local_modules.channel_images.ChannelImageReferences()
+    inputs = ImageInputs(attachment_root=tmp_path, warn=warnings.append)
+    references = ChannelMessageReferences()
     async with _temporary_plugin() as harness, _prepared_delivery_scope(state):
         find_registered = local_modules.participant_tools.register_find_channel_participants(
             harness.dispatcher,
@@ -707,27 +710,11 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
             provider,
             config,
         )
-        describe_registered = local_modules.description_tools.register_describe_channel_image(
-            harness.dispatcher,
-            local_modules.description_tools.ChannelImageDescriptionContext(
-                config=config,
-                get_perception=provider,
-            ),
-        )
-        prepare_image_registered = local_modules.channel_image_tools.register_prepare_channel_image(
-            harness.dispatcher,
-            local_modules.channel_image_tools.ChannelImageToolContext(
-                get_perception=provider,
-                warn=warnings.append,
-            ),
-        )
-        avatar_registered = local_modules.avatar_tools.register_describe_channel_participant_avatar(
-            harness.dispatcher,
-            provider,
-            config,
-        )
+        inspect_registered = local_modules.inspection_tools.register_inspect_image(harness.dispatcher, config, provider)
+        prepare_image_registered = local_modules.image_tools.register_prepare_image_ref(harness.dispatcher)
+        avatar_registered = local_modules.avatar_tools.register_get_channel_avatar(harness.dispatcher, provider)
 
-        with local_modules.channel_images.llm_chat_channel_image_scope(references):
+        with image_inputs_scope(inputs), channel_message_scope(references):
             find_result = json.loads(await find_registered.callable_target(query=" Alice ", limit=99, session=session))
             history_result = json.loads(
                 await history_registered.callable_target(
@@ -744,13 +731,10 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
                     session=session,
                 )
             )
-            avatar_result = json.loads(
-                await avatar_registered.callable_target(participant_ref=" participant_a ", session=session)
-            )
+            avatar_result = await avatar_registered.callable_target(participant_ref=" participant_a ", session=session)
+            assert described_pixels == []
             message_image_ref = history_result["messages"][0]["images"][0]["image_ref"]
-            message_description = json.loads(
-                await describe_registered.callable_target(image_ref=message_image_ref, session=session)
-            )
+            message_description = await inspect_registered.callable_target(image_ref=message_image_ref, session=session)
             message_prepared = await prepare_image_registered.callable_target(
                 image_ref=message_image_ref,
                 session=session,
@@ -759,6 +743,12 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
                 image_ref=avatar_result["image_ref"],
                 session=session,
             )
+            for prepared in (message_prepared, avatar_prepared):
+                original = resolve_media(session, [prepared["media_ref"]])[0]
+                assert original.element.src == "data:image/png;base64," + base64.b64encode(_PNG_BYTES).decode("ascii")
+            assert references.resolve_page(session, history_result["next_cursor"], "participant_a") == "older-page"
+            assert references.resolve(session, older_result["messages"][0]["message_ref"]) == "41"
+    await inputs.aclose()
 
     assert calls == [
         ("find", session, "Alice", 10),
@@ -766,26 +756,23 @@ async def test_channel_perception_tools_use_current_session_and_hide_transport_i
         ("history", session, 20, "older-page", "participant_a"),
         ("avatar", session, "participant_a"),
         ("message_images", session, "42"),
-        ("message_images", session, "42"),
     ]
     assert find_result == {"participants": [{"participant_ref": "participant_a", "display_name": "Alice"}]}
-    assert history_result["next_cursor"] == "older-page"
     assert history_result["messages"][0]["image_count"] == 1
     assert "description" not in history_result["messages"][0]["images"][0]
-    assert message_description == {"available": True, "description": "a blue chart"}
-    assert older_result == {
-        "messages": [{"participant_ref": "participant_a", "content": "older context", "image_count": 0}],
-        "next_cursor": "",
-    }
+    assert message_description["available"] is True
+    assert message_description["description"] == "a blue chart"
+    assert message_description["image_ref"] == message_image_ref
+    assert older_result["messages"][0]["content"] == "older context"
+    assert older_result["next_cursor"] == ""
     assert avatar_result["display_name"] == "Alice"
     assert avatar_result["available"] is True
-    assert avatar_result["description"] == "blue-haired avatar"
-    assert cast(str, avatar_result["image_ref"]).startswith("channel_image_")
-    assert described_sources == ["https://example.com/channel-image.png"]
+    assert "description" not in avatar_result
+    assert cast(str, avatar_result["image_ref"]).startswith("image_")
+    assert described_pixels == [_PNG_BYTES]
     assert session.downloads == [
         "https://example.com/avatar.png",
         "https://example.com/channel-image.png",
-        "https://example.com/avatar.png",
     ]
     assert session.sent == []
     assert message_prepared["status"] == avatar_prepared["status"] == "prepared"
@@ -808,14 +795,22 @@ def test_channel_history_tool_keeps_valid_bounded_json(local_modules: SimpleName
         for index in range(20)
     ]
 
-    serialized = local_modules.history_tools._serialize_history_page(messages, "older")
+    references = ChannelMessageReferences()
+    session = _DeliveryToolSession()
+    serialized = local_modules.history_tools._serialize_history_page(
+        messages,
+        "older",
+        references=references,
+        session=session,
+    )
     payload = json.loads(serialized)
 
     assert len(serialized) <= local_modules.history_tools.MAX_HISTORY_OUTPUT_CHARS
     assert payload["truncated"] is True
-    assert all("cursor" not in message for message in payload["messages"])
-    first_index = payload["messages"][0]["message_id"].removeprefix("message-")
-    assert payload["next_cursor"] == first_index
+    assert all("cursor" not in message and "message_id" not in message for message in payload["messages"])
+    first_cursor = references.resolve(session, payload["messages"][0]["message_ref"])
+    assert references.resolve_page(session, payload["next_cursor"], "") == first_cursor
+    references.close()
 
 
 @pytest.mark.asyncio
@@ -1160,13 +1155,13 @@ async def test_generate_image_sends_persona_reference_bytes_to_image_model(
 
     from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 
-    from plugins.llm_chat import image_edit_refs
+    from plugins.llm_chat import image_inputs
     from plugins.llm_chat.core.self_reference import load_self_reference_image
 
     persona_bytes = _PNG_BYTES + b"persona-original"
     (tmp_path / "persona.png").write_bytes(persona_bytes)
     monkeypatch.setattr(
-        image_edit_refs, "load_self_reference_image", partial(load_self_reference_image, image_root=tmp_path)
+        image_inputs, "load_self_reference_image", partial(load_self_reference_image, image_root=tmp_path)
     )
 
     wire_images: list[list[bytes]] = []
@@ -1233,17 +1228,10 @@ async def test_generate_image_sends_persona_reference_bytes_to_image_model(
         monkeypatch.setattr(runtime.image_edit_context, "edit", edit_provider)
 
         source_bytes = _PNG_BYTES + b"source-original"
-        source_attachment = store_agent_attachment(
-            source_bytes, kind="input", source="direct", index=1, root=tmp_path / "audit"
-        )
-
-        references = ImageEditReferences.from_input_attachments(
-            [source_attachment],
-            requires_web_reference=False,
-            persona_reference_path="persona.png",
-            attachment_root=tmp_path / "audit",
-        )
         session = _DeliveryToolSession()
+        inputs = ImageInputs(attachment_root=tmp_path / "audit")
+        inputs.persona_reference_path = "persona.png"
+        source_ref = inputs.register_bytes(session, source="direct", key="source", data=source_bytes, index=1)
         state = runtime.DeliveryState()
         recorder = ToolTraceRecorder()
         call = recorder.start(
@@ -1251,7 +1239,7 @@ async def test_generate_image_sends_persona_reference_bytes_to_image_model(
         )
         with (
             llm_chat_delivery_scope(state),
-            llm_chat_image_edit_scope(references),
+            image_inputs_scope(inputs),
             llm_chat_tool_trace_scope(recorder),
             llm_chat_tool_execution_scope(call.execution_ref),
         ):
@@ -1275,21 +1263,22 @@ async def test_generate_image_sends_persona_reference_bytes_to_image_model(
         assert stored_reference.read_bytes() == persona_bytes
         assert "persona-original" not in json.dumps(recorder.events[0].recorded_result)
 
-        with llm_chat_delivery_scope(state), llm_chat_image_edit_scope(references):
+        with llm_chat_delivery_scope(state), image_inputs_scope(inputs):
             edited = await _tool_callable(runtime, "edit_image")(
-                session, "Replace the source subject with the persona", use_persona_reference=True
+                session, "Replace the source subject with the persona", source_ref, use_persona_reference=True
             )
             await _tool_callable(runtime, "send_msg")(session, [{"type": "media", "media_ref": edited["media_ref"]}])
         assert wire_images == [[persona_bytes], [source_bytes, persona_bytes]]
         assert state.confirmed_media_deliveries == 3
 
-        missing = ImageEditReferences.from_input_attachments(
-            (), requires_web_reference=False, persona_reference_path="missing.png", attachment_root=tmp_path / "audit"
-        )
-        with llm_chat_delivery_scope(state), llm_chat_image_edit_scope(missing):
-            with pytest.raises(runtime.DeliveryError, match="unavailable or invalid"):
+        missing = ImageInputs(attachment_root=tmp_path / "audit")
+        missing.persona_reference_path = "missing.png"
+        with llm_chat_delivery_scope(state), image_inputs_scope(missing):
+            with pytest.raises(runtime.DeliveryError):
                 await target(session, "Use the persona reference", use_persona_reference=True)
         assert len(requests) == 3
+        await inputs.aclose()
+        await missing.aclose()
 
         await harness.dispose()
         _assert_registry_matches(baseline)
@@ -1344,11 +1333,9 @@ async def test_capture_web_reference_is_private_generation_local_and_audited(
         monkeypatch.setattr(runtime.web_reference_context, "capture", capture)
         monkeypatch.setattr(runtime, "vision_completion", inspect_reference)
 
-        references = ImageEditReferences.from_input_attachments(
-            (),
-            requires_web_reference=True,
-            attachment_root=tmp_path,
-        )
+        session = _DeliveryToolSession()
+        inputs = ImageInputs(attachment_root=tmp_path)
+        intent = MediaIntent(media_requested=True, requires_web_reference=True)
         recorder = ToolTraceRecorder()
         arguments = {
             "url": "https://example.com/character",
@@ -1362,22 +1349,22 @@ async def test_capture_web_reference_is_private_generation_local_and_audited(
                 WebAccessLimits(0, 2, 2),
                 allow_reference_capture=True,
             ),
-            llm_chat_image_edit_scope(references),
+            image_inputs_scope(inputs),
+            media_intent_scope(intent),
             llm_chat_tool_trace_scope(recorder),
             llm_chat_tool_execution_scope(call.execution_ref),
         ):
-            result = await target(**arguments)
+            result = await target(session, **arguments)
         recorder.finish_success(call, result, before=DeliverySnapshot(), after=DeliverySnapshot())
 
         payload = json.loads(result)
         reference_ref = payload["image_ref"]
-        assert reference_ref.startswith("web_ref_")
+        assert reference_ref.startswith("image_")
         assert payload["description"].startswith("A young woman")
         assert captures == [(browser, "https://example.com/character", "Character gallery", 1200)]
-        resolved = references.resolve_web_references([reference_ref])
-        assert len(resolved) == 1
-        assert resolved[0].data == _PNG_BYTES
-        assert resolved[0].attachment is not None
+        resolved = await inputs.resolve(session, reference_ref, purpose="reference")
+        assert resolved.data == _PNG_BYTES
+        assert resolved.attachment is not None
 
         event = recorder.events[0]
         assert event.status == "succeeded"
@@ -1389,34 +1376,32 @@ async def test_capture_web_reference_is_private_generation_local_and_audited(
             "matched_section": True,
             "truncated": False,
         }
-        assert "web_ref_" not in json.dumps(event.recorded_result)
+        assert reference_ref not in json.dumps(event.recorded_result)
         attachments = cast(list[dict[str, object]], event.evidence["attachments"])
         assert len(attachments) == 1
         attachment = attachments[0]
         assert str(attachment["attachment_ref"]).startswith("reference_")
-        assert attachment["description"] == payload["description"]
         assert (tmp_path / f"{attachment['attachment_ref']}.png").read_bytes() == _PNG_BYTES
 
         async def reject_reference(*_args: object, **_kwargs: object) -> str:
             return '{"matched":false,"description":"The requested subject is not visible."}'
 
         monkeypatch.setattr(runtime, "vision_completion", reject_reference)
-        rejected_references = ImageEditReferences.from_input_attachments(
-            (),
-            requires_web_reference=True,
-            attachment_root=tmp_path,
-        )
+        rejected_inputs = ImageInputs(attachment_root=tmp_path)
         with (
             llm_chat_web_access_scope(
                 WebAccessLimits(0, 1, 1),
                 allow_reference_capture=True,
             ),
-            llm_chat_image_edit_scope(rejected_references),
+            image_inputs_scope(rejected_inputs),
+            media_intent_scope(intent),
         ):
             with pytest.raises(runtime.DeliveryError, match="did not visibly match"):
-                await target(**arguments)
-        assert rejected_references.web_reference_count == 0
+                await target(session, **arguments)
+        assert rejected_inputs.source_count("web") == 0
         assert len(list(tmp_path.glob("reference_*.png"))) == 1
+        await inputs.aclose()
+        await rejected_inputs.aclose()
 
         await harness.dispose()
         _assert_registry_matches(baseline)
@@ -1451,35 +1436,11 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
         generate_target = _tool_callable(runtime, "generate_image")
         source_bytes = _PNG_BYTES
         reference_bytes = _PNG_BYTES + b"reference"
-        source_attachment = store_agent_attachment(
-            source_bytes,
-            kind="input",
-            source="direct",
-            index=1,
-            root=tmp_path,
-        )
-        reference_attachment = store_agent_attachment(
-            reference_bytes,
-            kind="reference",
-            source="direct_image",
-            index=1,
-            label="Web visual reference",
-            description="Dark braid and muted red period clothing.",
-            root=tmp_path,
-        )
-        references = ImageEditReferences.from_input_attachments(
-            [source_attachment],
-            requires_web_reference=True,
-            attachment_root=tmp_path,
-        )
-        reference_ref = "web_ref_0123456789abcdef01234567"
-        references.add_web_reference(
-            reference_ref,
-            reference_bytes,
-            mime="image/png",
-            description="Dark braid and muted red period clothing.",
-            attachment=reference_attachment,
-        )
+        session = _DeliveryToolSession()
+        inputs = ImageInputs(attachment_root=tmp_path)
+        source_ref = inputs.register_bytes(session, source="direct", key="source", data=source_bytes, index=1)
+        reference_ref = inputs.register_bytes(session, source="web", key="web", data=reference_bytes)
+        intent = MediaIntent(media_requested=True, requires_source_edit=True, requires_web_reference=True)
 
         requests: list[dict[str, object]] = []
 
@@ -1499,12 +1460,11 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
         monkeypatch.setattr(runtime.image_edit_context, "resolve_model", resolve_model)
         monkeypatch.setattr(runtime.image_edit_context, "edit", edit_provider)
 
-        session = _DeliveryToolSession()
         state = runtime.DeliveryState()
         recorder = ToolTraceRecorder()
         arguments = {
             "prompt": "Replace only the person while preserving the logo and background.",
-            "source_image_index": 1,
+            "source_image_ref": source_ref,
             "reference_image_refs": [reference_ref],
             "size": "1024x1024",
         }
@@ -1512,13 +1472,14 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
         before = DeliverySnapshot(active=True)
         with (
             llm_chat_delivery_scope(state),
-            llm_chat_image_edit_scope(references),
+            image_inputs_scope(inputs),
+            media_intent_scope(intent) as requirements,
             llm_chat_tool_trace_scope(recorder),
             llm_chat_tool_execution_scope(call.execution_ref),
         ):
             result = await target(session, **arguments)
             assert result["status"] == "prepared"
-            assert references.edit_confirmed is False
+            assert requirements.confirmed is False
             assert session.sent == []
             assert state.delivery_attempts == state.media_messages == 0
             recorder.finish_success(call, result, before=before, after=DeliverySnapshot(active=True))
@@ -1538,14 +1499,14 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
         assert len(session.sent) == 1
         assert state.delivered_texts == ["[发送了图片]"]
         assert state.confirmed_media_deliveries == 1
-        assert references.edit_confirmed is True
+        assert requirements.confirmed is True
 
         event = recorder.events[0]
         assert event.status == "succeeded"
         assert event.effect == "none"
         assert event.arguments["reference_count"] == 1
-        assert "web_ref_" not in json.dumps(event.recorded_arguments)
-        assert "web_ref_" not in json.dumps(event.recorded_result)
+        assert reference_ref not in json.dumps(event.recorded_arguments)
+        assert reference_ref not in json.dumps(event.recorded_result)
         attachments = cast(list[dict[str, object]], event.evidence["attachments"])
         assert [str(item["attachment_ref"]).split("_", 1)[0] for item in attachments] == [
             "input",
@@ -1556,35 +1517,32 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
         assert (tmp_path / f"{output_attachment['attachment_ref']}.png").read_bytes() == _PNG_BYTES
 
         blocked_state = runtime.DeliveryState()
-        with llm_chat_delivery_scope(blocked_state), llm_chat_image_edit_scope(references):
-            with pytest.raises(runtime.DeliveryError, match="requires a captured web reference"):
+        with llm_chat_delivery_scope(blocked_state), image_inputs_scope(inputs), media_intent_scope(intent):
+            with pytest.raises(runtime.DeliveryError):
                 await generate_target(session, "Ignore the real reference and invent it")
         assert blocked_state.delivery_attempts == 0
 
-        source_edit_only = ImageEditReferences.from_input_attachments(
-            [source_attachment],
-            requires_web_reference=False,
-            requires_image_edit=True,
-            attachment_root=tmp_path,
-        )
-        with llm_chat_delivery_scope(runtime.DeliveryState()), llm_chat_image_edit_scope(source_edit_only):
-            with pytest.raises(runtime.DeliveryError, match="requires editing the supplied image"):
+        with (
+            llm_chat_delivery_scope(runtime.DeliveryState()),
+            image_inputs_scope(inputs),
+            media_intent_scope(MediaIntent(requires_source_edit=True)),
+        ):
+            with pytest.raises(runtime.DeliveryError):
                 await generate_target(session, "Invent a replacement instead of editing")
 
-        forged = ImageEditReferences.from_input_attachments(
-            [source_attachment],
-            requires_web_reference=True,
-            attachment_root=tmp_path,
-        )
-        with llm_chat_delivery_scope(runtime.DeliveryState()), llm_chat_image_edit_scope(forged):
-            with pytest.raises(runtime.DeliveryError, match="not captured in the current generation"):
+        forged = ImageInputs(attachment_root=tmp_path)
+        forged_source = forged.register_bytes(session, source="direct", key="source", data=source_bytes, index=1)
+        with llm_chat_delivery_scope(runtime.DeliveryState()), image_inputs_scope(forged), media_intent_scope(intent):
+            with pytest.raises(runtime.DeliveryError):
                 await target(
                     session,
                     "Replace the person.",
-                    source_image_index=1,
+                    source_image_ref=forged_source,
                     reference_image_refs=[reference_ref],
                 )
         assert len(requests) == 1
+        await inputs.aclose()
+        await forged.aclose()
 
         await harness.dispose()
         _assert_registry_matches(baseline)
@@ -3261,6 +3219,7 @@ async def test_web_research_keeps_tool_headroom_for_external_image_delivery(
                 ctx=_tool_context(session),
                 web_limits=local_modules.web_access.WebAccessLimits(4, 4, 8),
                 delivery_state=state,
+                media_intent=MediaIntent(media_requested=True),
             )
 
         assert local_modules.generation.response_content(response) == "[END_OF_RESPONSE]"
@@ -3375,6 +3334,7 @@ async def test_explicit_missing_image_request_retries_with_tools_instead_of_clai
                 ctx=_tool_context(session),
                 web_limits=local_modules.web_access.WebAccessLimits(2, 2, 4),
                 delivery_state=state,
+                media_intent=MediaIntent(media_requested=True),
             )
 
         assert local_modules.generation.response_content(response) == "[END_OF_RESPONSE]"
@@ -4496,36 +4456,60 @@ async def test_staged_tool_replacement_retains_the_live_owner(
 @pytest.mark.asyncio
 async def test_external_delivery_waits_for_reference_edit_and_rejects_internal_references(
     local_modules: SimpleNamespace,
+    tmp_path: Path,
 ) -> None:
     session = _DeliveryToolSession()
     recorder = ToolTraceRecorder()
-    references = ImageEditReferences.from_input_attachments((), requires_web_reference=True)
+    intent = MediaIntent(requires_source_edit=True, requires_web_reference=True)
+    inputs = ImageInputs(attachment_root=tmp_path)
+    source_ref = inputs.register_bytes(session, source="direct", key="source", data=_PNG_BYTES, index=1)
+    web_ref = inputs.register_bytes(session, source="web", key="web", data=_PNG_BYTES)
     premature = _external_requirement("send_msg", {"segments": [{"type": "text", "text": "premature"}]}, "before-edit")
     allowed = _external_requirement("send_msg", {"segments": [{"type": "text", "text": "after edit"}]}, "after-edit")
-    leaked = _external_requirement(
-        "send_msg", {"segments": [{"type": "text", "text": "web_ref_0123456789abcdef01234567"}]}, "leaked-ref"
-    )
-    async with _temporary_plugin(
-        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
-        module_path=_TOOL_RUNTIME_PATH,
+    leaked = _external_requirement("send_msg", {"segments": [{"type": "text", "text": source_ref}]}, "leaked-ref")
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ) as harness,
+        prepared_media_scope(),
     ):
         with (
             llm_chat_tool_trace_scope(recorder),
             llm_chat_context_scope(_tool_context(session)),
-            llm_chat_image_edit_scope(references),
+            media_intent_scope(intent) as requirements,
             llm_chat_delivery_scope(local_modules.delivery.DeliveryState()),
         ):
             await llm_service_module.run_llm_tools(RunOutput(requirements=[premature]))
             assert [str(message) for message in session.sent] == []
-            references.edit_confirmed = True
+            prepared = prepare_media(
+                session,
+                Image.of(raw=_PNG_BYTES, mime="image/png"),
+                byte_count=len(_PNG_BYTES),
+                tool_name="edit_image",
+                provenance=ImageProvenance(
+                    "edited",
+                    source_image_ref=source_ref,
+                    reference_image_refs=(web_ref,),
+                    reference_sources=("web",),
+                ),
+            )
+            assert requirements.confirmed is False
+            await _tool_callable(harness.module, "send_msg")(
+                session,
+                [{"type": "media", "media_ref": prepared["media_ref"]}],
+            )
+            assert requirements.confirmed is True
             await llm_service_module.run_llm_tools(RunOutput(requirements=[allowed, leaked]))
-    assert [str(message) for message in session.sent] == ["after edit"]
+    assert len(session.sent) == 2
+    assert str(session.sent[-1]) == "after edit"
     assert [json.loads(req.external_execution_result)["ok"] for req in (premature, allowed, leaked)] == [
         False,
         True,
         False,
     ]
     assert [event.status for event in recorder.events] == ["rejected", "succeeded", "rejected"]
+    await inputs.aclose()
 
 
 @pytest.mark.asyncio
@@ -4808,6 +4792,7 @@ async def test_native_finish_during_media_recovery_does_not_request_fake_deliver
             ctx=_tool_context(session),
             web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
             delivery_state=local_modules.delivery.DeliveryState(),
+            media_intent=MediaIntent(media_requested=True),
             resolution=resolution,
         )
 
@@ -4899,7 +4884,9 @@ def _native_composition_response(payload: dict[str, Any]) -> litellm.ModelRespon
     )
 
 
-async def _generate_native_turn(local_modules, session, turn, *, references=None, content="Create an image."):
+async def _generate_native_turn(
+    local_modules, session, turn, *, image_inputs=None, media_intent=None, content="Create an image."
+):
     return await local_modules.generation.generate_chat_response(
         [{"role": "user", "content": content}],
         system="Use native images and end only after actual delivery.",
@@ -4908,7 +4895,8 @@ async def _generate_native_turn(local_modules, session, turn, *, references=None
         ctx=_tool_context(session),
         web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
         delivery_state=turn.state,
-        image_edit_references=references,
+        image_inputs=image_inputs,
+        media_intent=media_intent if media_intent is not None else MediaIntent(media_requested=True),
         resolution=turn.resolution,
         tool_trace=turn.turn.tool_trace,
         agent_events=turn.turn.agent_events,
@@ -5143,18 +5131,28 @@ async def test_native_finish_waits_for_receipt_before_publishing_delivered_outco
         _native_image_turn(local_modules, session) as turn,
     ):
         pending = asyncio.create_task(_generate_native_turn(local_modules, session, turn))
+        receipt_started = asyncio.create_task(entered.wait())
         try:
-            await asyncio.wait_for(entered.wait(), timeout=2)
+            # Assert receipt ordering, not the host's SDK initialization latency.
+            completed, _ = await asyncio.wait(
+                {pending, receipt_started}, timeout=10, return_when=asyncio.FIRST_COMPLETED
+            )
+            if pending in completed:
+                await pending
+            assert receipt_started in completed, [
+                (event.tool_name, event.status) for event in turn.turn.tool_trace.events
+            ]
             assert turn.resolution.outcome == "automatic"
             assert turn.state.confirmed_deliveries == 0
             release.set()
-            await asyncio.wait_for(pending, timeout=2)
+            await asyncio.wait_for(pending, timeout=10)
             assert turn.resolution.outcome == "delivered"
             assert turn.state.confirmed_media_deliveries == 1
         finally:
-            if not pending.done():
-                pending.cancel()
-            await asyncio.gather(pending, return_exceptions=True)
+            for task in (pending, receipt_started):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(pending, receipt_started, return_exceptions=True)
 
 
 async def test_native_images_cannot_bypass_required_reference_edit(local_modules, monkeypatch):
@@ -5174,7 +5172,7 @@ async def test_native_images_cannot_bypass_required_reference_edit(local_modules
         ],
     )
     session = _DeliveryToolSession()
-    references = ImageEditReferences.from_input_attachments((), requires_web_reference=True)
+    intent = MediaIntent(media_requested=True, requires_web_reference=True)
     async with (
         _temporary_plugin(
             config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
@@ -5182,7 +5180,7 @@ async def test_native_images_cannot_bypass_required_reference_edit(local_modules
         ),
         _native_image_turn(local_modules, session) as turn,
     ):
-        await _generate_native_turn(local_modules, session, turn, references=references)
+        await _generate_native_turn(local_modules, session, turn, media_intent=intent)
         assert turn.resolution.outcome == "declined"
         assert turn.state.confirmed_media_deliveries == 0
         assert turn.history == []
@@ -5287,3 +5285,86 @@ async def test_explicit_silence_discards_unsent_native_candidate_without_forcing
         assert turn.history == []
     assert session.sent == []
     assert len(payloads) == 1
+
+
+@pytest.mark.asyncio
+async def test_native_inspection_continuation_carries_pixels_after_all_matched_tool_results(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session = _DeliveryToolSession()
+    inputs = ImageInputs(attachment_root=tmp_path)
+    inputs.supports_image_input = True
+    pixels = _PNG_BYTES + b"authoritative-original"
+    image_ref = inputs.register_bytes(session, source="forward", key=("bundle", 2, 1), data=pixels)
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(
+                tool_calls=[
+                    _tool_call("inspect-first", "inspect_image", {"image_ref": image_ref}),
+                    _tool_call("inspect-again", "inspect_image", {"image_ref": image_ref}),
+                ]
+            ),
+            _model_response(tool_calls=[_tool_call("clock", "get_local_time", {})]),
+            _model_response("I inspected the original forwarded image."),
+        ],
+    )
+
+    async def unexpected_fallback(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("Visual model inspection must use original pixels, not a description")
+
+    async def get_local_time() -> str:
+        return "12:00"
+
+    monkeypatch.setattr(local_modules.inspection_tools, "describe_image_bytes", unexpected_fallback)
+    try:
+        async with _temporary_plugin() as harness:
+            local_modules.inspection_tools.register_inspect_image(
+                harness.dispatcher,
+                local_modules.config.LLMChatConfig(),
+                lambda: None,
+            )
+            register = importlib.import_module("plugins.llm_chat.tools._registration").register_tool
+            register(harness.dispatcher, get_local_time)
+            with (
+                image_inputs_scope(inputs),
+                llm_chat_context_scope(_tool_context(session)),
+                llm_chat_tool_trace_scope(ToolTraceRecorder()),
+                local_modules.agno_compat.agno_delivery_tool_scope(),
+            ):
+                response = await LLMService().generate("Inspect the forwarded image.", model="test-model")
+                assert inputs.drain_inspections() == ()
+        assert response.content == "I inspected the original forwarded image."
+        assert len(payloads) == 3
+        declaration = next(
+            tool["function"] for tool in payloads[0]["tools"] if tool["function"]["name"] == "inspect_image"
+        )
+        assert set(declaration["parameters"]["properties"]) == {"image_ref"}
+        assert declaration["parameters"]["required"] == ["image_ref"]
+        results = _tool_messages(payloads[1])
+        assert {result["tool_call_id"] for result in results} == {"inspect-first", "inspect-again"}
+        assert all(json.loads(result["content"])["ok"] for result in results)
+        assert all("data:image/" not in result["content"] for result in results)
+        expected_url = "data:image/png;base64," + base64.b64encode(pixels).decode("ascii")
+        for payload in payloads[1:]:
+            observations = [
+                (index, message)
+                for index, message in enumerate(payload["messages"])
+                if message["role"] == "user" and isinstance(message.get("content"), list)
+            ]
+            assert len(observations) == 1
+            observation_index, observation = observations[0]
+            image_parts = [part for part in observation["content"] if part.get("type") == "image_url"]
+            assert [part["image_url"]["url"] for part in image_parts] == [expected_url]
+            assert image_ref in json.dumps(observation["content"])
+            completed = {
+                message["tool_call_id"]
+                for message in payload["messages"][:observation_index]
+                if message["role"] == "tool"
+            }
+            assert completed >= {"inspect-first", "inspect-again"}
+        assert session.sent == []
+    finally:
+        await inputs.aclose()

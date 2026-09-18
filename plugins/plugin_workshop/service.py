@@ -333,13 +333,30 @@ class PluginWorkshopService(Service):
         self._ensure_running()
         return await asyncio.to_thread(self.store.list_versions, plugin_name, actor)
 
-    async def detail(self, plugin_name: str, version: int, actor: Actor) -> VersionRecord:
+    async def list_revisions(
+        self, actor: Actor, *, query_scope: int, plugin_name: str = "", limit: int = 10, offset: int = 0
+    ) -> list[VersionRecord]:
         self._ensure_running()
-        return await asyncio.to_thread(self.store.get_version, plugin_name, version, actor)
+        return await asyncio.to_thread(
+            self.store.list_revisions,
+            actor,
+            query_scope=query_scope,
+            plugin_name=plugin_name,
+            limit=limit,
+            offset=offset,
+        )
 
-    async def source(self, plugin_name: str, version: int, actor: Actor) -> dict[str, str]:
+    async def detail(
+        self, plugin_name: str, version: int, actor: Actor, *, query_scope: int | None = None
+    ) -> VersionRecord:
         self._ensure_running()
-        return await asyncio.to_thread(self.store.read_files, plugin_name, version, actor)
+        return await asyncio.to_thread(self.store.get_version, plugin_name, version, actor, query_scope=query_scope)
+
+    async def source(
+        self, plugin_name: str, version: int, actor: Actor, *, query_scope: int | None = None
+    ) -> dict[str, str]:
+        self._ensure_running()
+        return await asyncio.to_thread(self.store.read_files, plugin_name, version, actor, query_scope=query_scope)
 
     async def approve(self, plugin_name: str, version: int, source_hash: str, actor: Actor) -> VersionRecord:
         self._require_admin(actor)

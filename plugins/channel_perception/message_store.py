@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
+from dataclasses import asdict
 
 from sqlalchemy import delete, select, update
 from entari_plugin_database import get_session
@@ -42,6 +44,9 @@ async def _record_message(observation: MessageObservation) -> None:
             "content": observation.message.content,
             "reply_to_message_id": observation.message.reply_to_message_id,
             "image_count": observation.message.image_count,
+            "mentions_json": json.dumps(
+                [asdict(item) for item in observation.message.mentions], ensure_ascii=False, separators=(",", ":")
+            ),
             "directed_to_bot": observation.directed_to_bot,
             "is_command": observation.is_command,
             "is_bot": observation.is_bot,
@@ -71,6 +76,7 @@ async def _mutate_message(mutation: MessageMutation) -> None:
             content="",
             reply_to_message_id="",
             image_count=0,
+            mentions_json=None,
             deleted_at=mutation.observed_at,
         )
     elif mutation.message is not None:
@@ -78,6 +84,9 @@ async def _mutate_message(mutation: MessageMutation) -> None:
             content=mutation.message.content,
             reply_to_message_id=mutation.message.reply_to_message_id,
             image_count=mutation.message.image_count,
+            mentions_json=json.dumps(
+                [asdict(item) for item in mutation.message.mentions], ensure_ascii=False, separators=(",", ":")
+            ),
             deleted_at=None,
         )
     async with get_session() as session:

@@ -22,7 +22,7 @@ _MAX_INTERVAL_HARD_CEILING = 5.0
 _TRAILING_END_OF_RESPONSE = re.compile(rf"(?:\s*{re.escape(_END_OF_RESPONSE)})+\s*$")
 _INTERNAL_PARTICIPANT_REF = re.compile(r"(?<!\w)participant_[0-9a-f]{10}(?!\w)", re.IGNORECASE)
 _INTERNAL_IMAGE_REF = re.compile(
-    r"(?<!\w)(?:web_ref_[0-9a-f]{24}|(?:input|reference|output)_[0-9a-f]{32})(?!\w)",
+    r"(?<!\w)(?:web_ref_[0-9a-f]{24}|(?:image|message|page|input|reference|output)_[0-9a-f]{32})(?!\w)",
     re.IGNORECASE,
 )
 _PREPARED_MEDIA_REF = re.compile(r"(?<!\w)media_[0-9a-f]{32}(?!\w)", re.IGNORECASE)

@@ -14,7 +14,7 @@ from dataclasses import replace
 
 import pytest
 from sqlalchemy import select
-from arclet.entari import Image, Session
+from arclet.entari import Session
 from arclet.entari.config import EntariConfig
 
 if not hasattr(EntariConfig, "instance"):
@@ -51,6 +51,7 @@ from plugins.llm_chat.models import (
 from plugins.llm_chat.identity import ChatIdentity
 from plugins.llm_chat.agent_admin import AgentAdminService
 from plugins.llm_chat.agent_events import load_event_payload
+from plugins.llm_chat.image_inputs import ImageInputs
 from plugins.llm_chat.agent_context import AgentAccessContext
 from plugins.llm_chat.core.tool_trace import ToolTraceRecorder
 from plugins.llm_chat.session_manager import ScopeIdentity, BaselineFingerprint
@@ -74,6 +75,7 @@ async def agent_store(monkeypatch: pytest.MonkeyPatch):
         session_manager,
         personality,
         session_inspection,
+        context_builder,
     ):
         monkeypatch.setattr(module, "get_session", session_factory)
     try:
@@ -712,6 +714,7 @@ async def test_running_turn_exposes_recorded_context_without_replaying_operator_
         current_content=None,
         forwarded_messages=(),
         mentioned_participants=(),
+        image_inputs=ImageInputs(),
         input_attachments=[
             {
                 "attachment_ref": "input_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -726,7 +729,7 @@ async def test_running_turn_exposes_recorded_context_without_replaying_operator_
     )
 
     assert appended == [("channel", "alice", "Alice", "user", "hello")]
-    assert prepared.image_edit_references.persona_reference_path == "persona/Pepe.png"
+    assert prepared.image_inputs.persona_reference_path == "persona/Pepe.png"
     assert "image_url" not in json.dumps(prepared.chat_messages)
     assert "persona/Pepe.png" not in prepared.system
 
@@ -861,22 +864,21 @@ async def test_user_input_images_are_copied_to_private_audit_attachments(tmp_pat
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
     )
 
-    class _ImageSession:
-        async def download(self, src: str) -> bytes:
-            assert src in {"local://direct", "local://quoted"}
-            return png
-
-    attachments = await agent_attachments.capture_user_input_images(
-        cast(Session, _ImageSession()),
-        [
-            (Image.of(url="local://direct"), False),
-            (Image.of(url="local://quoted"), True),
-        ],
-        root=tmp_path,
+    session = cast(
+        Session,
+        SimpleNamespace(
+            account=SimpleNamespace(platform="test", self_id="bot"),
+            channel=SimpleNamespace(id="channel"),
+            event=SimpleNamespace(user=SimpleNamespace(id="user"), message=None),
+        ),
     )
+    inputs = ImageInputs(attachment_root=tmp_path)
+    inputs.register_bytes(session, source="direct", key="direct", data=png, index=1)
+    inputs.register_bytes(session, source="quoted", key="quoted", data=png, index=2)
+    attachments = await agent_attachments.capture_user_input_images(session, inputs)
 
     assert [item["source"] for item in attachments] == ["direct", "quoted"]
-    assert all("src" not in item and "path" not in item for item in attachments)
+    assert all("src" not in item and "path" not in item and "image_ref" not in item for item in attachments)
     for item in attachments:
         path = agent_attachments.resolve_user_input_attachment(
             cast(str, item["attachment_ref"]),
@@ -885,7 +887,7 @@ async def test_user_input_images_are_copied_to_private_audit_attachments(tmp_pat
         )
         assert path.read_bytes() == png
 
-    agent_attachments.remove_user_input_attachments(attachments, root=tmp_path)
+    await inputs.aclose()
     assert list(tmp_path.iterdir()) == []
 
 
@@ -896,23 +898,23 @@ async def test_cancelled_user_image_capture_removes_completed_files(tmp_path: Pa
     )
     blocker = asyncio.Event()
 
-    class _CancelledSession:
-        async def download(self, src: str) -> bytes:
-            if src == "local://direct":
-                return png
-            await blocker.wait()
-            return png
-
-    task = asyncio.create_task(
-        agent_attachments.capture_user_input_images(
-            cast(Session, _CancelledSession()),
-            [
-                (Image.of(url="local://direct"), False),
-                (Image.of(url="local://quoted"), True),
-            ],
-            root=tmp_path,
-        )
+    session = cast(
+        Session,
+        SimpleNamespace(
+            account=SimpleNamespace(platform="test", self_id="bot"),
+            channel=SimpleNamespace(id="channel"),
+            event=SimpleNamespace(user=SimpleNamespace(id="user"), message=None),
+        ),
     )
+    inputs = ImageInputs(attachment_root=tmp_path)
+    inputs.register_bytes(session, source="direct", key="direct", data=png, index=1)
+
+    async def load() -> bytes:
+        await blocker.wait()
+        return png
+
+    inputs.register(session, source="quoted", key="quoted", load=load, index=2)
+    task = asyncio.create_task(agent_attachments.capture_user_input_images(session, inputs))
     for _ in range(100):
         if list(tmp_path.iterdir()):
             break
@@ -921,6 +923,7 @@ async def test_cancelled_user_image_capture_removes_completed_files(tmp_path: Pa
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    await inputs.aclose()
     assert list(tmp_path.iterdir()) == []
 
 

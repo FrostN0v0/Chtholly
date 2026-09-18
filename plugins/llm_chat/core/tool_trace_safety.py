@@ -20,7 +20,7 @@ _MAX_NESTING_DEPTH = 4
 _REDACTED = "[REDACTED]"
 _EPHEMERAL_REFERENCE = re.compile(
     r"(?<!\w)(?:media_[0-9a-f]{32}|participant_[0-9a-f]{10}|web_ref_[0-9a-f]{24}|"
-    r"(?:input|reference|output)_[0-9a-f]{32})(?!\w)",
+    r"(?:image|message|page|input|reference|output)_[0-9a-f]{32})(?!\w)",
     re.IGNORECASE,
 )
 _MENTION_MARKUP = re.compile(r"<at\b[^>]*?/?>", re.IGNORECASE)
@@ -34,6 +34,11 @@ _SENSITIVE_KEY_PARTS = (
     "password",
     "secret",
     "media_ref",
+    "image_ref",
+    "message_ref",
+    "reply_to_ref",
+    "next_cursor",
+    "before_cursor",
     "participant_ref",
     "participant_id",
     "user_id",

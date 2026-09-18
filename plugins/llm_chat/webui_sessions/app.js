@@ -629,7 +629,7 @@ function toolCard(call, index) {
   content.append(panels, records);
   if (call.evidence != null) content.append(rawDetails("执行证据摘要", call.evidence));
   if (call.images?.length) content.append(node("p", "muted", "工具附件（可能含输入 / 参考图，不等同于已送达图片）"));
-  appendImages(content, call);
+  appendImages(content, { event_ref: call.result_event_ref, images: call.images });
   content.append(rawDetails("执行标识", { execution_ref: call.execution_ref, call_event_ref: call.call_event_ref, result_event_ref: call.result_event_ref }));
   return item;
 }
@@ -781,6 +781,14 @@ function appendImages(target, event) {
   if (!event?.images?.length || typeof event.event_ref !== "string") return;
   const grid = node("div", "images");
   for (const image of event.images) {
+    if (image.status === "unrecorded" || image.status === "unavailable") {
+      const label = image.name || image.label || "Image";
+      const status = image.status === "unavailable" ? "\u539f\u56fe\u4e0d\u53ef\u7528" : "\u56fe\u7247\u5ba1\u8ba1\u672a\u8bb0\u5f55";
+      const placeholder = node("div", "image-button");
+      placeholder.append(node("span", "muted", status), node("span", "muted", short(label, 40)));
+      grid.append(placeholder);
+      continue;
+    }
     let source;
     try {
       if (typeof image.url !== "string") continue;

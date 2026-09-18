@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime
 
 from launart import Launart, Service
-from arclet.entari import Session
+from arclet.entari import Session, ChannelType
 from launart.status import Phase
 from arclet.entari.logger import log
 
@@ -15,6 +15,7 @@ from .config import ChannelPerceptionConfig
 from .queries import (
     get_participant,
     find_participants,
+    get_exact_message,
     get_ambient_context,
     get_recent_messages,
     get_message_image_target,
@@ -29,6 +30,7 @@ from .schemas import (
     ParticipantSnapshot,
     ParticipantObservation,
 )
+from .migration import initialize_message_store
 from .message_store import store_observation
 from .participant_store import (
     upsert_participant,
@@ -176,6 +178,11 @@ class ChannelPerceptionService(Service):
             )
         )
 
+    def _history_scope(self, session: Session) -> PerceptionScope:
+        if getattr(session.channel, "type", None) == ChannelType.DIRECT:
+            raise ValueError("Channel history is unavailable in private conversations")
+        return scope_from_session(session)
+
     async def recent_messages(
         self,
         session: Session,
@@ -186,15 +193,20 @@ class ChannelPerceptionService(Service):
     ) -> tuple[list[MessageView], str]:
         await self.flush()
         return await get_recent_messages(
-            scope_from_session(session),
+            self._history_scope(session),
             limit=limit,
             before_cursor=before_cursor,
             participant_ref=participant_ref,
+            config=self.config,
         )
+
+    async def exact_message(self, session: Session, cursor: str) -> MessageView | None:
+        await self.flush()
+        return await get_exact_message(self._history_scope(session), cursor, config=self.config)
 
     async def message_image_sources(self, session: Session, cursor: str) -> list[str]:
         await self.flush()
-        target = await get_message_image_target(scope_from_session(session), cursor)
+        target = await get_message_image_target(self._history_scope(session), cursor, config=self.config)
         if target is None:
             return []
         message_id, image_count = target
@@ -213,10 +225,11 @@ class ChannelPerceptionService(Service):
     ) -> list[dict[str, object]]:
         await self.flush()
         return await get_ambient_context(
-            scope_from_session(session),
+            self._history_scope(session),
             max_messages=max_messages,
             max_chars=max_chars,
             exclude_message_id=exclude_message_id,
+            config=self.config,
         )
 
     async def _refresh_matching_participants(
@@ -304,6 +317,7 @@ class ChannelPerceptionService(Service):
 
     async def launch(self, manager: Launart):
         async with self.stage("preparing"):
+            await initialize_message_store()
             self._worker = asyncio.create_task(self._run_worker(), name="channel-perception-writer")
         async with self.stage("blocking"):
             await manager.status.wait_for_sigexit()

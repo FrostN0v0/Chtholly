@@ -10,6 +10,7 @@ from typing_extensions import NotRequired
 
 ForwardSource = Literal["direct", "quoted"]
 ForwardedSpeakerRole = Literal["assistant", "participant", "unknown"]
+MAX_FORWARD_IMAGES = 32
 ForwardPartKind = Literal[
     "text",
     "image",
@@ -29,6 +30,12 @@ class ForwardedMessage(TypedDict):
     content: str
     source: ForwardSource
     speaker_role: NotRequired[ForwardedSpeakerRole]
+    node_ref: NotRequired[str]
+    speaker_ref: NotRequired[str]
+    parent_node_ref: NotRequired[str]
+    node_index: NotRequired[int]
+    depth: NotRequired[int]
+    images: NotRequired[list[dict[str, object]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +49,7 @@ class ForwardPart:
 class ForwardNode:
     speaker: str
     parts: tuple[ForwardPart, ...]
+    speaker_id: str = ""
 
 
 def _as_mapping(value: object) -> Mapping[str, object] | None:
@@ -162,7 +170,7 @@ def parse_forward_payload(payload: object) -> list[ForwardNode]:
             text = _compact(raw_fallback)
             if text:
                 parts.append(ForwardPart("text", text=text))
-        nodes.append(ForwardNode(_speaker(sender), tuple(parts)))
+        nodes.append(ForwardNode(_speaker(sender), tuple(parts), _first_text(sender or {}, "user_id", "uin", "id")))
     return nodes
 
 
@@ -231,12 +239,25 @@ def render_forward_node(
     return {"speaker": node.speaker, "content": content, "source": source}
 
 
+def forwarded_storage_views(messages: Sequence[ForwardedMessage]) -> list[ForwardedMessage]:
+    """Preserve source attribution and positions without persisting executable image refs."""
+    stored: list[ForwardedMessage] = []
+    for message in messages:
+        view: ForwardedMessage = {**message}
+        if "images" in message:
+            view["images"] = [
+                {key: value for key, value in image.items() if key != "image_ref"} for image in message["images"]
+            ]
+        stored.append(view)
+    return stored
+
+
 def render_forwarded_storage(content: str, forwarded_messages: Sequence[ForwardedMessage]) -> str:
     """Persist outer text and quoted forwarded data without losing attribution."""
     if not forwarded_messages:
         return content
     return json.dumps(
-        {"content": content, "forwarded_messages": list(forwarded_messages)},
+        {"content": content, "forwarded_messages": forwarded_storage_views(forwarded_messages)},
         ensure_ascii=False,
         separators=(",", ":"),
     )

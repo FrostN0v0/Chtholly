@@ -29,6 +29,15 @@ class TTSSynthesisSelection:
 
 
 @dataclass(frozen=True, slots=True)
+class TTSDefaultSelectionError:
+    """Public diagnostic without configured values or provider error details."""
+
+    code: str
+    field: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class TTSVoiceCatalog:
     provider: str
     voices: tuple[TTSVoiceOption, ...]
@@ -39,6 +48,7 @@ class TTSVoiceCatalog:
     speed_min: float
     speed_max: float
     speed_default: float
+    default_selection_error: TTSDefaultSelectionError | None = None
 
 
 @dataclass(frozen=True, slots=True)

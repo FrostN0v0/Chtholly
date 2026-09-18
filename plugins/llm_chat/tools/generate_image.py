@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import cast
 import asyncio
 from dataclasses import field, dataclass
 
@@ -11,6 +12,7 @@ from arclet.entari.plugin.model import PluginDispatcher
 
 from ._rendering import WarningSink, prepare_image_bytes
 from ..core.types import JSONType
+from ..image_inputs import ImageInputError, current_image_inputs
 from ._registration import register_tool
 from ..core.delivery import DeliveryError
 from ._image_provider import (
@@ -27,8 +29,8 @@ from ._image_provider import (
     normalize_output_compression,
 )
 from ..core.tool_trace import record_tool_evidence
-from ..image_edit_refs import current_image_edit_references
 from ..agent_attachments import store_agent_attachment
+from ..core.media_delivery import MAX_IMAGE_REFERENCES, ImageProvenance, current_media_requirements
 
 
 @dataclass(slots=True)
@@ -47,7 +49,7 @@ class ImageGenerationToolContext:
 
 
 _REFERENCE_GENERATION_INSTRUCTION = (
-    "Use the provided input image as the configured persona identity reference for a new image. "
+    "Use the provided images as visual identity and appearance references for a new image. "
     "Preserve recognizable face, hair, clothing, headwear and accessories unless the requested prompt changes them. "
     "Create the new pose, expression, composition and background requested below; do not copy unrelated source text, "
     "logos, watermark or background unless requested. Produce exactly one finished image and no explanatory text "
@@ -66,37 +68,51 @@ def register_generate_image(
         prompt: str,
         size: ImageSize = DEFAULT_IMAGE_SIZE,
         use_persona_reference: bool = False,
+        reference_image_refs: list[str] = cast(list[str], None),
     ) -> dict[str, JSONType]:
         """Generate a new image, optionally using the configured persona's actual reference pixels.
 
         For an image of yourself/current persona, set use_persona_reference=true when runtime_context reports a
         configured reference. The runtime uploads the original image to the dedicated image model. Do not redescribe
         it or supply a path. Leave false for unrelated subjects. Missing requested references fail without text-only
-        fallback. Supplied user-image edits and real web-reference edits use edit_image instead. Prepare only; pass
-        the returned media_ref to send_msg for delivery.
+        fallback. Use edit_image only when modifying a specific source image. For new creations based on real web
+        images, pass matched refs from capture_web_reference in reference_image_refs; no source upload is needed.
+        Prepare only; pass the returned media_ref to send_msg for delivery.
 
         Args:
             prompt: Visual instructions for the new image; no secrets, internal IDs, paths or unrelated history.
             size: Output size: 1024x1024, 1536x1024, or 1024x1536.
             use_persona_reference: Use the current persona's configured reference as actual image input.
+            reference_image_refs: Zero to four authorized image_refs uploaded as real visual references.
         """
-        edit_references = current_image_edit_references()
-        if edit_references is not None and edit_references.requires_image_edit:
-            if edit_references.requires_web_reference:
-                raise DeliveryError(
-                    "this turn requires a captured web reference; use capture_web_reference followed by edit_image"
-                )
-            raise DeliveryError("this turn requires editing the supplied image; use edit_image")
+        inputs = current_image_inputs()
+        requirements = current_media_requirements()
+        if requirements is not None and requirements.intent.requires_source_edit:
+            raise DeliveryError("this turn requires editing a specific source image; use edit_image")
         normalized_prompt = normalize_image_prompt(prompt)
         normalized_size = normalize_image_size(size)
         compression = normalize_output_compression(runtime.output_compression)
         try:
             model = runtime.resolve_model(session.channel.id)
-            persona_reference = None
-            if use_persona_reference:
-                if edit_references is None:
-                    raise DeliveryError("persona references require an active llm_chat generation")
-                persona_reference = edit_references.resolve_persona_reference()
+            requested_refs = [] if reference_image_refs is None else reference_image_refs
+            if not isinstance(requested_refs, list) or not all(isinstance(item, str) for item in requested_refs):
+                raise DeliveryError("reference_image_refs must be a list of authorized image references")
+            if len(requested_refs) > MAX_IMAGE_REFERENCES:
+                raise DeliveryError(f"reference_image_refs exceeds the configured limit ({MAX_IMAGE_REFERENCES})")
+            if (requested_refs or use_persona_reference) and inputs is None:
+                raise DeliveryError("image references require an active llm_chat generation")
+            references = []
+            if inputs is not None:
+                references = [await inputs.resolve(session, ref, purpose="reference") for ref in requested_refs]
+                if use_persona_reference:
+                    references.append(await inputs.resolve_persona(session))
+            provenance = ImageProvenance(
+                "generated",
+                reference_image_refs=tuple(reference.image_ref for reference in references),
+                reference_sources=tuple(reference.source for reference in references),
+            )
+            if requirements is not None and not requirements.accepts(provenance):
+                raise DeliveryError("this turn requires at least one matched web reference from capture_web_reference")
             request: dict[str, object] = {
                 "model": model.name,
                 "prompt": normalized_prompt,
@@ -110,35 +126,67 @@ def register_generate_image(
                 **image_provider_extra(model),
             }
             provider = runtime.generate
-            if persona_reference is None:
+            if not references:
                 request.update(output_format=runtime.output_format, output_compression=compression)
             else:
                 provider = runtime.edit
                 request.update(
                     prompt=f"{_REFERENCE_GENERATION_INSTRUCTION}{normalized_prompt}",
-                    image=[persona_reference.data],
+                    image=[reference.data for reference in references],
                     input_fidelity="high",
                     response_format="b64_json",
                 )
-                record_tool_evidence({"attachments": [persona_reference.attachment], "reference_count": 1})
+                record_tool_evidence(
+                    {
+                        "attachments": [
+                            {
+                                **inputs.audit_view(reference.image_ref),
+                                "label": f"Visual reference {index} sent to image model",
+                                "provider_index": index,
+                            }
+                            for index, reference in enumerate(references, start=1)
+                        ]
+                        if inputs is not None
+                        else [],
+                        "reference_count": len(references),
+                    }
+                )
             async with runtime.semaphore:
                 response = await asyncio.wait_for(provider(**request), timeout=runtime.timeout_seconds)
             data = await image_response_bytes(session, response)
-            if persona_reference is not None:
-                output_attachment = store_agent_attachment(
-                    data,
-                    kind="output",
-                    source="image_generation",
-                    index=1,
-                    label="Prepared reference-conditioned image",
-                    root=edit_references.attachment_root if edit_references is not None else None,
-                )
-                record_tool_evidence({"attachments": [output_attachment]})
+            if references:
+                try:
+                    output_attachment = store_agent_attachment(
+                        data,
+                        kind="output",
+                        source="image_generation",
+                        index=1,
+                        label="Prepared reference-conditioned image",
+                        root=inputs.attachment_root if inputs is not None else None,
+                    )
+                except Exception as exc:
+                    runtime.warn(f"generate_image output audit unavailable: {type(exc).__name__}")
+                    record_tool_evidence(
+                        {
+                            "attachments": [
+                                {
+                                    "kind": "output",
+                                    "source": "image_generation",
+                                    "index": 1,
+                                    "status": "ready",
+                                    "audit_status": "unrecorded",
+                                    "label": "Prepared reference-conditioned image",
+                                }
+                            ]
+                        }
+                    )
+                else:
+                    record_tool_evidence({"attachments": [output_attachment]})
         except asyncio.CancelledError:
             raise
         except DeliveryError:
             raise
-        except ValueError as exc:
+        except (ValueError, ImageInputError) as exc:
             raise DeliveryError(str(exc)) from None
         except asyncio.TimeoutError:
             runtime.warn("generate_image failed: timeout")
@@ -152,6 +200,7 @@ def register_generate_image(
             data,
             warn=runtime.warn,
             tool_name="generate_image",
+            provenance=provenance,
         )
 
     return register_tool(dispatcher, generate_image)

@@ -31,11 +31,10 @@ from .vision import VISION_DESCRIBE_TIMEOUT, vision_completion
 from .tools.web import register_web_access_tools
 from .core.types import JSONType
 from .image_tags import pick_image
-from .meme_store import import_meme_image
+from .meme_store import import_meme_snapshot
 from .perception import get_channel_perception
 from .tools._tts import TTSServiceLike
 from .agno_compat import register_llm_chat_tool
-from .chat_context import collect_message_images
 from .core.delivery import (
     DeliveryError as DeliveryError,
     DeliveryState as DeliveryState,
@@ -57,6 +56,7 @@ from .tools.finish_turn import register_finish_turn
 from .tools.pin_context import register_pin_context
 from .tools.markdown2pic import register_markdown2pic
 from .tools._registration import register_tool
+from .tools.inspect_image import register_inspect_image
 from .tools.list_sessions import register_list_sessions
 from .tools.prepare_audio import AudioToolContext, register_prepare_audio
 from .tools.prepare_image import ImageToolContext, register_prepare_image
@@ -65,7 +65,9 @@ from .tools.generate_image import ImageGenerationToolContext, register_generate_
 from .tools.get_local_time import LocalTimeToolContext, register_get_local_time
 from .tools.list_tts_voices import TTSVoiceToolContext, register_list_tts_voices
 from .tools.read_agent_event import register_read_agent_event
+from .tools.prepare_image_ref import register_prepare_image_ref
 from .tools.synthesize_speech import SpeakToolContext, register_synthesize_speech
+from .tools.get_channel_avatar import register_get_channel_avatar
 from .tools.read_tool_execution import register_read_tool_execution
 from .tools.screenshot_web_page import (
     WebScreenshotToolContext,
@@ -79,13 +81,10 @@ from .tools.capture_web_reference import (
     WebReferenceToolContext,
     register_capture_web_reference,
 )
-from .tools.prepare_channel_image import ChannelImageToolContext, register_prepare_channel_image
 from .tools.read_channel_messages import register_read_channel_messages
-from .tools.describe_channel_image import ChannelImageDescriptionContext, register_describe_channel_image
 from .tools.prepare_external_media import ExternalImageToolContext, register_prepare_external_media
 from .tools.prepare_merged_forward import register_prepare_merged_forward
 from .tools.find_channel_participants import register_find_channel_participants
-from .tools.describe_channel_participant_avatar import register_describe_channel_participant_avatar
 
 DINGGONG_DIR = AUDIO_DIR / "dinggong"
 RENDER_TEMPLATE_DIR = Path(__file__).resolve().parent / "render_templates"
@@ -268,27 +267,12 @@ read_channel_messages = register_read_channel_messages(
     config,
 )
 registered_tools.append("read_channel_messages")
-channel_image_description_context = ChannelImageDescriptionContext(
-    config=config,
-    get_perception=get_channel_perception,
-)
-describe_channel_image = register_describe_channel_image(tools, channel_image_description_context)
-registered_tools.append("describe_channel_image")
-
-
-channel_image_context = ChannelImageToolContext(
-    get_perception=get_channel_perception,
-    warn=_LOGGER.warning,
-)
-prepare_channel_image = register_prepare_channel_image(tools, channel_image_context)
-registered_tools.append("prepare_channel_image")
-
-describe_channel_participant_avatar = register_describe_channel_participant_avatar(
-    tools,
-    get_channel_perception,
-    config,
-)
-registered_tools.append("describe_channel_participant_avatar")
+inspect_image = register_inspect_image(tools, config, get_channel_perception)
+registered_tools.append("inspect_image")
+prepare_image_ref = register_prepare_image_ref(tools)
+registered_tools.append("prepare_image_ref")
+get_channel_avatar = register_get_channel_avatar(tools, get_channel_perception)
+registered_tools.append("get_channel_avatar")
 
 audio_context = AudioToolContext(audio_dir=DINGGONG_DIR)
 if registered := register_prepare_audio(tools, audio_context):
@@ -352,8 +336,7 @@ registered_tools.extend(register_workshop_tools(tools, enabled=config.plugin_wor
 
 tag_image_context = TagImageToolContext(
     config=config,
-    collect_images=collect_message_images,
-    import_image=import_meme_image,
+    import_snapshot=import_meme_snapshot,
 )
 tag_image = register_tag_image(tools, tag_image_context)
 registered_tools.append("tag_image")

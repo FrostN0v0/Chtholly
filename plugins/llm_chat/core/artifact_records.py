@@ -58,7 +58,7 @@ def project_artifact_arguments(tool_name: str, arguments: Mapping[str, object]) 
             "source_chars": source_chars,
             "deleted_file_count": len(deleted) if isinstance(deleted, list) else 0,
         }
-    return _selected(arguments, ("artifact_ref", "limit", "offset", "max_chars"))
+    return _selected(arguments, ("artifact_ref", "mode", "limit", "offset", "max_chars"))
 
 
 def project_artifact_result(result: object) -> dict[str, JSONType]:

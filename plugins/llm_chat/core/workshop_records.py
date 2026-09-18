@@ -7,7 +7,9 @@ from collections.abc import Mapping
 from .types import JSONType
 from .tool_trace_safety import sanitize_json, parse_json_object
 
-WORKSHOP_TOOLS = frozenset({"submit_plugin", "activate_plugin", "rollback_plugin"})
+WORKSHOP_TOOLS = frozenset(
+    {"submit_plugin", "activate_plugin", "rollback_plugin", "list_workshop_plugins", "read_workshop_plugin"}
+)
 _SUMMARY_FIELDS = (
     "plugin_name",
     "title",
@@ -22,13 +24,21 @@ _SUMMARY_FIELDS = (
     "workshop_effect",
     "failed_checks",
     "code",
+    "mode",
+    "created_at",
+    "offset",
+    "next_offset",
+    "file_count",
+    "total_chars",
+    "size",
+    "content_sha256",
 )
 
 
 def project_workshop_arguments(tool_name: str, arguments: Mapping[str, object]) -> dict[str, JSONType]:
     result = {
         key: sanitize_json(arguments[key], max_text=128)
-        for key in ("plugin_name", "version", "source_hash")
+        for key in ("plugin_name", "version", "source_hash", "mode", "offset", "limit", "max_chars", "content_sha256")
         if key in arguments
     }
     if tool_name == "submit_plugin":
@@ -46,4 +56,13 @@ def project_workshop_result(result: object) -> dict[str, JSONType]:
     parsed = parse_json_object(result)
     if parsed is None:
         return {}
-    return {key: sanitize_json(parsed[key], max_text=128) for key in _SUMMARY_FIELDS if key in parsed}
+    projected = {key: sanitize_json(parsed[key], max_text=128) for key in _SUMMARY_FIELDS if key in parsed}
+    items = parsed.get("plugins")
+    if isinstance(items, list):
+        projected["plugins"] = [
+            {key: sanitize_json(item[key], max_text=128) for key in _SUMMARY_FIELDS if key in item}
+            for item in items[:50]
+            if isinstance(item, Mapping)
+        ]
+        projected["returned_count"] = len(items)
+    return projected

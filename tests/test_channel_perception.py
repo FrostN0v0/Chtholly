@@ -156,7 +156,7 @@ def test_normalize_message_preserves_safe_structure_and_bounds() -> None:
 @pytest.mark.asyncio
 async def test_message_image_sources_are_resolved_on_demand_within_current_scope(perception_store) -> None:
     scope = _scope()
-    observed_at = datetime(2026, 8, 17, 9, 0, 0)
+    observed_at = datetime.utcnow() - timedelta(hours=1)
     config = ChannelPerceptionConfig(retention_days=7, max_messages_per_channel=20)
     await message_store_module.store_observation(
         MessageObservation(
@@ -216,7 +216,7 @@ async def test_message_image_sources_are_resolved_on_demand_within_current_scope
 @pytest.mark.asyncio
 async def test_identity_name_change_and_message_lifecycle_are_consistent(perception_store) -> None:
     scope = _scope()
-    started = datetime(2026, 8, 17, 10, 0, 0)
+    started = datetime.utcnow() - timedelta(hours=1)
     config = ChannelPerceptionConfig(retention_days=7, max_messages_per_channel=20)
 
     await message_store_module.store_observation(
@@ -298,7 +298,7 @@ async def test_identity_name_change_and_message_lifecycle_are_consistent(percept
             "display_name": "Second Card",
             "platform_nickname": "Alice",
             "group_card": "Second Card",
-            "last_seen_at": "2026-08-17T10:03:00Z",
+            "last_seen_at": (started + timedelta(minutes=3)).isoformat(timespec="seconds") + "Z",
             "avatar_available": True,
         }
     ]
@@ -328,7 +328,7 @@ async def test_participant_identity_uses_group_card_when_platform_nickname_is_mi
             _scope(),
             card="Group Card",
             nickname="",
-            observed_at=datetime(2026, 8, 17, 10, 25, 0),
+            observed_at=datetime.utcnow() - timedelta(minutes=30),
         )
     )
 
@@ -437,7 +437,7 @@ async def test_participant_search_does_not_turn_unsupported_roster_into_false_ab
 @pytest.mark.asyncio
 async def test_concurrent_participant_upserts_are_idempotent(perception_store) -> None:
     scope = _scope()
-    observed_at = datetime(2026, 8, 17, 10, 30, 0)
+    observed_at = datetime.utcnow() - timedelta(minutes=30)
     observation = _participant(scope, card="Concurrent", observed_at=observed_at)
 
     first, second = await asyncio.gather(
@@ -455,7 +455,7 @@ async def test_concurrent_participant_upserts_are_idempotent(perception_store) -
 @pytest.mark.asyncio
 async def test_avatar_cache_update_requires_current_url(perception_store) -> None:
     scope = _scope()
-    started = datetime(2026, 8, 17, 10, 45, 0)
+    started = datetime.utcnow() - timedelta(minutes=30)
     first_url = "https://example.com/old.png"
     current_url = "https://example.com/current.png"
     participant = await participant_store_module.upsert_participant(
@@ -500,7 +500,7 @@ async def test_avatar_cache_update_requires_current_url(perception_store) -> Non
 
 @pytest.mark.asyncio
 async def test_scope_isolation_and_retention_limit(perception_store) -> None:
-    started = datetime(2026, 8, 17, 11, 0, 0)
+    started = datetime.utcnow() - timedelta(minutes=30)
     primary = _scope(account_id="bot-1")
     other_account = _scope(account_id="bot-2")
     config = ChannelPerceptionConfig(retention_days=7, max_messages_per_channel=2)
@@ -546,7 +546,7 @@ async def test_scope_isolation_and_retention_limit(perception_store) -> None:
 @pytest.mark.asyncio
 async def test_participant_retention_is_bounded(perception_store) -> None:
     scope = _scope()
-    started = datetime(2026, 8, 17, 12, 0, 0)
+    started = datetime.utcnow() - timedelta(minutes=30)
     config = ChannelPerceptionConfig(
         participant_retention_days=1,
         max_participants_per_channel=2,

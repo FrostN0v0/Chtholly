@@ -10,7 +10,8 @@ import litellm
 from entari_plugin_llm.config import get_model_config
 
 from .models import ContextSession
-from .agent_events import load_event_payload, load_session_events
+from .agent_events import load_session_events
+from .context_reads import model_readable_payload
 from .core.model_audit import ADMIN_ONLY_EVENT_TYPES
 
 _HANDOFF_KEYS = (
@@ -26,7 +27,7 @@ _HANDOFF_KEYS = (
 
 
 def _event_summary(event) -> dict[str, object]:
-    payload = load_event_payload(event)
+    payload = model_readable_payload(event, compact=event.event_type not in {"user_input", "assistant_output"})
     item: dict[str, object] = {
         "event_ref": event.event_ref,
         "type": event.event_type,
@@ -40,19 +41,21 @@ def _event_summary(event) -> dict[str, object]:
         if isinstance(content, str):
             item["content"] = content[:2000]
     elif event.event_type == "assistant_tool_call":
-        item["arguments"] = payload.get("context_arguments", {})
+        item["arguments"] = payload.get("arguments", {})
     elif event.event_type == "tool_result":
-        item["result"] = payload.get("context_result", {})
+        item["result"] = payload.get("result", {})
     return item
 
 
 async def _source_events(context_session: ContextSession, max_chars: int) -> list[dict[str, object]]:
+    if context_session.status == "sealed":
+        return []
     rows = await load_session_events(context_session.id, model_visible_only=False, turn_limit=40)
     selected: list[dict[str, object]] = []
     used = 2
     for _turn, events in reversed(rows):
         for event in reversed(events):
-            if event.event_type in ADMIN_ONLY_EVENT_TYPES:
+            if event.event_type in ADMIN_ONLY_EVENT_TYPES or not event.model_visible:
                 continue
             item = _event_summary(event)
             size = len(json.dumps(item, ensure_ascii=False, separators=(",", ":"))) + 1

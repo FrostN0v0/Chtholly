@@ -23,10 +23,10 @@ from .agent_events import persist_agent_events
 from .chat_context import build_chat_messages, serialize_user_turn, requests_recent_channel_context
 from .core.compose import energy_at, compose_persona_prompt
 from .core.forward import ForwardedMessage
+from .image_inputs import ImageInputs
 from .agent_context import AgentAccessContext
 from .core.delivery import DeliveryState, normalize_delivery_limits
 from .persona.store import get_mood, append_message, delete_message
-from .channel_images import ChannelImageReferences
 from .turn_lifecycle import ActiveChatTurn
 from .context_builder import (
     requests_context_pin,
@@ -36,8 +36,8 @@ from .context_builder import (
     render_session_baseline,
     requests_archived_context,
     build_baseline_fingerprint,
+    collect_context_read_grants,
 )
-from .image_edit_refs import ImageEditReferences
 from .session_handoff import generate_session_handoff
 from .session_manager import (
     start_turn,
@@ -50,11 +50,7 @@ from .session_manager import (
 )
 from .core.agent_trace import AgentTurnRecorder
 from .core.personality import ResolvedPersona
-from .core.media_delivery import (
-    latest_user_requests_media,
-    latest_user_requests_image_edit,
-    latest_user_requests_web_image_reference,
-)
+from .core.media_delivery import MediaIntent, build_media_intent
 from .relationships.state import load_relationship_snapshot
 from .core.artifact_access import is_artifact_request
 from .core.context_snapshot import build_context_snapshot
@@ -74,8 +70,8 @@ class PreparedAgentTurn:
     media_requested: bool
     web_limits: WebAccessLimits
     delivery_state: DeliveryState
-    channel_image_references: ChannelImageReferences
-    image_edit_references: ImageEditReferences
+    image_inputs: ImageInputs
+    media_intent: MediaIntent
     lifecycle: ActiveChatTurn
     agent_events: AgentTurnRecorder
     agent_access: AgentAccessContext
@@ -91,6 +87,7 @@ async def prepare_agent_turn(
     model_name: str | None,
     model_text: str,
     raw_user_text: str,
+    image_inputs: ImageInputs,
     content: str,
     current_content: str | list[dict[str, Any]] | None,
     forwarded_messages: Sequence[ForwardedMessage],
@@ -126,6 +123,9 @@ async def prepare_agent_turn(
         ),
     )
     artifact_requested = is_artifact_request(raw_user_text)
+    media_intent = build_media_intent(raw_user_text, has_image_inputs=bool(image_inputs.input_views()))
+    if artifact_requested:
+        media_intent = MediaIntent(media_requested=media_intent.media_requested)
 
     web_limits = normalize_web_access_limits(
         config.web_search_max_calls_per_generation,
@@ -144,9 +144,7 @@ async def prepare_agent_turn(
         config.delivery_max_media_messages_per_generation,
     )
     energy = energy_at(datetime.now(timezone.utc))
-    media_requested = (
-        latest_user_requests_media(current_messages) or artifact_requested or is_artifact_request(raw_user_text, "send")
-    )
+    media_requested = media_intent.media_requested or artifact_requested or is_artifact_request(raw_user_text, "send")
     resolution = TurnResolution()
     delivery_state = DeliveryState(limits=delivery_limits)
     scope = await get_or_create_scope(await resolve_scope_identity(session))
@@ -332,6 +330,7 @@ async def prepare_agent_turn(
         agent_turn_id=agent_turn.id,
         agent_events=agent_events,
     )
+    image_inputs.persona_reference_path = persona.reference_image
     return PreparedAgentTurn(
         relation=relation,
         persona=persona,
@@ -342,16 +341,8 @@ async def prepare_agent_turn(
         media_requested=media_requested,
         web_limits=web_limits,
         delivery_state=delivery_state,
-        image_edit_references=ImageEditReferences.from_input_attachments(
-            input_attachments,
-            requires_web_reference=not artifact_requested
-            and latest_user_requests_web_image_reference(current_messages),
-            requires_image_edit=not artifact_requested
-            and bool(input_attachments)
-            and latest_user_requests_image_edit(current_messages),
-            persona_reference_path=persona.reference_image,
-        ),
-        channel_image_references=ChannelImageReferences(),
+        image_inputs=image_inputs,
+        media_intent=media_intent,
         lifecycle=lifecycle,
         agent_events=agent_events,
         relationship_snapshot=relationship_snapshot,
@@ -366,6 +357,9 @@ async def prepare_agent_turn(
             allow_context_pin=requests_context_pin(raw_user_text),
             raw_user_text=raw_user_text,
             is_operator=is_operator,
+            context_read_grants=await collect_context_read_grants(
+                context_session, selection, anchors, turn_id=agent_turn.id
+            ),
         ),
     )
 

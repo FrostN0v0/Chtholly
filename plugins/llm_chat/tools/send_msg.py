@@ -57,7 +57,7 @@ from ._message_models import (
     MentionSegment,
     MessageSegment,
 )
-from ..image_edit_refs import current_image_edit_references
+from ..core.media_delivery import current_media_requirements
 
 _ONEBOT_PLATFORMS = frozenset({"onebot", "onebot11"})
 _NATIVE_EMOJI_ID = re.compile(r"(?:0|[1-9][0-9]{0,9})\Z", re.ASCII)
@@ -282,8 +282,8 @@ def register_send_msg(
         At most three mention occurrences are allowed, including repeats. Obtain media_ref from a preparation tool
         first, then place media segments anywhere in this message. References expire with this generation and cannot
         be reused after a send attempt. On OneBot, audio, video, file, and merged forward must each be the only segment.
-        A required image edit must be included in the chain before any other message may be sent. Links require public
-        HTTP(S) URLs; native emoji currently accepts only numeric OneBot face IDs. Unsupported composites are rejected,
+        A required source edit or web-reference image must be included before any other message may be sent.
+        Links require public HTTP(S) URLs; OneBot emoji IDs must be numeric. Unsupported composites are rejected,
         never split or retried through another delivery path. After success, do not repeat this content in final text.
 
         Args:
@@ -307,14 +307,14 @@ def register_send_msg(
             and any(type(item.element) in {Audio, Video, File, Message} for item in media)
         ):
             raise DeliveryRejected("OneBot audio, video, file, and merged forward require a standalone media message")
-        edit = current_image_edit_references()
+        requirements = current_media_requirements()
         if (
-            edit is not None
-            and edit.requires_image_edit
-            and not edit.edit_confirmed
-            and not any(item.edited for item in media)
+            requirements is not None
+            and requirements.intent.requires_provenance
+            and not requirements.confirmed
+            and not any(requirements.accepts(item.provenance) for item in media)
         ):
-            raise DeliveryRejected("This message must include the prepared edited image before other delivery")
+            raise DeliveryRejected("This message must include an image satisfying the requested source and references")
         try:
             mentions = await _resolve_mentions(session, parsed, runtime)
         except asyncio.CancelledError:

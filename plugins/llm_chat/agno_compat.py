@@ -68,7 +68,7 @@ _ORDERED_DELIVERY_TOOLS = frozenset(
         "screenshot_web_page",
         "prepare_audio",
         "prepare_artifact",
-        "prepare_channel_image",
+        "prepare_image_ref",
         "prepare_external_media",
         "prepare_image",
         "prepare_merged_forward",
@@ -78,8 +78,8 @@ _ORDERED_DELIVERY_TOOLS = frozenset(
 )
 _READ_ONLY_TOOLS = frozenset(
     {
-        "describe_channel_participant_avatar",
-        "describe_channel_image",
+        "get_channel_avatar",
+        "inspect_image",
         "find_channel_participants",
         "get_local_time",
         "list_image_resources",
@@ -87,6 +87,8 @@ _READ_ONLY_TOOLS = frozenset(
         "list_prepared_media",
         "list_web_artifacts",
         "read_web_artifact",
+        "list_workshop_plugins",
+        "read_workshop_plugin",
         "read_channel_messages",
         "read_web_page",
         "web_search",
@@ -98,15 +100,21 @@ _READ_ONLY_TOOLS = frozenset(
     }
 )
 _INTERNAL_PARTICIPANT_REFERENCE_TOOLS = {
-    "describe_channel_participant_avatar",
-    "describe_channel_image",
+    "get_channel_avatar",
+    "inspect_image",
     "find_channel_participants",
     "read_channel_messages",
-    "prepare_channel_image",
+    "prepare_image_ref",
     "prepare_merged_forward",
     "send_msg",
 }
-_INTERNAL_IMAGE_REFERENCE_TOOLS = {"edit_image"}
+_INTERNAL_IMAGE_REFERENCE_TOOLS = {
+    "edit_image",
+    "generate_image",
+    "inspect_image",
+    "prepare_image_ref",
+    "read_channel_messages",
+}
 _DELIVERY_TOOL_LOCK: ContextVar[asyncio.Lock | None] = ContextVar("llm_chat_agno_delivery_tool_lock", default=None)
 
 
@@ -506,6 +514,19 @@ def _wrap_litellm_model(previous_model: Any) -> Any:
     class NativeImageLiteLLM(previous_model):
         __llm_chat_compat__ = True
         __llm_chat_original__ = previous_model
+
+        async def ainvoke(self, messages: list[Message], *args: Any, **kwargs: Any) -> Any:
+            from .inspection_delivery import append_inspected_images
+
+            append_inspected_images(messages)
+            return await super().ainvoke(messages, *args, **kwargs)
+
+        async def ainvoke_stream(self, messages: list[Message], *args: Any, **kwargs: Any) -> Any:
+            from .inspection_delivery import append_inspected_images
+
+            append_inspected_images(messages)
+            async for response in super().ainvoke_stream(messages, *args, **kwargs):
+                yield response
 
         def _format_tools(self, tools: list[Function | dict[str, Any]] | None) -> list[dict[str, Any]]:
             declarations = super()._format_tools(tools)

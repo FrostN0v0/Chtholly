@@ -261,9 +261,18 @@ class WorkshopStore:
                 raise WorkshopError("Workshop store initialization failed", code="storage_error", status=503) from exc
 
     @staticmethod
-    def _project(connection: sqlite3.Connection, name: str, actor: Actor | None = None) -> sqlite3.Row:
+    def _project(
+        connection: sqlite3.Connection, name: str, actor: Actor | None = None, *, query_scope: int | None = None
+    ) -> sqlite3.Row:
         module_name(name)
-        row = connection.execute("SELECT * FROM projects WHERE name=?", (name,)).fetchone()
+        if query_scope is None:
+            row = connection.execute("SELECT * FROM projects WHERE name=?", (name,)).fetchone()
+        else:
+            if actor is None or type(query_scope) is not int or query_scope <= 0 or actor.scope_id != query_scope:
+                raise WorkshopError("A matching current query scope is required", code="forbidden", status=403)
+            row = connection.execute(
+                "SELECT * FROM projects WHERE name=? AND scope_id=?", (name, query_scope)
+            ).fetchone()
         if row is None:
             raise WorkshopError("Workshop project does not exist", code="not_found", status=404)
         if (
@@ -427,10 +436,10 @@ class WorkshopStore:
                     compensate_directory(stage)
                 raise
 
-    def get_version(self, name: str, version: int, actor: Actor) -> VersionRecord:
+    def get_version(self, name: str, version: int, actor: Actor, *, query_scope: int | None = None) -> VersionRecord:
         _actor(actor)
         with self._transaction() as connection:
-            project = self._project(connection, name, actor)
+            project = self._project(connection, name, actor, query_scope=query_scope)
             return self._record(self._row(connection, name, version), project)
 
     def _read_files(self, row: sqlite3.Row, project: sqlite3.Row) -> dict[str, str]:
@@ -469,10 +478,10 @@ class WorkshopStore:
                 "Immutable source encoding or metadata changed", code="source_tampered", status=409
             ) from exc
 
-    def read_files(self, name: str, version: int, actor: Actor) -> dict[str, str]:
+    def read_files(self, name: str, version: int, actor: Actor, *, query_scope: int | None = None) -> dict[str, str]:
         _actor(actor)
         with self._transaction() as connection:
-            project = self._project(connection, name, actor)
+            project = self._project(connection, name, actor, query_scope=query_scope)
             return self._read_files(self._row(connection, name, version), project)
 
     def list_projects(self, actor: Actor, *, limit: int = 100, offset: int = 0) -> list[dict[str, object]]:
@@ -519,6 +528,38 @@ class WorkshopStore:
                 self._record(row, project)
                 for row in connection.execute("SELECT * FROM versions WHERE name=? ORDER BY version DESC", (name,))
             ]
+
+    def list_revisions(
+        self,
+        actor: Actor,
+        *,
+        query_scope: int,
+        plugin_name: str = "",
+        limit: int = 10,
+        offset: int = 0,
+    ) -> list[VersionRecord]:
+        """List exact chat-readable versions with scope applied before pagination."""
+        _actor(actor)
+        if type(query_scope) is not int or query_scope <= 0 or actor.scope_id != query_scope:
+            raise WorkshopError("A matching current query scope is required", code="forbidden", status=403)
+        if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or not 0 <= offset < 2**63:
+            raise WorkshopError("Revision pagination requires limit 1..100 and a nonnegative offset")
+        with self._transaction() as connection:
+            query = (
+                "SELECT v.*, p.owner_key, p.scope_id, p.active_version, p.enabled "
+                "FROM versions v JOIN projects p ON p.name=v.name WHERE p.scope_id=?"
+            )
+            params: list[object] = [query_scope]
+            if not actor.is_admin:
+                query += " AND p.owner_key=?"
+                params.append(actor.key)
+            if plugin_name:
+                self._project(connection, plugin_name, actor, query_scope=query_scope)
+                query += " AND p.name=?"
+                params.append(plugin_name)
+            query += " ORDER BY p.name, v.version DESC LIMIT ? OFFSET ?"
+            params.extend((limit, offset))
+            return [self._record(row, row) for row in connection.execute(query, params)]
 
     def mark_validating(self, name: str, version: int) -> None:
         with self._transaction() as connection:

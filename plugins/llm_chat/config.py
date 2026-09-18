@@ -87,8 +87,8 @@ class LLMChatConfig(BasicConfModel, extra="forbid"):
     """Maximum normalized characters retained from one forwarded node."""
     merged_forward_max_total_chars: int = 32000
     """Maximum combined forwarded-node characters exposed per generation."""
-    merged_forward_max_described_images: int = 12
-    """Maximum forwarded images described through the vision model."""
+    merged_forward_max_images: int = 12
+    """Maximum forwarded images read in one generation, with original references preserved."""
     channel_message_max_images: int = 12
     """Maximum channel-message images exposed as generation-local references per history page."""
     model: str | None = None

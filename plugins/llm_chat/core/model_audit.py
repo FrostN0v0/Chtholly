@@ -28,7 +28,7 @@ _SECRET_KEY = re.compile(
     re.I,
 )
 _PRIVATE_KEY = re.compile(
-    r"(?:reasoning_content|reasoning_details|thinking|chain_of_thought|thought_signature|encrypted_content|signature|b64_json|base64|image_url|image_data|image_bytes|image_paths|pixels|audio_data|file_path|local_path|inline_data|inlineData|file_data|fileData|(?:channel_|source_|reference_)?image_refs?|reference_image|(?:current_)?participant_refs?|media_refs?|participant_ids?|user_id|channel_id|account_id|self_id|before_cursor)",
+    r"(?:reasoning_content|reasoning_details|thinking|chain_of_thought|thought_signature|encrypted_content|signature|b64_json|base64|image_url|image_data|image_bytes|image_paths|pixels|audio_data|file_path|local_path|inline_data|inlineData|file_data|fileData|(?:channel_|source_|reference_)?image_refs?|reference_image|(?:current_)?participant_refs?|media_refs?|message_ref|reply_to_ref|participant_ids?|user_id|channel_id|account_id|self_id|before_cursor|next_cursor)",
     re.I,
 )
 _SECRET_TEXT = re.compile(
