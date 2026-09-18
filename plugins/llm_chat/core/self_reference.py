@@ -1,20 +1,12 @@
-"""Trusted self-reference image injection for native image generation."""
+"""Resolve configured persona reference images for direct image-model input."""
 
 from __future__ import annotations
 
-from typing import Any, cast
 from pathlib import Path, PurePosixPath
-from functools import lru_cache
-from collections.abc import Callable
 
 from utils.path import IMAGE_DIR
 
-from .types import ChatMessage
-from .image_source import image_file_to_data_url
-
-SELF_REFERENCE_IMAGE_MARKER = "[当前角色自设参考图]"
-_UNAVAILABLE_WARNING = "self reference image skipped: configured file unavailable"
-_INVALID_WARNING = "self reference image skipped: configured file invalid or too large"
+from .image_source import IMAGE_FETCH_MAX_BYTES, raw_to_image_data_url
 
 
 def resolve_self_reference_image(
@@ -47,61 +39,27 @@ def resolve_self_reference_image(
     return resolved if resolved.is_file() else None
 
 
-@lru_cache(maxsize=4)
-def _cached_image_data_url(path: Path, _mtime_ns: int, _size: int) -> str | None:
-    return image_file_to_data_url(path)
-
-
-def _image_data_url(path: Path) -> str | None:
-    try:
-        stat = path.stat()
-    except OSError:
-        return None
-    return _cached_image_data_url(path, stat.st_mtime_ns, stat.st_size)
-
-
-def append_self_reference_image(
-    messages: list[ChatMessage],
+def load_self_reference_image(
     relative_path: str | None,
-    warn: Callable[[str], None],
     *,
     image_root: Path = IMAGE_DIR,
-) -> bool:
-    """Append the trusted role reference to the latest user turn without persisting it."""
+) -> tuple[bytes, str] | None:
+    """Load one bounded, MIME-validated persona reference for an image API."""
 
-    if not relative_path:
-        return False
     path = resolve_self_reference_image(relative_path, image_root=image_root)
     if path is None:
-        warn(_UNAVAILABLE_WARNING)
-        return False
-    data_url = _image_data_url(path)
+        return None
+    try:
+        with path.open("rb") as stream:
+            data = stream.read(IMAGE_FETCH_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if not data or len(data) > IMAGE_FETCH_MAX_BYTES:
+        return None
+    data_url = raw_to_image_data_url(data[:256])
     if data_url is None:
-        warn(_INVALID_WARNING)
-        return False
-
-    for index in range(len(messages) - 1, -1, -1):
-        message = messages[index]
-        if message.get("role") != "user":
-            continue
-        content = message.get("content")
-        if isinstance(content, str):
-            parts: list[dict[str, Any]] = [{"type": "text", "text": content}]
-        elif isinstance(content, list):
-            parts = list(content)
-        else:
-            warn(_UNAVAILABLE_WARNING)
-            return False
-        parts.extend(
-            (
-                {"type": "text", "text": SELF_REFERENCE_IMAGE_MARKER},
-                {"type": "image_url", "image_url": {"url": data_url}},
-            )
-        )
-        updated = dict(message)
-        updated["content"] = parts
-        messages[index] = cast(ChatMessage, updated)
-        return True
-
-    warn(_UNAVAILABLE_WARNING)
-    return False
+        return None
+    mime = data_url[5:].partition(";")[0].casefold()
+    if mime not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
+        return None
+    return data, mime

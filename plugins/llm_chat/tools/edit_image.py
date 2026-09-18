@@ -64,6 +64,7 @@ def register_edit_image(
         source_image_index: int = 1,
         reference_image_refs: list[str] = cast(list[str], None),
         size: ImageSize = DEFAULT_IMAGE_SIZE,
+        use_persona_reference: bool = False,
     ) -> dict[str, JSONType]:
         """Edit one current-turn user image and prepare one result through the configured image model.
 
@@ -74,12 +75,15 @@ def register_edit_image(
         precisely what to replace and what source details to preserve. Never place URLs, base64, local paths, secrets,
         internal IDs, or unrelated conversation history in prompt. This does not send the image: include the returned
         media_ref in a send_msg media segment to deliver it.
+        Set use_persona_reference=true when replacing the subject with the current persona; the runtime uploads
+        that configured reference after the source and any web references. Never substitute an appearance description.
 
         Args:
             prompt (str): Complete source-preserving edit instruction, at most 32000 characters.
             source_image_index (int): One-based current-turn user image index; defaults to 1.
             reference_image_refs (list[str]): Zero to four current-generation refs from capture_web_reference.
             size (str): Output size: 1024x1024, 1536x1024, or 1024x1536.
+            use_persona_reference (bool): Include the current persona's configured identity reference.
         Returns:
             dict[str, JSONType]: Prepared edited image resource containing a media_ref for send_msg.
         """
@@ -102,6 +106,20 @@ def register_edit_image(
 
             model = runtime.resolve_model(session.channel.id)
             provider_images = [source.data, *(reference.data for reference in web_references)]
+            persona_reference = references.resolve_persona_reference() if use_persona_reference else None
+            if persona_reference is not None:
+                provider_images.append(persona_reference.data)
+            audit_inputs: list[dict[str, object]] = []
+            if source.attachment is not None:
+                audit_inputs.append({**source.attachment, "label": "Source image sent to image model"})
+            for reference_index, reference in enumerate(web_references, start=1):
+                if reference.attachment is not None:
+                    audit_inputs.append(
+                        {**reference.attachment, "label": f"Web reference {reference_index} sent to image model"}
+                    )
+            if persona_reference is not None and persona_reference.attachment is not None:
+                audit_inputs.append(dict(persona_reference.attachment))
+            record_tool_evidence({"attachments": audit_inputs})
             async with runtime.semaphore:
                 response = await asyncio.wait_for(
                     runtime.edit(
@@ -134,22 +152,11 @@ def register_edit_image(
                 ),
                 root=references.attachment_root,
             )
-            audit_inputs: list[dict[str, object]] = []
-            if source.attachment is not None:
-                source_attachment = dict(source.attachment)
-                source_attachment["label"] = "Source image sent to image model"
-                audit_inputs.append(source_attachment)
-            for reference_index, reference in enumerate(web_references, start=1):
-                if reference.attachment is None:
-                    continue
-                reference_attachment = dict(reference.attachment)
-                reference_attachment["label"] = f"Web reference {reference_index} sent to image model"
-                audit_inputs.append(reference_attachment)
             record_tool_evidence(
                 {
-                    "attachments": [*audit_inputs, attachment],
+                    "attachments": [attachment],
                     "source_image_index": source_image_index,
-                    "reference_count": len(web_references),
+                    "reference_count": len(web_references) + int(persona_reference is not None),
                 }
             )
         except asyncio.CancelledError:

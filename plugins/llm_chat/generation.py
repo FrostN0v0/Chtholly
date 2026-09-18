@@ -236,7 +236,6 @@ def _moderation_recovery_system(system: str) -> str:
         "current_speaker": "current user",
         "current_participant_ref": "",
         "relationship": {},
-        "self_reference_attached": False,
         "user_profile": {},
         "relevant_memories": [],
         "agent_session": {},

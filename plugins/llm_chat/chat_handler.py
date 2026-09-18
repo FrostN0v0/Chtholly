@@ -196,7 +196,6 @@ async def _run_chat(
             session,
             identity,
             model_name=model_name,
-            supports_image_input=supports_image_input,
             model_text=model_text,
             raw_user_text=raw_user_text,
             content=content,

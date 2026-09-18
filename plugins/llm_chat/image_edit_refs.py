@@ -9,8 +9,9 @@ from contextvars import ContextVar
 from dataclasses import field, dataclass
 from collections.abc import Mapping, Iterator, Sequence
 
-from .agent_attachments import is_agent_attachment, resolve_agent_attachment
+from .agent_attachments import is_agent_attachment, store_agent_attachment, resolve_agent_attachment
 from .core.image_source import IMAGE_FETCH_MAX_BYTES, raw_to_image_data_url
+from .core.self_reference import load_self_reference_image
 
 MAX_EDIT_REFERENCES = 4
 _WEB_REFERENCE_REF = re.compile(r"web_ref_[0-9a-f]{24}\Z")
@@ -26,14 +27,16 @@ class EditableImage:
 
 @dataclass(slots=True)
 class ImageEditReferences:
-    """Private per-generation image inputs that model arguments cannot forge."""
+    """Private per-generation image inputs for editing and reference-conditioned generation."""
 
     input_attachments: tuple[Mapping[str, object], ...]
+    persona_reference_path: str | None = None
     requires_web_reference: bool = False
     requires_image_edit: bool = False
     attachment_root: Path | None = None
     edit_confirmed: bool = False
     _web_references: dict[str, EditableImage] = field(default_factory=dict)
+    _persona_reference: EditableImage | None = field(default=None, init=False)
 
     @classmethod
     def from_input_attachments(
@@ -43,9 +46,11 @@ class ImageEditReferences:
         requires_web_reference: bool,
         requires_image_edit: bool = False,
         attachment_root: Path | None = None,
+        persona_reference_path: str | None = None,
     ) -> ImageEditReferences:
         return cls(
             input_attachments=tuple(dict(item) for item in attachments),
+            persona_reference_path=persona_reference_path,
             requires_web_reference=requires_web_reference,
             requires_image_edit=requires_image_edit or requires_web_reference,
             attachment_root=attachment_root,
@@ -58,6 +63,25 @@ class ImageEditReferences:
     @property
     def web_reference_count(self) -> int:
         return len(self._web_references)
+
+    def resolve_persona_reference(self) -> EditableImage:
+        """Load the captured persona's configured image, never a model-supplied path."""
+        if self._persona_reference is not None:
+            return self._persona_reference
+        loaded = load_self_reference_image(self.persona_reference_path)
+        if loaded is None:
+            raise ValueError("the configured persona reference is unavailable or invalid; cannot generate from it")
+        data, mime = loaded
+        attachment = store_agent_attachment(
+            data,
+            kind="reference",
+            source="persona",
+            index=1,
+            label="Persona reference sent to image model",
+            root=self.attachment_root,
+        )
+        self._persona_reference = EditableImage(data=data, mime=mime, attachment=attachment)
+        return self._persona_reference
 
     def resolve_source_image(self, index: int) -> EditableImage:
         if type(index) is not int or index < 1 or index > len(self.input_attachments):

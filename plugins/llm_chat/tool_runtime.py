@@ -157,6 +157,7 @@ if config.image_generation_model:
     image_generation_context = ImageGenerationToolContext(
         resolve_model=_resolve_image_generation_model,
         generate=_generate_image_provider,
+        edit=_edit_image_provider,
         warn=lambda message: _LOGGER.warning(message),
         timeout_seconds=max(1.0, float(config.image_generation_timeout)),
         quality=config.image_generation_quality,

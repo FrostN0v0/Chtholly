@@ -130,11 +130,11 @@ def record_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> di
     if tool_name == "web_search":
         return _record_selected(arguments, "query")
     if tool_name == "generate_image":
-        return _record_selected(arguments, "prompt", "size")
+        return _record_selected(arguments, "prompt", "size", "use_persona_reference")
     if tool_name == "edit_image":
         references = arguments.get("reference_image_refs")
         return {
-            **_record_selected(arguments, "prompt", "source_image_index", "size"),
+            **_record_selected(arguments, "prompt", "source_image_index", "size", "use_persona_reference"),
             "reference_count": len(references) if isinstance(references, list) else 0,
         }
     if tool_name == "call_plugin":

@@ -106,11 +106,7 @@ from plugins.llm_chat.core.image_source import (
 )
 from plugins.llm_chat.persona.embedding import embed_text
 from plugins.llm_chat.core.media_delivery import latest_user_requests_media
-from plugins.llm_chat.core.self_reference import (
-    SELF_REFERENCE_IMAGE_MARKER,
-    append_self_reference_image,
-    resolve_self_reference_image,
-)
+from plugins.llm_chat.core.self_reference import load_self_reference_image, resolve_self_reference_image
 from plugins.llm_chat.persona.memory_update import apply_memory_updates, resolve_fact_embedding_update
 from plugins.llm_chat.core.tool_trace_policy import DeliverySnapshot, project_tool_arguments
 from plugins.llm_chat.core.tool_trace_safety import compact_tool_activity
@@ -380,7 +376,6 @@ def _install_handler_stubs(
         identity: Any,
         *,
         model_name: str | None,
-        supports_image_input: bool,
         model_text: str,
         raw_user_text: str,
         content: str,
@@ -393,7 +388,7 @@ def _install_handler_stubs(
         requires_media_reply: bool = False,
         is_operator: bool = False,
     ) -> SimpleNamespace:
-        del model_name, supports_image_input
+        del model_name
         records.input_attachments.extend(input_attachments)
         records.mentioned_participants.extend(mentioned_participants)
         relation = await module.get_relation(identity.user_id, session.channel.id)
@@ -427,7 +422,6 @@ def _install_handler_stubs(
         system = module.compose_persona_prompt(
             agent_session={},
             current_participant_ref=identity.participant_ref,
-            self_reference_attached=False,
             delivery_limits=delivery_limits,
         )
         user_message_id = await module.append_message(
@@ -937,33 +931,15 @@ def test_image_file_to_data_url_sniffs_webp_without_suffix_guessing(tmp_path):
     assert not data_url.startswith("data:image/jpeg")
 
 
-def test_self_reference_image_appends_trusted_multimodal_parts(tmp_path: Path):
+def test_self_reference_image_loads_validated_bytes_for_direct_model_input(tmp_path: Path):
     image_root = tmp_path / "image"
     image_path = image_root / "persona" / "ChthollyHat.png"
     image_path.parent.mkdir(parents=True)
     image_path.write_bytes(_PNG_BYTES)
-    original = '{"speaker":"Alice","content":"画一张你在雪地里的样子"}'
-    messages: list[ChatMessage] = [
-        {"role": "assistant", "content": "previous"},
-        {"role": "user", "content": original},
-    ]
-    warnings: list[str] = []
 
-    assert append_self_reference_image(
-        messages,
-        "persona/ChthollyHat.png",
-        warnings.append,
-        image_root=image_root,
-    )
+    loaded = load_self_reference_image("persona/ChthollyHat.png", image_root=image_root)
 
-    assert messages[0] == {"role": "assistant", "content": "previous"}
-    content = messages[1]["content"]
-    assert isinstance(content, list)
-    assert content[0] == {"type": "text", "text": original}
-    assert content[1] == {"type": "text", "text": SELF_REFERENCE_IMAGE_MARKER}
-    assert content[2]["type"] == "image_url"
-    assert content[2]["image_url"]["url"].startswith("data:image/png")
-    assert warnings == []
+    assert loaded == (_PNG_BYTES, "image/png")
 
 
 def test_self_reference_image_rejects_paths_outside_resource_root(tmp_path: Path):
@@ -971,20 +947,9 @@ def test_self_reference_image_rejects_paths_outside_resource_root(tmp_path: Path
     image_root.mkdir()
     outside = tmp_path / "outside.png"
     outside.write_bytes(_PNG_BYTES)
-    messages: list[ChatMessage] = [{"role": "user", "content": "generate an image"}]
-    original = list(messages)
-    warnings: list[str] = []
 
     assert resolve_self_reference_image("../outside.png", image_root=image_root) is None
-    assert not append_self_reference_image(
-        messages,
-        "../outside.png",
-        warnings.append,
-        image_root=image_root,
-    )
-
-    assert messages == original
-    assert warnings == ["self reference image skipped: configured file unavailable"]
+    assert load_self_reference_image("../outside.png", image_root=image_root) is None
 
 
 @pytest.mark.asyncio

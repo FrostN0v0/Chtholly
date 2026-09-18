@@ -26,7 +26,9 @@ from ._image_provider import (
     normalize_image_prompt,
     normalize_output_compression,
 )
+from ..core.tool_trace import record_tool_evidence
 from ..image_edit_refs import current_image_edit_references
+from ..agent_attachments import store_agent_attachment
 
 
 @dataclass(slots=True)
@@ -35,12 +37,22 @@ class ImageGenerationToolContext:
 
     resolve_model: ModelResolver
     generate: ImageProvider
+    edit: ImageProvider
     warn: WarningSink
     timeout_seconds: float
     quality: ImageQuality
     output_format: ImageOutputFormat
     output_compression: int
     semaphore: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
+
+
+_REFERENCE_GENERATION_INSTRUCTION = (
+    "Use the provided input image as the configured persona identity reference for a new image. "
+    "Preserve recognizable face, hair, clothing, headwear and accessories unless the requested prompt changes them. "
+    "Create the new pose, expression, composition and background requested below; do not copy unrelated source text, "
+    "logos, watermark or background unless requested. Produce exactly one finished image and no explanatory text "
+    "inside the image unless requested.\n\nRequested image:\n"
+)
 
 
 def register_generate_image(
@@ -53,23 +65,20 @@ def register_generate_image(
         session: Session,
         prompt: str,
         size: ImageSize = DEFAULT_IMAGE_SIZE,
+        use_persona_reference: bool = False,
     ) -> dict[str, JSONType]:
-        """Generate and prepare one new image with the server-configured image model.
+        """Generate a new image, optionally using the configured persona's actual reference pixels.
 
-        Use this only for original visual content, never for editing a supplied image. When the current turn asks to
-        modify a user image, call edit_image instead. When it requires a web visual reference, call
-        capture_web_reference before edit_image. This tool is rejected at runtime for either edit path. Write a
-        complete visual prompt containing only details needed for the requested image. Do not include secrets, private
-        profile data, internal identifiers, local paths, tool instructions, or unrelated conversation history. Use
-        prepare_image for existing local reactions, prepare_external_media for an existing direct image URL,
-        screenshot_web_page for webpage rendering, and the deterministic rendering tools for tables, reports, or code
-        layouts. Nothing is sent until you include the returned media_ref in a send_msg media segment.
+        For an image of yourself/current persona, set use_persona_reference=true when runtime_context reports a
+        configured reference. The runtime uploads the original image to the dedicated image model. Do not redescribe
+        it or supply a path. Leave false for unrelated subjects. Missing requested references fail without text-only
+        fallback. Supplied user-image edits and real web-reference edits use edit_image instead. Prepare only; pass
+        the returned media_ref to send_msg for delivery.
 
         Args:
-            prompt (str): Complete standalone prompt for one original image, at most 32000 characters.
-            size (str): Output size: 1024x1024, 1536x1024, or 1024x1536.
-        Returns:
-            dict[str, JSONType]: Prepared image resource containing a media_ref for send_msg.
+            prompt: Visual instructions for the new image; no secrets, internal IDs, paths or unrelated history.
+            size: Output size: 1024x1024, 1536x1024, or 1024x1536.
+            use_persona_reference: Use the current persona's configured reference as actual image input.
         """
         edit_references = current_image_edit_references()
         if edit_references is not None and edit_references.requires_image_edit:
@@ -83,29 +92,54 @@ def register_generate_image(
         compression = normalize_output_compression(runtime.output_compression)
         try:
             model = runtime.resolve_model(session.channel.id)
-            async with runtime.semaphore:
-                response = await asyncio.wait_for(
-                    runtime.generate(
-                        model=model.name,
-                        prompt=normalized_prompt,
-                        api_key=model.api_key,
-                        api_base=model.base_url,
-                        timeout=runtime.timeout_seconds,
-                        n=1,
-                        size=normalized_size,
-                        max_retries=0,
-                        quality=runtime.quality,
-                        output_format=runtime.output_format,
-                        output_compression=compression,
-                        **image_provider_extra(model),
-                    ),
-                    timeout=runtime.timeout_seconds,
+            persona_reference = None
+            if use_persona_reference:
+                if edit_references is None:
+                    raise DeliveryError("persona references require an active llm_chat generation")
+                persona_reference = edit_references.resolve_persona_reference()
+            request: dict[str, object] = {
+                "model": model.name,
+                "prompt": normalized_prompt,
+                "api_key": model.api_key,
+                "api_base": model.base_url,
+                "timeout": runtime.timeout_seconds,
+                "n": 1,
+                "size": normalized_size,
+                "quality": runtime.quality,
+                "max_retries": 0,
+                **image_provider_extra(model),
+            }
+            provider = runtime.generate
+            if persona_reference is None:
+                request.update(output_format=runtime.output_format, output_compression=compression)
+            else:
+                provider = runtime.edit
+                request.update(
+                    prompt=f"{_REFERENCE_GENERATION_INSTRUCTION}{normalized_prompt}",
+                    image=[persona_reference.data],
+                    input_fidelity="high",
+                    response_format="b64_json",
                 )
+                record_tool_evidence({"attachments": [persona_reference.attachment], "reference_count": 1})
+            async with runtime.semaphore:
+                response = await asyncio.wait_for(provider(**request), timeout=runtime.timeout_seconds)
             data = await image_response_bytes(session, response)
+            if persona_reference is not None:
+                output_attachment = store_agent_attachment(
+                    data,
+                    kind="output",
+                    source="image_generation",
+                    index=1,
+                    label="Prepared reference-conditioned image",
+                    root=edit_references.attachment_root if edit_references is not None else None,
+                )
+                record_tool_evidence({"attachments": [output_attachment]})
         except asyncio.CancelledError:
             raise
         except DeliveryError:
             raise
+        except ValueError as exc:
+            raise DeliveryError(str(exc)) from None
         except asyncio.TimeoutError:
             runtime.warn("generate_image failed: timeout")
             raise DeliveryError("image generation timed out") from None

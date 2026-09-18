@@ -53,10 +53,8 @@ from .core.personality import ResolvedPersona
 from .core.media_delivery import (
     latest_user_requests_media,
     latest_user_requests_image_edit,
-    latest_user_requests_image_generation,
     latest_user_requests_web_image_reference,
 )
-from .core.self_reference import append_self_reference_image
 from .relationships.state import load_relationship_snapshot
 from .core.artifact_access import is_artifact_request
 from .core.context_snapshot import build_context_snapshot
@@ -91,7 +89,6 @@ async def prepare_agent_turn(
     identity: ChatIdentity,
     *,
     model_name: str | None,
-    supports_image_input: bool,
     model_text: str,
     raw_user_text: str,
     content: str,
@@ -155,9 +152,6 @@ async def prepare_agent_turn(
     scope = await get_or_create_scope(await resolve_scope_identity(session))
     async with persona_scope_lock(scope.id):
         persona = await resolve_scope_persona(config, scope.id)
-        self_reference_attached = False
-        if supports_image_input and not artifact_requested and latest_user_requests_image_generation(current_messages):
-            self_reference_attached = append_self_reference_image(current_messages, persona.reference_image, warn)
         baseline = build_baseline_fingerprint(
             model_name=model_name or "default",
             persona=persona.baseline_text,
@@ -196,7 +190,7 @@ async def prepare_agent_turn(
                 agent_session=render_session_baseline(context_session, anchors),
                 user_name=user_name,
                 current_participant_ref=identity.participant_ref,
-                self_reference_attached=self_reference_attached,
+                persona_reference_configured=bool(persona.reference_image),
                 web_search_limit=web_limits.search_limit,
                 web_page_limit=web_limits.read_limit,
                 web_total_limit=web_limits.total_limit,
@@ -355,6 +349,7 @@ async def prepare_agent_turn(
             requires_image_edit=not artifact_requested
             and bool(input_attachments)
             and latest_user_requests_image_edit(current_messages),
+            persona_reference_path=persona.reference_image,
         ),
         channel_image_references=ChannelImageReferences(),
         lifecycle=lifecycle,

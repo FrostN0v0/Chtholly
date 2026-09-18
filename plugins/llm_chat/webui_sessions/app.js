@@ -20,6 +20,7 @@ const labels = {
   persona_state: "人格与记忆快照", engagement: "回应意向",
   current_state: "当前状态", current_speaker: "当前发言人", relationship_style: "关系与回应方式",
   current_participant_ref: "当前发言人引用", self_reference_attached: "本轮角色参考图",
+  persona_reference_configured: "\u89d2\u8272\u53c2\u8003\u56fe\u5df2\u914d\u7f6e",
   user_profile: "用户画像", relevant_memories: "相关记忆", agent_session: "会话交接与锚点",
   recent_impression: "近期印象", reply_intent: "回复意图", system: "完整系统指令",
   messages: "实际选中消息", persona: "人格快照", selection: "历史选择证据", budgets: "历史预算",

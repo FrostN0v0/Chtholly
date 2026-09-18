@@ -37,7 +37,7 @@ from plugins.llm_chat import (
     session_inspection,
 )
 from plugins.llm_chat.core import tool_trace
-from plugins.llm_chat.config import LLMChatConfig
+from plugins.llm_chat.config import LLMChatConfig, PersonaConfig
 from plugins.llm_chat.models import (
     AgentTurn,
     ChatScope,
@@ -698,11 +698,14 @@ async def test_running_turn_exposes_recorded_context_without_replaying_operator_
         event=SimpleNamespace(message=SimpleNamespace(id="message-1")),
     )
     prepared = await agent_turn_setup.prepare_agent_turn(
-        LLMChatConfig(memory_enabled=False),
+        LLMChatConfig(
+            memory_enabled=False,
+            default_persona="pepe",
+            personas={"pepe": PersonaConfig(name="Pepe", prompt="Test persona", reference_image="persona/Pepe.png")},
+        ),
         cast(Session, fake_session),
         ChatIdentity(user_id="alice", display_name="Alice", participant_ref="participant_alice"),
         model_name="test-model",
-        supports_image_input=False,
         model_text="hello",
         raw_user_text="hello",
         content="hello",
@@ -723,6 +726,9 @@ async def test_running_turn_exposes_recorded_context_without_replaying_operator_
     )
 
     assert appended == [("channel", "alice", "Alice", "user", "hello")]
+    assert prepared.image_edit_references.persona_reference_path == "persona/Pepe.png"
+    assert "image_url" not in json.dumps(prepared.chat_messages)
+    assert "persona/Pepe.png" not in prepared.system
 
     async def stored_events() -> list[AgentEvent]:
         async with agent_store.session_factory() as db:

@@ -90,7 +90,7 @@ Caddy 只代理明确的管理页面、API 与两个管理 WebSocket；Satori/On
 
 会话页通过原生 WebUI 的已认证父页面读取 API 和图片附件，兼容隔离 iframe 与密码登录；源码脚本和样式以内联 nonce 加载。切换轮次会停止旧的分页读取并释放临时图片地址，不关闭认证，也不放宽 iframe 的同源隔离。
 
-在 `llm_chat.personas` 下按角色键配置 `name`、`prompt`、`appearance` 和可选的 `reference_image`，用 `default_persona` 指定默认角色。人格和口吻由所填 `prompt` 定义，不额外附加情景对白或固定说话示例；参考图使用 `resources/image` 下已有文件的安全相对路径。旧 `persona` 移至对应角色的 `prompt`，旧 `self_reference_image` 移至该角色的 `reference_image`。
+在 `llm_chat.personas` 下按角色键配置 `name`、`prompt`、`appearance` 和可选的 `reference_image`，用 `default_persona` 指定默认角色。人格和口吻由所填 `prompt` 定义，不额外附加情景对白或固定说话示例；参考图使用 `resources/image` 下已有文件的安全相对路径。角色相关生图或编辑会将选用的参考图原始字节直接交给独立图像模型，不经过聊天模型描述，也不依赖聊天模型是否支持视觉；无关主体不会附带角色图，指定参考不可用时明确失败，不退回文字重构。旧 `persona` 移至对应角色的 `prompt`，旧 `self_reference_image` 移至该角色的 `reference_image`。
 
 仓库配置保留 `chtholly` 为默认角色，并提供按 [PRTS 佩佩资料](https://prts.wiki/w/%E4%BD%A9%E4%BD%A9)、语音及相关剧情整理的 `pepe`，参考图为 `persona/Pepe.png`（原版初始立绘）。超管可用 `llmchat persona pepe` 切换当前聊天范围。
 

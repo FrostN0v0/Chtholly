@@ -1149,6 +1149,155 @@ async def test_generate_image_uses_dedicated_model_and_confirms_delivery(
 
 
 @pytest.mark.asyncio
+async def test_generate_image_sends_persona_reference_bytes_to_image_model(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    baseline = _registry_snapshot()
+    from email import policy
+    from email.parser import BytesParser
+
+    from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
+
+    from plugins.llm_chat import image_edit_refs
+    from plugins.llm_chat.core.self_reference import load_self_reference_image
+
+    persona_bytes = _PNG_BYTES + b"persona-original"
+    (tmp_path / "persona.png").write_bytes(persona_bytes)
+    monkeypatch.setattr(
+        image_edit_refs, "load_self_reference_image", partial(load_self_reference_image, image_root=tmp_path)
+    )
+
+    wire_images: list[list[bytes]] = []
+
+    async def receive(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/images/edits"
+        envelope = f"Content-Type: {request.headers['content-type']}\r\nMIME-Version: 1.0\r\n\r\n".encode()
+        body = BytesParser(policy=policy.default).parsebytes(envelope + await request.aread())
+        wire_images.append(
+            [
+                part.get_payload(decode=True)
+                for part in body.iter_parts()
+                if part.get_param("name", header="content-disposition") == "image[]"
+            ]
+        )
+        return httpx.Response(200, json={"created": 1, "data": [{"b64_json": base64.b64encode(_PNG_BYTES).decode()}]})
+
+    class Transport(AsyncHTTPHandler):
+        def create_client(self, **_kwargs: Any) -> httpx.AsyncClient:
+            return httpx.AsyncClient(transport=httpx.MockTransport(receive), trust_env=False)
+
+    transport = Transport()
+
+    async with (
+        transport.client,
+        _temporary_plugin(
+            config={
+                "image_generation_model": "image",
+                "image_generation_timeout": 123.0,
+                "image_generation_quality": "high",
+                "tts_enabled": False,
+                "allowed_commands": [],
+                "web_search_enabled": False,
+            },
+            module_path=_TOOL_RUNTIME_PATH,
+        ) as harness,
+        prepared_media_scope(),
+    ):
+        runtime = harness.module
+        target = _tool_callable(runtime, "generate_image")
+        requests: list[dict[str, object]] = []
+
+        def resolve_model(channel_id: str) -> SimpleNamespace:
+            assert channel_id == "12345"
+            return SimpleNamespace(
+                name="openai/gpt-image-2",
+                api_key="image-key",
+                base_url="https://images.example.com/v1",
+                extra={},
+            )
+
+        async def generate_provider(**kwargs: object) -> SimpleNamespace:
+            requests.append(dict(kwargs))
+            return SimpleNamespace(data=[SimpleNamespace(b64_json=base64.b64encode(_PNG_BYTES).decode("ascii"))])
+
+        async def edit_provider(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            return await cast(Any, litellm.aimage_edit)(client=transport, **kwargs)
+
+        monkeypatch.setattr(runtime.image_generation_context, "resolve_model", resolve_model)
+        monkeypatch.setattr(runtime.image_generation_context, "generate", generate_provider)
+        monkeypatch.setattr(runtime.image_generation_context, "edit", edit_provider)
+        monkeypatch.setattr(runtime.image_edit_context, "resolve_model", resolve_model)
+        monkeypatch.setattr(runtime.image_edit_context, "edit", edit_provider)
+
+        source_bytes = _PNG_BYTES + b"source-original"
+        source_attachment = store_agent_attachment(
+            source_bytes, kind="input", source="direct", index=1, root=tmp_path / "audit"
+        )
+
+        references = ImageEditReferences.from_input_attachments(
+            [source_attachment],
+            requires_web_reference=False,
+            persona_reference_path="persona.png",
+            attachment_root=tmp_path / "audit",
+        )
+        session = _DeliveryToolSession()
+        state = runtime.DeliveryState()
+        recorder = ToolTraceRecorder()
+        call = recorder.start(
+            "generate_image", {"prompt": "A portrait in a snowy forest", "use_persona_reference": True}
+        )
+        with (
+            llm_chat_delivery_scope(state),
+            llm_chat_image_edit_scope(references),
+            llm_chat_tool_trace_scope(recorder),
+            llm_chat_tool_execution_scope(call.execution_ref),
+        ):
+            result = await target(session, "A portrait in a snowy forest", use_persona_reference=True)
+            recorder.finish_success(call, result, before=DeliverySnapshot(), after=DeliverySnapshot())
+            assert session.sent == []
+            await _tool_callable(runtime, "send_msg")(session, [{"type": "media", "media_ref": result["media_ref"]}])
+
+            unrelated = await target(session, "A landscape without characters")
+            await _tool_callable(runtime, "send_msg")(session, [{"type": "media", "media_ref": unrelated["media_ref"]}])
+
+        assert requests[0]["image"] == [persona_bytes]
+        assert wire_images == [[persona_bytes]]
+        assert requests[0]["input_fidelity"] == "high"
+        assert "image" not in requests[1]
+        assert requests[1]["prompt"] == "A landscape without characters"
+        assert state.confirmed_media_deliveries == 2
+        attachments = cast(list[dict[str, object]], recorder.events[0].evidence["attachments"])
+        assert [item["source"] for item in attachments] == ["persona", "image_generation"]
+        stored_reference = tmp_path / "audit" / f"{attachments[0]['attachment_ref']}.png"
+        assert stored_reference.read_bytes() == persona_bytes
+        assert "persona-original" not in json.dumps(recorder.events[0].recorded_result)
+
+        with llm_chat_delivery_scope(state), llm_chat_image_edit_scope(references):
+            edited = await _tool_callable(runtime, "edit_image")(
+                session, "Replace the source subject with the persona", use_persona_reference=True
+            )
+            await _tool_callable(runtime, "send_msg")(session, [{"type": "media", "media_ref": edited["media_ref"]}])
+        assert wire_images == [[persona_bytes], [source_bytes, persona_bytes]]
+        assert state.confirmed_media_deliveries == 3
+
+        missing = ImageEditReferences.from_input_attachments(
+            (), requires_web_reference=False, persona_reference_path="missing.png", attachment_root=tmp_path / "audit"
+        )
+        with llm_chat_delivery_scope(state), llm_chat_image_edit_scope(missing):
+            with pytest.raises(runtime.DeliveryError, match="unavailable or invalid"):
+                await target(session, "Use the persona reference", use_persona_reference=True)
+        assert len(requests) == 3
+
+        await harness.dispose()
+        _assert_registry_matches(baseline)
+
+    _assert_registry_matches(baseline)
+
+
+@pytest.mark.asyncio
 async def test_capture_web_reference_is_private_generation_local_and_audited(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
@@ -1384,9 +1533,6 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
         assert request["input_fidelity"] == "high"
         assert request["response_format"] == "b64_json"
         assert request["max_retries"] == 0
-        assert "first input image is the source composition" in cast(str, request["prompt"])
-        assert "headwear, and accessories" in cast(str, request["prompt"])
-        assert "eye-closure" in cast(str, request["prompt"])
         assert arguments["prompt"] in cast(str, request["prompt"])
         assert reference_ref not in cast(str, request["prompt"])
         assert len(session.sent) == 1

@@ -26,7 +26,6 @@ def _prompt(
     agent_session: dict[str, object] | None = None,
     user_name: str = "A",
     current_participant_ref: str = "",
-    self_reference_attached: bool = False,
     delivery_limits: DeliveryLimits = DEFAULT_DELIVERY_LIMITS,
 ) -> str:
     return compose_persona_prompt(
@@ -39,7 +38,6 @@ def _prompt(
         agent_session=agent_session,
         user_name=user_name,
         current_participant_ref=current_participant_ref,
-        self_reference_attached=self_reference_attached,
         delivery_limits=delivery_limits,
     )
 

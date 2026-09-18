@@ -150,7 +150,7 @@ def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> d
             "prompt": compact_text(arguments.get("prompt"), MAX_RESULT_TEXT),
             "source_image_index": source_image_index if type(source_image_index) is int else 1,
             "reference_count": len(normalized_references),
-            **selected_arguments(arguments, "size"),
+            **selected_arguments(arguments, "size", "use_persona_reference"),
         }
     if tool_name == "prepare_audio":
         return selected_arguments(arguments, "context")

@@ -21,7 +21,7 @@ class PersonaConfig(BasicConfModel, extra="forbid"):
     prompt: str
     """Identity, personality, speaking style and media preferences only."""
     reference_image: str | None = None
-    """Optional safe relative image path below resources/image."""
+    """Safe relative reference path uploaded to the image model when selected, never through chat descriptions."""
     appearance: str = ""
     """Optional visual appearance used with this persona's reference image."""
 
