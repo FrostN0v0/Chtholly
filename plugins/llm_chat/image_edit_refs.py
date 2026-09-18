@@ -84,9 +84,11 @@ class ImageEditReferences:
         return self._persona_reference
 
     def resolve_source_image(self, index: int) -> EditableImage:
-        if type(index) is not int or index < 1 or index > len(self.input_attachments):
+        if type(index) is not int or index < 1:
             raise ValueError("source image index is unavailable in the current user turn")
-        metadata = self.input_attachments[index - 1]
+        metadata = next((item for item in self.input_attachments if item.get("index") == index), None)
+        if metadata is None:
+            raise ValueError("source image index is unavailable in the current user turn")
         attachment_ref = metadata.get("attachment_ref")
         if not isinstance(attachment_ref, str) or not attachment_ref.startswith("input_"):
             raise ValueError("source image attachment is unavailable")

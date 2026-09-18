@@ -931,6 +931,22 @@ def test_image_file_to_data_url_sniffs_webp_without_suffix_guessing(tmp_path):
     assert not data_url.startswith("data:image/jpeg")
 
 
+@pytest.mark.asyncio
+async def test_failed_input_capture_does_not_renumber_edit_sources(tmp_path: Path):
+    from plugins.llm_chat.agent_attachments import capture_user_input_images
+
+    unavailable = Image.of(url="local://missing")
+    second = Image.of(raw=_PNG_BYTES)
+    session = cast(Session, _ImageSession([unavailable, second], None))
+    captured = await capture_user_input_images(session, [(unavailable, False), (second, False)], root=tmp_path)
+    references = ImageEditReferences.from_input_attachments(
+        captured, requires_web_reference=False, attachment_root=tmp_path
+    )
+    with pytest.raises(ValueError, match="unavailable"):
+        references.resolve_source_image(1)
+    assert references.resolve_source_image(2).data == _PNG_BYTES
+
+
 def test_self_reference_image_loads_validated_bytes_for_direct_model_input(tmp_path: Path):
     image_root = tmp_path / "image"
     image_path = image_root / "persona" / "ChthollyHat.png"
