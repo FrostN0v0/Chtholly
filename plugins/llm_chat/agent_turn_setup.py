@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from collections.abc import Mapping, Callable, Sequence
 
 from arclet.entari import Session
+from entari_plugin_llm.tools import available_functions
 
 from utils.turn_resolution_core import TurnResolution
 from utils.relationship_core.policy import read_emotions, build_relationship_context
@@ -407,6 +408,7 @@ async def _select_context(
         system=system,
         current_message=current_message,
         model_name=model_name,
+        tool_parameters={name: function.parameters for name, (_, function) in available_functions.items()},
         max_input_tokens=max(2048, config.max_input_tokens),
         output_reserve_tokens=max(0, config.output_reserve_tokens),
         rollover_ratio=config.context_rollover_ratio,

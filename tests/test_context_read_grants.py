@@ -22,6 +22,19 @@ from plugins.llm_chat.models import AgentEvent, ContextSession
 from plugins.llm_chat.agent_context import AgentAccessContext
 from plugins.llm_chat.session_manager import ScopeIdentity, BaselineFingerprint
 
+_TOOL_PARAMETERS = {
+    "source_tool": {
+        "type": "object",
+        "properties": {
+            "source": {"type": "string"},
+            "html": {"type": "string"},
+            "width": {"type": "integer"},
+            "note": {"type": "string"},
+            "query": {"type": "string"},
+        },
+    }
+}
+
 
 @pytest.fixture
 async def grant_store(monkeypatch):
@@ -104,6 +117,7 @@ async def _selection(context_session, *, message="Make the title blue", fresh=Fa
         minimum_recent_turns=1,
         inline_event_chars=256,
         fresh_context=fresh,
+        tool_parameters=_TOOL_PARAMETERS,
     )
 
 
@@ -317,7 +331,7 @@ async def test_budget_excluded_descriptors_do_not_issue_read_grants(grant_store,
     _scope, context_session = await _session()
     excluded, _ = await _execution(grant_store, context_session)
     included, _ = await _execution(grant_store, context_session)
-    monkeypatch.setattr(context_builder, "estimate_tokens", lambda _model, messages: len(messages) * 240)
+    monkeypatch.setattr(context_builder, "estimate_tokens", lambda _model, messages: len(messages) * 300)
     selection = await context_builder.select_session_context(
         context_session,
         system="system",
@@ -329,6 +343,7 @@ async def test_budget_excluded_descriptors_do_not_issue_read_grants(grant_store,
         minimum_recent_turns=1,
         inline_event_chars=256,
         fresh_context=False,
+        tool_parameters=_TOOL_PARAMETERS,
     )
     access = await _access(context_session, selection)
     assert (

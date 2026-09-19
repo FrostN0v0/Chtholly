@@ -63,6 +63,16 @@ from plugins.llm_chat.relationships.state import snapshot_relationship
 from plugins.llm_chat.core.tool_trace_policy import DeliverySnapshot
 from plugins.llm_chat.persona.memory_context import MemoryContext
 
+_TOOL_PARAMETERS = {
+    "html2pic": {
+        "type": "object",
+        "properties": {"html": {"type": "string"}, "width": {"type": "integer"}},
+        "required": ["html"],
+    },
+    "web_search": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+    "lookup": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]},
+}
+
 
 @pytest.fixture
 async def agent_store(monkeypatch: pytest.MonkeyPatch):
@@ -166,21 +176,17 @@ async def test_agent_event_rebuild_preserves_tool_pair_and_externalizes_large_so
         minimum_recent_turns=1,
         inline_event_chars=16,
         fresh_context=False,
+        tool_parameters=_TOOL_PARAMETERS,
     )
     assert [message["role"] for message in selection.messages] == [
         "user",
         "assistant",
-        "tool",
         "assistant",
         "user",
     ]
-    assistant_call = cast(dict[str, Any], selection.messages[1])
-    tool_result = cast(dict[str, Any], selection.messages[2])
-    tool_calls = cast(list[dict[str, Any]], assistant_call.get("tool_calls"))
-    tool_call = tool_calls[0]
-    assert tool_call["id"] == tool_result["tool_call_id"] == call.execution_ref
-    arguments = json.loads(tool_call["function"]["arguments"])
-    descriptor = arguments["html"]
+    batch = json.loads(cast(str, selection.messages[1]["content"]))["historical_tool_batch"]
+    assert batch["calls"][0]["id"] == batch["results"][0]["tool_call_id"] == call.execution_ref
+    descriptor = batch["calls"][0]["input_summary"]["html"]
     assert descriptor["stored"] is True
     assert descriptor["event_ref"] == call_event.event_ref
     assert descriptor["path"] == "arguments.html"
@@ -257,6 +263,7 @@ async def test_agent_event_rebuild_batches_parallel_tool_calls_before_their_resu
         minimum_recent_turns=1,
         inline_event_chars=4000,
         fresh_context=False,
+        tool_parameters=_TOOL_PARAMETERS,
     )
 
     assert [message["role"] for message in selection.messages] == [
@@ -320,6 +327,7 @@ async def test_context_budget_drops_whole_old_turns_without_orphaning_tool_messa
         minimum_recent_turns=1,
         inline_event_chars=4000,
         fresh_context=False,
+        tool_parameters=_TOOL_PARAMETERS,
     )
 
     assert selection.excluded_turn_refs
@@ -836,8 +844,9 @@ async def test_interleaved_tool_results_remain_paired_without_operator_snapshots
         minimum_recent_turns=0,
         inline_event_chars=4000,
         fresh_context=False,
+        tool_parameters=_TOOL_PARAMETERS,
     )
-    calls = [call for message in selection.messages for call in message.get("tool_calls", [])]
+    calls = [call for message in selection.messages for call in message.get("tool_calls") or []]
     results = [message for message in selection.messages if message["role"] == "tool"]
     assert [call["id"] for call in calls] == ["a", "b", "c"]
     assert [message["tool_call_id"] for message in results] == ["a", "b", "c"]

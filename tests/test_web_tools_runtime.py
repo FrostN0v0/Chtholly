@@ -4608,6 +4608,171 @@ async def test_native_readonly_batch_executes_following_delivery_exactly_once(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("send_msg", {"segments": [{"type": "media"}]}),
+        ("send_msg", {"segments": [{"type": "mention", "target": "participant"}]}),
+        ("html2pic", {"html": "<div>Source</div>" * 100, "width": 900}),
+    ],
+)
+async def test_legacy_nested_summaries_keep_results_without_advertising_invalid_calls(
+    local_modules: SimpleNamespace,
+    tool_name: str,
+    arguments: dict[str, object],
+) -> None:
+    from jsonschema import Draft202012Validator
+
+    from plugins.llm_chat.models import AgentTurn, AgentEvent
+    from plugins.llm_chat.context_builder import _turn_messages
+
+    rows = [
+        AgentEvent(
+            turn_id=1,
+            event_ref="historical-call",
+            event_type="assistant_tool_call",
+            model_visible=True,
+            tool_name=tool_name,
+            tool_call_id="legacy",
+            payload_json=json.dumps({"arguments": arguments, "audit_arguments": {"text": "private-audit"}}),
+        ),
+        AgentEvent(
+            turn_id=1,
+            event_ref="historical-result",
+            event_type="tool_result",
+            model_visible=True,
+            tool_name=tool_name,
+            tool_call_id="legacy",
+            payload_json=json.dumps({"result": {"error": "Unknown delivery outcome"}}),
+            status="failed",
+            effect="unknown",
+        ),
+    ]
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        validator = Draft202012Validator(available_functions[tool_name][1].parameters)
+        history = _turn_messages(AgentTurn(id=1), rows, inline_chars=256, validators={tool_name: validator})
+    assert not any(message.get("tool_calls") or message["role"] == "tool" for message in history)
+    result = json.loads(cast(str, history[0]["content"]))["historical_tool_batch"]["results"][0]
+    assert result["status"] == "failed"
+    assert result["effect"] == "unknown"
+    assert result["data"] == {"error": "Unknown delivery outcome"}
+    assert "private-audit" not in json.dumps(history)
+
+
+@pytest.mark.asyncio
+async def test_historical_summaries_never_become_executable_tool_arguments(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import asdict, replace
+
+    from jsonschema import Draft202012Validator
+
+    from plugins.llm_chat.models import AgentTurn, AgentEvent
+    from plugins.llm_chat.context_builder import _turn_messages
+    from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
+
+    trace = ToolTraceRecorder()
+    trace.set_attempt(1)
+    old_calls = [
+        trace.start("send_msg", {"segments": [{"type": "text", "text": "Already delivered."}]}),
+        trace.start("send_msg", {"segments": [{"type": "media", "media_ref": "media_0123456789abcdef"}]}),
+        trace.start("html2pic", {"html": "<div>Original source</div>" * 100, "width": 900}),
+    ]
+    for call in reversed(old_calls):
+        trace.finish_success(call, {"status": "recorded"}, before=DeliverySnapshot(), after=DeliverySnapshot())
+    trace.set_attempt(2)
+    clock = trace.start("get_local_time", {"timezone": "UTC"})
+    trace.finish_success(clock, {"time": "12:00"}, before=DeliverySnapshot(), after=DeliverySnapshot())
+    recorder = AgentTurnRecorder()
+    recorder.record_tool_events(
+        [
+            replace(
+                event,
+                started_at=datetime(2026, 1, 1, tzinfo=datetime_timezone.utc) + timedelta(seconds=event.attempt),
+                duration_ms=(5 - event.sequence) * 10,
+            )
+            for event in trace.events
+        ]
+    )
+    rows = []
+    for event in recorder.events:
+        values = asdict(event)
+        values["payload_json"] = json.dumps(values.pop("payload"))
+        rows.append(AgentEvent(turn_id=1, event_ref=f"event-{event.sequence}", **values))
+    stored_payloads = [row.payload_json for row in rows]
+    references = []
+    requests = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(
+                tool_calls=[_tool_call("fresh", "send_msg", {"segments": [{"type": "text", "text": "New reply."}]})]
+            ),
+            _model_response("[END_OF_RESPONSE]"),
+        ],
+    )
+    session = _DeliveryToolSession()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        parameters = {name: function.parameters for name, (_, function) in available_functions.items()}
+        history = _turn_messages(
+            AgentTurn(id=1),
+            rows,
+            inline_chars=256,
+            references=references,
+            validators={
+                name: Draft202012Validator({**schema, "additionalProperties": False})
+                for name, schema in parameters.items()
+            },
+        )
+        await local_modules.generation.generate_chat_response(
+            [*history, {"role": "user", "content": "Send a new acknowledgment."}],
+            system="Use current tool schemas and do not resend historical output.",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=local_modules.delivery.DeliveryState(),
+        )
+
+    native_calls = [call for message in history for call in message.get("tool_calls") or []]
+    for call in native_calls:
+        function = call["function"]
+        schema = {**parameters[function["name"]], "additionalProperties": False}
+        Draft202012Validator(schema).validate(json.loads(function["arguments"]))
+    assert [call["id"] for call in native_calls] == [clock.execution_ref]
+    assert [message["tool_call_id"] for message in history if message["role"] == "tool"] == [clock.execution_ref]
+    batch = json.loads(cast(str, history[0]["content"]))["historical_tool_batch"]
+    assert [call["id"] for call in batch["calls"]] == [call.execution_ref for call in old_calls]
+    assert [result["tool_call_id"] for result in batch["results"]] == [
+        call.execution_ref for call in reversed(old_calls)
+    ]
+    descriptor = batch["calls"][2]["input_summary"]["html"]
+    assert (references[0].event_ref, references[0].path) == (descriptor["event_ref"], "arguments.html")
+    assert "media_0123456789abcdef" not in json.dumps(history)
+    assert [row.payload_json for row in rows] == stored_payloads
+    assert [str(message) for message in session.sent] == ["New reply."]
+    assert session.attempts == session.sent
+    for message in requests[0]["messages"]:
+        for call in message.get("tool_calls") or []:
+            function = call["function"]
+            schema = {**parameters[function["name"]], "additionalProperties": False}
+            Draft202012Validator(schema).validate(json.loads(function["arguments"]))
+    assert any("historical_tool_batch" in (message.get("content") or "") for message in requests[0]["messages"])
+    assert (
+        json.loads(
+            next(result["content"] for result in _tool_messages(requests[1]) if result["tool_call_id"] == "fresh")
+        )["ok"]
+        is True
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["silent", "declined", "delivered"])
 async def test_native_finish_stops_queued_effects_with_matched_skipped_results(
     local_modules: SimpleNamespace,
@@ -4679,12 +4844,14 @@ async def test_native_finish_stops_queued_effects_with_matched_skipped_results(
         values = asdict(event)
         values["payload_json"] = json.dumps(values.pop("payload"))
         rows.append(AgentEvent(turn_id=1, event_ref=f"event-{event.sequence}", **values))
-    history = _turn_messages(AgentTurn(id=1), rows, inline_chars=10_000)
-    history_results = [message for message in history if message["role"] == "tool"]
+    history = _turn_messages(AgentTurn(id=1), rows, inline_chars=10_000, validators={})
+    history_results = [
+        result
+        for message in history
+        for result in json.loads(cast(str, message["content"]))["historical_tool_batch"]["results"]
+    ]
     assert sorted(message["tool_call_id"] for message in history_results) == sorted(call["id"] for call in calls)
-    decision_result = json.loads(
-        next(message["content"] for message in history_results if message["tool_call_id"] == "finish")
-    )
+    decision_result = next(message for message in history_results if message["tool_call_id"] == "finish")
     assert decision_result["effect"] == "none"
     assert decision_result["data"] == {"outcome": outcome}
     assert "private boundary explanation" not in json.dumps(history)

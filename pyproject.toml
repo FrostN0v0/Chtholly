@@ -19,6 +19,7 @@ dependencies = [
     "entari-plugin-webui>=1.0.1",
     "exa-py>=2.16.2",
     "httpx[http2]>=0.27.2",
+    "jsonschema>=4.23,<5",
     "markdown>=3.10",
     "orjson>=3.11.9",
     "psutil>=7.0.0",

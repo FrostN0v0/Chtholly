@@ -8,6 +8,7 @@ import base64
 import asyncio
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from dataclasses import asdict
 
 import pytest
 from satori import (
@@ -42,6 +43,7 @@ if not hasattr(EntariConfig, "instance"):
     )
 
 from plugins.llm_chat import delivery_audit, context_builder
+from plugins.llm_chat.models import AgentTurn, AgentEvent
 from plugins.llm_chat.core.tool_trace import llm_chat_tool_execution_scope
 from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
 from plugins.llm_chat.agent_attachments import resolve_agent_attachment
@@ -151,7 +153,12 @@ async def test_rendered_png_and_text_keep_actual_receipt_time_and_private_bytes(
     assert str(tmp_path) not in json.dumps([event.payload for event in stored])
     assert warnings == []
     # Exercise the real context projection with the actual captured private events.
-    assert context_builder._turn_messages(None, recorder.events, inline_chars=4000) == []
+    rows = []
+    for event in recorder.events:
+        values = asdict(event)
+        values["payload_json"] = json.dumps(values.pop("payload"))
+        rows.append(AgentEvent(turn_id=1, event_ref=f"event-{event.sequence}", **values))
+    assert context_builder._turn_messages(AgentTurn(id=1), rows, inline_chars=4000, validators={}) == []
 
 
 @pytest.mark.asyncio
