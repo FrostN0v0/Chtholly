@@ -10,7 +10,7 @@ from satori.adapters.qq.websocket import QQBotWebsocketConfig
 
 def test_qq_sandbox_group_message_intent_is_nested_and_enabled() -> None:
     root = Path(__file__).resolve().parents[1]
-    config = yaml.safe_load((root / "entari.yml").read_text(encoding="utf-8"))
+    config = yaml.safe_load((root / "entari.full.example.yml").read_text(encoding="utf-8"))
     adapter = next(item for item in config["plugins"]["server"]["adapters"] if item.get("$path") == "@qq.websocket")
 
     validated_type = make_dataclass("ValidatedQQConfig", [], bases=(QQBotWebsocketConfig, BasicConfModel))

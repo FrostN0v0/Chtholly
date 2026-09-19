@@ -18,7 +18,9 @@ from arclet.entari import Session
 from arclet.entari.config import EntariConfig
 
 if not hasattr(EntariConfig, "instance"):
-    setattr(EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.yml"))
+    setattr(
+        EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.full.example.yml")
+    )
 
 from entari_plugin_database import Base
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine

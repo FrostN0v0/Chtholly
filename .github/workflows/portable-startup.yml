@@ -1,0 +1,42 @@
+name: Portable startup
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  clean-startup:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.7"
+          python-version: "3.10"
+      - run: uv sync --locked --all-extras
+      - run: uv run --locked pytest tests/test_startup.py tests/test_startup_resources.py -q
+      - run: uv run --locked python scripts/smoke_startup.py
+
+  prepared-resources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.7"
+          python-version: "3.10"
+      - run: uv sync --locked --all-extras
+      - name: Install browser system dependencies explicitly
+        run: sudo .venv/bin/python -m playwright install-deps chromium
+      - run: uv run --locked python scripts/smoke_startup.py --resources

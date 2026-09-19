@@ -9,7 +9,7 @@
   <a href="https://raw.githubusercontent.com/FrostN0v0/Chtholly/master/LICENSE">
     <img src="https://img.shields.io/github/license/FrostN0v0/Chtholly" alt="license">
   </a>
-    <img src="https://img.shields.io/badge/python-3.10+-blue?logo=python&logoColor=edb641" alt="python">
+    <img src="https://img.shields.io/badge/python-3.10-blue?logo=python&logoColor=edb641" alt="python">
 
 </p>
 
@@ -33,20 +33,62 @@
 
 珂朵莉是世界上最幸福的女孩，也是一款基于 Entari 与 Satori 协议构建的 QQ 娱乐机器人。
 
-Welcome To [💬 斯卡布罗集市](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M75YeO2zj9f5ziuS2ijcDzbjkAfcMHVA&authKey=ilcGvEnqWjHOJKa3f1cpOMQPVAeA0RZyv%2BD9lE9aV1WfwFZ8ig%2BUynUCSM4AXZOB&noverify=0&group_code=326466216)
+点击链接加入群聊【[𝓢𝓬𝓪𝓻𝓫𝓸𝓻𝓸𝓾𝓰𝓱 𝓕𝓪𝓲𝒓🥧](https://qm.qq.com/q/egWCtfdJrU)】。
 
 ## 🛠️ 快速开始
 
-需要 Python 3.10+ 与 [uv](https://docs.astral.sh/uv/)。
+当前支持 **Python 3.10**，使用 [uv](https://docs.astral.sh/uv/) 按 `.python-version` 和锁文件安装，不复用其他 Python 版本的虚拟环境。
 
 ```shell
 git clone https://github.com/FrostN0v0/Chtholly.git
 cd Chtholly
 uv sync --locked --all-extras
-uv run --locked entari run
+uv run --locked main.py --check
+uv run --locked main.py
 ```
 
-`uv.lock` 固定当前兼容组合，包含 Entari、WebUI 补丁包与 LLM Git 版本；请按锁文件安装。Entari `0.19.0rc2+chtholly.2` 修复热更新回滚、监听器清理和命令目录残留；WebUI `1.0.3+chtholly.1` 将登录会话与聊天连接分离，支持同一账号多个标签页，并允许失败的认证初始化重试。wheel 随仓库提供，可用 `python scripts/build_patched_wheel.py --package entari` 或 `--package webui` 从固定官方 wheel 和仓库补丁重建，不手改 `.venv`。
+默认 `entari.yml` 是不需要账号或模型凭证的最小配置：初始化 SQLite，启动只监听 `127.0.0.1:8120` 的 Satori 服务。不自动连接 QQ、不加载 LLM、浏览器、TTS、WebUI 或工坊；没有配置协议端时，服务正常运行，但尚不能收发 QQ 消息。首次启动会建立数据库父目录，不需要复制别人的 `data/`。
+
+### 接入自己的账号和功能
+
+保留 `entari.yml` 作为受版本管理的默认配置；个人配置放在不入库的 `entari.local.yml`，凭证放在 `.env`。可先复制最小配置，或参考 `entari.full.example.yml` 挑选需要的插件段。完整示例不是免配置套餐：启用哪些功能，就需要提供对应账号、模型和服务；删除不使用的插件与适配器段，不要填写假的凭证来绕过检查。
+
+```shell
+uv run python -c "from pathlib import Path; Path('entari.local.yml').open('xb').write(Path('entari.yml').read_bytes()); Path('.env').open('xb').write(Path('.env.example').read_bytes())"
+```
+
+上述命令拒绝覆盖已有文件；只用于没有个人配置的新安装。配置选择顺序为 `--config PATH`、`ENTARI_CONFIG_FILE`、`entari.local.yml`、`entari.yml`。也可用 `--config entari.yml` 显式检查最小配置。
+
+- **OneBot**：在 `server.adapters` 中加入完整示例的 `@onebot11.reverse` 段，填写 `.env` 的 `ONEBOT_TOKEN`，并在 LLBot 等协议端配置同一个 token；反向 WebSocket 地址为 `ws://127.0.0.1:8120/onebot/v11/ws`。
+- **LLM / WebUI**：选择自己确实可用的模型、接口和密钥；启用工坊必须先设置明确的 `WEBUI_PASSWORD`。OneBot 用户不需要同时启用官方 QQ 适配器。
+- **官方 QQ**：单独配置 `QQ_APP_ID` 和 `QQ_APP_SECRET`，它们与 OneBot token 无关。
+- **TTS / 工坊 / 网页作品**：还需要相应的外部服务。工坊隔离验收要求 Linux 主机环境和预构建 Linux Docker 镜像，原生 Windows 上运行 Bot 不等于支持工坊验收；SSO、受管重启和作品服务器不是普通首启的必装项。
+
+启用浏览器或 LLM 后，先显式准备所选功能的资源，再检查和启动：
+
+```shell
+uv run --locked main.py --prepare
+uv run --locked main.py --check
+uv run --locked main.py
+```
+
+`--check` 不下载、不建目录、不连接账号或模型；`--prepare` 建立所需目录、准备匹配锁定版本的 Chromium 与 tokenizer，不启动 Bot 或调用模型。普通启动不再偷偷下载这些资源，缺失时会提示准备命令。Linux 若缺浏览器系统库，可显式使用 `--prepare --with-browser-deps`；该操作需要系统包管理器权限，不会自动执行 `sudo`。默认最小配置无需浏览器或 tokenizer 下载。
+
+LLM 的价格元数据默认使用随包副本。只有显式设置进程环境 `LITELLM_LOCAL_MODEL_COST_MAP=false` 才恢复上游导入时联网更新；这不是普通启动的必要步骤。
+
+### 更新已有安装
+
+升级前停止 Bot、备份个人配置及数据库；若以前直接修改 `entari.yml`，先保存为 `entari.local.yml`，避免拉取时覆盖个人设置。不要用删除数据库或覆盖 `.env` 的方式解决升级报错。
+
+```shell
+git pull --ff-only
+uv sync --locked --all-extras
+uv run --locked main.py --check
+```
+
+检查提示配置迁移时，按对应迁移说明操作；提示缺少资源时运行 `--prepare`，检查通过后再启动。仅 `git pull` 后直接用旧虚拟环境运行，不会自动完成依赖和配置升级。
+
+`uv.lock` 固定兼容组合，包含 Entari、WebUI、HTMLRender 补丁 wheel 与 LLM Git 版本。HTMLRender `0.1.0+chtholly.1` 修复驱动与安装器浏览器缓存不一致；补丁 wheel 随仓库提供，可用 `python scripts/build_patched_wheel.py --package entari`、`--package webui` 或 `--package htmlrender` 重建，不手改 `.venv`。干净环境验证入口为 `uv run --locked python scripts/smoke_startup.py`，CI 在 Windows 与 Linux 上检查新安装及本地配置升级路径。
 
 更多框架用法见 [Entari 文档](https://arclet.top/tutorial/entari/)。
 

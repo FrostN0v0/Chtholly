@@ -65,7 +65,7 @@ from plugins.llm_chat.core.tool_trace_policy import DeliverySnapshot
 
 _ROOT = Path(__file__).resolve().parents[1]
 if not hasattr(EntariConfig, "instance"):
-    EntariConfig.instance = EntariConfig.load(_ROOT / "entari.yml")
+    EntariConfig.instance = EntariConfig.load(_ROOT / "entari.full.example.yml")
 from entari_plugin_llm.event import LLMToolEvent
 from entari_plugin_llm.tools import get_agno_tools, available_functions
 from entari_plugin_htmlrender import (

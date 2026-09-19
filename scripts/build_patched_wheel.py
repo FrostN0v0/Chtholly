@@ -48,6 +48,17 @@ PACKAGES = {
         "entari-0.19.0rc2-staged-rollback.patch",
         "entari",
     ),
+    "htmlrender": WheelSpec(
+        "entari_plugin_htmlrender",
+        "0.1.0",
+        "0.1.0+chtholly.1",
+        "https://files.pythonhosted.org/packages/0d/d1/"
+        "229c5569dc41eb5ab82ae94b2ca98803f266c6f2390712dd094173024694/"
+        "entari_plugin_htmlrender-0.1.0-py3-none-any.whl",
+        "c982d3e8846f80598d66bd5039810d0d21303070b8a153014457ec4a6782c9fb",
+        "htmlrender-0.1.0-browser-cache.patch",
+        "htmlrender",
+    ),
     "webui": WheelSpec(
         "entari_plugin_webui",
         "1.0.3",

@@ -128,6 +128,7 @@ celerybeat.pid
 # Environments
 .env
 .env.*
+!.env.example
 .venv
 env/
 venv/
@@ -189,6 +190,7 @@ config/
 logs/
 data/
 entari.yml.local
+entari.local.yml
 .env.local
 .entari
 .entari_cli.toml

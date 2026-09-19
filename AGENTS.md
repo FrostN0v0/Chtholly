@@ -10,13 +10,16 @@
 
 - 协议层：Satori 协议；通过 `entari-plugin-server` + 适配器对接 OneBot V11 / Milky / QQ / Lagrange / Console / 纯 Satori 等协议端。
 - 主要职责：提供运行时环境（`entari.yml`）、共享工具（`utils/`）、静态资源（`resources/`）、本地扩展插件（`plugins/`）。
-- 使用者可按需在 `entari.yml` 的 `plugins` 段裁剪加载列表，或通过 `external_dirs` 引入额外插件目录。
+- `entari.yml` 是不含外部账号、模型、浏览器和 WebUI 的最小默认配置；完整能力参考 `entari.full.example.yml`，个人配置保存到不入库的 `entari.local.yml`，凭证参考 `.env.example` 后写入 `.env`。配置选择顺序固定为启动参数 `--config`、环境变量 `ENTARI_CONFIG_FILE`、`entari.local.yml`、`entari.yml`；不得在升级时覆盖已有个人配置或数据库。
 
 ## 技术栈与关键依赖
 
-- **Python**: >= 3.10, < 4.0（当前运行时使用 3.10；待协议栈完成 Python 3.14 兼容后再升级）
+- **Python**: >= 3.10, < 3.11；当前启动器、依赖锁和干净环境验收固定在 Python 3.10，其他版本须完成协议栈及 LLM 兼容性验证后再开放。
 - **Bot 框架**: [arclet-entari](https://pypi.org/project/arclet-entari/)（基于官方 `0.19.0rc2`，当前安装仓库内的 `0.19.0rc2+chtholly.2` 补丁 wheel，完整保留 `arclet-entari[full]`，含 CLI、YAML、文件监听）。补丁修复 staged reload 对象所有权、Scope 冲突、失败模块绑定恢复、子插件/Service 清理与重复替换后的命令残留；失败候选须恢复旧订阅者持有的真实 Alconna 解析器和 formatter 条目。`scripts/build_patched_wheel.py --package entari` 从固定官方 wheel 与仓库补丁重建制品；同一构建器的 `--package webui` 生成 `1.0.3+chtholly.1`，将认证 Cookie 与每个聊天连接的 transport ID 分离，断开只清理自己的连接、waiter 和 login，并让失败的前端认证初始化可以重试。不直接修改第三方安装目录。HTMLRender `0.1.0` 的 Entari 上界通过精确 uv override 保留 `full,pydantic`，升级必须验证真实渲染及失败更新、重复替换和最终卸载。
 - **CLI 工具**: [entari-cli](https://pypi.org/project/entari-cli/) —— `entari init / run / new / add / remove / config / gen_main`
+- **首启边界**: `main.py` 通过 `utils/startup` 在加载业务插件前使用 Entari 原生配置解析、聚合缺失前提并建立配置指定的 SQLite 父目录。`--check` 不写入或下载，`--prepare` 仅准备已启用能力的资源，不启动账号或调用模型；凭证化配置禁止 debug/trace 和 rich_error。默认配置只监听回环；接口探测使用原生 `/satori/v1/meta`，无账号时不能把需身份头的业务 API 当健康接口。
+- **资源准备**: HTMLRender 固定 `0.1.0+chtholly.1` 补丁 wheel，由同一 `scripts/build_patched_wheel.py --package htmlrender` 构建，安装器与驱动复用原生缓存定位。启动器按实际缓存、显式浏览器路径和远程模式检查资源，支持显式 Linux 系统库准备但不自动 sudo。LLM tokenizer 在 `--prepare` 中按上游哈希准备，价格元数据默认使用随包副本，普通启动不依靠隐式下载；不得用空实现或错误缓存伪装准备成功。
+- **干净环境验收**: `scripts/smoke_startup.py` 从受管源码和本轮新文件建立排除私有配置、运行数据与原虚拟环境的快照，实际安装依赖、启动原生服务并检查重启后配置/数据保留；`--resources` 追加真实浏览器启动和断网 tokenizer 导入。CI 在 Windows/Linux 执行最小路径，Linux 另验完整资源路径。业务测试显式使用完整示例，不再依赖面向用户的最小默认配置。
 - **事件总线**: arclet-letoderea（Entari 内建依赖）
 - **命令系统**: arclet-alconna（Entari 内建 `command` 模块）
 - **服务管理**: launart（`Service` 基类用于跨插件依赖注入）
@@ -52,9 +55,12 @@
 
 ```text
 Chtholly/
-├── entari.yml             # 主配置：basic.network / log / prefix / plugins
+├── entari.yml             # Minimal credential-free configuration
 ├── .env                   # 环境变量（需 arclet-entari[dotenv]）；存放敏感值，不入库
-├── main.py                # 可选：entari gen_main 生成，直接 python main.py 运行
+├── entari.local.yml       # Private user configuration, ignored by Git
+├── entari.full.example.yml # Advanced opt-in configuration
+├── .env.example           # Feature-scoped credential names
+├── main.py                # Portable startup and prerequisite checks
 ├── plugins/               # 本地插件目录
 │   └──...                 # 各插件
 ├── utils/                 # 跨插件共享工具（纯函数库，不写 Entari 副作用）
@@ -75,18 +81,17 @@ Chtholly/
 
 ```bash
 
-# 运行机器人
-entari run
-# 或生成入口脚本后运行
-entari gen_main
-uv run main.py
+# Check prerequisites, prepare selected resources, and start the Bot
+uv run --locked main.py --check
+uv run --locked main.py --prepare
+uv run --locked main.py
 
 # 安装插件并写入 entari.yml
 entari add <plugin-name> [-D] [-O] [-p NUM] [--key KEY]
 # 目前add指令会因为未读取到env而报错，所以请使用 uv 安装插件并手动配置 entari.yml
 
-# 同步依赖
-uv sync --all-extras 
+# Synchronize the supported locked dependency set
+uv sync --locked --all-extras
 
 # 格式化与静态检查
 uvx ruff format
@@ -96,6 +101,8 @@ uvx ruff check --fix
 # 构建发布包
 uv build
 ```
+
+项目已有包含首启检查的 `main.py`，不要通过 `entari gen_main` 覆盖它；原生 `entari run` 会调用该现有入口。
 
 ## 插件开发规范
 
@@ -223,7 +230,7 @@ config = plugin_config(MyConfig)
 ### 代码风格
 
 - 行长度与格式遵循 `ruff` 与项目已有设置。
-- Python 目标版本：3.14。
+- Python 目标版本：3.10。
 - Ruff lint 规则见 `pyproject.toml` 的 `[tool.ruff.lint]`。
 - Pyright 使用 `typeCheckingMode = "standard"`。
 - 保持现有代码风格：异步函数、配置模型（`BasicConfModel` 优先，跨框架兼容场景用 Pydantic）、短中文注释风格。

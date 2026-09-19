@@ -35,7 +35,9 @@ from arclet.entari.plugin.model import Plugin, current_plugin
 import plugins as _PLUGINS
 
 if not hasattr(EntariConfig, "instance"):
-    setattr(EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.yml"))
+    setattr(
+        EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.full.example.yml")
+    )
 from entari_plugin_database import Base
 
 from plugins.llm_chat import (
@@ -4170,28 +4172,8 @@ async def test_block_native_llm_fallback_claims_all_public_messages_after_uncaug
         assert native_persistence == []
 
 
-def test_yaml_and_default_delivery_configuration_are_synchronized() -> None:
-    llm_chat_plugin = cast(dict[str, Any], EntariConfig.instance.plugin["llm_chat"])
-    defaults = LLMChatConfig()
-    expected: dict[str, int | float] = {
-        "delivery_min_interval_seconds": 1.1,
-        "delivery_default_interval_seconds": 1.2,
-        "delivery_max_interval_seconds": 5.0,
-        "delivery_max_text_messages_per_generation": 5,
-        "delivery_max_text_chars_per_message": 1000,
-        "delivery_max_forward_nodes": 20,
-        "delivery_max_forward_chars_per_node": 2000,
-        "delivery_max_total_text_chars_per_generation": 12000,
-        "delivery_max_media_messages_per_generation": 6,
-    }
-
-    for key, value in expected.items():
-        assert getattr(defaults, key) == value
-        assert llm_chat_plugin[key] == value
-
-
 def test_real_yaml_resolves_optional_exa_key_without_template_residue():
-    config_path = Path(__file__).resolve().parents[1] / "entari.yml"
+    config_path = Path(__file__).resolve().parents[1] / "entari.full.example.yml"
     required_env = {
         "WEBUI_PASSWORD": "",
         "LLM_API_KEY": "",

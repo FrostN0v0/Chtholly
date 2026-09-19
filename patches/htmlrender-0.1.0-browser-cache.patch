@@ -1,0 +1,23 @@
+--- a/entari_plugin_htmlrender/adapters/playwright/install.py
++++ b/entari_plugin_htmlrender/adapters/playwright/install.py
+@@ -14,6 +14,7 @@
+ from ._support.install import (
+     execute_install_command as _execute_install_command,
+ )
++from .install_state import get_playwright_storage_path
+ 
+ if TYPE_CHECKING:
+     from collections.abc import Mapping
+@@ -54,9 +55,12 @@
+     A copy of the caller environment plus the download timeout, the selected
+     mirror host (only when ``mirror`` is given) and proxy variables. Existing
+     parent proxy variables keep their priority and are never overwritten; the
+     parent environment itself is not mutated.
++    Browser cache location follows the same native resolver as driver startup,
++    overriding any inherited browser path only in the subprocess environment.
+     """
+     env = dict(os.environ)
++    env["PLAYWRIGHT_BROWSERS_PATH"] = os.path.abspath(str(get_playwright_storage_path(config)))
+     env[_CONNECTION_TIMEOUT_VAR] = "300000"
+ 
+     proxy = config.install_proxy

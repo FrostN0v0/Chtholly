@@ -22,7 +22,7 @@ import plugins as plugins_package
 
 _ROOT = Path(__file__).resolve().parents[1]
 if not hasattr(EntariConfig, "instance"):
-    EntariConfig.instance = EntariConfig.load(_ROOT / "entari.yml")
+    EntariConfig.instance = EntariConfig.load(_ROOT / "entari.full.example.yml")
 
 from entari_plugin_database import Base
 

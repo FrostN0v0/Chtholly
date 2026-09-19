@@ -4,3 +4,4 @@ patches/*.patch text eol=lf
 vendor/entari/*.whl binary
 scripts/oauth2_proxy/* text eol=lf
 vendor/webui/*.whl binary
+vendor/htmlrender/*.whl binary

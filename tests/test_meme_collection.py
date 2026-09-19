@@ -25,7 +25,9 @@ from arclet.entari.const import ITEM_SESSION
 from arclet.entari.config import EntariConfig
 
 if not hasattr(EntariConfig, "instance"):
-    setattr(EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.yml"))
+    setattr(
+        EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.full.example.yml")
+    )
 from satori.model import MessageObject
 from agno.run.agent import RunOutput
 from arclet.letoderea import Contexts
@@ -42,7 +44,9 @@ _PACKAGE.__path__ = [str(Path(__file__).resolve().parents[1] / "plugins" / "llm_
 sys.modules.setdefault("plugins.llm_chat", _PACKAGE)
 setattr(_PLUGINS, "llm_chat", _PACKAGE)
 if not hasattr(EntariConfig, "instance"):
-    setattr(EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.yml"))
+    setattr(
+        EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.full.example.yml")
+    )
 
 from entari_plugin_database import Base
 

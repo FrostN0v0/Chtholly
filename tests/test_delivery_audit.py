@@ -37,7 +37,9 @@ from arclet.entari.config import EntariConfig
 from arclet.entari.session import COMPONENTS, EntariProtocol
 
 if not hasattr(EntariConfig, "instance"):
-    setattr(EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.yml"))
+    setattr(
+        EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.full.example.yml")
+    )
 
 from plugins.llm_chat import delivery_audit, context_builder
 from plugins.llm_chat.core.tool_trace import llm_chat_tool_execution_scope
