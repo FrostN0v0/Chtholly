@@ -128,7 +128,7 @@ def terminate(process: subprocess.Popen) -> None:
         process.wait(timeout=5)
 
 
-def serve_once(workspace: Path, env: dict[str, str], port: int) -> None:
+def serve_once(workspace: Path, env: dict[str, str], port: int, *, resources: bool) -> None:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with (workspace / "startup.log").open("wb") as log:
         process = subprocess.Popen(
@@ -157,8 +157,16 @@ def serve_once(workspace: Path, env: dict[str, str], port: int) -> None:
                         consecutive += 1
                 except (urllib.error.URLError, TimeoutError):
                     consecutive = 0
-                if consecutive == 3:
-                    return
+                if consecutive >= 3:
+                    if not resources:
+                        return
+                    try:
+                        with opener.open(f"http://127.0.0.1:{port}/__startup_smoke__/render", timeout=20) as response:
+                            rendered = json.load(response)
+                            if rendered == {"browser": True, "htmlrender": True}:
+                                return
+                    except (urllib.error.URLError, TimeoutError):
+                        pass
                 time.sleep(0.5)
             raise SmokeFailure("Native Satori API did not become ready")
         finally:
@@ -195,12 +203,26 @@ def exercise(workspace: Path, *, resources: bool) -> dict[str, object]:
             "startup": "probe",
             "provider_config": {"engine": "chromium", "storage_path": str(workspace / "browser-cache")},
         }
+        template_root = workspace / "smoke-templates"
+        template_root.mkdir()
+        (template_root / "sample.html").write_text(
+            "<!doctype html><html><head><style>html,body{margin:0;width:32px;height:24px;"
+            "background:#2468ac}</style></head><body></body></html>",
+            encoding="utf-8",
+        )
+        config["plugins"]["htmlrender"]["resources"] = {"local_access": {"allowed_paths": [str(template_root)]}}
+        shutil.copyfile(
+            workspace / "tests/fixtures/startup_resource_probe.py",
+            workspace / "plugins/startup_resource_probe.py",
+        )
+        config["plugins"].setdefault("$prefix", []).append({"key": "", "plugins": ["startup_resource_probe"]})
+        config["plugins"]["startup_resource_probe"] = {}
     local = workspace / "entari.local.yml"
     write_config(local, config)
     original = local.read_bytes()
     run(workspace, env, "run", "--locked", "main.py", "--prepare")
     run(workspace, env, "run", "--locked", "main.py", "--check")
-    serve_once(workspace, env, port)
+    serve_once(workspace, env, port, resources=resources)
     database = workspace / "persistent/chat.db"
     if not database.parent.is_dir():
         raise SmokeFailure("Startup ignored the selected local database directory")
@@ -210,7 +232,7 @@ def exercise(workspace: Path, *, resources: bool) -> dict[str, object]:
     connection.close()
     run(workspace, env, "sync", "--locked", "--all-extras")
     run(workspace, env, "run", "--locked", "main.py", "--check")
-    serve_once(workspace, env, port)
+    serve_once(workspace, env, port, resources=resources)
     with sqlite3.connect(database) as connection:
         if connection.execute("SELECT value FROM startup_smoke").fetchall() != [("retained",)]:
             raise SmokeFailure("Upgrade lost existing database state")

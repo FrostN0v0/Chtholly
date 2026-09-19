@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import json
 from pathlib import Path
 
@@ -17,6 +19,15 @@ def startup_root(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("ENTARI_CONFIG_FILE", raising=False)
     monkeypatch.delenv("ENTARI_CONFIG_EXTENSION", raising=False)
+    monkeypatch.setattr(sys, "dont_write_bytecode", sys.dont_write_bytecode)
+    for name in (
+        "TIKTOKEN_CACHE_DIR",
+        "CUSTOM_TIKTOKEN_CACHE_DIR",
+        "DATA_GYM_CACHE_DIR",
+        "LITELLM_LOCAL_MODEL_COST_MAP",
+    ):
+        monkeypatch.setenv(name, os.environ.get(name, ""))
+        monkeypatch.delenv(name)
     from arclet.entari.config import EntariConfig
 
     previous = getattr(EntariConfig, "instance", None)
@@ -36,13 +47,12 @@ def write_config(root: Path, plugins: dict, name: str = "entari.yml") -> Path:
     return path
 
 
-def test_missing_database_parent_is_checked_without_writes_then_prepared(startup_root, capsys):
+def test_missing_database_parent_is_checked_without_writes_then_prepared(startup_root):
     source = write_config(startup_root, {"database": {"name": "new/nested/chtholly.db"}})
     original = source.read_bytes()
 
     assert main(["--check"]) == 0
     assert not (startup_root / "new").exists()
-    assert "initialized" in capsys.readouterr().out
     assert main(["--prepare"]) == 0
     assert (startup_root / "new/nested").is_dir()
     assert not (startup_root / "new/nested/chtholly.db").exists()

@@ -19,7 +19,7 @@
 - **CLI 工具**: [entari-cli](https://pypi.org/project/entari-cli/) —— `entari init / run / new / add / remove / config / gen_main`
 - **首启边界**: `main.py` 通过 `utils/startup` 在加载业务插件前使用 Entari 原生配置解析、聚合缺失前提并建立配置指定的 SQLite 父目录。`--check` 不写入或下载，`--prepare` 仅准备已启用能力的资源，不启动账号或调用模型；凭证化配置禁止 debug/trace 和 rich_error。默认配置只监听回环；接口探测使用原生 `/satori/v1/meta`，无账号时不能把需身份头的业务 API 当健康接口。
 - **资源准备**: HTMLRender 固定 `0.1.0+chtholly.1` 补丁 wheel，由同一 `scripts/build_patched_wheel.py --package htmlrender` 构建，安装器与驱动复用原生缓存定位。启动器按实际缓存、显式浏览器路径和远程模式检查资源，支持显式 Linux 系统库准备但不自动 sudo。LLM tokenizer 在 `--prepare` 中按上游哈希准备，价格元数据默认使用随包副本，普通启动不依靠隐式下载；不得用空实现或错误缓存伪装准备成功。
-- **干净环境验收**: `scripts/smoke_startup.py` 从受管源码和本轮新文件建立排除私有配置、运行数据与原虚拟环境的快照，实际安装依赖、启动原生服务并检查重启后配置/数据保留；`--resources` 追加真实浏览器启动和断网 tokenizer 导入。CI 在 Windows/Linux 执行最小路径，Linux 另验完整资源路径。业务测试显式使用完整示例，不再依赖面向用户的最小默认配置。
+- **干净环境验收**: `scripts/smoke_startup.py` 从受管源码和本轮新文件建立排除私有配置、运行数据与原虚拟环境的快照，实际安装依赖、启动原生服务并检查重启后配置/数据保留；`--resources` 还须通过原生服务渲染并解码核对两条浏览器链路的像素，再完成断网 tokenizer 导入，不能仅凭 HTTP 健康宣称渲染就绪。CI 在 Windows/Linux 执行最小路径，Linux 另验完整资源路径。业务测试显式使用完整示例，不再依赖面向用户的最小默认配置。
 - **事件总线**: arclet-letoderea（Entari 内建依赖）
 - **命令系统**: arclet-alconna（Entari 内建 `command` 模块）
 - **服务管理**: launart（`Service` 基类用于跨插件依赖注入）
