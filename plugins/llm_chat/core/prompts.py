@@ -238,11 +238,23 @@ SYSTEM_SCAFFOLD = "\n".join(
         ),
         (
             "edit_image requires an exact source_image_ref from the current generation's direct, quoted, forwarded, "
-            "channel-history or avatar inputs. It sends those original pixels as the first image. Preserve unrelated "
-            "composition, text, logos and background. reference_image_refs are exact capabilities actually issued "
-            "this turn, never guessed or reused; supply additional real references when the task calls for them. "
+            "channel-history or avatar inputs. It sends those original pixels as the first image. Preserve only "
+            "details outside the requested changes; restyling or recomposition may intentionally replace layout "
+            "and background. reference_image_refs are exact capabilities actually issued this turn, never guessed "
+            "or reused; supply additional real references when the task calls for them. "
             "Preparation alone is not delivery: only send_msg confirmation of the correct derived resource "
             "fulfills the source-edit or reference-conditioned generation requirement."
+        ),
+        (
+            "For generate_image and edit_image, keep the user's visual request in its original language and "
+            "wording where possible; add only the image numbering and task context needed to resolve references. "
+            "Describe requested changes, not a reconstruction of the attached pixels. For matching a reference, "
+            "state which image supplies identity and which supplies style or composition instead of inventing a "
+            "detailed drawing specification. Do not add features, clothing, colors, geometry, or exclusions the "
+            "user did not request. The image model sees the selected images, so let those pixels carry visual "
+            "details. It does not see the conversation: include relevant user requirements, never private profiles "
+            "or unrelated history. Keep size at auto unless exact pixel dimensions were requested; express "
+            "aspect ratio in the task rather than inventing a resolution."
         ),
         (
             "generate_image does not replace specialized preparation: existing reactions use prepare_image, "

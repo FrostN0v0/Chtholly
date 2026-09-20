@@ -65,7 +65,12 @@ _CONFIG_SCHEMA_TEXT = {
         "原创图片生成和当前图片编辑使用的独立模型别名；留空时不注册 generate_image 与 edit_image 工具。",
     ),
     "image_generation_timeout": ("图片生成与编辑超时", "单次图片生成或编辑请求的最长等待时间（秒）。"),
-    "image_generation_quality": ("图片生成与编辑质量", "图片生成与编辑请求使用的固定质量等级。"),
+    "image_generation_quality": (
+        "\u56fe\u7247\u751f\u6210\u4e0e\u7f16\u8f91\u8d28\u91cf",
+        "auto \u4e0d\u53d1\u9001\u8d28\u91cf\u53c2\u6570\uff0c\u7531\u4f9b\u5e94\u5546\u51b3\u5b9a\uff1b"
+        "\u5176\u4ed6\u9009\u9879\u539f\u6837\u8bf7\u6c42\u5bf9\u5e94\u8d28\u91cf\uff0c"
+        "\u4e0d\u4fdd\u8bc1\u7f51\u5173\u5b9e\u9645\u91c7\u7528\u3002",
+    ),
     "image_generation_output_format": ("图片输出格式", "原创图片发送前要求供应商返回的图片格式。"),
     "image_generation_output_compression": (
         "图片输出压缩率",

@@ -1165,11 +1165,14 @@ async def test_generate_image_sends_persona_reference_bytes_to_image_model(
     )
 
     wire_images: list[list[bytes]] = []
+    wire_prompts: list[str] = []
+    wire_fields: list[set[str]] = []
 
     async def receive(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/images/edits"
         envelope = f"Content-Type: {request.headers['content-type']}\r\nMIME-Version: 1.0\r\n\r\n".encode()
         body = BytesParser(policy=policy.default).parsebytes(envelope + await request.aread())
+        wire_fields.append({str(part.get_param("name", header="content-disposition")) for part in body.iter_parts()})
         wire_images.append(
             [
                 part.get_payload(decode=True)
@@ -1177,6 +1180,11 @@ async def test_generate_image_sends_persona_reference_bytes_to_image_model(
                 if part.get_param("name", header="content-disposition") == "image[]"
             ]
         )
+        for part in body.iter_parts():
+            if part.get_param("name", header="content-disposition") == "prompt":
+                prompt_bytes = part.get_payload(decode=True)
+                assert isinstance(prompt_bytes, bytes)
+                wire_prompts.append(prompt_bytes.decode())
         return httpx.Response(200, json={"created": 1, "data": [{"b64_json": base64.b64encode(_PNG_BYTES).decode()}]})
 
     class Transport(AsyncHTTPHandler):
@@ -1191,7 +1199,7 @@ async def test_generate_image_sends_persona_reference_bytes_to_image_model(
             config={
                 "image_generation_model": "image",
                 "image_generation_timeout": 123.0,
-                "image_generation_quality": "high",
+                "image_generation_quality": "auto",
                 "tts_enabled": False,
                 "allowed_commands": [],
                 "web_search_enabled": False,
@@ -1253,7 +1261,7 @@ async def test_generate_image_sends_persona_reference_bytes_to_image_model(
 
         assert requests[0]["image"] == [persona_bytes]
         assert wire_images == [[persona_bytes]]
-        assert requests[0]["input_fidelity"] == "high"
+        assert wire_prompts == ["A portrait in a snowy forest"]
         assert "image" not in requests[1]
         assert requests[1]["prompt"] == "A landscape without characters"
         assert state.confirmed_media_deliveries == 2
@@ -1269,6 +1277,8 @@ async def test_generate_image_sends_persona_reference_bytes_to_image_model(
             )
             await _tool_callable(runtime, "send_msg")(session, [{"type": "media", "media_ref": edited["media_ref"]}])
         assert wire_images == [[persona_bytes], [source_bytes, persona_bytes]]
+        assert wire_prompts == ["A portrait in a snowy forest", "Replace the source subject with the persona"]
+        assert all(fields == {"model", "prompt", "n", "image[]"} for fields in wire_fields)
         assert state.confirmed_media_deliveries == 3
 
         missing = ImageInputs(attachment_root=tmp_path / "audit")
@@ -1491,10 +1501,7 @@ async def test_edit_image_uses_exact_source_and_captured_reference_then_audits_r
         assert request["model"] == "openai/gpt-image-2"
         assert request["api_base"] == "https://images.example.com/v1"
         assert request["quality"] == "high"
-        assert request["input_fidelity"] == "high"
-        assert request["response_format"] == "b64_json"
         assert request["max_retries"] == 0
-        assert arguments["prompt"] in cast(str, request["prompt"])
         assert reference_ref not in cast(str, request["prompt"])
         assert len(session.sent) == 1
         assert state.delivered_texts == ["[发送了图片]"]

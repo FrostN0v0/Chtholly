@@ -24,7 +24,7 @@ from ._image_provider import (
     ImageOutputFormat,
     image_provider_extra,
     image_response_bytes,
-    normalize_image_size,
+    image_request_options,
     normalize_image_prompt,
     normalize_output_compression,
 )
@@ -48,15 +48,6 @@ class ImageGenerationToolContext:
     semaphore: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
 
 
-_REFERENCE_GENERATION_INSTRUCTION = (
-    "Use the provided images as visual identity and appearance references for a new image. "
-    "Preserve recognizable face, hair, clothing, headwear and accessories unless the requested prompt changes them. "
-    "Create the new pose, expression, composition and background requested below; do not copy unrelated source text, "
-    "logos, watermark or background unless requested. Produce exactly one finished image and no explanatory text "
-    "inside the image unless requested.\n\nRequested image:\n"
-)
-
-
 def register_generate_image(
     dispatcher: PluginDispatcher[JSONType],
     runtime: ImageGenerationToolContext,
@@ -77,11 +68,15 @@ def register_generate_image(
         it or supply a path. Leave false for unrelated subjects. Missing requested references fail without text-only
         fallback. Use edit_image only when modifying a specific source image. For new creations based on real web
         images, pass matched refs from capture_web_reference in reference_image_refs; no source upload is needed.
-        Prepare only; pass the returned media_ref to send_msg for delivery.
+        Images are uploaded in reference_image_refs order, with the optional persona image last. State each image's
+        task-specific role in prompt, such as identity, style, composition, or background. Preserve the user's
+        visual request in its original language; add only necessary image numbering, not an invented detailed
+        description of the attached pixels. The prompt is forwarded without extra visual rules. Prepare only;
+        pass the returned media_ref to send_msg for delivery.
 
         Args:
             prompt: Visual instructions for the new image; no secrets, internal IDs, paths or unrelated history.
-            size: Output size: 1024x1024, 1536x1024, or 1024x1536.
+            size: Keep auto unless exact pixels were requested: 1024x1024, 1536x1024, or 1024x1536.
             use_persona_reference: Use the current persona's configured reference as actual image input.
             reference_image_refs: Zero to four authorized image_refs uploaded as real visual references.
         """
@@ -90,7 +85,7 @@ def register_generate_image(
         if requirements is not None and requirements.intent.requires_source_edit:
             raise DeliveryError("this turn requires editing a specific source image; use edit_image")
         normalized_prompt = normalize_image_prompt(prompt)
-        normalized_size = normalize_image_size(size)
+        options = image_request_options(size, runtime.quality)
         compression = normalize_output_compression(runtime.output_compression)
         try:
             model = runtime.resolve_model(session.channel.id)
@@ -120,9 +115,8 @@ def register_generate_image(
                 "api_base": model.base_url,
                 "timeout": runtime.timeout_seconds,
                 "n": 1,
-                "size": normalized_size,
-                "quality": runtime.quality,
                 "max_retries": 0,
+                **options,
                 **image_provider_extra(model),
             }
             provider = runtime.generate
@@ -130,12 +124,7 @@ def register_generate_image(
                 request.update(output_format=runtime.output_format, output_compression=compression)
             else:
                 provider = runtime.edit
-                request.update(
-                    prompt=f"{_REFERENCE_GENERATION_INSTRUCTION}{normalized_prompt}",
-                    image=[reference.data for reference in references],
-                    input_fidelity="high",
-                    response_format="b64_json",
-                )
+                request["image"] = [reference.data for reference in references]
                 record_tool_evidence(
                     {
                         "attachments": [
