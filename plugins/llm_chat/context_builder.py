@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import json
+from typing import cast
 from hashlib import sha256
 from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
 
 import litellm
+from jsonschema import Draft202012Validator
 from sqlalchemy import select
 from entari_plugin_database import get_session
 
 from .models import AgentTurn, AgentEvent, ContextAnchor, ContextSession
-from .core.types import ChatMessage
+from .core.types import JSONType, ChatMessage
 from .agent_events import load_event_payload, load_session_events
 from .agent_context import ContextReadGrant, ContextReadReference
 from .context_reads import payload_digest, public_payload_path, model_readable_payload
@@ -163,20 +165,7 @@ def _event_tool_call_id(event: AgentEvent) -> str:
     return event.tool_call_id or event.execution_ref or event.event_ref
 
 
-def _tool_call_item(
-    event: AgentEvent,
-    *,
-    inline_chars: int,
-    references: list[ContextReadReference] | None = None,
-) -> dict[str, object]:
-    payload = model_readable_payload(event)
-    arguments = _compact_payload(
-        payload.get("arguments", {}),
-        event_ref=event.event_ref,
-        path="arguments",
-        inline_chars=inline_chars,
-        references=references,
-    )
+def _tool_call_item(event: AgentEvent, arguments: object) -> dict[str, object]:
     return {
         "id": _event_tool_call_id(event),
         "type": "function",
@@ -187,12 +176,12 @@ def _tool_call_item(
     }
 
 
-def _tool_result_message(
+def _tool_result_payload(
     event: AgentEvent,
     *,
     inline_chars: int,
     references: list[ContextReadReference] | None = None,
-) -> ChatMessage:
+) -> dict[str, object]:
     payload = model_readable_payload(event)
     result = _compact_payload(
         payload.get("result", {}),
@@ -202,20 +191,11 @@ def _tool_result_message(
         references=references,
     )
     return {
-        "role": "tool",
-        "tool_call_id": _event_tool_call_id(event),
-        "name": event.tool_name,
-        "content": json.dumps(
-            {
-                "ok": event.status == "succeeded",
-                "status": event.status,
-                "effect": event.effect,
-                "event_ref": event.event_ref,
-                "data": result,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ),
+        "ok": event.status == "succeeded",
+        "status": event.status,
+        "effect": event.effect,
+        "event_ref": event.event_ref,
+        "data": result,
     }
 
 
@@ -224,6 +204,7 @@ def _turn_messages(
     events: Sequence[AgentEvent],
     *,
     inline_chars: int,
+    validators: Mapping[str, Draft202012Validator],
     references: list[ContextReadReference] | None = None,
 ) -> list[ChatMessage]:
     visible_types = {"user_input", "assistant_tool_call", "tool_result", "assistant_output"}
@@ -260,21 +241,85 @@ def _turn_messages(
                 event_index += 1
 
             result_events: list[tuple[int, AgentEvent]] = []
-            tool_calls: list[dict[str, object]] = []
+            calls: list[tuple[AgentEvent, object]] = []
             for call_index, call_event in call_events:
                 key = (call_event.attempt, call_event.execution_ref or _event_tool_call_id(call_event))
                 result = result_index.get(key)
                 if key in emitted or result is None or result[0] <= call_index:
                     continue
                 emitted.add(key)
-                tool_calls.append(_tool_call_item(call_event, inline_chars=inline_chars, references=references))
+                arguments = _compact_payload(
+                    model_readable_payload(call_event).get("arguments", {}),
+                    event_ref=call_event.event_ref,
+                    path="arguments",
+                    inline_chars=inline_chars,
+                    references=references,
+                )
+                calls.append((call_event, arguments))
                 result_events.append(result)
-            if not tool_calls:
+            if not calls:
                 continue
 
-            messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
-            for _index, result_event in sorted(result_events, key=lambda item: item[0]):
-                messages.append(_tool_result_message(result_event, inline_chars=inline_chars, references=references))
+            results = [
+                (result_event, _tool_result_payload(result_event, inline_chars=inline_chars, references=references))
+                for _index, result_event in sorted(result_events, key=lambda item: item[0])
+            ]
+            if all(
+                (validator := validators.get(call.tool_name)) is not None
+                and validator.is_valid(cast(JSONType, arguments))
+                for call, arguments in calls
+            ):
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [_tool_call_item(call, arguments) for call, arguments in calls],
+                    }
+                )
+                for result_event, payload in results:
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": _event_tool_call_id(result_event),
+                            "name": result_event.tool_name,
+                            "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                        }
+                    )
+            else:
+                # Keep the batch together: summaries must not interrupt native call/result pairs.
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": json.dumps(
+                            {
+                                "historical_tool_batch": {
+                                    "note": "Historical observations only. Input summaries are not callable arguments; "
+                                    "use current tool schemas for new calls. "
+                                    "References do not renew media or identity access.",
+                                    "calls": [
+                                        {
+                                            "id": _event_tool_call_id(call),
+                                            "name": call.tool_name,
+                                            "event_ref": call.event_ref,
+                                            "input_summary": arguments,
+                                        }
+                                        for call, arguments in calls
+                                    ],
+                                    "results": [
+                                        {
+                                            "tool_call_id": _event_tool_call_id(result_event),
+                                            "name": result_event.tool_name,
+                                            **payload,
+                                        }
+                                        for result_event, payload in results
+                                    ],
+                                }
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                    }
+                )
             continue
         if event.event_type == "assistant_output":
             content = load_event_payload(event).get("content")
@@ -290,6 +335,7 @@ async def select_session_context(
     system: str,
     current_message: ChatMessage,
     model_name: str | None,
+    tool_parameters: Mapping[str, Mapping[str, object]],
     max_input_tokens: int,
     output_reserve_tokens: int,
     rollover_ratio: float,
@@ -310,6 +356,10 @@ async def select_session_context(
         )
 
     turn_rows = await load_session_events(context_session.id, model_visible_only=True)
+    validators = {
+        name: Draft202012Validator({**parameters, "additionalProperties": False})
+        for name, parameters in tool_parameters.items()
+    }
     turn_references: dict[int, list[ContextReadReference]] = {}
     rendered = [
         (
@@ -317,6 +367,7 @@ async def select_session_context(
             _turn_messages(
                 turn,
                 events,
+                validators=validators,
                 inline_chars=max(256, inline_event_chars),
                 references=turn_references.setdefault(turn.id, []),
             ),
