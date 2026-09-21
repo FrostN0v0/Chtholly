@@ -103,8 +103,8 @@ class LLMChatConfig(BasicConfModel, extra="forbid"):
     """Dedicated model alias/name for original generation and source-image editing; None disables both tools."""
     image_generation_timeout: float = 300.0
     """Maximum duration of one image generation or editing request."""
-    image_generation_quality: Literal["auto", "low", "medium", "high"] = "medium"
-    """Fixed provider quality for generated and edited images."""
+    image_generation_quality: Literal["auto", "low", "medium", "high"] = "auto"
+    """Provider quality override; auto omits the parameter and lets the provider choose."""
     image_generation_output_format: Literal["png", "jpeg", "webp"] = "webp"
     """Generated image format delivered to the chat transport."""
     image_generation_output_compression: int = 90

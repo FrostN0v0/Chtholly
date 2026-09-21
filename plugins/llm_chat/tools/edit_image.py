@@ -23,27 +23,17 @@ from ._image_provider import (
     ModelResolver,
     image_provider_extra,
     image_response_bytes,
-    normalize_image_size,
+    image_request_options,
     normalize_image_prompt,
 )
 from ..core.tool_trace import record_tool_evidence
 from ..agent_attachments import store_agent_attachment
 from ..core.media_delivery import MAX_IMAGE_REFERENCES, ImageProvenance, current_media_requirements
 
-_EDIT_INSTRUCTION = (
-    "The first input image is the source composition to edit. When replacing a person or character, replace all "
-    "source-specific identity traits, including face, hair, clothing, headwear, and accessories, with traits supported "
-    "by the reference images. Preserve the source's exact pose, hand gestures, expression, gaze and eye-closure "
-    "orientation, framing, background, typography, logos, and all unrelated visual details unless the requested edit "
-    "explicitly changes them. Any subsequent input images are identity and appearance references only: do not copy "
-    "their background, text, framing, watermarks, or unrelated objects. Produce exactly one finished image and no "
-    "explanatory text inside the image unless requested.\n\nRequested edit:\n"
-)
-
 
 @dataclass(slots=True)
 class ImageEditToolContext:
-    """Runtime dependencies and fixed provider policy for source-preserving edits."""
+    """Runtime dependencies and fixed provider policy for image edits."""
 
     resolve_model: ModelResolver
     edit: ImageProvider
@@ -57,7 +47,7 @@ def register_edit_image(
     dispatcher: PluginDispatcher[JSONType],
     runtime: ImageEditToolContext,
 ) -> Subscriber[JSONType]:
-    """Register source-preserving image editing with immutable authorized inputs."""
+    """Register task-led image editing with immutable authorized inputs."""
 
     async def edit_image(
         session: Session,
@@ -70,25 +60,31 @@ def register_edit_image(
         """Edit an authorized source image and prepare its result without sending it.
 
         source_image_ref is required: select the exact incoming, forwarded, channel-history or avatar image_ref.
-        Its original pixels are always the first provider input. Additional reference_image_refs supply actual
-        authorized visual references, never descriptions. Web and persona references cannot be source images.
+        Its original pixels are always the first provider input. Subsequent images follow reference_image_refs order,
+        with an optional persona image last. Explain each image's task-specific role in prompt: identity, style,
+        composition, background, or another requested visual property. References are not limited to identity.
+        Preserve details outside the requested changes, but allow restyling and recomposition when requested.
+        Keep the user's visual request in its original language; add only the needed image numbering and roles.
+        Describe requested changes, not the source appearance. Do not invent a detailed drawing specification
+        for a request to match a reference: the image model receives the actual pixels.
+        Web and persona references cannot be source images. The prompt is forwarded without extra visual rules.
         When the user requires a real web reference, include at least one from capture_web_reference.
         Set use_persona_reference=true to upload the configured persona reference after the other inputs.
         Do not put paths, URLs, base64, secrets or unrelated history in prompt. Pass the returned media_ref to
         send_msg to deliver the result; preparing it alone does not complete the request.
 
         Args:
-            prompt: Complete source-preserving instruction, at most 32000 characters.
+            prompt: Complete task instructions and ordered image roles, at most 32000 characters.
             source_image_ref: Required current-generation source image_ref.
             reference_image_refs: Zero to four current-generation visual reference image_refs.
-            size: Output size: 1024x1024, 1536x1024, or 1024x1536.
+            size: Keep auto unless exact pixels were requested: 1024x1024, 1536x1024, or 1024x1536.
             use_persona_reference: Upload the current persona's configured identity reference.
         """
         inputs = current_image_inputs()
         if inputs is None:
             raise DeliveryError("image editing is unavailable outside the current llm_chat generation")
         normalized_prompt = normalize_image_prompt(prompt)
-        normalized_size = normalize_image_size(size)
+        options = image_request_options(size, runtime.quality)
         try:
             source = await inputs.resolve(session, source_image_ref, purpose="edit")
             requested_refs = [] if reference_image_refs is None else reference_image_refs
@@ -128,17 +124,14 @@ def register_edit_image(
                 response = await asyncio.wait_for(
                     runtime.edit(
                         model=model.name,
-                        prompt=f"{_EDIT_INSTRUCTION}{normalized_prompt}",
+                        prompt=normalized_prompt,
                         image=[source.data, *(reference.data for reference in references)],
                         api_key=model.api_key,
                         api_base=model.base_url,
                         timeout=runtime.timeout_seconds,
                         n=1,
-                        size=normalized_size,
-                        quality=runtime.quality,
-                        input_fidelity="high",
-                        response_format="b64_json",
                         max_retries=0,
+                        **options,
                         **image_provider_extra(model),
                     ),
                     timeout=runtime.timeout_seconds,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol
 from collections.abc import Mapping, Callable, Sequence, Awaitable
 
 from arclet.entari import Session
@@ -11,12 +11,12 @@ from ..core.delivery import DeliveryError
 from ..core.image_source import fetch_image_bytes
 from ..core.native_images import normalize_native_image
 
-ImageSize = Literal["1024x1024", "1536x1024", "1024x1536"]
+ImageSize = Literal["auto", "1024x1024", "1536x1024", "1024x1536"]
 ImageQuality = Literal["auto", "low", "medium", "high"]
 ImageOutputFormat = Literal["png", "jpeg", "webp"]
 
 MAX_IMAGE_PROMPT_CHARS = 32_000
-DEFAULT_IMAGE_SIZE: ImageSize = "1024x1024"
+DEFAULT_IMAGE_SIZE: ImageSize = "auto"
 _MISSING = object()
 
 
@@ -60,12 +60,19 @@ def normalize_image_prompt(value: str) -> str:
     return normalized
 
 
-def normalize_image_size(value: str) -> ImageSize:
-    """Restrict generated images to the delivery-tested aspect ratios."""
+def image_request_options(size: str, quality: ImageQuality) -> dict[str, object]:
+    """Omit automatic choices; explicit options remain provider requests, not guarantees."""
 
-    if value not in {"1024x1024", "1536x1024", "1024x1536"}:
-        raise DeliveryError("size must be 1024x1024, 1536x1024, or 1024x1536")
-    return cast(ImageSize, value)
+    if size not in {"auto", "1024x1024", "1536x1024", "1024x1536"}:
+        raise DeliveryError("size must be auto, 1024x1024, 1536x1024, or 1024x1536")
+    if quality not in {"auto", "low", "medium", "high"}:
+        raise DeliveryError("image quality must be auto, low, medium, or high")
+    options: dict[str, object] = {}
+    if size != "auto":
+        options["size"] = size
+    if quality != "auto":
+        options["quality"] = quality
+    return options
 
 
 def normalize_output_compression(value: int) -> int:
@@ -124,6 +131,6 @@ __all__ = [
     "image_provider_extra",
     "image_response_bytes",
     "normalize_image_prompt",
-    "normalize_image_size",
+    "image_request_options",
     "normalize_output_compression",
 ]

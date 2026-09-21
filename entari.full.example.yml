@@ -185,7 +185,7 @@ plugins:
     media_request_timeout: 300.0
     image_generation_model: image
     image_generation_timeout: 300.0
-    image_generation_quality: medium
+    image_generation_quality: auto
     image_generation_output_format: webp
     image_generation_output_compression: 90
     eval_request_timeout: 60.0
