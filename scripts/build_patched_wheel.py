@@ -62,7 +62,7 @@ PACKAGES = {
     "webui": WheelSpec(
         "entari_plugin_webui",
         "1.0.3",
-        "1.0.3+chtholly.1",
+        "1.0.3+chtholly.3",
         "https://files.pythonhosted.org/packages/17/0c/"
         "c02c08d5f23ee7577f0ce6613aedb78c4e01740cbbad34299b2129c32d1e/"
         "entari_plugin_webui-1.0.3-py3-none-any.whl",
@@ -217,6 +217,32 @@ def publish_wheel(spec: WheelSpec, source: Path, output: Path) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def install_webui_theme(source: Path) -> None:
+    """Add content-addressed appearance assets without rewriting upstream application logic."""
+    frontend = source / "entari_plugin_webui" / "static" / "frontend"
+    entry = frontend / "index.html"
+    document = entry.read_text(encoding="utf-8")
+    if document.count('<html lang="zh-CN">') != 1 or document.count("</head>") != 1:
+        raise BuildError("upstream WebUI entry changed; review theme integration before rebuilding")
+    theme = ROOT / "patches" / "webui-theme"
+    stylesheet = (ROOT / "utils" / "webui_theme" / "tokens.css").read_text(encoding="utf-8")
+    stylesheet += "\n" + (theme / "native.css").read_text(encoding="utf-8")
+    assets = {"css": stylesheet, "js": (theme / "native.js").read_text(encoding="utf-8")}
+    names = {}
+    for extension, content in assets.items():
+        data = content.encode("utf-8")
+        name = f"chtholly-theme-{hashlib.sha256(data).hexdigest()[:16]}.{extension}"
+        (frontend / "assets" / name).write_bytes(data)
+        names[extension] = name
+    document = document.replace('<html lang="zh-CN">', '<html lang="zh-CN" data-ui-native>')
+    document = document.replace(
+        "</head>",
+        f'<link rel="stylesheet" href="/assets/{names["css"]}">\n'
+        f'<script defer src="/assets/{names["js"]}"></script>\n</head>',
+    )
+    entry.write_bytes(document.encode("utf-8"))
+
+
 def build(spec: WheelSpec, wheel: Path | None = None, output: Path | None = None) -> Path:
     """Verify, patch and atomically publish a pinned wheel without importing it."""
     output = output or spec.output
@@ -225,6 +251,8 @@ def build(spec: WheelSpec, wheel: Path | None = None, output: Path | None = None
         source = Path(directory).resolve()
         extract_upstream(data, source)
         apply_patch(spec, source)
+        if spec.directory == "webui":
+            install_webui_theme(source)
         update_metadata(spec, source)
         publish_wheel(spec, source, output)
     return output

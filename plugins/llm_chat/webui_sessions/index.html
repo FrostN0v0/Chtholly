@@ -9,63 +9,80 @@
 </head>
 <body>
   <div class="app">
-    <header class="toolbar">
-      <div class="toolbar-heading">
-        <h1>会话检查器</h1>
-        <p class="muted">先看摘要，按需展开调用与上下文详情。</p>
+    <div class="context-bar">
+      <div class="context-picker">
+        <label for="scope-select">&#39057;&#36947;</label>
+        <select id="scope-select" aria-label="&#36873;&#25321;&#32842;&#22825;&#33539;&#22260;"></select>
       </div>
-      <div class="actions">
+      <div class="context-picker session-picker">
+        <label for="session-select">&#20250;&#35805; <span id="session-count"></span></label>
+        <select id="session-select" aria-label="&#36873;&#25321;&#20250;&#35805;"></select>
+      </div>
+      <div class="context-actions">
         <span id="status" role="status" aria-live="polite">正在连接…</span>
         <span id="auto-refresh" class="is-hidden">自动刷新中</span>
         <button id="refresh-button" type="button">刷新</button>
+        <button id="session-details-button" class="session-info" type="button" disabled>&#20250;&#35805;&#35814;&#24773;</button>
+        <details class="admin-menu">
+          <summary>&#31649;&#29702;</summary>
+          <div class="context-popover session-controls">
+            <button id="new-session-button" type="button" disabled>&#26032;&#20250;&#35805;</button>
+            <button id="rollover-button" type="button" disabled>&#25658;&#24102;&#19978;&#19979;&#25991;&#32493;&#25509;</button>
+            <button id="hard-reset-button" class="danger" type="button" disabled>&#30828;&#37325;&#32622;</button>
+          </div>
+        </details>
       </div>
-    </header>
-    <main class="workspace">
-      <aside class="panel sidebar" aria-label="频道与会话">
-        <div class="panel-head scope-picker">
-          <label for="scope-select">频道 / 私聊</label>
-          <select id="scope-select" aria-label="选择聊天范围"></select>
-          <p id="scope-meta" class="muted">尚未选择聊天范围</p>
+    </div>
+    <main class="workspace" data-mobile-view="detail">
+      <section class="panel turn-panel" aria-label="&#36718;&#27425;&#21015;&#34920;">
+        <div class="panel-head">
+          <h2>&#36718;&#27425; <span id="turn-count" class="muted">0</span></h2>
+          <button id="turn-order-button" class="quiet-button" type="button" aria-pressed="true">&#26368;&#26032;&#22312;&#19978;</button>
         </div>
-        <div class="panel-head"><h2>会话</h2><span id="session-count" class="muted">0</span></div>
-        <nav id="session-list" class="scroll list" aria-label="会话列表"></nav>
-        <div class="session-controls actions">
-          <button id="new-session-button" type="button" disabled>新会话</button>
-          <button id="rollover-button" type="button" disabled>续接</button>
-          <details class="admin-menu"><summary>管理</summary><button id="hard-reset-button" class="danger" type="button" disabled>硬重置</button></details>
-        </div>
-      </aside>
-      <section class="panel turn-panel" aria-label="轮次列表">
-        <div class="panel-head"><h2>轮次</h2><span id="turn-count" class="muted">0</span></div>
-        <div id="session-detail" class="session-detail">请选择一个会话。</div>
-        <nav id="turn-list" class="scroll list" aria-label="选择轮次"></nav>
+        <nav id="turn-list" class="scroll list" aria-label="&#36873;&#25321;&#36718;&#27425;"></nav>
       </section>
       <section class="panel inspector" aria-label="轮次工作区">
+        <button id="back-to-turns" class="back-button" type="button">&#8592; &#36718;&#27425;&#21015;&#34920;</button>
         <div id="turn-header" class="turn-header">请选择一个轮次。</div>
         <div class="inspector-navigation">
         <div class="tabs" role="tablist" aria-label="检查内容">
-          <button id="tab-timeline" class="tab is-active" role="tab" aria-selected="true" aria-controls="timeline-view" data-tab="timeline" type="button">调用时间线</button>
-          <button id="tab-context" class="tab" role="tab" aria-selected="false" aria-controls="context-view" data-tab="context" tabindex="-1" type="button">上下文注入</button>
-          <button id="tab-io" class="tab" role="tab" aria-selected="false" aria-controls="io-view" data-tab="io" tabindex="-1" type="button">输入与输出</button>
+          <button id="tab-io" class="tab is-active" role="tab" aria-selected="true" aria-controls="io-view" data-tab="io" type="button">&#23545;&#35805;</button>
+          <button id="tab-timeline" class="tab" role="tab" aria-selected="false" aria-controls="timeline-view" data-tab="timeline" tabindex="-1" type="button">&#35843;&#29992;</button>
+          <button id="tab-context" class="tab" role="tab" aria-selected="false" aria-controls="context-view" data-tab="context" tabindex="-1" type="button">&#19978;&#19979;&#25991;</button>
+          <button id="tab-relationship" class="tab" role="tab" aria-selected="false" aria-controls="relationship-view" data-tab="relationship" tabindex="-1" type="button">&#20851;&#31995;</button>
         </div>
           <button id="collapse-details-button" class="collapse-button" type="button" aria-label="折叠本轮全部详情" disabled>全部折叠</button>
         </div>
         <div class="scroll inspector-body">
-          <div id="timeline-view" class="view" role="tabpanel" aria-labelledby="tab-timeline" tabindex="0"></div>
+          <div id="io-view" class="view" role="tabpanel" aria-labelledby="tab-io" tabindex="0"></div>
+          <div id="timeline-view" class="view" role="tabpanel" aria-labelledby="tab-timeline" tabindex="0" hidden></div>
           <div id="context-view" class="view" role="tabpanel" aria-labelledby="tab-context" tabindex="0" hidden></div>
-          <div id="io-view" class="view" role="tabpanel" aria-labelledby="tab-io" tabindex="0" hidden></div>
+          <div id="relationship-view" class="view" role="tabpanel" aria-labelledby="tab-relationship" tabindex="0" hidden></div>
         </div>
       </section>
     </main>
   </div>
+  <dialog id="session-dialog" class="modal modal-session" aria-labelledby="session-title">
+    <form method="dialog" class="modal-card">
+      <header class="modal-head"><div><p class="eyebrow">&#20250;&#35805;&#27010;&#35272;</p><h2 id="session-title">&#20250;&#35805;&#35814;&#24773;</h2></div><button type="submit" aria-label="&#20851;&#38381;&#20250;&#35805;&#35814;&#24773;">&#20851;&#38381;</button></header>
+      <div class="modal-body"><div id="scope-meta" class="muted"></div><div id="session-detail" class="session-detail"></div></div>
+    </form>
+  </dialog>
   <dialog id="payload-dialog" class="modal modal-wide" aria-labelledby="payload-title">
     <form method="dialog" class="modal-card">
       <header class="modal-head"><h2 id="payload-title">记录详情</h2><button type="submit" aria-label="关闭详情">关闭</button></header>
       <div class="modal-body">
-        <p class="muted">显示已记录的脱敏内容；未记录的原始数据无法还原。复制只包含当前已加载内容。</p>
-        <details><summary>字段过滤</summary><div class="payload-controls"><label for="payload-path">字段路径</label><input id="payload-path" autocomplete="off" placeholder="例如 messages 或 arguments"><button id="payload-load-button" type="button">读取</button></div></details>
-        <div class="payload-controls"><span id="payload-meta" role="status" aria-live="polite"></span><button id="payload-copy-button" type="button" disabled>复制已加载</button></div>
-        <pre id="payload-output" class="code payload-code" tabindex="0"></pre>
+        <div class="payload-toolbar">
+          <div class="segmented" role="group" aria-label="&#20869;&#23481;&#26174;&#31034;&#26041;&#24335;">
+            <button id="payload-reader-button" type="button" aria-pressed="true">&#38405;&#35835;</button>
+            <button id="payload-source-button" type="button" aria-pressed="false">&#21407;&#22987;&#25968;&#25454;</button>
+          </div>
+          <span id="payload-meta" role="status" aria-live="polite"></span>
+          <button id="payload-copy-button" type="button" disabled>&#22797;&#21046;&#24050;&#21152;&#36733;</button>
+        </div>
+        <div id="payload-reader" class="payload-reader" tabindex="0"></div>
+        <pre id="payload-output" class="code payload-code" tabindex="0" hidden></pre>
+        <details class="payload-filter"><summary>&#23383;&#27573;&#36873;&#25321;</summary><div class="payload-controls"><label for="payload-path">&#23383;&#27573;&#36335;&#24452;</label><input id="payload-path" autocomplete="off" placeholder="messages / arguments"><button id="payload-load-button" type="button">&#35835;&#21462;</button></div></details>
         <p id="payload-error" class="error" role="alert"></p>
       </div>
       <footer class="modal-foot actions">

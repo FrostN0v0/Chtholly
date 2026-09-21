@@ -1096,6 +1096,150 @@ async def test_event_view_inlines_key_content_without_extra_read_step() -> None:
     assert serialize_event_view(untitled, {})["title"] == "future_event"
 
 
+def test_event_view_projects_nested_user_message_without_metadata() -> None:
+    nested = json.dumps(
+        {
+            "content": "first line\nsecond line",
+            "forwarded_messages": [
+                {
+                    "speaker": "Quoted member",
+                    "speaker_role": "participant",
+                    "content": "quoted text",
+                    "speaker_ref": "platform-secret",
+                    "source_url": "https://example.invalid/private",
+                },
+                {"speaker": "Bot", "speaker_role": "assistant", "content": "bot quote"},
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    content = json.dumps(
+        {
+            "speaker": "Alice",
+            "content": nested,
+            "mentioned_participants": [{"display_name": "Bob", "participant_ref": "private-ref"}],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    event = AgentEvent(
+        event_ref="event_nested_user",
+        turn_id=1,
+        sequence=1,
+        event_type="user_input",
+        role="user",
+        payload_json=json.dumps({"content": content}, ensure_ascii=False),
+    )
+
+    view = serialize_event_view(event, {"content": content})
+
+    assert view["message"] == {
+        "speaker": "Alice",
+        "content": "first line\nsecond line",
+        "quotes": [
+            {"speaker": "Quoted member", "role": "participant", "content": "quoted text"},
+            {"speaker": "Bot", "role": "assistant", "content": "bot quote"},
+        ],
+        "mentions": [{"name": "Bob"}],
+        "truncated": False,
+    }
+    assert "platform-secret" not in json.dumps(view["message"], ensure_ascii=False)
+    assert "example.invalid" not in json.dumps(view["message"], ensure_ascii=False)
+
+
+def test_event_view_keeps_legacy_text_and_summarizes_content_lists() -> None:
+    legacy = AgentEvent(
+        event_ref="event_legacy_user",
+        turn_id=1,
+        sequence=1,
+        event_type="user_input",
+        role="user",
+        payload_json=json.dumps({"content": "plain legacy input"}, ensure_ascii=False),
+    )
+    listed = json.dumps(
+        {"speaker": "Alice", "content": [{"type": "text", "text": "one"}, {"type": "text", "text": "two"}]},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    listed_event = AgentEvent(
+        event_ref="event_listed_user",
+        turn_id=1,
+        sequence=2,
+        event_type="user_input",
+        role="user",
+        payload_json=json.dumps({"content": listed}),
+    )
+
+    legacy_view = serialize_event_view(legacy, {"content": "plain legacy input"})
+    listed_view = serialize_event_view(listed_event, {"content": listed})
+
+    assert legacy_view["preview"] == "plain legacy input"
+    assert legacy_view["message"] == {
+        "speaker": None,
+        "content": "plain legacy input",
+        "quotes": [],
+        "mentions": [],
+        "truncated": False,
+    }
+    assert listed_view["message"]["content"] == "one\ntwo"
+
+
+def test_event_view_marks_message_truncation() -> None:
+    content = json.dumps({"speaker": "Alice", "content": "x" * 2500}, ensure_ascii=False, separators=(",", ":"))
+    event = AgentEvent(
+        event_ref="event_truncated_user",
+        turn_id=1,
+        sequence=1,
+        event_type="user_input",
+        role="user",
+        payload_json=json.dumps({"content": content}, ensure_ascii=False),
+    )
+
+    message = serialize_event_view(event, {"content": content})["message"]
+
+    assert message["truncated"] is True
+    assert cast(str, message["content"]).endswith("…")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("nested_text", "expected"),
+    [
+        ("{not-json", "{not-json"),
+        (json.dumps({"padding": "x" * 500, "content": "Readable input"}), "Readable input"),
+    ],
+)
+async def test_turn_list_summary_keeps_malformed_nested_user_text(
+    agent_store: SimpleNamespace, nested_text: str, expected: str
+) -> None:
+    turn = AgentTurn(
+        session_id=1,
+        sequence=1,
+        user_id="user-1",
+        user_name="Alice",
+        status="finished",
+    )
+    nested_input = json.dumps({"speaker": "Alice", "content": nested_text}, ensure_ascii=False)
+    async with agent_store.session_factory() as db:
+        db.add(turn)
+        await db.flush()
+        db.add(
+            AgentEvent(
+                turn_id=turn.id,
+                sequence=1,
+                event_type="user_input",
+                role="user",
+                payload_json=json.dumps({"content": nested_input}, ensure_ascii=False),
+            )
+        )
+        await db.commit()
+
+    summaries = await session_inspection.turn_list_summaries([turn])
+
+    assert summaries[turn.id]["input_preview"] == expected
+
+
 @pytest.mark.asyncio
 async def test_scope_identity_resolves_channel_name_and_backs_off_on_failure(
     agent_store: SimpleNamespace,

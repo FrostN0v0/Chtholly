@@ -846,6 +846,11 @@ function bindEvents() {
   elements.deleteForm.addEventListener("submit", deleteSelected);
   elements.uploadForm.addEventListener("submit", uploadSelected);
   elements.uploadInput.addEventListener("change", () => addUploadFiles(elements.uploadInput.files));
+  elements.dropZone.addEventListener("keydown", (event) => {
+    if (event.target !== elements.dropZone || !["Enter", " "].includes(event.key)) return;
+    event.preventDefault();
+    elements.uploadInput.click();
+  });
   ["dragenter", "dragover"].forEach((name) => {
     elements.dropZone.addEventListener(name, (event) => {
       event.preventDefault();

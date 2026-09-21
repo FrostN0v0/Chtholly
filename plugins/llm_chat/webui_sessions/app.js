@@ -35,6 +35,7 @@ const state = {
   scopes: [], scope: null, sessions: [], session: null, detail: null, turns: [], turn: null,
   inspection: null, events: [], navigation: 0, scopeLoad: 0, sessionLoad: 0,
   pollTimer: null, pollBusy: false, payload: null, action: null, actionBusy: false,
+  newestFirst: true,
 };
 
 function node(tag, className = "", text = "") {
@@ -78,6 +79,25 @@ function turnDuration(turn) {
     return `运行中已过 ${duration(turn.elapsed_ms)}（${basis}，非最终耗时） · ${delivered}`;
   }
   return turn.duration_source === "not_delivered" ? "总耗时未知（尚无确认送达）" : "总耗时未记录";
+}
+function compactTokens(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "\u672a\u77e5";
+  const magnitude = Math.abs(value);
+  const scale = magnitude >= 999950 ? 1000000 : magnitude >= 1000 ? 1000 : 1;
+  return (value / scale).toLocaleString(undefined, { maximumFractionDigits: scale === 1 ? 0 : 1 })
+    + (scale === 1000000 ? "M" : scale === 1000 ? "K" : "");
+}
+function compactDuration(turn) {
+  if (turn.duration_source === "running") return `${duration(turn.elapsed_ms)} \xb7 \u8fdb\u884c\u4e2d`;
+  if (turn.duration_source === "legacy_lifecycle") return `${duration(turn.duration_ms)} \xb7 \u4f30\u7b97`;
+  if (turn.duration_source === "received_to_confirmed_delivery") return duration(turn.duration_ms);
+  return turn.duration_source === "not_delivered" ? "\u672a\u9001\u8fbe" : "\u672a\u8bb0\u5f55";
+}
+function metric(title, value, explanation = "") {
+  const item = node("div", "metric");
+  item.append(node("span", "metric-label", title), node("strong", "metric-value", value));
+  if (explanation) item.title = explanation;
+  return item;
 }
 function status(message, error = false) {
   $("status").textContent = message;
@@ -223,18 +243,11 @@ function rawDetails(title, value) {
   return item;
 }
 function empty(target, message) { target.replaceChildren(node("p", "empty", message)); }
-function usageText(usage) {
-  const coverage = usage?.coverage?.complete === false ? "（部分统计）" : "";
-  return `输入 ${number(usage?.input_tokens)} / 输出 ${number(usage?.output_tokens)} / 合计 ${number(usage?.total_tokens)} token${coverage}`;
-}
 function usageDetails(usage) {
   const item = node("details", "usage-details");
   item.dataset.recordKey = "usage";
-  item.append(node("summary", "", usageText(usage)));
-  item.append(node("p", "muted", `缓存输入 ${number(usage?.cached_input_tokens)} · 推理 ${number(usage?.reasoning_tokens)}（均为子集，不额外相加）`));
-  const source = usage?.source === "model_response" ? "逐请求实测" : label(usage?.source || "not_recorded");
-  item.append(node("p", "muted", `已测请求 ${number(usage?.measured_requests)} · 未知请求 ${number(usage?.unknown_requests)} · 来源：${source}`));
-  if (usage?.coverage !== undefined) item.append(rawDetails("统计覆盖范围", usage.coverage));
+  item.append(node("summary", "", `Token ${compactTokens(usage?.total_tokens)}${usage?.coverage?.complete === false ? " \xb7 \u90e8\u5206\u7edf\u8ba1" : ""}`));
+  item.append(SessionCharts.usage(usage));
   return item;
 }
 function personaName(persona) { return persona?.name || "人格未记录"; }
@@ -281,9 +294,6 @@ function affectIndicators(view, turnStatus) {
     const count = evaluation.evidence_count ?? evaluation.evidence_turn_ids?.length;
     if (count > 1) row.append(node("span", "badge", `${count} \u8f6e\u5408\u5e76\u6279\u6b21`));
   }
-  if (view.relationship?.emotions?.length) {
-    for (const emotion of view.relationship.emotions.slice(0, 4)) row.append(node("span", "badge emotion-badge", `${emotion.name || "\u60c5\u7eea\u672a\u8bb0\u5f55"} ${affectNumber(emotion.intensity)}`));
-  } else if (view.relationship?.emotions) row.append(node("span", "badge", "\u65e0\u6d3b\u8dc3\u60c5\u7eea"));
   return row;
 }
 async function selectEvidenceTurn(evidence) {
@@ -338,81 +348,61 @@ function snapshotDescription(snapshot, title) {
 }
 function relationshipPanel() {
   const view = state.inspection;
-  const panel = section("\u672c\u8f6e\u5173\u7cfb\u3001\u60c5\u7eea\u4e0e\u81ea\u4e3b\u56de\u5e94", "\u5c55\u793a\u672c\u8f6e\u5b9e\u9645\u4f7f\u7528\u7684\u5feb\u7167\uff0c\u4e0d\u4ece\u5f53\u524d\u914d\u7f6e\u5012\u63a8\u5386\u53f2\u3002");
+  const panel = section("\u5173\u7cfb\u4e0e\u60c5\u7eea");
   panel.classList.add("relationship-panel");
   panel.dataset.recordKey = "relationship";
   panel.append(affectIndicators(view, view.turn.status));
-  const decision = view.response_decision;
-  const outcome = node("div", "response-outcome");
-  outcome.append(node("strong", "", outcomeLabel(decision, view.turn.status)));
-  if (decision) {
-    const delivery = decision.actual_delivery || {};
-    outcome.append(node("p", "", `\u786e\u8ba4\u9001\u8fbe ${affectNumber(delivery.confirmed_deliveries)} \u00b7 \u6587\u5b57 ${affectNumber(delivery.text_messages)} \u00b7 \u5a92\u4f53 ${affectNumber(delivery.media_messages)}`));
-    outcome.append(node("p", "muted", `${decision.source === "model" ? "\u6a21\u578b\u9009\u62e9" : decision.source === "runtime" ? "\u8fd0\u884c\u65f6\u8bb0\u5f55" : "\u6765\u6e90\u672a\u8bb0\u5f55"}\uff1a${decision.reason || "\u539f\u56e0\u672a\u8bb0\u5f55"}`));
-    outcome.append(eventButton(decision.event_ref, "\u5b8c\u6574\u56de\u5e94\u51b3\u7b56"));
-  }
-  if (["failed", "partial", "cancelled", "superseded"].includes(view.turn.status)) outcome.append(node("p", "error", "\u5931\u8d25\u3001\u90e8\u5206\u9001\u8fbe\u6216\u88ab\u53d6\u6d88\u4e0d\u7b49\u4e8e\u81ea\u4e3b\u6c89\u9ed8\u3002"));
-  panel.append(outcome);
   const snapshot = view.relationship;
-  if (snapshot) {
-    panel.append(node("h4", "", "\u751f\u6210\u524d\u5b9e\u9645\u4f7f\u7528\u7684\u5173\u7cfb"));
-    const axes = node("div", "relationship-axes");
-    for (const [key, title] of Object.entries(relationshipAxes)) {
-      const axis = node("div", "relationship-axis");
-      axis.append(node("span", "muted", title), node("strong", "", affectNumber(snapshot.axes?.[key])));
-      axes.append(axis);
-    }
-    panel.append(axes, snapshotDescription(snapshot, "\u5bf9\u8be5\u6210\u5458\u7684\u5173\u7cfb\u4e0e\u5370\u8c61"), emotionSnapshot(snapshot, "\u751f\u6210\u65f6\u7684\u611f\u53d7\u4e0e\u539f\u56e0", "generation"));
-  } else {
-    panel.append(node("p", "muted", "\u672c\u8f6e\u672a\u8bb0\u5f55\u65b0\u7248\u5173\u7cfb\u4e0e\u60c5\u7eea\u5feb\u7167\uff1b\u4e0d\u8865\u5199\u6570\u503c\u3002"));
-    const legacy = state.events.find((event) => event.event_type === "persona_state");
-    if (legacy?.persona?.relation?.length) {
-      const old = disclosure("\u5386\u53f2\u5173\u7cfb\u8bb0\u5f55");
-      old.item.dataset.detailKey = "legacy-relation";
-      for (const row of legacy.persona.relation) old.content.append(node("p", "", `${row.label}\uff1a${row.value}`));
-      old.content.append(eventButton(legacy.event_ref, "\u5b8c\u6574\u5386\u53f2\u5feb\u7167"));
-      panel.append(old.item);
-    }
-  }
   const evaluation = view.relationship_evaluation;
-  if (!evaluation) panel.append(node("p", "muted", "\u672c\u8f6e\u5c1a\u65e0\u5173\u7cfb\u8bc4\u4f30\u8bb0\u5f55\uff1b\u4e0d\u4ee3\u8868\u5df2\u8bc4\u4f30\u6216\u53d8\u5316\u4e3a\u96f6\u3002"));
-  else {
-    const result = section(evaluationStatus(evaluation.status));
-    result.dataset.recordKey = `evaluation:${evaluation.event_ref}`;
-    result.classList.add("evaluation-result");
-    const count = evaluation.evidence_turn_ids?.length || 0;
-    result.append(node("p", "batch-notice", count > 1 ? `\u6b64\u7ed3\u679c\u5c5e\u4e8e ${count} \u8f6e\u5408\u5e76\u8bc4\u4f30\uff0c\u4e0d\u662f\u672c\u6761\u6d88\u606f\u7684\u5355\u72ec\u8d21\u732e\u3002` : "\u6b64\u7ed3\u679c\u5bf9\u5e94\u8bc4\u4f30\u6279\u6b21\uff0c\u751f\u6210\u524d\u5feb\u7167\u4e0e\u8bc4\u4f30\u524d\u72b6\u6001\u53ef\u80fd\u4e0d\u540c\u3002"));
-    if (evaluation.error) result.append(node("p", "error", evaluation.error));
-    if (evaluation.status !== "succeeded") result.append(node("p", "muted", "\u5c1a\u65e0\u6210\u529f\u5199\u5165\u7684\u8bc4\u4f30\u540e\u72b6\u6001\uff1b\u4e0d\u628a\u672a\u77e5\u53d8\u5316\u5f53\u4f5c\u96f6\u3002"));
-    const table = node("table", "relationship-changes");
-    const head = node("thead"), headers = node("tr");
-    for (const title of ["\u5173\u7cfb\u8f74", "\u8bc4\u4f30\u524d", "\u2192 \u8bc4\u4f30\u540e", "\u53d8\u5316"]) { const cell = node("th", "", title); cell.scope = "col"; headers.append(cell); }
-    head.append(headers); table.append(head);
-    const body = node("tbody");
-    for (const [key, title] of Object.entries(relationshipAxes)) {
-      const row = node("tr"), change = evaluation.changes?.[key];
-      const name = node("th", "", title); name.scope = "row";
-      row.append(name, node("td", "", affectNumber(evaluation.before?.axes?.[key])), node("td", "", affectNumber(evaluation.after?.axes?.[key])), node("td", "axis-delta", axisDelta(change?.delta)));
-      body.append(row);
-    }
-    table.append(body); result.append(table);
+  const evaluated = evaluation?.status === "succeeded";
+  if (snapshot || evaluated) {
+    panel.append(SessionCharts.relationship(evaluated ? evaluation.after?.axes : snapshot?.axes, evaluated ? evaluation.before?.axes || {} : null));
+  } else panel.append(node("p", "empty", "\u5173\u7cfb\u5feb\u7167\u672a\u8bb0\u5f55"));
+  const count = evaluation?.evidence_turn_ids?.length || 0;
+  if (count > 1) panel.append(node("p", "batch-notice", `${count} \u8f6e\u5408\u5e76\u8bc4\u4f30 \xb7 \u975e\u672c\u8f6e\u72ec\u7acb\u8d21\u732e`));
+  if (evaluation?.error) panel.append(node("p", "error", evaluation.error));
+  if (!evaluation) panel.append(node("p", "muted", "\u5c1a\u65e0\u8bc4\u4f30\u8bb0\u5f55"));
+  const shown = evaluated ? evaluation.after : snapshot;
+  if (shown) {
+    const impression = disclosure("\u5173\u7cfb\u5370\u8c61\u4e0e\u60c5\u7eea", (shown.emotions || []).map((emotion) => emotion.name).join(" \xb7 "));
+    impression.item.dataset.detailKey = "affect-details";
+    impression.content.append(snapshotDescription(shown, evaluated ? "\u8bc4\u4f30\u540e\u5370\u8c61" : "\u751f\u6210\u524d\u5370\u8c61"));
     const feelings = node("div", "affect-comparison");
-    feelings.append(emotionSnapshot(evaluation.before, "\u8bc4\u4f30\u524d\u611f\u53d7", "before"), emotionSnapshot(evaluation.after, "\u8bc4\u4f30\u540e\u611f\u53d7", "after"));
-    result.append(feelings);
-    const evidence = disclosure("\u6279\u6b21\u8bc1\u636e\u4e0e\u8bc4\u4f30\u8be6\u60c5", `${count} \u8f6e\u8bc1\u636e`);
+    if (evaluated) feelings.append(emotionSnapshot(evaluation.before, "\u8bc4\u4f30\u524d\u60c5\u7eea", "before"));
+    feelings.append(emotionSnapshot(shown, evaluated ? "\u8bc4\u4f30\u540e\u60c5\u7eea" : "\u751f\u6210\u65f6\u60c5\u7eea", "after"));
+    impression.content.append(feelings);
+    panel.append(impression.item);
+  }
+  const decision = view.response_decision;
+  if (decision) {
+    const more = disclosure("\u81ea\u4e3b\u56de\u5e94\u4f9d\u636e");
+    more.item.dataset.detailKey = "decision-evidence";
+    more.content.append(SessionContent.markdown(decision.reason || "\u539f\u56e0\u672a\u8bb0\u5f55"), eventButton(decision.event_ref, "\u5b8c\u6574\u51b3\u7b56"));
+    panel.append(more.item);
+  }
+  if (evaluation || snapshot) {
+    const evidence = disclosure("\u8bc1\u636e\u4e0e\u539f\u59cb\u8bb0\u5f55", count ? `${count} \u8f6e\u8bc1\u636e` : "");
     evidence.item.dataset.detailKey = "evaluation-evidence";
-    evidence.content.append(node("p", "muted", `\u8bc4\u4f30\u6807\u8bc6\uff1a${evaluation.evaluation_ref || "\u672a\u8bb0\u5f55"}`), node("p", "muted", `\u6a21\u578b\uff1a${evaluation.model || "\u672a\u8bb0\u5f55"}`));
-    evidence.content.append(node("p", "muted", `\u6392\u961f ${date(evaluation.queued_at)} \u00b7 \u5f00\u59cb ${date(evaluation.started_at)} \u00b7 \u7ed3\u675f ${date(evaluation.finished_at)}`));
-    evidence.content.append(evidenceLinks(evaluation.evidence_turn_ids, evaluation.event_ref));
-    evidence.content.append(snapshotDescription(evaluation.before, "\u8bc4\u4f30\u524d\u5173\u7cfb\u4e0e\u5370\u8c61"), snapshotDescription(evaluation.after, "\u8bc4\u4f30\u540e\u5173\u7cfb\u4e0e\u5370\u8c61"));
-    evidence.content.append(eventButton(evaluation.event_ref, "\u5b8c\u6574\u8bc4\u4f30\u8d1f\u8f7d"));
-    result.append(evidence.item); panel.append(result);
+    if (evaluation) {
+      evidence.content.append(evidenceLinks(evaluation.evidence_turn_ids, evaluation.event_ref));
+      evidence.content.append(node("p", "muted", `\u8bc4\u4f30\u6a21\u578b ${evaluation.model || "\u672a\u8bb0\u5f55"} \xb7 ${date(evaluation.finished_at)}`), eventButton(evaluation.event_ref, "\u5b8c\u6574\u8bc4\u4f30\u8bb0\u5f55"));
+    }
+    const generation = state.events.find((event) => event.event_type === "persona_state");
+    if (generation) evidence.content.append(eventButton(generation.event_ref, "\u751f\u6210\u65f6\u5feb\u7167", "relationship"));
+    panel.append(evidence.item);
+  }
+  const legacy = state.events.find((event) => event.event_type === "persona_state");
+  if (!snapshot && !evaluated && legacy?.persona?.relation?.length) {
+    const old = disclosure("\u5386\u53f2\u5173\u7cfb\u8bb0\u5f55");
+    old.item.dataset.detailKey = "legacy-relation";
+    for (const row of legacy.persona.relation) old.content.append(node("p", "", `${row.label}\uff1a${row.value}`));
+    old.content.append(eventButton(legacy.event_ref, "\u5b8c\u6574\u5386\u53f2\u5feb\u7167"));
+    panel.append(old.item);
   }
   if (view.engagement) {
-    const history = disclosure("\u5386\u53f2\u56de\u5e94\u610f\u5411\uff08\u65e7\u7b56\u7565\uff09", view.engagement.level_label || "");
+    const history = disclosure("\u5386\u53f2\u56de\u5e94\u610f\u5411", view.engagement.level_label || "");
     history.item.dataset.detailKey = "legacy-engagement";
     history.content.append(node("p", "", view.engagement.tone || ""));
-    for (const reason of view.engagement.reasons || []) history.content.append(node("p", "", reason));
     const event = state.events.find((item) => item.event_type === "engagement_decision");
     history.content.append(eventButton(event?.event_ref, "\u5b8c\u6574\u5386\u53f2\u610f\u5411"));
     panel.append(history.item);
@@ -460,23 +450,21 @@ async function loadSessions(preferredRef = "") {
   state.sessions = result.items || [];
   const selected = state.sessions.find((item) => item.session_ref === preferredRef)
     || state.sessions.find((item) => item.status === "active") || state.sessions[0] || null;
-  await selectSession(selected);
+  const turnRef = selected?.session_ref === state.session?.session_ref ? state.turn?.turn_ref : "";
+  await selectSession(selected, turnRef);
 }
 function renderSessions() {
-  $("session-count").textContent = String(state.sessions.length);
-  $("session-list").replaceChildren();
-  if (!state.sessions.length) empty($("session-list"), "暂无会话");
+  $("session-count").textContent = state.sessions.length ? `(${state.sessions.length})` : "";
+  const select = $("session-select");
+  select.replaceChildren();
+  select.disabled = !state.sessions.length;
+  if (!state.sessions.length) select.append(node("option", "", "\u6682\u65e0\u4f1a\u8bdd"));
   for (const session of state.sessions) {
-    const item = button("", () => selectSession(session), "list-item");
-    item.dataset.focusKey = session.session_ref;
-    item.classList.toggle("is-active", session.session_ref === state.session?.session_ref);
-    item.setAttribute("aria-current", String(session.session_ref === state.session?.session_ref));
-    const heading = node("div", "item-heading");
-    heading.append(node("strong", "", `会话 ${session.sequence}`), badge(session.status));
-    item.append(heading, node("p", "snippet", `${personaName(session.persona)} · ${session.model || "模型未记录"}`));
-    item.append(node("p", "muted", `${session.turn_count} 轮 · ${label(session.start_reason)}`), node("p", "muted", date(session.created_at)));
-    $("session-list").append(item);
+    const option = node("option", "", `#${session.sequence} \xb7 ${personaName(session.persona)} \xb7 ${label(session.status)} \xb7 ${date(session.created_at)}`);
+    option.value = session.session_ref;
+    select.append(option);
   }
+  select.value = state.session?.session_ref || "";
 }
 async function selectSession(session, preferredTurnRef = "") {
   stopPolling();
@@ -496,33 +484,43 @@ async function selectSession(session, preferredTurnRef = "") {
   state.turns = turns.items || [];
   renderSession(); renderTurns();
   if (preferredTurnRef) await selectTurn(state.turns.find((turn) => turn.turn_ref === preferredTurnRef) || { turn_ref: preferredTurnRef });
-  else if (state.turns.length) await selectTurn(state.turns[state.turns.length - 1]);
+  else if (state.turns.length) await selectTurn(state.turns.reduce((latest, turn) => turn.sequence > latest.sequence ? turn : latest));
 }
 function renderSession() {
   const container = $("session-detail");
   container.replaceChildren();
-  if (!state.detail) return empty(container, state.session ? "正在读取会话…" : "请选择一个会话。");
+  $("session-details-button").disabled = !state.detail;
+  if (!state.detail) return empty(container, state.session ? "\u6b63\u5728\u8bfb\u53d6\u4f1a\u8bdd\u2026" : "\u8bf7\u9009\u62e9\u4e00\u4e2a\u4f1a\u8bdd");
   const detail = state.detail;
-  container.append(node("p", "", `${personaName(detail.persona)} · ${detail.model || "模型未记录"}`), usageDetails(detail.usage));
-  const more = node("details");
-  more.append(node("summary", "", "会话上下文与固定事件"));
-  more.append(rawDetails("最近记录的上下文预算", detail.context ?? null));
-  if (detail.handoff && Object.keys(detail.handoff).length) more.append(rawDetails("会话交接", detail.handoff));
-  if (detail.anchors?.length) {
-    for (const anchor of detail.anchors) {
-      const row = node("div", "anchor-row");
-      row.append(eventButton(anchor.event_ref, anchor.label || "固定事件"), button("取消固定", () => confirmUnpin(anchor)));
-      more.append(row);
-    }
-  } else more.append(node("p", "muted", "无固定事件"));
-  more.append(rawDetails("高级会话标识", detail));
-  container.append(more);
+  $("session-title").textContent = `\u4f1a\u8bdd #${detail.sequence} \xb7 ${personaName(detail.persona)}`;
+  const overview = node("div", "session-summary");
+  overview.append(metric("\u72b6\u6001", label(detail.status)), metric("\u8f6e\u6b21", number(detail.turn_count)), metric("\u521b\u5efa\u65f6\u95f4", date(detail.created_at)));
+  container.append(overview);
+  const usage = node("section", "section");
+  usage.append(SessionCharts.usage(detail.usage));
+  container.append(usage);
+  const context = disclosure("\u4e0a\u4e0b\u6587\u4e0e\u4f1a\u8bdd\u4ea4\u63a5", detail.model || "\u6a21\u578b\u672a\u8bb0\u5f55");
+  context.content.append(SessionContent.value(detail.context ?? "\u4e0a\u4e0b\u6587\u672a\u8bb0\u5f55"));
+  if (detail.handoff && Object.keys(detail.handoff).length) context.content.append(SessionContent.value(detail.handoff));
+  container.append(context.item);
+  const anchors = disclosure("\u56fa\u5b9a\u4e8b\u4ef6", `${detail.anchors?.length || 0} \u9879`);
+  for (const anchor of detail.anchors || []) {
+    const row = node("div", "anchor-row");
+    row.append(eventButton(anchor.event_ref, anchor.label || "\u56fa\u5b9a\u4e8b\u4ef6"), button("\u53d6\u6d88\u56fa\u5b9a", () => confirmUnpin(anchor)));
+    anchors.content.append(row);
+  }
+  if (!detail.anchors?.length) anchors.content.append(node("p", "muted", "\u6682\u65e0\u56fa\u5b9a\u4e8b\u4ef6"));
+  container.append(anchors.item, rawDetails("\u539f\u59cb\u4f1a\u8bdd\u6570\u636e", detail));
 }
 function renderTurns() {
   $("turn-count").textContent = String(state.turns.length);
+  $("turn-order-button").textContent = state.newestFirst ? "\u6700\u65b0\u5728\u4e0a" : "\u6700\u65e9\u5728\u4e0a";
+  $("turn-order-button").setAttribute("aria-pressed", String(state.newestFirst));
+  $("turn-order-button").title = state.newestFirst ? "\u5207\u6362\u4e3a\u6700\u65e9\u5728\u4e0a" : "\u5207\u6362\u4e3a\u6700\u65b0\u5728\u4e0a";
   $("turn-list").replaceChildren();
-  if (!state.turns.length) empty($("turn-list"), "暂无轮次");
-  for (const turn of state.turns) {
+  if (!state.turns.length) empty($("turn-list"), "\u6682\u65e0\u8f6e\u6b21");
+  const ordered = [...state.turns].sort((a, b) => state.newestFirst ? b.sequence - a.sequence : a.sequence - b.sequence);
+  for (const turn of ordered) {
     const item = button("", () => selectTurn(turn), "list-item");
     item.dataset.focusKey = turn.turn_ref;
     item.classList.toggle("is-active", turn.turn_ref === state.turn?.turn_ref);
@@ -530,13 +528,15 @@ function renderTurns() {
     const heading = node("div", "item-heading");
     heading.append(node("strong", "", turn.user_name || "用户"), badge(turn.status));
     item.append(heading, node("p", "snippet", turn.input_preview == null ? "用户输入摘要未记录" : short(turn.input_preview, 180)));
-    item.append(node("p", "muted", date(turn.created_at)));
-    item.append(node("p", "muted", `${turn.model || "模型未记录"} · 请求 ${number(turn.model_call_count)} · 工具 ${number(turn.tool_call_count)}`));
-    item.append(node("p", "muted turn-duration", turnDuration(turn)));
-    item.append(affectIndicators(turn, turn.status));
-    if (turn.relationship?.axes) item.append(node("p", "muted", Object.entries(relationshipAxes).map(([key, title]) => `${title} ${affectNumber(turn.relationship.axes[key])}`).join(" \u00b7 ")));
-    const changes = Object.entries(turn.relationship_evaluation?.changes || {}).filter(([, change]) => typeof change.delta === "number" && change.delta !== 0);
-    if (changes.length) item.append(node("p", "muted", `\u6279\u6b21\u53d8\u5316\uff1a${changes.map(([key, change]) => `${relationshipAxes[key] || key} ${axisDelta(change.delta)}`).join(" \u00b7 ")}`));
+    const meta = node("div", "turn-list-meta");
+    const timing = node("span", "", compactDuration(turn));
+    timing.title = turnDuration(turn);
+    meta.append(node("span", "", `#${turn.sequence} \xb7 ${date(turn.created_at)}`), timing);
+    item.append(meta);
+    const evaluation = turn.relationship_evaluation;
+    const changes = Object.entries(evaluation?.changes || {}).filter(([, change]) => typeof change.delta === "number" && change.delta !== 0);
+    if (changes.length) item.append(node("p", "muted batch-summary", `\u6279\u6b21\uff1a${changes.map(([key, change]) => `${relationshipAxes[key] || key} ${axisDelta(change.delta)}`).join(" \xb7 ")}`));
+    else if (["failed", "pending", "running"].includes(evaluation?.status)) item.append(node("p", "muted batch-summary", evaluationStatus(evaluation.status)));
     $("turn-list").append(item);
   }
 }
@@ -551,6 +551,9 @@ async function selectTurn(turn) {
   state.turn = turn;
   state.inspection = null;
   state.events = [];
+  document.querySelector(".workspace").dataset.mobileView = "detail";
+  document.querySelector(".inspector-body").scrollTop = 0;
+  document.querySelector(".inspector").scrollTop = 0;
   renderTurns(); renderWorkspace();
   const result = await fetchTurn(turn.turn_ref);
   if (generation !== state.navigation) return;
@@ -566,39 +569,54 @@ function renderWorkspace() {
   $("collapse-details-button").disabled = !state.inspection;
   if (!state.inspection) {
     header.append(node("p", "", state.turn ? "正在读取轮次…" : "请选择一个轮次。"));
-    for (const id of ["timeline-view", "context-view", "io-view"]) empty($(id), state.turn ? "正在读取…" : "请选择一个轮次。");
+    for (const id of ["timeline-view", "context-view", "io-view", "relationship-view"]) empty($(id), state.turn ? "\u6b63\u5728\u8bfb\u53d6\u2026" : "\u8bf7\u9009\u62e9\u4e00\u4e2a\u8f6e\u6b21\u3002");
     return;
   }
   const inspection = state.inspection;
   const heading = node("div", "item-heading");
-  heading.append(node("h2", "", `${inspection.turn.user_name || "用户"} · ${date(inspection.turn.created_at)}`), badge(inspection.turn.status));
+  heading.append(node("h2", "", inspection.turn.user_name || "\u7528\u6237"), badge(inspection.turn.status));
+  heading.append(node("span", "muted turn-date", `#${inspection.turn.sequence} \xb7 ${date(inspection.turn.created_at)}`));
   const models = [...new Set((inspection.model_calls || []).map((call) => call.model).filter(Boolean))];
-  header.append(heading, node("p", "muted", `${personaName(inspection.persona)} · ${models.length ? models.join(" / ") : inspection.turn.model || "模型未记录"}`), usageDetails(inspection.usage));
-  header.append(node("p", "turn-duration", turnDuration(inspection.turn)));
-  header.append(affectIndicators(inspection, inspection.turn.status));
+  const identity = node("p", "muted turn-identity", `${personaName(inspection.persona)} \xb7 ${models.length ? models.join(" / ") : inspection.turn.model || "\u6a21\u578b\u672a\u8bb0\u5f55"}`);
+  identity.title = identity.textContent;
+  const metrics = node("div", "turn-metrics");
+  const tokens = metric("Token", compactTokens(inspection.usage?.total_tokens), `${number(inspection.usage?.total_tokens)} Token`);
+  if (inspection.usage?.coverage?.complete === false && inspection.usage.total_tokens != null) tokens.append(node("span", "metric-note", "\u90e8\u5206\u7edf\u8ba1"));
+  metrics.append(metric("\u8017\u65f6", compactDuration(inspection.turn), turnDuration(inspection.turn)), tokens,
+    metric("\u6a21\u578b\u8bf7\u6c42", number(inspection.turn.model_call_count)), metric("\u5de5\u5177\u8c03\u7528", number(inspection.turn.tool_call_count)));
+  const statistics = node("details", "turn-statistics");
+  statistics.dataset.recordKey = "turn-statistics";
+  const usage = usageDetails(inspection.usage);
+  usage.open = true;
+  statistics.append(node("summary", "", "\u8be6\u7ec6\u7edf\u8ba1"), usage, node("p", "muted", turnDuration(inspection.turn)));
+  header.append(heading, identity, metrics, statistics);
   renderTimeline(); renderContext(); renderIO();
+  $("relationship-view").replaceChildren(relationshipPanel());
 }
 function callPanel(title, preview, ref, path = "") {
   const panel = node("div", "call-panel");
   const heading = node("div", "call-panel-heading");
   heading.append(node("h4", "", title), eventButton(ref, "查看完整内容", path));
-  const value = !ref ? "本轮未记录" : preview == null ? "摘要未记录" : text(preview);
-  panel.append(heading, node("pre", `preview ${typeof preview === "object" && preview !== null ? "code" : "prose"}`, value));
+  const display = preview?.kind === "messages" ? preview.items : preview?.kind === "value" ? preview.value : preview;
+  const value = !ref ? "\u672c\u8f6e\u672a\u8bb0\u5f55" : display ?? "\u6458\u8981\u672a\u8bb0\u5f55";
+  const body = SessionContent.value(value);
+  body.classList.add("preview");
+  panel.append(heading, body);
+  if (preview?.truncated) panel.append(node("p", "partial-notice", "\u6458\u8981\u5df2\u622a\u65ad\uff0c\u5b8c\u6574\u5185\u5bb9\u53ef\u6309\u9700\u67e5\u770b"));
   return panel;
 }
 function modelCard(call, index) {
   const { item, summary, content } = disclosure(`模型请求 ${index + 1}`, call.model || "模型未记录", "record-card model-record");
   item.dataset.recordKey = `model:${call.request_id || call.request_event_ref || call.response_event_ref || index}`;
   item.dataset.detailKey = "record";
-  const kind = node("span", "record-kind", "M");
-  kind.setAttribute("aria-hidden", "true");
+  const kind = node("span", "record-kind", "\u6a21");
   summary.prepend(kind);
   const meta = node("span", "record-meta");
   meta.append(badge(call.status), node("span", "record-duration", duration(call.duration_ms)));
   summary.append(meta);
-  content.append(node("p", "muted", `${usageText(call.usage)} · 尝试 ${call.attempt ?? "未知"} · ${label(call.capture_status)}`));
+  content.append(usageDetails(call.usage), node("p", "muted", `\u5c1d\u8bd5 ${call.attempt ?? "\u672a\u77e5"} \xb7 ${label(call.capture_status)}`));
   const panels = node("div", "call-panels");
-  panels.append(callPanel("模型输入", call.input_preview, call.request_event_ref), callPanel("模型输出", call.output_preview, call.response_event_ref));
+  panels.append(callPanel("\u6a21\u578b\u8f93\u5165", call.input_display ?? call.input_preview, call.request_event_ref), callPanel("\u6a21\u578b\u8f93\u51fa", call.output_display ?? call.output_preview, call.response_event_ref));
   content.append(panels, rawDetails("请求标识与统计", { request_id: call.request_id, request_event_ref: call.request_event_ref, response_event_ref: call.response_event_ref, usage: call.usage }));
   return item;
 }
@@ -609,24 +627,21 @@ function toolCard(call, index) {
   const { item, summary, content } = disclosure(call.tool_name || "工具名未记录", deliveryNote, "record-card tool-record");
   item.dataset.recordKey = `tool:${call.execution_ref || call.call_event_ref || call.result_event_ref || index}`;
   item.dataset.detailKey = "record";
-  const kind = node("span", "record-kind", "T");
-  kind.setAttribute("aria-hidden", "true");
+  const kind = node("span", "record-kind", "\u5de5");
   summary.prepend(kind);
   const meta = node("span", "record-meta");
   meta.append(badge(call.status), node("span", "record-duration", duration(call.duration_ms)));
   summary.append(meta);
-  content.append(node("p", "muted", `工具效果记录：${label(call.effect)}（与实际送达凭据分开）`));
+  content.append(node("p", "muted", `\u6267\u884c\u6548\u679c \xb7 ${label(call.effect)}`));
   for (const delivery of deliveries) content.append(deliveryCard(delivery, `tool-delivery:${delivery.event_ref}`));
   if (call.delivery_source === "legacy_incomplete") content.append(node("p", "muted", "旧记录没有独立送达凭据；未留存的历史输出图片无法还原，不重新渲染历史 Markdown。"));
   const panels = node("div", "call-panels");
-  const argumentsPanel = callPanel("调用参数", call.arguments_preview, call.call_event_ref, call.arguments_path || "");
-  const resultPanel = callPanel("返回结果", call.result_preview, call.result_event_ref, call.result_path || "");
-  argumentsPanel.append(node("p", "muted", `参数捕获：${label(call.arguments_capture_status || "not_recorded")}`));
-  resultPanel.append(node("p", "muted", `结果捕获：${label(call.result_capture_status || "not_recorded")}`));
+  const argumentsPanel = callPanel("\u8c03\u7528\u53c2\u6570", call.arguments_display ?? call.arguments_preview, call.call_event_ref, call.arguments_path || "");
+  const resultPanel = callPanel("\u8fd4\u56de\u7ed3\u679c", call.result_display ?? call.result_preview, call.result_event_ref, call.result_path || "");
+  if (!["complete", "captured"].includes(call.arguments_capture_status)) argumentsPanel.append(node("p", "muted", label(call.arguments_capture_status || "not_recorded")));
+  if (!["complete", "captured"].includes(call.result_capture_status)) resultPanel.append(node("p", "muted", label(call.result_capture_status || "not_recorded")));
   panels.append(argumentsPanel, resultPanel);
-  const records = node("div", "actions");
-  records.append(eventButton(call.call_event_ref, "调用原始记录 / 脱敏说明"), eventButton(call.result_event_ref, "结果原始记录 / 脱敏说明"));
-  content.append(panels, records);
+  content.append(panels);
   if (call.evidence != null) content.append(rawDetails("执行证据摘要", call.evidence));
   if (call.images?.length) content.append(node("p", "muted", "工具附件（可能含输入 / 参考图，不等同于已送达图片）"));
   appendImages(content, { event_ref: call.result_event_ref, images: call.images });
@@ -637,14 +652,13 @@ function renderTimeline() {
   const target = $("timeline-view");
   target.replaceChildren();
   const inspection = state.inspection;
-  target.append(relationshipPanel());
   const calls = [
     ...(inspection.model_calls || []).map((call, index) => ({ ref: call.request_event_ref || call.response_event_ref, card: () => modelCard(call, index) })),
     ...(inspection.tool_calls || []).map((call, index) => ({ ref: call.call_event_ref || call.result_event_ref, card: () => toolCard(call, index) })),
   ];
   calls.sort((a, b) => (eventByRef(a.ref)?.sequence ?? Infinity) - (eventByRef(b.ref)?.sequence ?? Infinity));
   const overview = node("div", "timeline-overview");
-  overview.append(node("h3", "", "执行记录"), node("p", "muted", `${inspection.model_calls?.length || 0} 次模型请求 · ${inspection.tool_calls?.length || 0} 次工具调用 · 点击记录展开详情`));
+  overview.append(node("h3", "", "\u6267\u884c\u987a\u5e8f"), node("p", "muted", `${number(inspection.turn.model_call_count)} \u6b21\u8bf7\u6c42 \xb7 ${number(inspection.turn.tool_call_count)} \u6b21\u5de5\u5177\u8c03\u7528`));
   target.append(overview);
   if (!calls.length) target.append(node("p", "empty", "\u672c\u8f6e\u672a\u8bb0\u5f55\u6a21\u578b\u8bf7\u6c42\u6216\u5de5\u5177\u8c03\u7528\uff1b\u4e0d\u4ee5\u751f\u6210\u5c1d\u8bd5\u63a8\u65ad\u5b9e\u9645\u8bf7\u6c42\u3002"));
   for (const call of calls) target.append(call.card());
@@ -663,7 +677,10 @@ function renderContext() {
   const context = state.inspection.context;
   if (!context?.captured) return empty(target, "本轮未记录上下文注入快照。旧审计记录无法还原实际请求，不使用当前配置代替。");
   const ref = context.event_ref;
-  const overview = section("本轮注入快照", "保留本轮开始时的原始记录，不代表当前配置。修改人格后，请查看新轮次的快照。");
+  const overview = section("\u672c\u8f6e\u4e0a\u4e0b\u6587");
+  const note = node("details", "raw-details");
+  note.append(node("summary", "", "\u5feb\u7167\u8bf4\u660e"), node("p", "muted", "\u6765\u81ea\u672c\u8f6e\u751f\u6210\u524d\u7684\u5386\u53f2\u5feb\u7167\uff0c\u4e0d\u968f\u5f53\u524d\u914d\u7f6e\u53d8\u5316\u3002"));
+  overview.append(note);
   const links = node("div", "actions snapshot-links");
   for (const [path, title] of [["persona", "本轮人格快照"], ["system", "完整系统指令"], ["messages", "实际选中消息"], ["", "完整快照"]]) links.append(eventButton(ref, title, path));
   overview.append(node("p", "", `${personaName(state.inspection.persona)} · ${label(context.capture_status || "not_recorded")}`), links);
@@ -672,13 +689,17 @@ function renderContext() {
   const values = context.budgets;
   if (values && Object.keys(values).length) {
     const list = node("dl", "fields");
-    for (const [key, value] of Object.entries(values)) list.append(node("dt", "", label(key)), node("dd", "", text(value)));
+    for (const [key, value] of Object.entries(values)) {
+      const cell = node("dd", "", key.endsWith("tokens") ? compactTokens(value) : text(value));
+      if (key.endsWith("tokens")) cell.title = `${number(value)} Token`;
+      list.append(node("dt", "", label(key)), cell);
+    }
     budgets.content.append(list);
   } else budgets.content.append(node("p", "muted", "本轮未记录"));
   budgets.content.append(eventButton(ref, "预算原始记录", "budgets"));
   target.append(budgets.item);
   const selection = disclosure("历史选择", "选中与排除的轮次证据，不以当前历史重算");
-  selection.content.append(rawDetails("选择证据", context.selection ?? null), eventButton(ref, "完整选择记录", "selection"));
+  selection.content.append(SessionContent.value(context.selection ?? "\u672a\u8bb0\u5f55"), eventButton(ref, "\u5b8c\u6574\u9009\u62e9\u8bb0\u5f55", "selection"));
   target.append(selection.item);
   const blockCount = Array.isArray(context.blocks) ? `${context.blocks.length} 个命名块` : "命名块未记录";
   const blocks = disclosure("注入内容", blockCount);
@@ -826,43 +847,51 @@ function appendImages(target, event) {
   }
   target.append(grid);
 }
-function ioEvent(event, title, recordKey) {
-  const preview = eventPreview(event);
-  const card = disclosure(title, preview == null ? "摘要未记录" : short(preview, 110), "message-record");
-  card.item.dataset.recordKey = recordKey;
-  card.item.dataset.detailKey = "record";
-  card.content.append(node("pre", "prose preview", preview ?? "摘要未记录"), eventButton(event.event_ref, "查看完整记录"));
-  appendImages(card.content, event);
-  return card;
-}
 function deliveryCard(output, recordKey) {
   const confirmed = output.source === "message_delivery";
   const legacyTool = !confirmed && output.event_type === "tool_result";
-  const card = section(confirmed ? "确认送达消息" : legacyTool ? "工具输出附件（旧版记录）" : "旧版回复摘要（审计不完整）");
+  const card = section(confirmed ? "\u56de\u590d" : legacyTool ? "\u5386\u53f2\u5de5\u5177\u9644\u4ef6" : "\u5386\u53f2\u56de\u590d\u6458\u8981");
   card.classList.add("delivery-record");
   if (!confirmed) card.classList.add("legacy-output");
   card.dataset.recordKey = recordKey;
   const content = typeof output.content === "string" && output.content ? output.content : confirmed ? "" : eventPreview(output);
-  if (content) card.append(node("pre", "prose delivery-text", content));
+  if (content) card.append(SessionContent.markdown(content));
   appendImages(card, output);
   for (const media of output.media || []) card.append(node("p", "muted", `${media.label || media.kind || "媒体"} · ${label(media.capture_status)}`));
   const legacyNote = legacyTool && output.effect !== "confirmed"
     ? "工具输出附件，送达状态未记录。生成成功不代表发送成功；未捕获的历史图片不可查看。"
     : "仅有旧版摘要 / 工具效果记录，缺少独立送达凭据，不能完整还原实际发送消息；未捕获的历史图片不可查看。";
-  card.append(node("p", "muted", confirmed ? `${label(output.status)} · 捕获：${label(output.capture_status)} · ${date(output.confirmed_at)}` : legacyNote));
-  card.append(eventButton(output.event_ref, "查看完整记录"), rawDetails(confirmed ? "送达记录" : "旧版输出记录", output));
+  if (confirmed) card.append(node("p", "muted delivery-meta", `\u5df2\u9001\u8fbe \xb7 ${date(output.confirmed_at)}${output.capture_status !== "captured" ? ` \xb7 ${label(output.capture_status)}` : ""}`));
+  else card.append(node("p", "muted", "\u65e7\u7248\u8bb0\u5f55 \xb7 \u7f3a\u5c11\u72ec\u7acb\u9001\u8fbe\u51ed\u636e"));
+  const more = node("details", "raw-details");
+  more.dataset.detailKey = "delivery-details";
+  more.append(node("summary", "", "\u8bb0\u5f55\u8be6\u60c5"));
+  if (!confirmed) more.append(node("p", "muted", legacyNote));
+  more.append(eventButton(output.event_ref, "\u5b8c\u6574\u8bb0\u5f55"), rawDetails("\u5143\u6570\u636e", output));
+  card.append(more);
   return card;
 }
 function renderIO() {
   const target = $("io-view");
   target.replaceChildren();
-  const decision = state.inspection.response_decision;
-  if (decision) target.append(section("\u81ea\u4e3b\u56de\u5e94\u4e0e\u5b9e\u9645\u9001\u8fbe", outcomeLabel(decision, state.turn.status)));
   const inputs = state.events.filter((event) => event.event_type === "user_input");
-  if (!inputs.length) target.append(section("用户输入", "本轮未记录"));
-  for (const [index, event] of inputs.entries()) target.append(ioEvent(event, "用户输入", `input:${event.event_ref || index}`).item);
+  if (!inputs.length) target.append(section("\u7528\u6237\u8f93\u5165", "\u672a\u8bb0\u5f55"));
+  for (const [index, event] of inputs.entries()) {
+    const card = section("\u7528\u6237\u8f93\u5165");
+    card.classList.add("input-record");
+    card.dataset.recordKey = `input:${event.event_ref || index}`;
+    card.append(SessionContent.message(event.message || { speaker: state.turn.user_name, content: eventPreview(event) ?? "\u672a\u8bb0\u5f55", quotes: [], mentions: [], truncated: false }));
+    appendImages(card, event);
+    const more = node("details", "raw-details");
+    more.append(node("summary", "", "\u8f93\u5165\u8bb0\u5f55"), eventButton(event.event_ref, "\u67e5\u770b\u5b8c\u6574\u8f93\u5165", "content"));
+    card.append(more);
+    target.append(card);
+  }
   const outputs = state.inspection.outputs || [];
-  if (!outputs.length) target.append(section("确认输出", "本轮没有独立确认输出记录；不把模型响应当作已送达消息。未捕获的历史图片无法还原。"));
+  if (!outputs.length) {
+    const message = state.turn.status === "silent" ? "\u672c\u8f6e\u4e3b\u52a8\u6c89\u9ed8" : state.turn.status === "running" ? "\u6b63\u5728\u751f\u6210\uff0c\u5c1a\u65e0\u786e\u8ba4\u56de\u590d" : "\u65e0\u5df2\u786e\u8ba4\u56de\u590d";
+    target.append(section("\u56de\u590d", message));
+  }
   for (const [index, output] of outputs.entries()) {
     const event = { ...eventByRef(output.event_ref), ...output };
     target.append(deliveryCard(event, `output:${output.event_ref || index}`));
@@ -873,24 +902,28 @@ function renderIO() {
 }
 
 function refreshPanels() {
-  const detailKey = (item) => [
-    item.closest(".view, #session-detail, #turn-header")?.id,
-    item.closest("[data-record-key]")?.dataset.recordKey,
-    item.dataset.detailKey || (item.classList.contains("usage-details") ? "usage" : item.querySelector("summary")?.textContent),
-  ].join("|");
-  const opened = new Set([...document.querySelectorAll(".workspace details[open]")].map(detailKey));
+  const detailKey = (item) => {
+    const records = [];
+    for (let parent = item; parent; parent = parent.parentElement) {
+      if (parent.dataset.recordKey) records.push(parent.dataset.recordKey);
+    }
+    return [item.closest(".view, #session-detail, #turn-header")?.id, ...records.reverse(),
+      item.dataset.detailKey || (item.classList.contains("usage-details") ? "usage" : item.querySelector("summary")?.textContent),
+    ].join("|");
+  };
+  const opened = new Set([...document.querySelectorAll(".workspace details[open], #session-detail details[open]")].map(detailKey));
   const focused = document.activeElement;
   const focusKey = focused?.dataset.focusKey;
   const focusedDetail = focused?.tagName === "SUMMARY" ? detailKey(focused.parentElement) : null;
-  const scrollPositions = [...document.querySelectorAll(".workspace .scroll, #session-detail")].map((item) => [item, item.scrollTop, item.scrollLeft]);
+  const scrollPositions = [...document.querySelectorAll(".workspace .scroll, .inspector, .context-popover, #session-dialog .modal-body")].map((item) => [item, item.scrollTop, item.scrollLeft]);
   const pageScroll = { top: window.scrollY, left: window.scrollX, behavior: "instant" };
   renderTurns(); renderSession(); renderWorkspace();
-  for (const item of document.querySelectorAll(".workspace details")) {
+  for (const item of document.querySelectorAll(".workspace details, #session-detail details")) {
     item.open = opened.has(detailKey(item));
     if (focusedDetail === detailKey(item)) item.querySelector("summary")?.focus({ preventScroll: true });
   }
   if (focusKey) {
-    [...document.querySelectorAll(".workspace [data-focus-key]")]
+    [...document.querySelectorAll(".workspace [data-focus-key], #session-detail [data-focus-key]")]
       .find((item) => item.dataset.focusKey === focusKey)?.focus({ preventScroll: true });
   }
   for (const [item, top, left] of scrollPositions) {
@@ -944,15 +977,35 @@ function disposePayload() {
 function openPayload(ref, title, path = "") {
   if (!ref) return;
   disposePayload();
-  state.payload = { ref, title, path, text: "", next: 0, total: null, loaded: 0, busy: false, all: false, controller: null, hasPage: false };
+  state.payload = { ref, title, path, text: "", next: 0, total: null, loaded: 0, busy: false, all: false, controller: null, hasPage: false, source: false };
   $("payload-title").textContent = title;
   $("payload-path").value = path;
   $("payload-error").textContent = "";
   $("payload-output").textContent = "";
+  $("payload-reader").replaceChildren(node("p", "empty", "\u6b63\u5728\u8bfb\u53d6\u2026"));
+  setPayloadMode(false);
   $("pin-event-button").textContent = "固定事件";
   $("pin-event-button").disabled = !state.scope || eventByRef(ref)?.model_visible === false;
   if (!$("payload-dialog").open) $("payload-dialog").showModal();
   loadPayloadPage().catch(payloadError);
+}
+function setPayloadMode(source) {
+  if (state.payload) state.payload.source = source;
+  $("payload-output").hidden = !source;
+  $("payload-reader").hidden = source;
+  $("payload-reader-button").setAttribute("aria-pressed", String(!source));
+  $("payload-source-button").setAttribute("aria-pressed", String(source));
+}
+function renderPayloadContent() {
+  const payload = state.payload;
+  if (!payload) return;
+  $("payload-output").textContent = payload.text;
+  let value = payload.text;
+  try { value = JSON.parse(payload.text); } catch { /* Incomplete pages stay explicitly partial. */ }
+  const target = $("payload-reader");
+  target.replaceChildren();
+  if (payload.next !== null) target.append(node("p", "partial-notice", "\u4ec5\u663e\u793a\u5df2\u52a0\u8f7d\u90e8\u5206 \xb7 \u53ef\u7ee7\u7eed\u52a0\u8f7d"));
+  target.append(SessionContent.value(value));
 }
 function payloadError(error) {
   if (error?.name !== "AbortError" && state.payload) $("payload-error").textContent = error instanceof Error ? error.message : "读取失败，可重试。";
@@ -994,7 +1047,7 @@ async function loadPayloadPage() {
     payload.total = item.total_chars;
     payload.loaded = item.next_offset ?? item.total_chars;
     payload.hasPage = true;
-    $("payload-output").textContent = payload.text;
+    renderPayloadContent();
   } finally {
     payload.busy = false;
     if (payload === state.payload) renderPayloadProgress();
@@ -1011,6 +1064,7 @@ async function loadAllPayload() {
 }
 function confirmAction({ title, message, dangerous = false, requireToken = false, action }) {
   if (state.actionBusy) return;
+  for (const menu of document.querySelectorAll(".context-bar > details[open]")) menu.open = false;
   state.action = { action, requireToken };
   $("confirm-title").textContent = title;
   $("confirm-message").textContent = message;
@@ -1084,6 +1138,33 @@ $("scope-select").addEventListener("change", () => {
   state.session = null;
   renderScope(); loadSessions().catch(showError);
 });
+$("session-select").addEventListener("change", () => {
+  selectSession(state.sessions.find((session) => session.session_ref === $("session-select").value) || null).catch(showError);
+});
+$("turn-order-button").addEventListener("click", () => {
+  state.newestFirst = !state.newestFirst;
+  renderTurns();
+  $("turn-list").scrollTop = 0;
+});
+$("back-to-turns").addEventListener("click", () => {
+  document.querySelector(".workspace").dataset.mobileView = "list";
+  $("turn-list").querySelector("[aria-current=true]")?.focus({ preventScroll: true });
+});
+document.addEventListener("click", (event) => {
+  for (const menu of document.querySelectorAll(".context-bar > details[open]")) {
+    if (!menu.contains(event.target)) menu.open = false;
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  for (const menu of document.querySelectorAll(".context-bar > details[open]")) {
+    if (menu.contains(document.activeElement)) menu.querySelector("summary").focus();
+    menu.open = false;
+  }
+});
+$("session-details-button").addEventListener("click", () => $("session-dialog").showModal());
+$("payload-reader-button").addEventListener("click", () => setPayloadMode(false));
+$("payload-source-button").addEventListener("click", () => setPayloadMode(true));
 $("refresh-button").addEventListener("click", () => loadScopes().catch(showError));
 $("collapse-details-button").addEventListener("click", () => {
   for (const item of document.querySelectorAll(".inspector details[open]")) item.open = false;
@@ -1118,7 +1199,7 @@ $("payload-copy-button").addEventListener("click", async () => {
   try { await navigator.clipboard.writeText(loadedText); if (payload === state.payload) $("payload-copy-button").textContent = complete ? "已复制完整内容" : "已复制部分内容"; }
   catch { $("payload-error").textContent = "剪贴板不可用，请选中已加载文本手动复制。"; }
 });
-$("payload-dialog").addEventListener("close", () => { disposePayload(); $("payload-output").textContent = ""; });
+$("payload-dialog").addEventListener("close", () => { disposePayload(); $("payload-output").textContent = ""; $("payload-reader").replaceChildren(); });
 $("image-dialog").addEventListener("close", () => $("image-preview").removeAttribute("src"));
 $("pin-event-button").addEventListener("click", () => {
   const scope = state.scope, payload = state.payload;

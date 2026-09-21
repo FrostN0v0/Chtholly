@@ -11,6 +11,8 @@ from collections.abc import Mapping, Callable
 from fastapi import Query, Depends, Request, APIRouter
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
+from utils.webui_theme import themed_assets
+
 from .agent_admin import AgentAdminError, AgentAdminService
 
 _API_PREFIX = "/api/llm-chat/sessions"
@@ -62,8 +64,11 @@ def create_agent_sessions_router(
         nonce = token_urlsafe(24)
         try:
             document = (asset_dir / "index.html").read_text(encoding="utf-8")
-            stylesheet = (asset_dir / "app.css").read_text(encoding="utf-8")
-            script = (asset_dir / "app.js").read_text(encoding="utf-8")
+            stylesheet, script = themed_assets(
+                asset_dir,
+                script_names=("content.js", "charts.js", "app.js"),
+                style_names=("app.css", "content.css", "charts.css"),
+            )
         except (OSError, UnicodeError):
             return JSONResponse(
                 {"success": False, "code": "page_unavailable", "message": "Agent sessions page is unavailable"},

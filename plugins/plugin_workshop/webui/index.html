@@ -10,7 +10,7 @@
 <body>
   <div class="app">
     <header class="toolbar">
-      <div><p class="eyebrow">NATIVE PLUGIN WORKSHOP</p><h1>插件工坊</h1><p class="muted">隔离验收 · 不可变版本 · 人工授权 · 原生生命周期</p></div>
+      <div class="toolbar-copy"><p class="eyebrow">NATIVE PLUGIN WORKSHOP</p><h1>插件工坊</h1><p class="muted">隔离验收 · 不可变版本 · 人工授权 · 原生生命周期</p></div>
       <div class="actions"><span id="connection" class="badge" role="status">正在连接</span><button id="refresh" type="button">刷新</button><button id="new-candidate" class="primary" type="button">新建候选</button></div>
     </header>
     <section class="readiness panel" aria-label="运行前提">
@@ -80,7 +80,7 @@
       <footer class="dialog-foot"><span id="candidate-progress" role="status" aria-live="polite"></span><button id="submit-candidate" class="primary" type="submit">保存新版本并隔离验收</button></footer>
     </form>
   </dialog>
-  <dialog id="operation-dialog" aria-labelledby="operation-title">
+  <dialog id="operation-dialog" class="operation-dialog" aria-labelledby="operation-title">
     <section class="dialog-body">
       <h2 id="operation-title">Confirm reviewed operation</h2>
       <pre id="operation-summary" class="preserve"></pre>

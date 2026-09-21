@@ -14,6 +14,7 @@ from fastapi.routing import APIRoute
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
 
+from utils.webui_theme import themed_assets
 from utils.plugin_workshop_core.codec import state_payload, version_payload
 from utils.plugin_workshop_core.models import Actor, WorkshopAPI, WorkshopError
 
@@ -176,8 +177,7 @@ def create_workshop_router(
         nonce = token_urlsafe(24)
         try:
             document = (asset_dir / "index.html").read_text(encoding="utf-8")
-            stylesheet = (asset_dir / "app.css").read_text(encoding="utf-8")
-            script = (asset_dir / "app.js").read_text(encoding="utf-8")
+            stylesheet, script = themed_assets(asset_dir)
         except OSError:
             raise WorkshopError("Workshop page is unavailable", code="page_unavailable", status=503) from None
         # Native WebUI frames have an opaque origin: embed trusted assets and use its API bridge.

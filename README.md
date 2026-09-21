@@ -92,7 +92,9 @@ uv run --locked main.py --check
 
 更多框架用法见 [Entari 文档](https://arclet.top/tutorial/entari/)。
 
-## WebUI 配置应用
+## WebUI 外观与配置应用
+
+管理页保留 Entari Logo 原色，使用中文、中性色卡片和语义状态色，支持深浅色与窄屏布局。会话页默认展示格式化正文、引用和实际回复；系统指令、工具记录在实色弹窗中阅读，原始数据按需切换。关系前后数值与增减合并为一张五轴图；Token 显示 K/M，并提供精确值与输入/输出占比。轮次默认最新在上，可切换排序。原生主题随 WebUI `1.0.3+chtholly.3` 补丁 wheel 安装；升级需同步源码并运行 `uv sync --locked --all-extras`，扩展页后端、`utils/webui_theme/` 与页面资源必须配套更新。原生主题修改通过 `scripts/build_patched_wheel.py --package webui` 重建，不直接修改第三方安装目录。
 
 启用 `webui_config_apply` 后，已加载 LLM 的模型目录、全局及分模型凭证引用、接口地址、提示词与模型参数可通过原生“保存”直接热生效，不重启 Bot。正在执行的主聊天保持原模型直到本轮纠正与最终化结束，新轮次使用新配置；删除模型时同步修复默认选择，保留会话指针和历史。不显示常驻浮窗或独立重启菜单。
 

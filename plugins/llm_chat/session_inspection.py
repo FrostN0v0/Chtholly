@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from itertools import islice
 from collections.abc import Mapping, Sequence
 
-from sqlalchemy import JSON, case, func, select, type_coerce
+from sqlalchemy import JSON, case, func, select, literal, type_coerce
 from entari_plugin_database import get_session
+from sqlalchemy.sql.elements import ColumnElement
 
 from .models import AgentTurn, AgentEvent
 from .agent_events import load_event_payload
@@ -33,6 +35,118 @@ _BUDGET_FIELDS = (
 def _preview(value: object, limit: int = 400) -> str:
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _nested_user_content_expr(payload: ColumnElement[object]) -> ColumnElement[str]:
+    """Extract nested serialized user content before applying the SQL preview bound."""
+    current = func.json_extract(payload, "$.content")
+    for _ in range(4):
+        safe = case((func.json_valid(current) == 1, current), else_=literal("{}"))
+        extracted = func.json_extract(safe, "$.content")
+        current = case(
+            (func.json_type(safe, "$.content") == "text", extracted),
+            else_=current,
+        )
+    return func.substr(current, 1, 401)
+
+
+_DISPLAY_TEXT_CHARS = 1200
+_DISPLAY_ITEMS = 12
+_DISPLAY_DEPTH = 4
+_DISPLAY_MAX_CHARS = 8000
+_DISPLAY_MAX_NODES = 128
+
+
+def _display_marker(state: dict[str, int | bool]) -> str:
+    state["truncated"] = True
+    return "[\u663e\u793a\u5df2\u622a\u65ad]"
+
+
+def _bounded_display_value(
+    value: object,
+    state: dict[str, int | bool],
+    *,
+    depth: int = 0,
+) -> object:
+    nodes = int(state["nodes"]) + 1
+    state["nodes"] = nodes
+    if nodes > _DISPLAY_MAX_NODES:
+        return _display_marker(state)
+    if isinstance(value, str):
+        candidate = value.lstrip()
+        if candidate.startswith(("{", "[")):
+            try:
+                parsed = json.loads(value)
+            except (TypeError, ValueError, UnicodeError):
+                parsed = None
+            if isinstance(parsed, (Mapping, list)):
+                return _bounded_display_value(parsed, state, depth=depth)
+        remaining = _DISPLAY_MAX_CHARS - int(state["chars"])
+        limit = min(_DISPLAY_TEXT_CHARS, max(0, remaining))
+        if len(value) <= limit:
+            state["chars"] = int(state["chars"]) + len(value)
+            return value
+        state["truncated"] = True
+        if limit <= 1:
+            return _display_marker(state)
+        state["chars"] = int(state["chars"]) + limit
+        return value[: limit - 1] + "…"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if depth >= _DISPLAY_DEPTH:
+        return _display_marker(state)
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        for key, child in islice(value.items(), _DISPLAY_ITEMS):
+            result[str(key)] = _bounded_display_value(child, state, depth=depth + 1)
+        if len(value) > _DISPLAY_ITEMS:
+            state["truncated"] = True
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        if len(value) > _DISPLAY_ITEMS:
+            state["truncated"] = True
+        return [_bounded_display_value(item, state, depth=depth + 1) for item in islice(value, _DISPLAY_ITEMS)]
+    return _bounded_display_value(str(value), state, depth=depth)
+
+
+def _structured_display(value: object) -> dict[str, object]:
+    state: dict[str, int | bool] = {"truncated": False, "chars": 0, "nodes": 0}
+    bounded = _bounded_display_value(value, state)
+    return {"kind": "value", "value": bounded, "truncated": bool(state["truncated"])}
+
+
+def _messages_display(value: object) -> dict[str, object]:
+    state: dict[str, int | bool] = {"truncated": False, "chars": 0, "nodes": 0}
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return _structured_display(value)
+    items: list[object] = []
+    for raw in islice(value, _DISPLAY_ITEMS):
+        if not isinstance(raw, Mapping):
+            state["truncated"] = True
+            items.append(_bounded_display_value(raw, state))
+            continue
+        bounded = _bounded_display_value(raw, state)
+        if isinstance(bounded, dict):
+            for key in ("role", "content"):
+                if key not in bounded:
+                    state["truncated"] = True
+                    bounded[key] = _bounded_display_value(raw.get(key), state)
+        items.append(bounded)
+    if len(value) > _DISPLAY_ITEMS:
+        state["truncated"] = True
+    return {"kind": "messages", "items": items, "truncated": bool(state["truncated"])}
+
+
+def _model_input_display(value: object) -> dict[str, object]:
+    if isinstance(value, Mapping):
+        messages = value.get("messages")
+    else:
+        messages = value
+    return (
+        _messages_display(messages)
+        if isinstance(messages, Sequence) and not isinstance(messages, (str, bytes, bytearray))
+        else _structured_display(value)
+    )
 
 
 def _model_groups(events: Sequence[AgentEvent]) -> list[dict[str, AgentEvent]]:
@@ -151,7 +265,7 @@ async def turn_list_summaries(turns: Sequence[AgentTurn]) -> dict[int, dict[str,
                     case((AgentEvent.event_type == "message_delivery", payload["confirmed_at"].as_string())),
                     payload["request_id"].as_string(),
                     payload["model"].as_string(),
-                    case((AgentEvent.event_type == "user_input", func.substr(payload["content"].as_string(), 1, 401))),
+                    case((AgentEvent.event_type == "user_input", _nested_user_content_expr(payload))),
                 )
                 .where(
                     AgentEvent.turn_id.in_(turn_ids),
@@ -340,6 +454,9 @@ def project_model_calls(events: Sequence[AgentEvent], *, turn_status: str = "run
                 "input_preview": _preview(request_payload.get("messages", request_payload))
                 if request is not None
                 else "",
+                "input_display": _model_input_display(request_payload.get("messages", request_payload))
+                if request is not None
+                else _structured_display(None),
                 "output_preview": _preview(
                     response_payload.get("content")
                     or response_payload.get("tool_calls")
@@ -348,6 +465,14 @@ def project_model_calls(events: Sequence[AgentEvent], *, turn_status: str = "run
                 )
                 if response is not None
                 else "",
+                "output_display": _structured_display(
+                    response_payload.get("content")
+                    or response_payload.get("tool_calls")
+                    or response_payload.get("error")
+                    or response_payload
+                )
+                if response is not None
+                else _structured_display(None),
                 "capture_status": request_payload.get("capture_status", "not_recorded"),
             }
         )
@@ -401,6 +526,10 @@ def project_tool_calls(events: Sequence[AgentEvent], *, turn_status: str = "runn
                 "effect": result.effect if result is not None else event.effect,
                 "duration_ms": result.duration_ms if result is not None else None,
                 "arguments_preview": _preview(arguments) if call is not None else "",
+                "arguments_display": _structured_display(arguments) if call is not None else _structured_display(None),
+                "result_display": _structured_display(result_value)
+                if result is not None
+                else _structured_display(None),
                 "result_preview": _preview(result_value) if result is not None else "",
                 "arguments_path": "audit_arguments.data"
                 if isinstance(audit_arguments, Mapping)

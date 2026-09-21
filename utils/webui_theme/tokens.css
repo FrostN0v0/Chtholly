@@ -1,0 +1,32 @@
+/* One palette shared by the native shell and nonce-protected extension frames. */
+:root {
+  color-scheme: light dark;
+  --ui-bg: light-dark(#fafafa, #101012);
+  --ui-surface: light-dark(#ffffff, #161618);
+  --ui-soft: light-dark(#f5f5f6, #1c1c20);
+  --ui-raised: light-dark(#ffffff, #202024);
+  --ui-text: light-dark(#18181b, #ededf0);
+  --ui-muted: light-dark(#65656f, #a0a0aa);
+  --ui-faint: light-dark(#85858f, #7c7c88);
+  --ui-border: light-dark(#e6e6e9, #2b2b31);
+  --ui-border-strong: light-dark(#ceced4, #44444e);
+  --ui-accent: light-dark(#202024, #ededf0);
+  --ui-on-accent: light-dark(#ffffff, #18181b);
+  --ui-selected: light-dark(#ededf0, #29292f);
+  --ui-focus: light-dark(#6366c9, #a5a6ff);
+  --ui-success: light-dark(#21734c, #87cba5);
+  --ui-success-soft: light-dark(#edf7f0, #182c22);
+  --ui-warning: light-dark(#92651b, #e3bd7e);
+  --ui-warning-soft: light-dark(#fbf5e9, #30271b);
+  --ui-danger: light-dark(#b63a44, #f498a0);
+  --ui-danger-soft: light-dark(#fdf0f1, #342024);
+  --ui-info: light-dark(#5962a8, #b2b7ee);
+  --ui-info-soft: light-dark(#f0f1fa, #25263b);
+  --ui-shadow: 0 12px 40px light-dark(#18181b14, #0005), 0 2px 6px light-dark(#18181b08, #0003);
+  --ui-font: Inter, "Noto Sans SC", "Noto Sans CJK SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --ui-mono: "SFMono-Regular", "Cascadia Code", Consolas, monospace;
+}
+
+/* The native toggle overrides the OS, including inside opaque frames. */
+:root[data-ui-native], :root[data-ui-theme="light"] { color-scheme: light; }
+:root.dark[data-ui-native], :root[data-ui-theme="dark"] { color-scheme: dark; }

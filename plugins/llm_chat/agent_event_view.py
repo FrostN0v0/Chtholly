@@ -209,23 +209,198 @@ def _preview_source(event: AgentEvent, payload: Mapping[str, JSONType]) -> JSONT
     return payload
 
 
-def _unwrap_user_turn(value: str) -> str:
-    """Return the human-readable text inside one serialized user turn."""
+_MESSAGE_CONTENT_CHARS = 2400
+_MESSAGE_QUOTE_CHARS = 500
+_MESSAGE_MAX_QUOTES = 8
+_MESSAGE_MAX_MENTIONS = 10
+_MESSAGE_MAX_LIST_ITEMS = 12
 
-    candidate = value.strip()
-    if not candidate.startswith("{"):
+
+def _clip_message_text(value: str, limit: int, state: list[bool]) -> str:
+    if len(value) <= limit:
         return value
+    state[0] = True
+    return f"{value[: max(0, limit - 1)]}…"
+
+
+def _display_text(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _decode_message_mapping(value: object) -> Mapping[str, object] | None:
+    if isinstance(value, Mapping):
+        return cast(Mapping[str, object], value)
+    if not isinstance(value, str) or not value.lstrip().startswith("{"):
+        return None
     try:
-        parsed = json.loads(candidate)
-    except ValueError:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, UnicodeError):
+        return None
+    return cast(Mapping[str, object], parsed) if isinstance(parsed, Mapping) else None
+
+
+def _human_message_value(value: object, state: list[bool], *, depth: int = 0) -> str:
+    if isinstance(value, str):
         return value
-    if not isinstance(parsed, Mapping):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    if depth >= 3:
+        state[0] = True
+        return "[\u5d4c\u5957\u5185\u5bb9\u5df2\u7701\u7565]"
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        items = list(value)
+        rendered: list[str] = []
+        for item in items[:_MESSAGE_MAX_LIST_ITEMS]:
+            text = _human_message_value(item, state, depth=depth + 1)
+            if text:
+                rendered.append(text)
+        if len(items) > _MESSAGE_MAX_LIST_ITEMS:
+            state[0] = True
+            rendered.append("…")
+        return "\n".join(rendered)
+    if isinstance(value, Mapping):
+        nested = value.get("content")
+        if nested is not None:
+            return _human_message_value(nested, state, depth=depth + 1)
+        text = value.get("text")
+        if isinstance(text, str):
+            return text
+        data = value.get("data")
+        if isinstance(data, Mapping) and isinstance(data.get("text"), str):
+            return cast(str, data["text"])
+    return ""
+
+
+def _message_quote(value: object, state: list[bool]) -> dict[str, object] | None:
+    mapping = _decode_message_mapping(value)
+    if mapping is None:
+        content = _human_message_value(value, state)
+        return (
+            {"speaker": None, "role": "unknown", "content": _clip_message_text(content, _MESSAGE_QUOTE_CHARS, state)}
+            if content
+            else None
+        )
+    speaker = _display_text(mapping.get("speaker"))
+    role = _display_text(mapping.get("speaker_role")) or _display_text(mapping.get("role"))
+    raw_content = mapping.get("content")
+    nested = _decode_message_mapping(raw_content)
+    if nested is not None and "content" in nested:
+        mapping = nested
+        raw_content = mapping.get("content")
+    content = _human_message_value(raw_content, state)
+    if not content:
+        return None
+    speaker = speaker or _display_text(mapping.get("speaker"))
+    role = role or _display_text(mapping.get("speaker_role")) or _display_text(mapping.get("role")) or "unknown"
+    return {
+        "speaker": speaker,
+        "role": role,
+        "content": _clip_message_text(content, _MESSAGE_QUOTE_CHARS, state),
+    }
+
+
+def _message_projection(value: object) -> dict[str, object] | None:
+    """Project serialized user input without exposing platform metadata."""
+    state = [False]
+    mapping = _decode_message_mapping(value)
+    if mapping is None or "content" not in mapping:
+        content = _human_message_value(value, state)
+        if not content and isinstance(value, str):
+            content = value
+        if not content:
+            return None
+        return {
+            "speaker": None,
+            "content": _clip_message_text(content, _MESSAGE_CONTENT_CHARS, state),
+            "quotes": [],
+            "mentions": [],
+            "truncated": state[0],
+        }
+
+    outer = mapping
+    inner = _decode_message_mapping(outer.get("content"))
+    if inner is not None and "content" in inner:
+        mapping = inner
+    raw_content = mapping.get("content")
+    content = _clip_message_text(_human_message_value(raw_content, state), _MESSAGE_CONTENT_CHARS, state)
+    speaker = _display_text(outer.get("speaker")) or _display_text(mapping.get("speaker"))
+
+    raw_quotes: list[object] = []
+    for source in (outer,) if outer is mapping else (outer, mapping):
+        candidate = source.get("forwarded_messages")
+        if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes, bytearray)):
+            raw_quotes.extend(candidate)
+    quotes: list[dict[str, object]] = []
+    for raw_quote in raw_quotes:
+        if len(quotes) >= _MESSAGE_MAX_QUOTES:
+            state[0] = True
+            break
+        quote = _message_quote(raw_quote, state)
+        if quote is None:
+            continue
+        quotes.append(quote)
+
+    raw_mentions: list[object] = []
+    for source in (outer,) if outer is mapping else (outer, mapping):
+        candidate = source.get("mentioned_participants")
+        if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes, bytearray)):
+            raw_mentions.extend(candidate)
+    mentions: list[dict[str, str]] = []
+    seen_mentions: set[str] = set()
+    for raw_mention in raw_mentions:
+        if len(mentions) >= _MESSAGE_MAX_MENTIONS:
+            state[0] = True
+            break
+        name = (
+            _display_text(raw_mention.get("display_name") or raw_mention.get("name"))
+            if isinstance(raw_mention, Mapping)
+            else _display_text(raw_mention)
+        )
+        if not name:
+            continue
+        name = _clip_message_text(name, 120, state)
+        if name in seen_mentions:
+            continue
+        seen_mentions.add(name)
+        mentions.append({"name": name})
+    return {
+        "speaker": speaker,
+        "content": content,
+        "quotes": quotes,
+        "mentions": mentions,
+        "truncated": state[0],
+    }
+
+
+def _unwrap_user_turn(value: str) -> str:
+    """Return readable text and attributed quoted context from one user turn."""
+    projection = _message_projection(value)
+    if projection is None:
         return value
-    inner = parsed.get("content")
-    speaker = parsed.get("speaker")
-    if not isinstance(inner, str):
-        return value
-    return f"{speaker}：{inner}" if isinstance(speaker, str) and speaker else inner
+    content = cast(str, projection["content"])
+    speaker = projection.get("speaker")
+    text = f"{speaker}\uff1a{content}" if isinstance(speaker, str) and speaker else content
+    quotes = projection.get("quotes")
+    if isinstance(quotes, list):
+        for quote in quotes:
+            if not isinstance(quote, Mapping):
+                continue
+            quote_content = quote.get("content")
+            if not isinstance(quote_content, str) or not quote_content:
+                continue
+            quote_speaker = quote.get("speaker")
+            label = quote_speaker if isinstance(quote_speaker, str) and quote_speaker else "\u672a\u77e5\u6765\u6e90"
+            text += f"\n[\u5f15\u7528 {label}] {quote_content}"
+    mentions = projection.get("mentions")
+    if isinstance(mentions, list):
+        names = [
+            item.get("name") for item in mentions if isinstance(item, Mapping) and isinstance(item.get("name"), str)
+        ]
+        if names:
+            text += "\n" + " ".join(f"@{name}" for name in names)
+    return text
 
 
 def _message_preview(arguments: Mapping[str, object]) -> str:
@@ -675,7 +850,7 @@ def event_images(
 def serialize_event_view(event: AgentEvent, payload: Mapping[str, JSONType]) -> dict[str, object]:
     """Build the WebUI presentation fields for one durable event."""
 
-    return {
+    view: dict[str, object] = {
         "title": event_title(event),
         "preview": event_preview(event, payload),
         "details": event_details(event, payload),
@@ -692,3 +867,6 @@ def serialize_event_view(event: AgentEvent, payload: Mapping[str, JSONType]) -> 
         "images": event_images(event, payload),
         "payload_chars": len(event.payload_json or ""),
     }
+    if event.event_type == "user_input":
+        view["message"] = _message_projection(payload.get("content"))
+    return view

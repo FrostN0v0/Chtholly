@@ -12,6 +12,8 @@ from collections.abc import Mapping, Callable
 from fastapi import File, Form, Query, Depends, Request, APIRouter, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
+from utils.webui_theme import themed_assets
+
 from .meme_admin import MemeAdminError, MemeAdminService
 from .meme_catalog import MemeCatalogItem, MemeCatalogSort, MemeCatalogFilter
 from .core.image_source import IMAGE_FETCH_MAX_BYTES
@@ -77,8 +79,7 @@ def create_meme_admin_router(
         nonce = token_urlsafe(24)
         try:
             document = (asset_dir / "index.html").read_text(encoding="utf-8")
-            stylesheet = (asset_dir / "app.css").read_text(encoding="utf-8")
-            script = (asset_dir / "app.js").read_text(encoding="utf-8")
+            stylesheet, script = themed_assets(asset_dir)
         except (OSError, UnicodeError):
             return JSONResponse(
                 {"success": False, "code": "page_unavailable", "message": "Meme manager page is unavailable"},
