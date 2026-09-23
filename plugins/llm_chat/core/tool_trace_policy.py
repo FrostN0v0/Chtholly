@@ -71,6 +71,25 @@ _OBSERVATION_TOOLS = {
 }
 
 
+def reminder_action_from_arguments(arguments: Mapping[str, object]) -> str:
+    """Extract only the validated reminder action for effect policy."""
+
+    request = arguments.get("request")
+    if isinstance(request, Mapping):
+        action = request.get("action")
+        return action if isinstance(action, str) else ""
+    action = arguments.get("action")
+    return action if isinstance(action, str) else ""
+
+
+def reminder_effect_from_result(result: object) -> ToolEffect:
+    """Accept effect metadata only from the host-produced compact result."""
+
+    parsed = parse_json_object(result)
+    effect = parsed.get("effect") if parsed is not None else None
+    return effect if effect in {"observed", "confirmed", "partial", "none", "unknown"} else "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class DeliverySnapshot:
     """Minimal confirmed-delivery counters surrounding one tool call."""
@@ -97,6 +116,10 @@ def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> d
             "url": safe_url(arguments.get("url")),
             **selected_arguments(arguments, "purpose", "section", "width"),
         }
+    if tool_name == "reminder":
+        request = arguments.get("request")
+        action = request.get("action") if isinstance(request, Mapping) else arguments.get("action")
+        return {"action": action if isinstance(action, str) else ""}
     if tool_name == "finish_turn":
         return selected_arguments(arguments, "outcome")
     if tool_name == "get_local_time":
@@ -188,6 +211,8 @@ def project_tool_success(
     """Normalize one handler return into execution and effect semantics."""
 
     outcome = _project_tool_result(tool_name, result, before=before, after=after)
+    if tool_name == "reminder":
+        return "succeeded", reminder_effect_from_result(result), outcome
     if tool_name in {"list_workshop_plugins", "read_workshop_plugin"}:
         return "succeeded", "observed", outcome
     if tool_name == "finish_turn":
@@ -288,9 +313,17 @@ def tool_error_effect(
     after: DeliverySnapshot,
     *,
     terminal_status: ToolStatus,
+    arguments: Mapping[str, object] | None = None,
 ) -> ToolEffect:
-    """Return partial delivery only for side-effect tools with confirmed prefixes."""
+    """Return partial delivery and action-specific reminder failure effects."""
 
+    if tool_name == "reminder":
+        action = reminder_action_from_arguments(arguments or {})
+        if action == "list":
+            return "observed"
+        if action == "resolve":
+            return "none"
+        return "unknown"
     if tool_name not in _DELIVERY_TOOLS and tool_name not in {"publish_web_preview", "call_plugin"}:
         return "none"
     return delivery_effect(before, after, terminal_status=terminal_status)
@@ -362,6 +395,14 @@ def _project_tool_result(
             "excerpt": compact_text(content, MAX_RESULT_TEXT),
         }
     parsed = parse_json_object(result)
+    if tool_name == "reminder" and parsed is not None:
+        return {
+            "task_ref": compact_text(parsed.get("task_ref"), MAX_ARGUMENT_TEXT),
+            "status": compact_text(parsed.get("status"), MAX_ARGUMENT_TEXT),
+            "revision": safe_int(parsed.get("revision")),
+            "effect": compact_text(parsed.get("effect"), MAX_ARGUMENT_TEXT),
+            "proposed": parsed.get("proposed") is True,
+        }
     if tool_name == "finish_turn" and parsed is not None:
         return selected_arguments(parsed, "outcome")
     if tool_name == "capture_web_reference" and parsed is not None:

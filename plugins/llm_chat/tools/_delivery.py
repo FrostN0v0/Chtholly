@@ -36,7 +36,9 @@ async def send_with_delivery(
     if state is not None:
         await wait_for_delivery(state, delay_seconds)
     try:
-        receipts = await asyncio.wait_for(session.send(payload), timeout=30.0)
+        from ..reminders.delivery import send_reminder_transport
+
+        receipts = await asyncio.wait_for(send_reminder_transport(lambda: session.send(payload)), timeout=30.0)
         if not receipts:
             raise DeliveryError("Transport returned no confirmed delivery receipt")
     except asyncio.CancelledError:

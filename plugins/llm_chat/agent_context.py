@@ -41,6 +41,27 @@ class AgentAccessContext:
     raw_user_text: str = ""
     is_operator: bool = False
     context_read_grants: tuple[ContextReadGrant, ...] = ()
+    trigger_kind: str = "message"
+    reminder_task_ref: str | None = None
+    capability_names: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        if len(self.capability_names) > 16 or any(
+            not isinstance(name, str) or not name or len(name) > 64 for name in self.capability_names
+        ):
+            raise ValueError("Generation capability names must be bounded")
+
+
+SCHEDULED_TOOL_CAPABILITIES = frozenset(
+    {
+        "reminder",
+        "reminder.resolve",
+        "safe_read",
+        "safe_prepare",
+        "web_read",
+        "send_msg",
+    }
+)
 
 
 _ACTIVE_AGENT_CONTEXT: ContextVar[AgentAccessContext | None] = ContextVar(

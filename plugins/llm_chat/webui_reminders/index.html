@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>提醒任务</title>
+  <!-- REMINDER_STYLES -->
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div><p class="eyebrow">LLM · REMINDERS</p><h1>提醒任务</h1></div>
+      <button id="refresh" type="button">刷新</button>
+    </header>
+    <section class="notice" aria-label="访问范围">
+      <strong>管理员只读概览</strong>
+      <p>当前 WebUI 登录不关联聊天用户身份，无法安全地确认“我的提醒”。此页仅展示有界的任务概览，不提供暂停、恢复、取消或联系偏好操作。本人管理请使用聊天中的提醒指令。</p>
+    </section>
+    <div class="toolbar"><span id="status" role="status" aria-live="polite">正在读取…</span><span id="count"></span></div>
+    <section id="tasks" class="tasks" aria-label="任务列表"></section>
+    <footer class="footer"><button id="more" type="button" hidden>加载更多</button></footer>
+  </main>
+  <!-- REMINDER_SCRIPT -->
+</body>
+</html>

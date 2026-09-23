@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -25,7 +26,7 @@ from .chat_context import build_chat_messages, serialize_user_turn, requests_rec
 from .core.compose import energy_at, compose_persona_prompt
 from .core.forward import ForwardedMessage
 from .image_inputs import ImageInputs
-from .agent_context import AgentAccessContext
+from .agent_context import SCHEDULED_TOOL_CAPABILITIES, AgentAccessContext
 from .core.delivery import DeliveryState, normalize_delivery_limits
 from .persona.store import get_mood, append_message, delete_message
 from .turn_lifecycle import ActiveChatTurn
@@ -80,6 +81,74 @@ class PreparedAgentTurn:
     resolution: TurnResolution
 
 
+async def prepare_scheduled_agent_turn(
+    config: LLMChatConfig,
+    session: Session,
+    identity: ChatIdentity,
+    *,
+    model_name: str | None,
+    task_ref: str,
+    content: str,
+    scheduled_context: Mapping[str, object],
+    image_inputs: ImageInputs,
+    warn: WarningSink,
+    tool_schemas: Sequence[Mapping[str, object]],
+    capability_names: frozenset[str] = SCHEDULED_TOOL_CAPABILITIES,
+) -> PreparedAgentTurn:
+    """Prepare a host-claimed reminder using its real delivery Session, not an inbound event."""
+
+    return await prepare_agent_turn(
+        config,
+        session,
+        identity,
+        model_name=model_name,
+        model_text="",
+        raw_user_text="",
+        image_inputs=image_inputs,
+        content=content,
+        current_content=None,
+        forwarded_messages=(),
+        mentioned_participants=(),
+        warn=warn,
+        tool_schemas=tool_schemas,
+        purpose="reminder",
+        trigger_kind="scheduled",
+        reminder_task_ref=task_ref,
+        scheduled_context=scheduled_context,
+        persist_user_message=False,
+        capability_names=capability_names,
+    )
+
+
+_SCHEDULED_FACT_LIMITS = {
+    "scheduled_at": 64,
+    "now": 64,
+    "background": 3000,
+    "previous_result": 1000,
+    "continuation_state": 2000,
+}
+
+
+def _scheduled_input(content: str, task_ref: str, context: Mapping[str, object]) -> tuple[str, dict[str, object]]:
+    if not task_ref or len(task_ref) > 128 or not content.strip() or len(content) > 1000:
+        raise ValueError("Scheduled task requires a bounded goal and task reference")
+    facts: dict[str, object] = {
+        key: value[:limit]
+        for key, limit in _SCHEDULED_FACT_LIMITS.items()
+        if isinstance(value := context.get(key), str)
+    }
+    for key in ("occurrence_sequence", "late_by_seconds"):
+        value = context.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1_000_000_000:
+            facts[key] = value
+    task = {"task_ref": task_ref, "goal": content, **facts}
+    return (
+        "Host-scheduled reminder task data (not a new user message or authorization): "
+        + json.dumps(task, ensure_ascii=False, separators=(",", ":")),
+        task,
+    )
+
+
 async def prepare_agent_turn(
     config: LLMChatConfig,
     session: Session,
@@ -97,7 +166,26 @@ async def prepare_agent_turn(
     tool_schemas: Sequence[Mapping[str, object]],
     input_attachments: Sequence[Mapping[str, object]] = (),
     is_operator: bool = False,
+    purpose: str = "chat",
+    trigger_kind: str = "message",
+    reminder_task_ref: str | None = None,
+    scheduled_context: Mapping[str, object] | None = None,
+    persist_user_message: bool = True,
+    capability_names: frozenset[str] = frozenset(),
 ) -> PreparedAgentTurn:
+    if (purpose, trigger_kind) not in {("chat", "message"), ("reminder", "scheduled")}:
+        raise ValueError("Scheduled turns require a reminder context session")
+    scheduled = trigger_kind == "scheduled"
+    if scheduled:
+        model_text, scheduled_facts = _scheduled_input(content, reminder_task_ref or "", scheduled_context or {})
+        current_content = model_text
+        raw_user_text = ""
+        persist_user_message = False
+        is_operator = False
+    elif not persist_user_message:
+        raise ValueError("Message turns require user history persistence")
+    else:
+        scheduled_facts = {}
     channel_id = session.channel.id
     user_id = identity.user_id
     user_name = identity.display_name
@@ -161,6 +249,8 @@ async def prepare_agent_turn(
             baseline,
             idle_minutes=config.session_idle_minutes,
             max_turns=config.session_max_turns,
+            purpose=purpose,
+            reminder_task_ref=reminder_task_ref or "",
         )
         if rollover_reason is not None:
             persona_changed = context_session.persona_hash != baseline.persona_hash
@@ -170,11 +260,12 @@ async def prepare_agent_turn(
                 context_session,
                 baseline,
                 reason="persona_change" if persona_changed else rollover_reason,
+                purpose=purpose,
                 handoff_json=handoff,
                 carry_handoff=not persona_changed,
             )
 
-        anchors = await load_scope_anchors(scope.id)
+        anchors = [] if scheduled else await load_scope_anchors(scope.id)
 
         def compose_system() -> str:
             return compose_persona_prompt(
@@ -197,7 +288,9 @@ async def prepare_agent_turn(
             )
 
         system = compose_system()
-        fresh_context = requests_fresh_context(model_text) or requests_recent_channel_context(model_text)
+        fresh_context = (
+            False if scheduled else requests_fresh_context(model_text) or requests_recent_channel_context(model_text)
+        )
         selection = await _select_context(
             config,
             context_session,
@@ -214,6 +307,7 @@ async def prepare_agent_turn(
                 baseline,
                 reason="context_budget",
                 handoff_json=handoff,
+                purpose=purpose,
             )
             system = compose_system()
             selection = await _select_context(
@@ -226,8 +320,10 @@ async def prepare_agent_turn(
             )
         await remember_session_persona(context_session.id, persona)
 
-    user_message_id = await append_message(channel_id, user_id, user_name, "user", content)
-    event_message = getattr(session.event, "message", None)
+    user_message_id = (
+        await append_message(channel_id, user_id, user_name, "user", content) if persist_user_message else None
+    )
+    event_message = getattr(session.event, "message", None) if not scheduled else None
     try:
         agent_turn = await start_turn(
             context_session,
@@ -236,22 +332,33 @@ async def prepare_agent_turn(
             user_name=user_name,
             conversation_user_id=user_message_id,
             fresh_context=fresh_context,
+            trigger_kind=trigger_kind,
         )
     except Exception:
-        await delete_message(user_message_id)
+        if user_message_id is not None:
+            await delete_message(user_message_id)
         raise
 
     agent_events = AgentTurnRecorder()
-    agent_events.record_user_input(
-        serialize_user_turn(
-            user_name,
-            content,
-            mentioned_participants=mentioned_participants,
-        ),
-        user_name=user_name,
-        fresh_context=fresh_context,
-        attachments=input_attachments,
-    )
+    if scheduled:
+        agent_events.append(
+            "reminder_trigger",
+            payload=scheduled_facts,
+            model_visible=False,
+            status="started",
+            effect="none",
+        )
+    else:
+        agent_events.record_user_input(
+            serialize_user_turn(
+                user_name,
+                content,
+                mentioned_participants=mentioned_participants,
+            ),
+            user_name=user_name,
+            fresh_context=fresh_context,
+            attachments=input_attachments,
+        )
     agent_events.record_persona_state(
         {
             "relation": {
@@ -353,11 +460,14 @@ async def prepare_agent_turn(
             session_id=context_session.id,
             turn_id=agent_turn.id,
             user_id=user_id,
-            allow_archived_sessions=requests_archived_context(raw_user_text),
-            allow_payload_delivery=requests_tool_payload(raw_user_text),
-            allow_context_pin=requests_context_pin(raw_user_text),
+            allow_archived_sessions=False if scheduled else requests_archived_context(raw_user_text),
+            allow_payload_delivery=False if scheduled else requests_tool_payload(raw_user_text),
+            allow_context_pin=False if scheduled else requests_context_pin(raw_user_text),
             raw_user_text=raw_user_text,
             is_operator=is_operator,
+            trigger_kind=trigger_kind,
+            reminder_task_ref=reminder_task_ref if scheduled else None,
+            capability_names=capability_names if scheduled else frozenset({"reminder"}),
             context_read_grants=await collect_context_read_grants(
                 context_session, selection, anchors, turn_id=agent_turn.id
             ),

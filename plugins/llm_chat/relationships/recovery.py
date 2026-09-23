@@ -35,6 +35,8 @@ async def recover_unqueued_evidence(model: str) -> int:
                     .outerjoin(RelationshipEvidence, RelationshipEvidence.turn_id == AgentTurn.id)
                     .where(
                         AgentTurn.id > after_turn,
+                        AgentTurn.trigger_kind == "message",
+                        ContextSession.purpose == "chat",
                         AgentTurn.status.in_(("completed", "silent", "declined")),
                         AgentTurn.finished_at.is_not(None),
                         RelationshipEvidence.turn_id.is_(None),

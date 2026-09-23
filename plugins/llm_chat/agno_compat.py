@@ -26,6 +26,7 @@ from utils.turn_resolution_core import current_turn_resolution
 from utils.llm_model_core.snapshot import current_main_model
 
 from .core.errors import summarize_exception
+from .agent_context import current_agent_access
 from .core.delivery import (
     current_llm_chat_delivery,
     contains_internal_image_reference,
@@ -97,6 +98,33 @@ _READ_ONLY_TOOLS = frozenset(
         "list_tool_executions",
         "read_agent_event",
         "read_tool_execution",
+    }
+)
+
+_SCHEDULED_ALLOWED_TOOLS = frozenset(
+    {
+        "reminder",
+        "send_msg",
+        "prepare_image",
+        "prepare_image_ref",
+        "prepare_external_media",
+        "prepare_audio",
+        "prepare_merged_forward",
+        "generate_image",
+        "edit_image",
+        "html2pic",
+        "jinja2pic",
+        "markdown2pic",
+        "synthesize_speech",
+        "get_channel_avatar",
+        "inspect_image",
+        "find_channel_participants",
+        "read_channel_messages",
+        "get_local_time",
+        "list_image_resources",
+        "list_prepared_media",
+        "read_web_page",
+        "web_search",
     }
 )
 _INTERNAL_PARTICIPANT_REFERENCE_TOOLS = {
@@ -236,7 +264,20 @@ def register_llm_chat_tool(subscriber: Subscriber[Any]) -> None:
 
 def _authorized(name: str) -> bool:
     entry = available_functions.get(name)
-    return entry is not None and _is_compat_wrapper(entry[0].handle) and entry[1].external_execution is True
+    if entry is None or not _is_compat_wrapper(entry[0].handle) or entry[1].external_execution is not True:
+        return False
+    access = current_agent_access()
+    if access is not None and access.trigger_kind == "scheduled":
+        if name not in _SCHEDULED_ALLOWED_TOOLS:
+            return False
+        if name != "reminder":
+            return True
+    if name != "reminder":
+        return True
+    if access is None:
+        return False
+    capabilities = access.capability_names
+    return bool("reminder" in capabilities or "reminder.manage" in capabilities or "reminder.resolve" in capabilities)
 
 
 def _delivery_snapshot() -> DeliverySnapshot:

@@ -47,8 +47,18 @@ async def _drain_tasks(tasks: set[asyncio.Task[None]]) -> None:
 class DeliveryAudit:
     """One incoming generation; child tasks inherit this object, not a global turn."""
 
-    def __init__(self, session: Session, warn: Callable[[str], object], *, attachment_root: Path | None = None):
+    def __init__(
+        self,
+        session: Session,
+        warn: Callable[[str], object],
+        *,
+        attachment_root: Path | None = None,
+        scheduled_reminder: bool = False,
+    ):
         self.received_at = datetime.utcnow()
+        self.timing_source = (
+            "task_started_to_confirmed_delivery" if scheduled_reminder else "received_to_confirmed_delivery"
+        )
         self.started = time.monotonic()
         self.session = session
         self.warn = warn
@@ -84,7 +94,12 @@ class DeliveryAudit:
             return
         recorder.append(
             "turn_timing",
-            payload={"received_at": _iso(self.received_at), "timing_source": "received_to_confirmed_delivery"},
+            payload={
+                "received_at" if self.timing_source == "received_to_confirmed_delivery" else "triggered_at": _iso(
+                    self.received_at
+                ),
+                "timing_source": self.timing_source,
+            },
             model_visible=False,
             created_at=self.received_at,
         )
@@ -194,7 +209,9 @@ class DeliveryAudit:
                 payload: dict[str, object] = {
                     "content": content,
                     "attachments": attachments,
-                    "received_at": _iso(self.received_at),
+                    "received_at" if self.timing_source == "received_to_confirmed_delivery" else "triggered_at": _iso(
+                        self.received_at
+                    ),
                     "confirmed_at": _iso(confirmed_at),
                     "capture_status": "partial"
                     if projection.partial
@@ -235,9 +252,13 @@ class DeliveryAudit:
 
 @contextmanager
 def delivery_audit_scope(
-    session: Session, warn: Callable[[str], object], *, attachment_root: Path | None = None
+    session: Session,
+    warn: Callable[[str], object],
+    *,
+    attachment_root: Path | None = None,
+    scheduled_reminder: bool = False,
 ) -> Iterator[DeliveryAudit]:
-    audit = DeliveryAudit(session, warn, attachment_root=attachment_root)
+    audit = DeliveryAudit(session, warn, attachment_root=attachment_root, scheduled_reminder=scheduled_reminder)
     token = _CURRENT.set(audit)
     try:
         yield audit

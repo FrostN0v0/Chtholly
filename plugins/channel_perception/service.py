@@ -45,7 +45,7 @@ MAX_PROTOCOL_MEMBER_SCAN = 5_000
 
 
 def scope_from_session(session: Session) -> PerceptionScope:
-    guild = getattr(session, "guild", None)
+    guild = getattr(session.event, "guild", None)
     return PerceptionScope(
         platform=session.account.platform,
         account_id=session.account.self_id,
@@ -55,7 +55,7 @@ def scope_from_session(session: Session) -> PerceptionScope:
 
 
 def participant_from_session(session: Session, observed_at: datetime) -> ParticipantObservation:
-    member = session.member
+    member = getattr(session.event, "member", None)
     user = session.user
     return ParticipantObservation(
         scope=scope_from_session(session),

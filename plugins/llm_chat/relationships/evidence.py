@@ -40,7 +40,7 @@ async def enqueue_relationship_evidence(
             return False
         row = (
             await db.execute(
-                select(AgentTurn, ChatScope)
+                select(AgentTurn, ChatScope, ContextSession)
                 .join(ContextSession, ContextSession.id == AgentTurn.session_id)
                 .join(ChatScope, ChatScope.id == ContextSession.scope_id)
                 .where(AgentTurn.id == turn_id)
@@ -48,8 +48,13 @@ async def enqueue_relationship_evidence(
         ).one_or_none()
         if row is None:
             return False
-        turn, scope = row
-        if turn.status not in _ELIGIBLE_OUTCOMES or turn.finished_at is None:
+        turn, scope, context_session = row
+        if (
+            turn.trigger_kind != "message"
+            or context_session.purpose != "chat"
+            or turn.status not in _ELIGIBLE_OUTCOMES
+            or turn.finished_at is None
+        ):
             return False
         owner = await resolve_relationship_owner(db, user_id, channel_id)
         original_owner = await resolve_relationship_owner(db, turn.user_id, channel_id)

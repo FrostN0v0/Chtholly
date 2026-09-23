@@ -36,7 +36,7 @@ def test_domain_and_tts_core_imports_do_not_load_plugin_entrypoints():
         "plugins.llm_chat.tools.jinja2pic",
         "plugins.llm_chat.tools.get_local_time",
         "plugins.llm_chat.turn_lifecycle",
-        "utils.poke_core",
+        "utils.reminder_core",
         "utils.tts_service_core.voice_catalog",
         "utils.tts_service_core.providers.gpt_sovits",
         "utils.tts_service_core.providers.gpt_sovits_catalog",
@@ -88,7 +88,7 @@ def test_llm_chat_entrypoint_runs_under_entari_module_proxy():
     script = """
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from weakref import proxy
 from importlib.util import module_from_spec, spec_from_file_location
 
@@ -122,21 +122,39 @@ agno_compat.install_agno_tool_bridge = lambda: bridge_calls.append("installed")
 tool_runtime = ModuleType(f"{package_name}.tool_runtime")
 tool_runtime.registered_tools = ["sentinel_tool"]
 tool_runtime.registered_tool_schemas = [{"name": "sentinel_tool", "source_hash": "sentinel"}]
+chat_handler = ModuleType(f"{package_name}.chat_handler")
+chat_handler.config = SimpleNamespace(model="default")
+reminders = ModuleType(f"{package_name}.reminders")
+reminders.__path__ = [str(package_dir / "reminders")]
+reminder_service = ModuleType(f"{package_name}.reminders.service")
+class ReminderService:
+    id = "llm_chat.reminders.service"
+
+    def __init__(self, config): self.config = config
+    async def aclose(self): pass
+    def account_update(self, account): pass
+    def wake(self): pass
+reminder_service.ReminderService = ReminderService
+sys.modules[f"{package_name}.reminders.service"] = reminder_service
 submodules = {
     "agno_compat": agno_compat,
-    "chat_handler": ModuleType(f"{package_name}.chat_handler"),
+    "chat_handler": chat_handler,
     "agent_command": ModuleType(f"{package_name}.agent_command"),
     "model_state_runtime": ModuleType(f"{package_name}.model_state_runtime"),
     "agent_runtime": ModuleType(f"{package_name}.agent_runtime"),
     "agent_webui": ModuleType(f"{package_name}.agent_webui"),
+    "reminder_command": ModuleType(f"{package_name}.reminder_command"),
+    "reminder_webui": ModuleType(f"{package_name}.reminder_webui"),
+    "meme_webui": ModuleType(f"{package_name}.meme_webui"),
+    "reminders": reminders,
     "tag_runtime": ModuleType(f"{package_name}.tag_runtime"),
     "tool_runtime": tool_runtime,
-    "meme_webui": ModuleType(f"{package_name}.meme_webui"),
 }
 for suffix, submodule in submodules.items():
     sys.modules[f"{package_name}.{suffix}"] = submodule
     setattr(module, suffix, submodule)
 
+submodules["reminders"].registered_tools = []
 entari.metadata = lambda *args, **kwargs: None
 entari_plugin.collect_disposes = lambda callback: None
 token = current_plugin.set(plugin)

@@ -53,7 +53,7 @@ from .group_delivery import group_delivery_scope
 from .chat_evaluation import cancel_pending_evaluations, schedule_relationship_evaluation
 from .forward_context import resolve_merged_forward_messages
 from .tools._delivery import send_with_delivery
-from .agent_turn_setup import prepare_agent_turn
+from .agent_turn_setup import PreparedAgentTurn, prepare_agent_turn
 from .agent_attachments import capture_user_input_images
 from .reaction_feedback import MessageReactionFeedback, settle_reaction_update, llm_chat_reaction_scope
 from .native_image_delivery import native_image_delivery_scope
@@ -178,7 +178,6 @@ async def _run_chat(
         await send_with_delivery(session, _CHAT_FAILURE_REPLY, None)
         await reaction.finish("failed")
         return BLOCK
-    user_id = identity.user_id
     user_name = identity.display_name
     mentioned_participants = await resolve_mentioned_participants(session)
 
@@ -232,6 +231,24 @@ async def _run_chat(
         is_operator=await _is_operator(session),
     )
     inputs.commit_input_audit()
+    await run_prepared_agent_turn(session, ctx, prepared, model_name=model_name, turn_config=config, reaction=reaction)
+    return BLOCK
+
+
+async def run_prepared_agent_turn(
+    session: Session,
+    ctx: Contexts | None,
+    prepared: PreparedAgentTurn,
+    *,
+    model_name: str | None,
+    reaction: MessageReactionFeedback | None = None,
+    turn_config: LLMChatConfig | None = None,
+) -> str:
+    """Run and finalize a prepared chat or scheduled turn; settlement belongs to the caller."""
+    active_config = turn_config or config
+    user_id = prepared.agent_access.user_id
+    channel_id = session.channel.id
+
     delivery_audit = current_delivery_audit()
     if delivery_audit is not None:
         delivery_audit.bind(prepared.agent_events)
@@ -248,7 +265,8 @@ async def _run_chat(
     turn_status = "failed"
     try:
         try:
-            await reaction.set_stage("thinking")
+            if reaction is not None:
+                await reaction.set_stage("thinking")
             with native_image_delivery_scope(partial(turn.prepare_model_images, session)):
                 response = await generate_chat_response(
                     chat_messages,
@@ -260,8 +278,8 @@ async def _run_chat(
                     delivery_state=delivery_state,
                     image_inputs=image_inputs,
                     media_intent=prepared.media_intent,
-                    request_timeout=config.model_request_timeout,
-                    media_request_timeout=config.media_request_timeout,
+                    request_timeout=active_config.model_request_timeout,
+                    media_request_timeout=active_config.media_request_timeout,
                     tool_trace=turn.tool_trace,
                     agent_events=agent_events,
                     agent_access=agent_access,
@@ -271,7 +289,7 @@ async def _run_chat(
             turn.capture_tool_events()
             turn_status = "partial" if delivery_state.confirmed_deliveries else "cancelled"
             await turn.preserve_and_rollback()
-            if delivery_state.confirmed_deliveries:
+            if reaction is not None and delivery_state.confirmed_deliveries:
                 await settle_reaction_update(reaction.finish("partial"))
             raise
         except Exception as exc:
@@ -279,8 +297,12 @@ async def _run_chat(
             _LOGGER.warning(f"llm generate failed: {summarize_exception(exc)}")
             if delivery_state.delivery_attempts:
                 await turn.preserve_and_rollback()
-                await reaction.finish("partial" if delivery_state.confirmed_deliveries else "failed")
-                return BLOCK
+                if reaction is not None:
+                    await reaction.finish("partial" if delivery_state.confirmed_deliveries else "failed")
+                return "partial" if delivery_state.confirmed_deliveries else "failed"
+            if reaction is None:
+                await turn.preserve_and_rollback()
+                return "failed"
             failure_reply = _MEDIA_FAILURE_REPLY if media_requested else _CHAT_FAILURE_REPLY
             try:
                 if await turn.deliver_model_reply(session, failure_reply):
@@ -292,7 +314,7 @@ async def _run_chat(
                 await turn.preserve_and_rollback()
                 _LOGGER.warning(f"generation failure notice delivery failed: {summarize_exception(delivery_exc)}")
             await reaction.finish("failed")
-            return BLOCK
+            return turn_status
 
         turn.capture_tool_events()
         if delivery_state.delivery_attempts > delivery_state.confirmed_deliveries or any(
@@ -301,8 +323,9 @@ async def _run_chat(
         ):
             await turn.preserve_and_rollback()
             turn_status = "partial" if delivery_state.confirmed_deliveries else "failed"
-            await reaction.finish("partial" if delivery_state.confirmed_deliveries else "failed")
-            return BLOCK
+            if reaction is not None:
+                await reaction.finish("partial" if delivery_state.confirmed_deliveries else "failed")
+            return turn_status
         if resolution.outcome == "silent":
             turn.agent_events.append(
                 "response_decision",
@@ -320,8 +343,9 @@ async def _run_chat(
                 },
             )
             turn_status = "silent"
-            await reaction.finish_silent()
-            return BLOCK
+            if reaction is not None:
+                await reaction.finish_silent()
+            return turn_status
         if resolution.outcome == "declined":
             previous_deliveries = delivery_state.confirmed_deliveries
             if not resolution.reply or not await turn.deliver_model_reply(session, resolution.reply):
@@ -345,8 +369,9 @@ async def _run_chat(
                 },
             )
             turn_status = "declined"
-            await reaction.finish("declined")
-            return BLOCK
+            if reaction is not None:
+                await reaction.finish("declined")
+            return turn_status
         if resolution.outcome == "delivered":
             if not delivery_state.confirmed_deliveries:
                 raise RuntimeError("explicit delivered outcome lacked confirmed output")
@@ -368,11 +393,14 @@ async def _run_chat(
                 },
             )
             turn_status = "completed"
-            await reaction.finish("success")
-            return BLOCK
+            if reaction is not None:
+                await reaction.finish("success")
+            return turn_status
         if not await turn.deliver_model_reply(session, response_content(response)):
-            await reaction.finish("partial" if delivery_state.confirmed_deliveries else "failed")
-            return BLOCK
+            turn_status = "partial" if delivery_state.confirmed_deliveries else "failed"
+            if reaction is not None:
+                await reaction.finish(turn_status)
+            return turn_status
         await turn.persist_delivered_text()
         turn.agent_events.append(
             "response_decision",
@@ -390,8 +418,9 @@ async def _run_chat(
             },
         )
         turn_status = "completed"
-        await reaction.finish("success")
-        return BLOCK
+        if reaction is not None:
+            await reaction.finish("success")
+        return turn_status
     except asyncio.CancelledError:
         if turn_status == "failed":
             turn_status = "partial" if delivery_state.confirmed_deliveries else "cancelled"
@@ -405,9 +434,13 @@ async def _run_chat(
             if delivery_audit is not None:
                 await delivery_audit.drain()
             await turn.finalize_agent_turn(turn_status)
-            if turn_status in {"completed", "silent", "declined"} and turn.agent_turn_id is not None:
+            if (
+                agent_access.trigger_kind == "message"
+                and turn_status in {"completed", "silent", "declined"}
+                and turn.agent_turn_id is not None
+            ):
                 schedule_relationship_evaluation(
-                    config,
+                    active_config,
                     turn_id=turn.agent_turn_id,
                     user_id=user_id,
                     channel_id=channel_id,

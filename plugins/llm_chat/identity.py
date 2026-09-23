@@ -203,7 +203,8 @@ async def resolve_chat_identity(session: Session) -> ChatIdentity:
     user_id = str(participant.person_id)
     platform_user_id = _clean_text(platform_user.id)
     platform_nickname = _clean_text(platform_user.name)
-    group_card = _clean_text(session.member.nick if session.member else None)
+    member = getattr(session.event, "member", None)
+    group_card = _clean_text(member.nick if member else None)
     display_name = group_card or platform_nickname or "member"
     await migrate_legacy_user_state(
         session.channel.id,
