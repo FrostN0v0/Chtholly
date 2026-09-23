@@ -43,7 +43,8 @@ class SessionHandle:
 
 
 def scope_identity(session: Session) -> ScopeIdentity:
-    guild = getattr(session.event, "guild", None)
+    event = getattr(session, "event", None)
+    guild = getattr(event, "guild", None) or getattr(session, "guild", None)
     channel = session.channel
     platform = str(session.account.platform)
     account_id = str(session.account.self_id)
