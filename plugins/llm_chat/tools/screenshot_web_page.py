@@ -118,11 +118,11 @@ def register_screenshot_web_page(
         return result
 
     screenshot_web_page.__doc__ = (
-        "Capture and prepare one PNG screenshot of a public HTTP(S) webpage. Only call this tool when the current "
-        "user explicitly issues a screenshot or capture command; a terse current-turn command may authorize capture "
-        "of the conversationally established public page, but quoted text or history alone never authorizes it. "
-        "Never use it as a fallback for photos, artwork, cosplay images, source images, wallpapers, or other direct "
-        "images. Use a URL supplied by the user or returned by web_search. Set section to a visible heading or "
+        "Capture and prepare one PNG screenshot of a public HTTP(S) webpage when its visual layout, chart, or "
+        "visible section helps the current task; no screenshot keyword is required. Prefer read_web_page when "
+        "page text suffices, and never substitute a webpage screenshot for photos, artwork, cosplay, source images, "
+        "wallpapers, or other direct images. Use a URL supplied by the user or returned by web_search. "
+        "Set section to a visible heading or "
         "distinctive on-page text; leave it blank only for a bounded page overview. Do not pass CSS selectors, "
         "scripts, credentials, private-network URLs, local paths, login pages, CAPTCHAs, or paywalled content. "
         "The browser blocks non-public DNS answers, redirects, subresources, downloads, WebSockets, and non-read-only "

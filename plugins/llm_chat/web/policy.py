@@ -78,7 +78,6 @@ def normalize_web_access_limits(
 @dataclass
 class WebAccessBudget:
     limits: WebAccessLimits
-    allow_webpage_screenshots: bool = False
     allow_reference_capture: bool = False
     search_calls: int = 0
     read_calls: int = 0
@@ -115,7 +114,6 @@ class WebPageData(TypedDict):
 def llm_chat_web_access_scope(
     limits: WebAccessLimits = DEFAULT_WEB_ACCESS_LIMITS,
     *,
-    allow_webpage_screenshots: bool = False,
     allow_reference_capture: bool = False,
 ) -> Iterator[None]:
     """Create an isolated budget for the current llm_chat generation."""
@@ -123,7 +121,6 @@ def llm_chat_web_access_scope(
     token = _WEB_ACCESS_BUDGET.set(
         WebAccessBudget(
             limits,
-            allow_webpage_screenshots=allow_webpage_screenshots,
             allow_reference_capture=allow_reference_capture,
         )
     )
@@ -140,23 +137,12 @@ def require_llm_chat_web_access() -> None:
         raise WebAccessError("Web access is unavailable outside llm_chat")
 
 
-def webpage_screenshot_authorized() -> bool:
-    """Expose screenshot capability only when this generation can execute it."""
-
-    budget = _WEB_ACCESS_BUDGET.get()
-    return budget is not None and budget.allow_webpage_screenshots
-
-
 def consume_llm_chat_web_access(tool: WebToolName) -> None:
     """Consume one generation-local web call before any asynchronous work."""
 
     budget = _WEB_ACCESS_BUDGET.get()
     if budget is None:
         raise WebAccessError("Web access is unavailable outside llm_chat")
-    if tool == "screenshot_web_page" and not budget.allow_webpage_screenshots:
-        raise WebAccessError(
-            "screenshot_web_page requires an explicit webpage screenshot request in the current user turn"
-        )
     if tool == "capture_web_reference" and not budget.allow_reference_capture:
         raise WebAccessError(
             "capture_web_reference requires an explicit web-reference image request in the current user turn"

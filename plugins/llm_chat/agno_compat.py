@@ -25,7 +25,6 @@ from entari_plugin_llm.sessions import SessionInfo
 from utils.turn_resolution_core import current_turn_resolution
 from utils.llm_model_core.snapshot import current_main_model
 
-from .web.policy import webpage_screenshot_authorized
 from .core.errors import summarize_exception
 from .agent_context import current_agent_access
 from .core.delivery import (
@@ -266,8 +265,6 @@ def register_llm_chat_tool(subscriber: Subscriber[Any]) -> None:
 def _authorized(name: str) -> bool:
     entry = available_functions.get(name)
     if entry is None or not _is_compat_wrapper(entry[0].handle) or entry[1].external_execution is not True:
-        return False
-    if name == "screenshot_web_page" and not webpage_screenshot_authorized():
         return False
     access = current_agent_access()
     if access is not None and access.trigger_kind == "scheduled":

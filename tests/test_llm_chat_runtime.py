@@ -2746,50 +2746,30 @@ async def test_generation_separates_enriched_media_timeout_hint_from_host_author
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("content", "expected_authorized"),
-    [
-        ("请截图这个网页", True),
-        ("截图一下异格安洁莉娜的技能给我", True),
-        ("截", True),
-        ('<at id="2123673121" name="珂朵莉"/> 截', True),
-        ("请找一下陈千语 cosplay 图片", False),
-    ],
-)
-async def test_generation_authorizes_webpage_screenshot_only_for_explicit_current_request(
+async def test_generation_allows_model_chosen_public_screenshot_without_a_keyword(
     monkeypatch: pytest.MonkeyPatch,
-    content: str,
-    expected_authorized: bool,
 ) -> None:
-    observed: list[bool] = []
     state = DeliveryState()
 
     async def fake_generate(_messages: list[dict[str, Any]], **_kwargs: Any) -> SimpleNamespace:
-        try:
-            web_policy_module.consume_llm_chat_web_access("screenshot_web_page")
-        except web_policy_module.WebAccessError:
-            observed.append(False)
-        else:
-            observed.append(True)
-            mark_delivery_success(state, media=True)
-        return _handler_response("done")
+        web_policy_module.consume_llm_chat_web_access("screenshot_web_page")
+        return _handler_response("The page uses a two-column layout.")
 
     monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
-
     response = await generation_module.generate_chat_response(
-        cast(list[Any], [{"role": "user", "content": content}]),
+        cast(list[Any], [{"role": "user", "content": "Describe the visual layout of this public page"}]),
         system="system",
         model="deepseek",
         channel_id="group",
         ctx=Contexts(),
         web_limits=generation_module.WebAccessLimits(0, 1, 1),
         delivery_state=state,
-        agent_access=AgentAccessContext(10, 20, 30, "same-user", raw_user_text=content),
+        agent_access=AgentAccessContext(
+            10, 20, 30, "same-user", raw_user_text="Describe the visual layout of this public page"
+        ),
         request_timeout=12.5,
     )
-
-    assert generation_module.response_content(response) == "done"
-    assert observed == [expected_authorized]
+    assert generation_module.response_content(response) == "The page uses a two-column layout."
 
 
 @pytest.mark.asyncio

@@ -847,25 +847,8 @@ async def test_screenshot_web_page_uses_public_url_budget_and_confirmed_media_de
         target = _tool_callable(runtime, "screenshot_web_page")
         state = runtime.DeliveryState()
 
-        unauthorized_state = runtime.DeliveryState()
         with (
             local_modules.web_access.llm_chat_web_access_scope(local_modules.web_access.WebAccessLimits(0, 1, 1)),
-            llm_chat_delivery_scope(unauthorized_state),
-        ):
-            with pytest.raises(
-                local_modules.web_access.WebAccessError,
-                match="explicit webpage screenshot request",
-            ):
-                await target(session, "https://prts.wiki/w/%E6%BE%84%E9%97%AA", "技能", 1200)
-        assert captures == []
-        assert session.sent == []
-        assert unauthorized_state.media_messages == unauthorized_state.confirmed_media_deliveries == 0
-
-        with (
-            local_modules.web_access.llm_chat_web_access_scope(
-                local_modules.web_access.WebAccessLimits(0, 1, 1),
-                allow_webpage_screenshots=True,
-            ),
             llm_chat_delivery_scope(state),
         ):
             result = await target(
@@ -897,10 +880,7 @@ async def test_screenshot_web_page_uses_public_url_budget_and_confirmed_media_de
         runtime.web_screenshot_context.capture = invalid_capture
         invalid_state = runtime.DeliveryState()
         with (
-            local_modules.web_access.llm_chat_web_access_scope(
-                local_modules.web_access.WebAccessLimits(0, 1, 1),
-                allow_webpage_screenshots=True,
-            ),
+            local_modules.web_access.llm_chat_web_access_scope(local_modules.web_access.WebAccessLimits(0, 1, 1)),
             llm_chat_delivery_scope(invalid_state),
         ):
             with pytest.raises(runtime.DeliveryError, match="webpage screenshot failed"):
@@ -949,10 +929,7 @@ async def test_screenshot_web_page_delivers_three_requested_operations_in_one_ge
         sections = ("作战一", "作战二", "作战三")
 
         with (
-            local_modules.web_access.llm_chat_web_access_scope(
-                local_modules.web_access.WebAccessLimits(16, 24, 32),
-                allow_webpage_screenshots=True,
-            ),
+            local_modules.web_access.llm_chat_web_access_scope(local_modules.web_access.WebAccessLimits(16, 24, 32)),
             llm_chat_delivery_scope(state),
         ):
             results = [
@@ -4155,10 +4132,7 @@ async def test_local_generation_exposes_only_original_authorized_external_functi
         native = get_agno_tools()
         with llm_chat_tool_trace_scope(ToolTraceRecorder()):
             exposed = llm_service_module.get_agno_tools()
-            with llm_chat_web_access_scope(WebAccessLimits(0, 1, 1), allow_webpage_screenshots=True):
-                authorized = llm_service_module.get_agno_tools()
-        assert {function.name for function in exposed} == set(harness.module.registered_tools) - {"screenshot_web_page"}
-        assert {function.name for function in authorized} == set(harness.module.registered_tools)
+        assert {function.name for function in exposed} == set(harness.module.registered_tools)
         assert "unrelated_builtin" in {function.name for function in native}
         for function in exposed:
             assert "session" not in function.parameters["properties"]

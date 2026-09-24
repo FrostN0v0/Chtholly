@@ -481,7 +481,6 @@ async def generate_chat_response(
         scopes.enter_context(
             llm_chat_web_access_scope(
                 web_limits,
-                allow_webpage_screenshots=intent.webpage_screenshot_requested,
                 allow_reference_capture=intent.requires_web_reference,
             )
         )
