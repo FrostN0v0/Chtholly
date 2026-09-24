@@ -157,6 +157,7 @@ async def test_scheduled_prepare_captures_task_not_user_input_and_normal_prepare
         content="Check the progress tomorrow",
         scheduled_context={
             "occurrence_sequence": 2,
+            "mode": "once",
             "scheduled_at": "2026-09-23T12:00:00Z",
             "now": "2026-09-23T12:01:00Z",
             "late_by_seconds": 60,
@@ -174,6 +175,8 @@ async def test_scheduled_prepare_captures_task_not_user_input_and_normal_prepare
     assert task["goal"] == "Check the progress tomorrow"
     assert task["occurrence_sequence"] == 2
     assert task["late_by_seconds"] == 60
+    assert task["mode"] == "once"
+    assert '"action":"resolve"' in prepared.system
     assert "media_ref" not in task
     await prepared.lifecycle.rollback_if_unstarted()
     assert deleted == []
@@ -219,6 +222,7 @@ async def test_scheduled_prepare_captures_task_not_user_input_and_normal_prepare
         tool_schemas=[],
     )
     assert normal.lifecycle.user_message_id is not None
+    assert '"action":"resolve"' not in normal.system
     assert normal.agent_access.capability_names == frozenset({"reminder"})
     async with store() as db:
         turn = await db.get(AgentTurn, normal.lifecycle.agent_turn_id)

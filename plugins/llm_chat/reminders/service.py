@@ -311,6 +311,7 @@ class ReminderService(Service):
                 "now": now.isoformat(),
                 "late_by_seconds": max(0, int((now - _utc(task.due_at)).total_seconds())),
                 "occurrence_sequence": claim.occurrence_sequence,
+                "mode": task.mode,
                 "background": task.background,
                 "continuation_state": task.continuation_state,
             }

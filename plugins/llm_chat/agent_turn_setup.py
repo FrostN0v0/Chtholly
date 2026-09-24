@@ -120,7 +120,19 @@ async def prepare_scheduled_agent_turn(
     )
 
 
+_SCHEDULED_REMINDER_CONTRACT = (
+    "This is a host-claimed scheduled reminder, not a new user message. The task data includes its mode and "
+    "actual wakeup time. Work on its goal at the bound destination, then call reminder with "
+    'request={"action":"resolve","decision":"completed"} for a completed one-shot task. '
+    "For adaptive tasks, choose completed when finished, continue only with a validated future schedule and "
+    "explicit timezone, or paused when further action is unsafe. Call resolve once after the work, never "
+    "send after resolving, and do not repeat confirmed messages in final text. An unknown send outcome is "
+    "not completion: never retry it or propose completed. Do not reveal task references or internal state."
+)
+
+
 _SCHEDULED_FACT_LIMITS = {
+    "mode": 16,
     "scheduled_at": 64,
     "now": 64,
     "background": 3000,
@@ -268,7 +280,7 @@ async def prepare_agent_turn(
         anchors = [] if scheduled else await load_scope_anchors(scope.id)
 
         def compose_system() -> str:
-            return compose_persona_prompt(
+            system = compose_persona_prompt(
                 persona.prompt,
                 mood,
                 energy,
@@ -286,6 +298,7 @@ async def prepare_agent_turn(
                 web_total_limit=web_limits.total_limit,
                 delivery_limits=delivery_limits,
             )
+            return f"{system}\n\n{_SCHEDULED_REMINDER_CONTRACT}" if scheduled else system
 
         system = compose_system()
         fresh_context = (
