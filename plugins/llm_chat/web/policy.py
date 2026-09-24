@@ -140,6 +140,13 @@ def require_llm_chat_web_access() -> None:
         raise WebAccessError("Web access is unavailable outside llm_chat")
 
 
+def webpage_screenshot_authorized() -> bool:
+    """Expose screenshot capability only when this generation can execute it."""
+
+    budget = _WEB_ACCESS_BUDGET.get()
+    return budget is not None and budget.allow_webpage_screenshots
+
+
 def consume_llm_chat_web_access(tool: WebToolName) -> None:
     """Consume one generation-local web call before any asynchronous work."""
 

@@ -4155,7 +4155,10 @@ async def test_local_generation_exposes_only_original_authorized_external_functi
         native = get_agno_tools()
         with llm_chat_tool_trace_scope(ToolTraceRecorder()):
             exposed = llm_service_module.get_agno_tools()
-        assert {function.name for function in exposed} == set(harness.module.registered_tools)
+            with llm_chat_web_access_scope(WebAccessLimits(0, 1, 1), allow_webpage_screenshots=True):
+                authorized = llm_service_module.get_agno_tools()
+        assert {function.name for function in exposed} == set(harness.module.registered_tools) - {"screenshot_web_page"}
+        assert {function.name for function in authorized} == set(harness.module.registered_tools)
         assert "unrelated_builtin" in {function.name for function in native}
         for function in exposed:
             assert "session" not in function.parameters["properties"]
