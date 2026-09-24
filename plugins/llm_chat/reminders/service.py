@@ -9,7 +9,7 @@ import asyncio
 from datetime import datetime, timezone
 from collections.abc import Callable, Iterable, Awaitable
 
-from satori import User, Event, Guild, Channel, ChannelType
+from satori import User, Event, Guild, Channel, ChannelType, LoginStatus
 from launart import Launart, Service
 from arclet.entari import Session
 from launart.status import Phase
@@ -56,7 +56,15 @@ Runner = Callable[..., Awaitable[str]]
 
 def _online(account: Any) -> bool:
     connected = getattr(account, "connected", None)
-    return bool(connected is not None and connected.is_set())
+    if connected is not None and connected.is_set():
+        return True
+    protocol = getattr(account, "protocol", None)
+    server = getattr(protocol, "server", None)
+    if server is None:
+        return False
+    from entari_plugin_server.patch import DirectAdapterServer
+
+    return isinstance(server, DirectAdapterServer) and getattr(account.self_info, "status", None) == LoginStatus.ONLINE
 
 
 def _account_key(account: Any) -> AccountKey:
@@ -128,6 +136,11 @@ class ReminderService(Service):
     async def _native_dm_channel(account: Any, user_id: str) -> Channel:
         return await account.protocol.user_channel_create(user_id=user_id)
 
+    def _refresh_accounts(self) -> None:
+        if self._accounts_provider is None:
+            return
+        self._accounts = {_account_key(account): account for account in self._accounts_provider() if _online(account)}
+
     def account_update(self, account: Any) -> None:
         if self._closed:
             return
@@ -150,9 +163,7 @@ class ReminderService(Service):
             await migrate_turn_origin_columns()
             await recover_stale()
             await expire_tasks()
-            if self._accounts_provider is not None:
-                for account in self._accounts_provider():
-                    self.account_update(account)
+            self._refresh_accounts()
             if self._closed:
                 return
             self._started = True
@@ -196,6 +207,7 @@ class ReminderService(Service):
         """Claim only currently connected accounts, in short database transactions."""
         if self._closed:
             return
+        self._refresh_accounts()
         capacity = self._capacity - len(self._workers)
         if capacity <= 0:
             return

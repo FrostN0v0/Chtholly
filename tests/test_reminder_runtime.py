@@ -154,6 +154,39 @@ async def test_offline_account_online_wake_single_claim_and_group_has_no_quote(d
 
 
 @pytest.mark.asyncio
+async def test_direct_adapter_account_discovered_after_start_without_account_update(db, fake_generation):
+    from satori import LoginStatus
+    from entari_plugin_server.patch import DirectAdapterServer
+
+    accounts = []
+    account = Account()
+    account.protocol.server = object.__new__(DirectAdapterServer)
+    account.self_info.status = LoginStatus.ONLINE
+    due_task = await task()
+
+    async def runner(session, ctx, prepared, **kwargs):
+        propose_reminder_decision(ReminderDecision(due_task.task_ref, "completed"))
+        return "silent"
+
+    worker = runtime.ReminderService(SimpleNamespace(model="default"), accounts=lambda: accounts, runner=runner)
+    try:
+        await worker.start()
+        accounts.append(account)
+        worker.wake()
+        await settled(worker)
+        assert (await store.get_task_for_service(due_task.task_ref)).status == "completed"
+        assert len(fake_generation) == 1
+
+        account.self_info.status = LoginStatus.OFFLINE
+        later = await task(operation_id="offline", unified_user_id="v", platform_user_id="v")
+        worker.wake()
+        await worker.claim_ready()
+        assert (await store.get_task_for_service(later.task_ref)).current_occurrence == 0
+    finally:
+        await worker.aclose()
+
+
+@pytest.mark.asyncio
 async def test_dm_resolved_only_when_authorized_and_never_falls_back(db, fake_generation):
     account = Account(True)
     goal = await task(delivery_target_type="dm", delivery_channel_id="", delivery_user_id="p", dm_authorized=False)
