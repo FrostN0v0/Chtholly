@@ -187,6 +187,31 @@ async def test_direct_adapter_account_discovered_after_start_without_account_upd
 
 
 @pytest.mark.asyncio
+async def test_scheduled_turn_does_not_require_a_root_sys_modules_entry(db, fake_generation, monkeypatch):
+    monkeypatch.setattr(runtime, "__package__", "runtime_alias.reminders")
+    account = Account(True)
+    goal = await task()
+
+    async def runner(session, ctx, prepared, **kwargs):
+        propose_reminder_decision(ReminderDecision(goal.task_ref, "completed"))
+        return "silent"
+
+    worker = runtime.ReminderService(
+        SimpleNamespace(model="default"),
+        ({"name": "reminder", "source_hash": "abc"},),
+        accounts=lambda: [account],
+        runner=runner,
+    )
+    try:
+        await worker.start()
+        await settled(worker)
+        assert (await store.get_task_for_service(goal.task_ref)).status == "completed"
+        assert len(fake_generation) == 1
+    finally:
+        await worker.aclose()
+
+
+@pytest.mark.asyncio
 async def test_dm_resolved_only_when_authorized_and_never_falls_back(db, fake_generation):
     account = Account(True)
     goal = await task(delivery_target_type="dm", delivery_channel_id="", delivery_user_id="p", dm_authorized=False)

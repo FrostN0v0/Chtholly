@@ -59,7 +59,12 @@ if plug is not None and plug.module.__name__ == __name__:
     from arclet.entari.scheduler import schedule, timer
     from .reminders.service import ReminderService  # entari: package
 
-    reminder_service = add_service(ReminderService(chat_handler.config))
+    registered_tool_schemas = [
+        *getattr(tool_runtime, "registered_tool_schemas", ()),
+        *getattr(reminders, "registered_tool_schemas", ()),
+    ]
+
+    reminder_service = add_service(ReminderService(chat_handler.config, tool_schemas=registered_tool_schemas))
     plugin.collect_disposes(reminder_service.aclose)
 
     @plugin.listen(AccountUpdate)
@@ -80,8 +85,4 @@ if plug is not None and plug.module.__name__ == __name__:
     from . import reminder_webui as reminder_webui  # entari: package
 
     registered_tools = [*tool_runtime.registered_tools, *getattr(reminders, "registered_tools", ())]
-    registered_tool_schemas = [
-        *getattr(tool_runtime, "registered_tool_schemas", ()),
-        *getattr(reminders, "registered_tool_schemas", ()),
-    ]
     _LOGGER.info(f"registered LLM tools: {', '.join(registered_tools) or '(none)'}")

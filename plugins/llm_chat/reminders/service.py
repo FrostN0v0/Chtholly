@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import sys
 from copy import deepcopy
 from typing import Any
 import asyncio
+from pathlib import Path
 from datetime import datetime, timezone
-from collections.abc import Callable, Iterable, Awaitable
+import traceback
+from collections.abc import Mapping, Callable, Iterable, Sequence, Awaitable
 
 from satori import User, Event, Guild, Channel, ChannelType, LoginStatus
 from launart import Launart, Service
@@ -100,6 +101,7 @@ class ReminderService(Service):
     def __init__(
         self,
         config: Any,
+        tool_schemas: Sequence[Mapping[str, object]] = (),
         *,
         accounts: Callable[[], Iterable[Any]] | None = None,
         runner: Runner | None = None,
@@ -109,6 +111,7 @@ class ReminderService(Service):
     ) -> None:
         super().__init__()
         self.config = config
+        self.tool_schemas = tuple(tool_schemas)
         self._accounts_provider = accounts
         self._runner = runner
         self._dm_channel = dm_channel or self._native_dm_channel
@@ -338,7 +341,7 @@ class ReminderService(Service):
                         scheduled_context=facts,
                         image_inputs=inputs,
                         warn=_LOGGER.warning,
-                        tool_schemas=getattr(sys.modules[__package__.rsplit(".", 1)[0]], "registered_tool_schemas", ()),
+                        tool_schemas=self.tool_schemas,
                     )
                     if not await bind_turn_ref(claim, await get_agent_turn_ref(prepared.lifecycle.agent_turn_id)):
                         raise ReminderLeaseLost("claim changed before model")
@@ -386,7 +389,10 @@ class ReminderService(Service):
         except ReminderConflict:
             return
         except Exception as exc:
-            _LOGGER.warning(f"reminder execution failed: {type(exc).__name__}")
+            frame = traceback.extract_tb(exc.__traceback__)[-1]
+            _LOGGER.warning(
+                f"reminder execution failed at {Path(frame.filename).name}:{frame.lineno}: {type(exc).__name__}"
+            )
         finally:
             renewer.cancel()
             await asyncio.gather(renewer, return_exceptions=True)
