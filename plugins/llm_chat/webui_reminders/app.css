@@ -1,8 +1,9 @@
 * { box-sizing: border-box; }
 body { margin: 0; color: var(--ui-text); background: var(--ui-bg); font: 14px/1.55 var(--ui-font); }
-button { border: 1px solid var(--ui-border-strong); border-radius: 9px; padding: 7px 15px; background: var(--ui-surface); color: var(--ui-text); font: inherit; cursor: pointer; }
+button, select, input, textarea { font: inherit; color: var(--ui-text); }
+button { border: 1px solid var(--ui-border-strong); border-radius: 9px; padding: 7px 15px; background: var(--ui-surface); cursor: pointer; }
 button:hover:not(:disabled) { background: var(--ui-selected); }
-button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
+:is(button, select, input, textarea, summary):focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 button:disabled { opacity: .55; cursor: default; }
 .app { max-width: 1020px; margin: auto; padding: clamp(16px, 3vw, 32px); }
 .topbar, .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -12,12 +13,16 @@ h1 { margin: 0; font-size: 25px; letter-spacing: -.02em; }
 .notice { padding: 14px 18px; border: 1px solid var(--ui-border); border-radius: 12px; background: var(--ui-soft); }
 .notice strong { font-size: 14px; }
 .notice p { margin: 5px 0 0; color: var(--ui-muted); }
-.toolbar { margin: 22px 0 12px; color: var(--ui-muted); }
+.scope-control { display: grid; gap: 5px; margin-top: 22px; max-width: 680px; font-weight: 600; }
+.scope-control select { width: 100%; min-width: 0; border: 1px solid var(--ui-border-strong); border-radius: 9px; padding: 9px 12px; background: var(--ui-surface); }
+.toolbar { margin: 18px 0 12px; color: var(--ui-muted); }
 #status.error { color: var(--ui-danger); }
-.tasks { display: grid; gap: 12px; }
+.tasks { display: grid; gap: 20px; }
+.task-group { display: grid; gap: 12px; min-width: 0; }
+.group-title { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
 .card { border: 1px solid var(--ui-border); border-radius: 14px; padding: 18px 20px; background: var(--ui-surface); overflow-wrap: anywhere; }
 .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.card h2 { margin: 0; font-size: 16px; line-height: 1.5; font-weight: 650; white-space: pre-wrap; }
+.card h3 { margin: 0; font-size: 16px; line-height: 1.5; font-weight: 650; white-space: pre-wrap; }
 .badge { flex: none; border-radius: 99px; background: var(--ui-soft); color: var(--ui-muted); padding: 2px 10px; font-size: 12px; white-space: nowrap; }
 .badge.active { background: var(--ui-success-soft); color: var(--ui-success); }
 .badge.paused { background: var(--ui-warning-soft); color: var(--ui-warning); }
@@ -28,9 +33,30 @@ h1 { margin: 0; font-size: 25px; letter-spacing: -.02em; }
 .run p { margin: 4px 0 0; }
 .empty { padding: 32px 14px; text-align: center; border: 1px dashed var(--ui-border-strong); border-radius: 12px; color: var(--ui-muted); }
 .footer { display: flex; justify-content: center; padding: 24px 0; }
+.warning { color: var(--ui-warning); }
+.editor { border-top: 1px solid var(--ui-border); margin-top: 14px; padding-top: 12px; }
+.editor summary { cursor: pointer; font-weight: 600; width: fit-content; }
+.hint { color: var(--ui-muted); font-size: 12px; margin: 10px 0; }
+.edit-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
+.field { display: grid; align-content: start; gap: 4px; min-width: 0; font-size: 12px; font-weight: 600; }
+.field:has(textarea) { grid-column: 1 / -1; }
+.field :is(input, textarea) { min-width: 0; width: 100%; border: 1px solid var(--ui-border-strong); border-radius: 8px; padding: 8px 10px; background: var(--ui-bg); font-weight: 400; }
+.field textarea { resize: vertical; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.danger { color: var(--ui-danger); }
+.danger:hover:not(:disabled) { border-color: var(--ui-danger); }
+.confirm-cancel { border: 1px solid var(--ui-danger); border-radius: 9px; background: var(--ui-soft); margin-top: 14px; padding: 12px; }
+.confirm-cancel p { margin: 0; overflow-wrap: anywhere; }
+.confirm-cancel .actions { margin-top: 9px; }
 @media (max-width: 520px) {
   .app { padding: 14px; }
   .card { padding: 15px; }
   .card-head { flex-direction: column-reverse; gap: 7px; }
   .meta { display: grid; gap: 5px; }
+  .topbar { align-items: flex-start; }
+  .topbar h1 { font-size: 21px; }
+  .toolbar { align-items: flex-start; flex-wrap: wrap; }
+  .edit-grid { grid-template-columns: minmax(0, 1fr); }
+  .field:has(textarea) { grid-column: auto; }
+  .actions button { flex: 1 1 120px; }
 }

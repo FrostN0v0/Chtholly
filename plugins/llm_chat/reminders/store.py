@@ -583,6 +583,26 @@ async def _mutate_task(
         effective_expiry = _utc_naive(expires_at, "expires_at") if expires_at is not None else task.expires_at
         if effective_expiry is not None and effective_expiry <= effective_due:
             raise ValueError("expires_at must be after due_at")
+        if action == "resume":
+            if task.status != "paused":
+                raise ReminderConflict("only paused reminders can be resumed")
+            latest = await db.scalar(
+                select(ReminderOccurrence)
+                .where(ReminderOccurrence.task_ref == task_ref)
+                .order_by(ReminderOccurrence.sequence.desc())
+                .limit(1)
+            )
+            if (
+                task.due_at <= datetime.utcnow()
+                and latest is not None
+                and (
+                    latest.confirmed_count > 0
+                    or latest.transport_started
+                    or latest.dm_started
+                    or latest.state == "unknown"
+                )
+            ):
+                raise ReminderConflict("reschedule to a future time before resuming uncertain or confirmed work")
         if status == "active" and task.status != "active":
             active_count = await db.scalar(
                 select(func.count(ReminderTask.id)).where(
