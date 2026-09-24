@@ -4165,6 +4165,97 @@ async def test_local_generation_exposes_only_original_authorized_external_functi
 
 
 @pytest.mark.asyncio
+async def test_native_reminder_schema_accepts_create_and_rejects_wrong_fields() -> None:
+    from jsonschema import Draft202012Validator
+
+    from plugins.llm_chat.reminders.tool import register_reminder_tools
+
+    async with _temporary_plugin() as harness:
+        register_reminder_tools(harness.dispatcher)
+        parameters = available_functions["reminder"][1].parameters
+        validator = Draft202012Validator(parameters)
+        valid = {
+            "request": {
+                "action": "create",
+                "goal": "Check in later",
+                "schedule": "2030-01-01T12:00:00+00:00",
+                "timezone": "UTC",
+            }
+        }
+        assert list(validator.iter_errors(valid)) == []
+        assert list(validator.iter_errors({"request": {"action": "create", "content": "hi", "due_time": "soon"}}))
+
+
+@pytest.mark.asyncio
+async def test_native_reminder_create_persists_and_continues_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy import select
+    from entari_plugin_database import Base
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from plugins.llm_chat.models import ReminderTask, ReminderMutation
+    from plugins.llm_chat.reminders import store
+    from plugins.llm_chat.agent_context import AgentAccessContext, agent_access_scope
+    from plugins.llm_chat.reminders.tool import register_reminder_tools
+
+    due = datetime.now(datetime_timezone.utc) + timedelta(hours=1)
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(
+                tool_calls=[
+                    _tool_call(
+                        "create-reminder",
+                        "reminder",
+                        {
+                            "request": {
+                                "action": "create",
+                                "goal": "Check in later",
+                                "schedule": due.isoformat(),
+                                "timezone": "UTC",
+                            }
+                        },
+                    )
+                ]
+            ),
+            _model_response("Reminder scheduled."),
+        ],
+    )
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'reminder-bridge.db'}")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    monkeypatch.setattr(store, "get_session", factory)
+    trace = ToolTraceRecorder()
+    try:
+        async with _temporary_plugin() as harness:
+            register_reminder_tools(harness.dispatcher)
+            with (
+                agent_access_scope(
+                    AgentAccessContext(1, 2, 3, "unified-user", capability_names=frozenset({"reminder"}))
+                ),
+                llm_chat_context_scope(_tool_context(_DeliveryToolSession())),
+                llm_chat_tool_trace_scope(trace),
+            ):
+                response = await LLMService().generate("Remind me later.", model="test-model")
+
+        async with factory() as db:
+            tasks = list((await db.execute(select(ReminderTask))).scalars())
+            mutations = list((await db.execute(select(ReminderMutation))).scalars())
+        assert response.content == "Reminder scheduled."
+        assert len(tasks) == len(mutations) == 1
+        assert tasks[0].goal == "Check in later"
+        assert tasks[0].due_at == due.replace(tzinfo=None)
+        assert mutations[0].task_ref == tasks[0].task_ref
+        assert [(event.status, event.effect) for event in trace.events] == [("succeeded", "confirmed")]
+        result = json.loads(_tool_messages(payloads[1])[0]["content"])
+        assert json.loads(result["data"])["task_ref"] == tasks[0].task_ref
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("audit_enabled", [False, True])
 async def test_function_wire_schema_preserves_upstream_external_pause_and_continue(
     local_modules: SimpleNamespace,
@@ -4549,6 +4640,41 @@ async def test_external_reference_capture_completes_before_dependent_edit(local_
             await llm_service_module.run_llm_tools(RunOutput(requirements=requirements))
     assert effects == ["captured", "edited"]
     assert all(json.loads(req.external_execution_result)["ok"] for req in requirements)
+
+
+@pytest.mark.asyncio
+async def test_invalid_tool_arguments_return_error_and_allow_corrected_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(tool_calls=[_tool_call("invalid", "probe", {"arguments": {"text": "first"}})]),
+            _model_response(tool_calls=[_tool_call("corrected", "probe", {"text": "second"})]),
+            _model_response("The corrected tool call succeeded."),
+        ],
+    )
+    invoked: list[str] = []
+
+    async def probe(text: str) -> str:
+        invoked.append(text)
+        return text
+
+    trace = ToolTraceRecorder()
+    async with _temporary_plugin() as harness:
+        probe.__module__ = harness.module.__name__
+        harness.dispatcher(probe)
+        with llm_chat_tool_trace_scope(trace):
+            response = await LLMService().generate("Use the probe.", model="test-model")
+
+    assert response.content == "The corrected tool call succeeded."
+    assert invoked == ["second"]
+    assert [event.status for event in trace.events] == ["rejected", "succeeded"]
+    assert trace.events[0].outcome["error_code"] == "invalid_request"
+    assert [result["tool_call_id"] for result in _tool_messages(payloads[1])] == ["invalid"]
+    assert json.loads(_tool_messages(payloads[1])[0]["content"])["ok"] is False
+    corrected = next(result for result in _tool_messages(payloads[2]) if result["tool_call_id"] == "corrected")
+    assert json.loads(corrected["content"]) == {"ok": True, "data": "second"}
 
 
 @pytest.mark.asyncio

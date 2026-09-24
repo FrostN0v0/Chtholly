@@ -7,11 +7,13 @@ import json
 from typing import Any, Literal, Annotated, cast
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from collections.abc import Iterable
+from collections.abc import Mapping, Iterable
 
 from pydantic import Field, RootModel, ConfigDict, TypeAdapter, ValidationError, model_validator
 from arclet.entari import Session
+from pydantic_core import CoreSchema
 from arclet.letoderea import Subscriber
+from pydantic.json_schema import JsonSchemaValue, GetJsonSchemaHandler
 from arclet.entari.plugin.model import PluginDispatcher
 from arclet.entari.config.models.pyd import BaseModel
 
@@ -120,10 +122,43 @@ ReminderRequest = Annotated[
 REMINDER_REQUEST_ADAPTER = TypeAdapter(ReminderRequest)
 
 
+def _inline_reminder_refs(value: Any, definitions: Mapping[str, Any], seen: frozenset[str] = frozenset()) -> Any:
+    if isinstance(value, list):
+        return [_inline_reminder_refs(item, definitions, seen) for item in value]
+    if not isinstance(value, dict):
+        return value
+    ref = value.get("$ref")
+    if ref is not None:
+        if not isinstance(ref, str) or not ref.startswith("#/$defs/"):
+            raise ValueError("Reminder schema contains an unsupported reference")
+        name = ref.removeprefix("#/$defs/")
+        if name in seen or name not in definitions:
+            raise ValueError("Reminder schema contains a recursive or missing reference")
+        return _inline_reminder_refs(
+            {**definitions[name], **{key: item for key, item in value.items() if key != "$ref"}},
+            definitions,
+            seen | {name},
+        )
+    return {key: _inline_reminder_refs(item, definitions, seen) for key, item in value.items()}
+
+
 class ReminderRequestBody(RootModel[ReminderRequest]):
     """Pydantic root wrapper so Agno advertises the actual action schema."""
 
     model_config = ConfigDict(strict=True)
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
+        # Agno removes $defs but does not resolve oneOf references. Advertise
+        # the same Pydantic union as an inline schema on the native Function.
+        del core_schema, handler
+        schema = REMINDER_REQUEST_ADAPTER.json_schema()
+        definitions = schema.pop("$defs", {})
+        discriminator = schema.get("discriminator")
+        if isinstance(discriminator, dict):
+            discriminator.pop("mapping", None)
+        schema["title"] = cls.__name__
+        return cast(JsonSchemaValue, _inline_reminder_refs(schema, definitions))
 
 
 @dataclass(frozen=True, slots=True)

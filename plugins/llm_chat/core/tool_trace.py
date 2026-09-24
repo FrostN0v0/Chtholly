@@ -146,6 +146,7 @@ class ToolTraceRecorder:
                 terminal_status=status,
                 arguments=call.arguments,
             ),
+            outcome=error,
             recorded_result=error,
             audit_result=sanitize_audit_value(error),
         )
