@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import asyncio
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -17,7 +18,12 @@ if not hasattr(EntariConfig, "instance"):
 from plugins.llm_chat.reminders import tool
 from plugins.llm_chat.agent_context import AgentAccessContext, agent_access_scope
 from plugins.llm_chat.core.tool_trace import llm_chat_tool_trace_scope, llm_chat_tool_execution_scope
-from plugins.llm_chat.reminders.runtime import reminder_decision_scope, current_reminder_decision
+from plugins.llm_chat.reminders.runtime import (
+    ReminderDecision,
+    reminder_decision_scope,
+    current_reminder_decision,
+    propose_reminder_decision,
+)
 from plugins.llm_chat.tools.finish_turn import _check_effects
 from plugins.llm_chat.core.tool_trace_policy import (
     DeliverySnapshot,
@@ -141,10 +147,62 @@ def test_finish_silent_rejects_confirmed_write_but_accepts_failed_list() -> None
         _check_effects("silent")
 
 
-def test_resolve_proposals_are_generation_local() -> None:
+@pytest.mark.asyncio
+async def test_resolve_proposals_are_shared_with_child_tasks_but_generation_local() -> None:
+    first = ReminderDecision("first", "completed")
+    second = ReminderDecision("second", "completed")
+    released = asyncio.Event()
+
+    async def propose(decision: ReminderDecision) -> ReminderDecision:
+        await asyncio.sleep(0)
+        return propose_reminder_decision(decision)
+
+    async def late() -> None:
+        await released.wait()
+        propose_reminder_decision(second)
+
     assert current_reminder_decision() is None
-    with reminder_decision_scope():
-        assert current_reminder_decision() is None
+    with pytest.raises(ValueError, match="active scheduled generation"):
+        propose_reminder_decision(first)
+    escaped = None
+    try:
+        with reminder_decision_scope():
+            escaped = asyncio.create_task(late())
+            await asyncio.create_task(propose(first))
+            assert current_reminder_decision() == first
+            with pytest.raises(ValueError, match="already been proposed"):
+                await asyncio.create_task(propose(second))
+            with reminder_decision_scope():
+                assert current_reminder_decision() is None
+                await asyncio.create_task(propose(second))
+                assert current_reminder_decision() == second
+            assert current_reminder_decision() == first
+        released.set()
+        with pytest.raises(ValueError, match="active scheduled generation"):
+            await escaped
+    finally:
+        if escaped is not None:
+            escaped.cancel()
+            await asyncio.gather(escaped, return_exceptions=True)
+    assert current_reminder_decision() is None
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_generations_keep_distinct_decisions() -> None:
+    arrived = [asyncio.Event(), asyncio.Event()]
+    decisions = [ReminderDecision("first", "completed"), ReminderDecision("second", "paused")]
+
+    async def child(index: int) -> None:
+        propose_reminder_decision(decisions[index])
+        arrived[index].set()
+        await asyncio.wait_for(arrived[1 - index].wait(), timeout=1)
+
+    async def generation(index: int) -> ReminderDecision | None:
+        with reminder_decision_scope():
+            await asyncio.create_task(child(index))
+            return current_reminder_decision()
+
+    assert await asyncio.gather(generation(0), generation(1)) == decisions
     assert current_reminder_decision() is None
 
 

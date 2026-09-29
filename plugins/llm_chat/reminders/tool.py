@@ -645,7 +645,14 @@ async def _resolve(owner: BoundReminderOwner, request: ResolveReminder) -> dict[
 
 
 async def reminder(session: Session, request: ReminderRequestBody) -> str:
-    """Manage one host-bound reminder through a strict action request."""
+    """Persist reminders and adaptive follow-ups that wake the Bot for a new model turn.
+
+    A chat turn cannot wake itself later. Choose create when a future contact would help,
+    with or without an explicit reminder phrase. Use list, update, cancel and preferences
+    for the current user's tasks; resolve only the current scheduled task. Times must be
+    future ISO-8601 timestamps with an explicit UTC offset matching the IANA timezone.
+    A task is arranged only after create returns a confirmed result.
+    """
 
     owner = _bind_owner(session)
     parsed = validate_reminder_request(request)

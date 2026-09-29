@@ -21,27 +21,35 @@ class ReminderDecision:
     reason: str = ""
 
 
-_ACTIVE_REMINDER_DECISION: ContextVar[ReminderDecision | None] = ContextVar(
-    "llm_chat_reminder_decision",
-    default=None,
-)
+@dataclass(slots=True)
+class _DecisionState:
+    decision: ReminderDecision | None = None
+    active: bool = True
+
+
+_ACTIVE_REMINDER_DECISION: ContextVar[_DecisionState | None] = ContextVar("llm_chat_reminder_decision", default=None)
 
 
 @contextmanager
 def reminder_decision_scope() -> Iterator[None]:
     """Clear a scheduled generation's proposal and restore its parent state."""
 
-    token = _ACTIVE_REMINDER_DECISION.set(None)
+    # Native tools run in child tasks; ContextVar assignments do not flow back.
+    state = _DecisionState()
+    token = _ACTIVE_REMINDER_DECISION.set(state)
     try:
         yield
     finally:
+        state.active = False
+        state.decision = None
         _ACTIVE_REMINDER_DECISION.reset(token)
 
 
 def current_reminder_decision() -> ReminderDecision | None:
     """Return the current generation's validated proposal, if any."""
 
-    return _ACTIVE_REMINDER_DECISION.get()
+    state = _ACTIVE_REMINDER_DECISION.get()
+    return state.decision if state is not None and state.active else None
 
 
 def propose_reminder_decision(decision: ReminderDecision) -> ReminderDecision:
@@ -49,9 +57,12 @@ def propose_reminder_decision(decision: ReminderDecision) -> ReminderDecision:
 
     if not isinstance(decision, ReminderDecision):
         raise TypeError("decision must be a ReminderDecision")
-    if _ACTIVE_REMINDER_DECISION.get() is not None:
+    state = _ACTIVE_REMINDER_DECISION.get()
+    if state is None or not state.active:
+        raise ValueError("a reminder decision requires an active scheduled generation")
+    if state.decision is not None:
         raise ValueError("a reminder decision has already been proposed")
-    _ACTIVE_REMINDER_DECISION.set(decision)
+    state.decision = decision
     return decision
 
 

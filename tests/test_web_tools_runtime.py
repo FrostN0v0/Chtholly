@@ -4233,6 +4233,151 @@ async def test_native_reminder_create_persists_and_continues_generation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["completed", "continue"])
+async def test_native_reminder_resolve_survives_continuation_and_service_settlement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decision: str
+) -> None:
+    from satori import MessageObject
+    from sqlalchemy import select
+    from entari_plugin_database import Base
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from plugins.llm_chat.models import AgentTurn, ReminderOccurrence
+    from plugins.llm_chat.reminders import store, service as reminder_service
+    from plugins.llm_chat.agent_context import AgentAccessContext, agent_access_scope
+    from plugins.llm_chat.core.delivery import DeliveryState
+    from plugins.llm_chat.reminders.tool import register_reminder_tools
+    from plugins.llm_chat.tools.send_msg import SendMsgToolContext, register_send_msg
+    from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
+
+    now = datetime.now(datetime_timezone.utc)
+    next_due = (now + timedelta(days=2)).replace(hour=12, minute=0, second=0, microsecond=0)
+    request = {"action": "resolve", "decision": decision}
+    if decision == "continue":
+        request.update(schedule=next_due.isoformat(), timezone="UTC")
+    script = [
+        _model_response(tool_calls=[_tool_call("resolve-reminder", "reminder", {"request": request})]),
+        _model_response("[END_OF_RESPONSE]"),
+    ]
+    if decision == "completed":
+        script.insert(
+            0,
+            _model_response(
+                tool_calls=[
+                    _tool_call(
+                        "send-reminder", "send_msg", {"segments": [{"type": "text", "text": "Time for a break."}]}
+                    )
+                ]
+            ),
+        )
+    payloads = _install_completion_script(monkeypatch, script)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'resolve-bridge.db'}")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    monkeypatch.setattr(store, "get_session", factory)
+    monkeypatch.setattr(reminder_service, "migrate_turn_origin_columns", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(reminder_service, "get_model_config", lambda *_: SimpleNamespace(name="test-model"))
+    monkeypatch.setattr(reminder_service, "pin_main_model", lambda model: model)
+    trace = ToolTraceRecorder()
+    audit = AgentTurnRecorder()
+
+    class Protocol:
+        def __init__(self):
+            self.sent: list[str] = []
+
+        async def send_message(self, channel, message, *args, **kwargs):
+            self.sent.append(str(message))
+            return [MessageObject(id=f"receipt-{len(self.sent)}")]
+
+    async def resolve_participant(_session, _reference):
+        return None
+
+    account = SimpleNamespace(
+        platform="test",
+        self_id="bot",
+        self_info=Login(platform="test", user=User(id="bot")),
+        connected=asyncio.Event(),
+        protocol=Protocol(),
+    )
+    account.connected.set()
+
+    async def prepare(_config, _session, _identity, **_kwargs):
+        async with factory() as db:
+            turn = AgentTurn(session_id=2, sequence=1, user_id="owner", user_name="Owner", trigger_kind="scheduled")
+            db.add(turn)
+            await db.commit()
+        return SimpleNamespace(lifecycle=SimpleNamespace(agent_turn_id=turn.id), agent_events=audit)
+
+    async def runner(session, ctx, prepared, **_kwargs):
+        access = AgentAccessContext(
+            1,
+            2,
+            prepared.lifecycle.agent_turn_id,
+            "owner",
+            trigger_kind="scheduled",
+            reminder_task_ref=task.task_ref,
+            capability_names=frozenset({"reminder.resolve"}),
+        )
+        with (
+            agent_access_scope(access),
+            llm_chat_context_scope(ctx),
+            llm_chat_tool_trace_scope(trace),
+            llm_chat_delivery_scope(DeliveryState()),
+        ):
+            await LLMService().generate("Evaluate this scheduled task.", model="test-model")
+        return "completed" if decision == "completed" else "silent"
+
+    monkeypatch.setattr(reminder_service, "prepare_scheduled_agent_turn", prepare)
+    service = reminder_service.ReminderService(
+        SimpleNamespace(model="test-model"), accounts=lambda: [account], runner=runner
+    )
+    try:
+        task = await store.create_task(
+            operation_id="native-resolution",
+            platform="test",
+            account_id="bot",
+            unified_user_id="owner",
+            platform_user_id="user",
+            delivery_channel_id="group",
+            goal="Check progress",
+            due_at=now - timedelta(minutes=1),
+            mode="adaptive" if decision == "continue" else "once",
+        )
+        async with _temporary_plugin() as harness:
+            register_reminder_tools(harness.dispatcher)
+            register_send_msg(harness.dispatcher, SendMsgToolContext(resolve_participant))
+            await service.start()
+            for _ in range(250):
+                async with factory() as db:
+                    occurrence = await db.scalar(
+                        select(ReminderOccurrence).where(ReminderOccurrence.task_ref == task.task_ref)
+                    )
+                if occurrence is not None and occurrence.finished_at is not None:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                pytest.fail("Native reminder execution did not settle")
+            result = json.loads(_tool_messages(payloads[-1])[-1]["content"])
+            assert result["ok"] is True
+            assert json.loads(result["data"])["proposed"] is True
+            persisted = await store.get_task_for_service(task.task_ref)
+            assert persisted.status == ("active" if decision == "continue" else "completed")
+            assert persisted.paused_reason == ""
+            assert occurrence.state == "completed"
+            assert occurrence.confirmed_count == (1 if decision == "completed" else 0)
+            assert account.protocol.sent == (["Time for a break."] if decision == "completed" else [])
+            assert (trace.events[-1].status, trace.events[-1].effect) == ("succeeded", "none")
+            if decision == "continue":
+                assert persisted.due_at == next_due.replace(tzinfo=None)
+            await service.claim_ready()
+            assert (await store.get_task_for_service(task.task_ref)).current_occurrence == 1
+    finally:
+        await service.aclose()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("audit_enabled", [False, True])
 async def test_function_wire_schema_preserves_upstream_external_pause_and_continue(
     local_modules: SimpleNamespace,
