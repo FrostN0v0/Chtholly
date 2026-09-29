@@ -8,20 +8,43 @@
   <!-- REMINDER_STYLES -->
 </head>
 <body>
-  <main class="app">
-    <header class="topbar">
-      <div><p class="eyebrow">LLM · REMINDERS</p><h1>提醒任务</h1></div>
+  <div class="app">
+    <header class="context-bar">
+      <label>频道<select id="scope-select" aria-label="选择来源频道"></select></label>
+      <label>来源会话<select id="session-select" aria-label="选择来源会话"></select></label>
+      <label>状态<select id="status-select" aria-label="选择任务状态">
+        <option value="all">全部状态</option><option value="active">待执行</option>
+        <option value="paused">已暂停</option><option value="completed">已结束</option>
+        <option value="cancelled">已取消</option>
+      </select></label>
+      <label>搜索<input id="search-input" type="search" aria-label="搜索任务目标或用户" placeholder="目标或用户" maxlength="100" autocomplete="off"></label>
+      <span id="status" role="status" aria-live="polite">正在读取…</span>
       <button id="refresh" type="button">刷新</button>
     </header>
-    <section class="notice" aria-label="管理范围">
-      <strong>管理员任务管理</strong>
-      <p>按来源会话筛选，或选择“所有任务”查看未归属任务。任务操作使用当前 WebUI 登录，独立于聊天用户身份。已确认的发送不代表任务目标已完成。</p>
-    </section>
-    <div class="scope-control"><label for="scope-select">来源会话</label><select id="scope-select" aria-label="选择来源会话"><option value="all">所有任务</option></select></div>
-    <div class="toolbar"><span id="status" role="status" aria-live="polite">正在读取…</span><span id="count"></span></div>
-    <section id="tasks" class="tasks" aria-label="任务列表"></section>
-    <footer class="footer"><button id="more" type="button" hidden>加载更多</button></footer>
-  </main>
+    <main class="workspace" data-mobile-view="list">
+      <section class="panel task-panel" aria-label="任务列表">
+        <div class="panel-head"><h1>提醒任务 <span id="count"></span></h1></div>
+        <nav id="tasks" class="task-list" aria-label="选择任务"></nav>
+        <footer class="panel-foot"><button id="more" type="button" hidden>加载更多</button></footer>
+      </section>
+      <section class="panel inspector" aria-label="任务详情">
+        <button id="back-to-tasks" class="back-button" type="button">← 返回任务列表</button>
+        <div id="task-heading" class="task-heading">请选择任务。</div>
+        <div class="tabs" role="tablist" aria-label="任务信息">
+          <button type="button" data-tab="overview" role="tab" aria-selected="true">概览</button>
+          <button type="button" data-tab="execution" role="tab" aria-selected="false">执行</button>
+          <button type="button" data-tab="context" role="tab" aria-selected="false">上下文</button>
+          <button type="button" data-tab="source" role="tab" aria-selected="false">来源</button>
+        </div>
+        <div class="inspector-body">
+          <section id="overview-view" class="view" role="tabpanel"></section>
+          <section id="execution-view" class="view" role="tabpanel" hidden></section>
+          <section id="context-view" class="view" role="tabpanel" hidden></section>
+          <section id="source-view" class="view" role="tabpanel" hidden></section>
+        </div>
+      </section>
+    </main>
+  </div>
   <!-- REMINDER_SCRIPT -->
 </body>
 </html>

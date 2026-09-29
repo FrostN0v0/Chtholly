@@ -2698,9 +2698,8 @@ async def test_generation_separates_enriched_media_timeout_hint_from_host_author
 
     async def fake_generate(_messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
         requests.append(kwargs)
-        for tool in ("capture_web_reference", "screenshot_web_page"):
-            with pytest.raises(web_policy_module.WebAccessError):
-                web_policy_module.consume_llm_chat_web_access(cast(Any, tool))
+        with pytest.raises(web_policy_module.WebAccessError):
+            web_policy_module.consume_llm_chat_web_access("capture_web_reference")
         if authorized:
             mark_delivery_success(state, media=True)
             return _handler_response("[END_OF_RESPONSE]")
@@ -2784,7 +2783,7 @@ async def test_generation_rejects_native_image_until_required_provenance_is_deli
     requires_web_reference: bool,
 ) -> None:
     requests: list[dict[str, Any]] = []
-    authorization: list[tuple[bool, bool]] = []
+    reference_capture_allowed: list[bool] = []
     state = DeliveryState()
     session = cast(Session, _ChatSession("Create the requested image"))
     intent = MediaIntent(
@@ -2807,15 +2806,12 @@ async def test_generation_rejects_native_image_until_required_provenance_is_deli
             assert requirements is not None
             assert requirements.confirmed is False
             if len(requests) == 1:
-                allowed = []
-                for tool in ("capture_web_reference", "screenshot_web_page"):
-                    try:
-                        web_policy_module.consume_llm_chat_web_access(cast(Any, tool))
-                    except web_policy_module.WebAccessError:
-                        allowed.append(False)
-                    else:
-                        allowed.append(True)
-                authorization.append((allowed[0], allowed[1]))
+                try:
+                    web_policy_module.consume_llm_chat_web_access("capture_web_reference")
+                except web_policy_module.WebAccessError:
+                    reference_capture_allowed.append(False)
+                else:
+                    reference_capture_allowed.append(True)
                 response = _handler_response("")
                 response.images = [SimpleNamespace(content=_PNG_BYTES, filepath=None, url=None)]
                 return response
@@ -2866,7 +2862,7 @@ async def test_generation_rejects_native_image_until_required_provenance_is_deli
 
     assert generation_module.response_content(response) == "[END_OF_RESPONSE]"
     assert generation_module.response_images(response) == ()
-    assert authorization == [(requires_web_reference, False)]
+    assert reference_capture_allowed == [requires_web_reference]
     assert len(requests) == 2
     assert all(request["parallel_tool_calls"] is False for request in requests)
     assert state.confirmed_media_deliveries == 1

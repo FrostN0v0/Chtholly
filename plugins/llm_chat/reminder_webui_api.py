@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from urllib.parse import urlsplit
 
 from fastapi import Query, Depends, Request, APIRouter, HTTPException
-from sqlalchemy import and_, func, select
 from fastapi.routing import APIRoute
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -23,32 +22,22 @@ from entari_plugin_webui.core.security import is_local_mode
 from utils.webui_theme import themed_assets
 from utils.reminder_core import parse_schedule
 
-from .models import ChatScope, ReminderTask, ReminderOccurrence
+from .models import ReminderTask
 from .reminders import store
+from .reminder_admin_queries import (
+    _scopes,
+    _scope_id,
+    _sessions,
+    _source_rows,
+    _RequestError,
+    _task_projection,
+    _list_projections,
+)
+from .reminder_admin_inspection import _occurrences, _occurrence_detail
 
 _API_PREFIX = "/api/llm-chat/reminders"
 _PAGE_HEADERS = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
-_STATUSES = frozenset({"active", "paused", "completed", "cancelled"})
-_OCCURRENCE_STATES = frozenset(
-    {
-        "claimed",
-        "model_started",
-        "dm_started",
-        "transport_started",
-        "confirmed",
-        "completed",
-        "paused",
-        "cancelled",
-        "expired_recovered",
-        "unknown",
-    }
-)
 _UPDATE_FIELDS = frozenset({"goal", "background", "continuation_state", "schedule", "timezone", "expires_at"})
-
-
-class _RequestError(Exception):
-    def __init__(self, message: str, code: str = "invalid_request", status: int = 400) -> None:
-        self.message, self.code, self.status = message, code, status
 
 
 def _failure(message: str, code: str, status: int) -> JSONResponse:
@@ -76,14 +65,6 @@ def _authenticated(session: Session | None = Depends(require_auth)) -> Session:
     if is_local_mode() or session is None:
         raise HTTPException(status_code=403, detail="需要启用 WebUI 登录后管理提醒")
     return session
-
-
-def _utc(value: datetime | None) -> str | None:
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _origin(value: str) -> tuple[str, str, int]:
@@ -133,141 +114,6 @@ async def _write_payload(request: Request) -> dict[str, object]:
     return payload
 
 
-def _project(task: ReminderTask, occurrence: ReminderOccurrence | None, scope_ref: str | None) -> dict[str, object]:
-    # Never serialize ORM entities: lease tokens, receipt IDs and source/audit refs are private.
-    return {
-        "task_ref": task.task_ref,
-        "scope_ref": scope_ref,
-        "revision": task.revision,
-        "owner_user_id": task.unified_user_id,
-        "platform_user_id": task.platform_user_id,
-        "goal": task.goal[: store.MAX_GOAL],
-        "background": task.background[: store.MAX_BACKGROUND],
-        "continuation_state": task.continuation_state[: store.MAX_CONTINUATION],
-        "mode": task.mode if task.mode in {"once", "adaptive"} else "unknown",
-        "origin": task.origin if task.origin in {"user", "autonomous"} else "unknown",
-        "delivery": task.delivery_target_type if task.delivery_target_type in {"channel", "dm"} else "unknown",
-        "status": task.status if task.status in _STATUSES else "unknown",
-        "due_at": _utc(task.due_at),
-        "timezone": task.timezone[: store.MAX_TIMEZONE],
-        "expires_at": _utc(task.expires_at),
-        "created_at": _utc(task.created_at),
-        "updated_at": _utc(task.updated_at),
-        "paused_reason": task.paused_reason[: store.MAX_REASON],
-        "occurrence": None
-        if occurrence is None
-        else {
-            "state": occurrence.state if occurrence.state in _OCCURRENCE_STATES else "unknown",
-            "scheduled_at": _utc(occurrence.scheduled_at),
-            "started_at": _utc(occurrence.started_at),
-            "finished_at": _utc(occurrence.finished_at),
-            "confirmed_count": max(0, occurrence.confirmed_count),
-            "transport_started": occurrence.transport_started,
-        },
-    }
-
-
-async def _scope_id(db, scope_ref: str) -> int | None:
-    if scope_ref == "all":
-        return None
-    result = await db.scalar(select(ChatScope.id).where(ChatScope.scope_ref == scope_ref))
-    if result is None:
-        raise _RequestError("聊天范围不存在", "scope_not_found", 404)
-    return result
-
-
-async def _latest_occurrences(db, task_refs: list[str]) -> dict[str, ReminderOccurrence]:
-    if not task_refs:
-        return {}
-    latest = (
-        select(ReminderOccurrence.task_ref, func.max(ReminderOccurrence.sequence).label("sequence"))
-        .where(ReminderOccurrence.task_ref.in_(task_refs))
-        .group_by(ReminderOccurrence.task_ref)
-        .subquery()
-    )
-    rows = await db.execute(
-        select(ReminderOccurrence).join(
-            latest,
-            and_(
-                ReminderOccurrence.task_ref == latest.c.task_ref,
-                ReminderOccurrence.sequence == latest.c.sequence,
-            ),
-        )
-    )
-    return {row.task_ref: row for row in rows.scalars()}
-
-
-async def _list_projections(scope_ref: str, limit: int, offset: int) -> tuple[list[dict[str, object]], bool]:
-    async with get_session() as db:
-        scope_id = await _scope_id(db, scope_ref)
-        statement = select(ReminderTask, ChatScope.scope_ref).outerjoin(
-            ChatScope, ReminderTask.source_scope_id == ChatScope.id
-        )
-        if scope_id is not None:
-            statement = statement.where(ReminderTask.source_scope_id == scope_id)
-        rows = (
-            await db.execute(
-                statement.order_by(ReminderTask.updated_at.desc(), ReminderTask.id.desc())
-                .offset(offset)
-                .limit(limit + 1)
-            )
-        ).all()
-        has_more = len(rows) > limit
-        rows = rows[:limit]
-        occurrences = await _latest_occurrences(db, [task.task_ref for task, _ in rows])
-        return [_project(task, occurrences.get(task.task_ref), ref) for task, ref in rows], has_more
-
-
-async def _scopes(limit: int, offset: int) -> tuple[list[dict[str, object]], bool]:
-    async with get_session() as db:
-        counts = (
-            select(
-                ReminderTask.source_scope_id.label("scope_id"),
-                func.count(ReminderTask.id).label("task_count"),
-                func.count(ReminderTask.id).filter(ReminderTask.status == "active").label("active_count"),
-            )
-            .group_by(ReminderTask.source_scope_id)
-            .subquery()
-        )
-        rows = (
-            await db.execute(
-                select(ChatScope, counts.c.task_count, counts.c.active_count)
-                .join(counts, ChatScope.id == counts.c.scope_id)
-                .order_by(ChatScope.updated_at.desc(), ChatScope.id.desc())
-                .offset(offset)
-                .limit(limit + 1)
-            )
-        ).all()
-        return [
-            {
-                "scope_ref": scope.scope_ref,
-                "channel_name": scope.display_name or scope.channel_id,
-                "platform": scope.platform,
-                "account_id": scope.account_id,
-                "channel_id": scope.channel_id,
-                "task_count": count or 0,
-                "active_count": active or 0,
-            }
-            for scope, count, active in rows[:limit]
-        ], len(rows) > limit
-
-
-async def _task_projection(task_ref: str) -> dict[str, object]:
-    async with get_session() as db:
-        row = (
-            await db.execute(
-                select(ReminderTask, ChatScope.scope_ref)
-                .outerjoin(ChatScope, ReminderTask.source_scope_id == ChatScope.id)
-                .where(ReminderTask.task_ref == task_ref)
-            )
-        ).one_or_none()
-        if row is None:
-            raise _RequestError("任务不存在", "task_not_found", 404)
-        task, ref = row
-        occurrences = await _latest_occurrences(db, [task_ref])
-        return _project(task, occurrences.get(task_ref), ref)
-
-
 def _validate_manage(payload: dict[str, object]) -> tuple[str, int, str]:
     action, scope_ref, revision = payload.get("action"), payload.get("scope_ref"), payload.get("revision")
     if (
@@ -308,13 +154,19 @@ def _update_values(payload: dict[str, object], task: ReminderTask) -> dict[str, 
         values["timezone_name"] = timezone_name
     now = datetime.now(timezone.utc)
     if "schedule" in payload:
+        schedule_value = payload["schedule"]
+        if not isinstance(schedule_value, str):
+            raise _RequestError("时间无效")
         try:
-            values["due_at"] = parse_schedule(payload["schedule"], timezone_name, now=now).utc
+            values["due_at"] = parse_schedule(schedule_value, timezone_name, now=now).utc
         except (ValueError, TypeError) as exc:
             raise _RequestError(str(exc)) from None
     if "expires_at" in payload:
+        expiry_value = payload["expires_at"]
+        if not isinstance(expiry_value, str):
+            raise _RequestError("失效时间无效")
         try:
-            values["expires_at"] = parse_schedule(payload["expires_at"], timezone_name, now=now).utc
+            values["expires_at"] = parse_schedule(expiry_value, timezone_name, now=now).utc
         except (ValueError, TypeError) as exc:
             raise _RequestError(str(exc)) from None
     return values
@@ -325,8 +177,13 @@ async def _manage(task_ref: str, request: Request) -> dict[str, object]:
     scope_ref, revision, action = _validate_manage(payload)
     async with get_session() as db:
         scope_id = await _scope_id(db, scope_ref)
-        task = await db.scalar(select(ReminderTask).where(ReminderTask.task_ref == task_ref))
-        if task is None or (scope_ref != "all" and task.source_scope_id != scope_id):
+        row = (await db.execute(_source_rows().where(ReminderTask.task_ref == task_ref))).one_or_none()
+        if row is None:
+            raise _RequestError("任务不存在", "task_not_found", 404)
+        task, trusted_scope, _source_turn, _source_session = row
+        if (scope_ref == "unassigned" and trusted_scope is not None) or (
+            scope_ref not in ("all", "unassigned") and (trusted_scope is None or trusted_scope.id != scope_id)
+        ):
             raise _RequestError("任务不属于此聊天范围", "task_not_found", 404)
         if task.revision != revision:
             raise _RequestError("任务已发生变化，请刷新", "revision_conflict", 409)
@@ -398,22 +255,48 @@ def create_reminder_webui_router(*, asset_dir: Path) -> APIRouter:
 
     @router.get("/scopes", response_model=None)
     async def scopes(
-        limit: Annotated[int, Query(ge=1, le=100)] = 40, offset: Annotated[int, Query(ge=0, le=10000)] = 0
+        limit: Annotated[int, Query(ge=1, le=100)] = 40, offset: Annotated[int, Query(ge=0, le=9223372036854775807)] = 0
     ) -> dict[str, object]:
         items, has_more = await _scopes(limit, offset)
         return {"success": True, "items": items, "has_more": has_more}
 
+    @router.get("/sessions", response_model=None)
+    async def sessions(
+        scope_ref: Annotated[str, Query(max_length=200)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 40,
+        offset: Annotated[int, Query(ge=0, le=9223372036854775807)] = 0,
+    ) -> dict[str, object]:
+        items, has_more, total_count = await _sessions(scope_ref, limit, offset)
+        return {"success": True, "items": items, "has_more": has_more, "total_count": total_count}
+
     @router.get("/tasks", response_model=None)
     async def tasks(
         scope_ref: Annotated[str, Query(max_length=200)] = "all",
+        session_ref: Annotated[str, Query(max_length=200)] = "all",
+        status: Annotated[str, Query(max_length=30)] = "all",
+        q: Annotated[str, Query(max_length=120)] = "",
         limit: Annotated[int, Query(ge=1, le=100)] = 40,
-        offset: Annotated[int, Query(ge=0, le=10000)] = 0,
-    ) -> dict[str, object] | JSONResponse:
-        try:
-            items, has_more = await _list_projections(scope_ref, limit, offset)
-        except _RequestError as exc:
-            return _failure(exc.message, exc.code, exc.status)
-        return {"success": True, "items": items, "has_more": has_more}
+        offset: Annotated[int, Query(ge=0, le=9223372036854775807)] = 0,
+    ) -> dict[str, object]:
+        items, has_more, total_count = await _list_projections(scope_ref, session_ref, status, q, limit, offset)
+        return {"success": True, "items": items, "has_more": has_more, "total_count": total_count}
+
+    @router.get("/tasks/{task_ref}", response_model=None)
+    async def task_detail(task_ref: str) -> dict[str, object]:
+        return {"success": True, "item": await _task_projection(task_ref, include_source=True)}
+
+    @router.get("/tasks/{task_ref}/occurrences", response_model=None)
+    async def occurrences(
+        task_ref: str,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        offset: Annotated[int, Query(ge=0, le=9223372036854775807)] = 0,
+    ) -> dict[str, object]:
+        items, has_more, total_count = await _occurrences(task_ref, limit, offset)
+        return {"success": True, "items": items, "has_more": has_more, "total_count": total_count}
+
+    @router.get("/tasks/{task_ref}/occurrences/{sequence}", response_model=None)
+    async def occurrence_detail(task_ref: str, sequence: int) -> dict[str, object]:
+        return {"success": True, "item": await _occurrence_detail(task_ref, sequence)}
 
     @router.post("/tasks/{task_ref}/manage", response_model=None)
     async def manage(task_ref: str, request: Request) -> dict[str, object] | JSONResponse:

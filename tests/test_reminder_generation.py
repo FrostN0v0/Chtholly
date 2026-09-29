@@ -20,7 +20,14 @@ if not hasattr(EntariConfig, "instance"):
 
 from entari_plugin_database import Base
 
-from plugins.llm_chat import personality, agent_events, context_builder, session_manager, agent_turn_setup
+from plugins.llm_chat import (
+    personality,
+    agent_events,
+    context_builder,
+    session_manager,
+    agent_turn_setup,
+    scheduled_chat_context,
+)
 from plugins.llm_chat.config import LLMChatConfig, PersonaConfig
 from plugins.llm_chat.models import (
     AgentTurn,
@@ -55,6 +62,101 @@ async def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def _baseline() -> BaselineFingerprint:
     return BaselineFingerprint("test", "persona", "system", "tools", "policy")
+
+
+async def _add_completed_chat_turn(store, context_session, *, user: str, assistant: str, speaker: str = "Alice"):
+    turn = await session_manager.start_turn(
+        context_session,
+        trigger_message_id="inbound",
+        user_id="alice",
+        user_name=speaker,
+        conversation_user_id=None,
+        fresh_context=False,
+    )
+    async with store() as db:
+        db.add_all(
+            [
+                AgentEvent(
+                    turn_id=turn.id,
+                    sequence=1,
+                    event_type="user_input",
+                    role="user",
+                    payload_json=json.dumps(
+                        {"content": json.dumps({"speaker": speaker, "content": user}, ensure_ascii=False)},
+                        ensure_ascii=False,
+                    ),
+                    model_visible=True,
+                ),
+                AgentEvent(
+                    turn_id=turn.id,
+                    sequence=2,
+                    event_type="assistant_output",
+                    role="assistant",
+                    payload_json=json.dumps({"content": assistant}, ensure_ascii=False),
+                    status="confirmed",
+                    effect="confirmed",
+                    model_visible=True,
+                ),
+            ]
+        )
+        await db.commit()
+    await session_manager.finish_turn(turn.id, status="completed", final_text=assistant)
+    return turn
+
+
+@pytest.mark.asyncio
+async def test_scheduled_snapshot_reads_only_destination_active_chat_scope(store):
+    group_scope = await session_manager.get_or_create_scope(ScopeIdentity("test", "bot", "guild", "group", "group"))
+    dm_scope = await session_manager.get_or_create_scope(ScopeIdentity("test", "bot", "", "dm", "dm"))
+    group_chat, _ = await session_manager.ensure_active_session(group_scope, _baseline(), idle_minutes=60, max_turns=20)
+    dm_chat, _ = await session_manager.ensure_active_session(dm_scope, _baseline(), idle_minutes=60, max_turns=20)
+    await _add_completed_chat_turn(store, group_chat, user="group secret", assistant="group answer")
+    dm_turn = await _add_completed_chat_turn(
+        store,
+        dm_chat,
+        user="dm question media_0123456789abcdef0123456789abcdef https://c2cpicdw.qpic.cn/private.png",
+        assistant="dm answer",
+    )
+
+    snapshot = await scheduled_chat_context.read_scheduled_chat_snapshot(dm_scope.id)
+
+    assert snapshot is not None
+    assert snapshot.source_session_ref == dm_chat.session_ref
+    assert snapshot.selected_turn_refs == (dm_turn.turn_ref,)
+    rendered_turns = snapshot.model_payload["turns"]
+    assert [item["speaker"] for item in rendered_turns] == ["Alice", "assistant"]
+    assert "dm question" in rendered_turns[0]["content"]
+    assert "group secret" not in json.dumps(snapshot.model_payload, ensure_ascii=False)
+    rendered = json.dumps(snapshot.model_payload, ensure_ascii=False)
+    assert "media_0123456789abcdef0123456789abcdef" not in rendered
+    assert "c2cpicdw.qpic.cn/private.png" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_scheduled_snapshot_is_absent_without_active_chat_session(store):
+    scope = await session_manager.get_or_create_scope(ScopeIdentity("test", "bot", "guild", "channel", "channel"))
+    await session_manager.ensure_active_session(
+        scope, _baseline(), idle_minutes=60, max_turns=20, purpose="reminder", reminder_task_ref="task-a"
+    )
+
+    assert await scheduled_chat_context.read_scheduled_chat_snapshot(scope.id) is None
+
+
+@pytest.mark.asyncio
+async def test_scheduled_snapshot_drops_old_chat_after_hard_reset_and_caps_text(store):
+    scope = await session_manager.get_or_create_scope(ScopeIdentity("test", "bot", "guild", "channel", "channel"))
+    old_chat, _ = await session_manager.ensure_active_session(scope, _baseline(), idle_minutes=60, max_turns=20)
+    old_turn = await _add_completed_chat_turn(store, old_chat, user="old sealed text", assistant="old answer")
+    current_chat = await session_manager.rollover_session(scope, old_chat, _baseline(), reason="manual_reset")
+    await _add_completed_chat_turn(store, current_chat, user="x" * 500, assistant="y" * 500)
+
+    snapshot = await scheduled_chat_context.read_scheduled_chat_snapshot(scope.id, max_chars=512)
+
+    assert snapshot is not None
+    assert snapshot.source_session_ref == current_chat.session_ref
+    assert old_turn.turn_ref not in snapshot.selected_turn_refs
+    assert snapshot.selected_turn_refs
+    assert sum(len(item["content"]) for item in snapshot.model_payload["turns"]) <= 512
 
 
 @pytest.mark.asyncio
@@ -148,6 +250,15 @@ async def test_scheduled_prepare_captures_task_not_user_input_and_normal_prepare
         ),
     )
     identity = ChatIdentity(user_id="alice", display_name="Alice", participant_ref="participant_alice")
+    destination_scope = await session_manager.get_or_create_scope(
+        ScopeIdentity("test", "bot", "guild", "channel", "channel")
+    )
+    destination_chat, _ = await session_manager.ensure_active_session(
+        destination_scope, _baseline(), idle_minutes=60, max_turns=20
+    )
+    destination_turn = await _add_completed_chat_turn(
+        store, destination_chat, user="What did I ask you to remember?", assistant="The destination chat context."
+    )
     prepared = await agent_turn_setup.prepare_scheduled_agent_turn(
         config,
         session,
@@ -172,6 +283,10 @@ async def test_scheduled_prepare_captures_task_not_user_input_and_normal_prepare
     assert prepared.agent_access.trigger_kind == "scheduled"
     assert prepared.agent_access.is_operator is False
     task = json.loads(prepared.chat_messages[-1]["content"].split(": ", 1)[1])
+    ordinary = task["read_only_ordinary_chat_context"]
+    assert ordinary["label"] == "UNTRUSTED_READ_ONLY_ORDINARY_CHAT_CONTEXT"
+    assert [item["speaker"] for item in ordinary["turns"]] == ["Alice", "assistant"]
+    assert "What did I ask you to remember?" in ordinary["turns"][0]["content"]
     assert task["goal"] == "Check the progress tomorrow"
     assert task["occurrence_sequence"] == 2
     assert task["late_by_seconds"] == 60
@@ -201,10 +316,15 @@ async def test_scheduled_prepare_captures_task_not_user_input_and_normal_prepare
     assert started[0].model_visible is False
     assert "media_ref" not in started[0].payload_json
     assert all(event.event_type != "user_input" for event in started)
-    assert (
-        json.loads(next(event.payload_json for event in started if event.event_type == "context_snapshot"))["messages"]
-        == prepared.chat_messages
+    context_snapshot_payload = json.loads(
+        next(event.payload_json for event in started if event.event_type == "context_snapshot")
     )
+    assert context_snapshot_payload["messages"] == prepared.chat_messages
+    assert context_snapshot_payload["selection"]["ordinary_chat"] == {
+        "status": "present",
+        "session_ref": destination_chat.session_ref,
+        "included_turn_refs": [destination_turn.turn_ref],
+    }
 
     normal = await agent_turn_setup.prepare_agent_turn(
         config,
