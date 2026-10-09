@@ -5,10 +5,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 import asyncio
 from pathlib import Path
+import sqlite3
 from datetime import datetime, timezone, timedelta
 
 import pytest
 from satori import User, Login, Channel, ChannelType, MessageObject
+from sqlalchemy import text, event
 from arclet.entari.config import EntariConfig
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -29,8 +31,10 @@ UTC = timezone.utc
 
 
 @pytest.fixture
-async def db(tmp_path, monkeypatch):
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}", connect_args={"timeout": 15})
+async def db(tmp_path, monkeypatch, request):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}", connect_args={"timeout": getattr(request, "param", 15)}
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -420,26 +424,108 @@ async def test_two_users_in_one_channel_run_concurrently(db, fake_generation):
         await worker.aclose()
 
 
+def hold_sqlite_reader(tmp_path):
+    reader = sqlite3.connect(tmp_path / "runtime.db")
+    reader.execute("BEGIN")
+    reader.execute("SELECT task_ref FROM chat_reminder_tasks").fetchall()
+    return reader
+
+
+def observe_sqlite_lock(db):
+    locked = asyncio.Event()
+
+    def handle_error(context):
+        if isinstance(context.original_exception, sqlite3.OperationalError):
+            locked.set()
+
+    event.listen(db.kw["bind"].sync_engine, "handle_error", handle_error)
+    return locked
+
+
 @pytest.mark.asyncio
-async def test_migration_precedes_any_existing_database_query(db, fake_generation, monkeypatch):
-    sequence = []
-    migrate = runtime.migrate_turn_origin_columns
-    query = runtime.recover_stale
+@pytest.mark.parametrize("db", [0.02], indirect=True)
+async def test_startup_retries_real_commit_lock_and_preserves_unexecuted_tasks(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, "_STARTUP_RETRY_SECONDS", 0.02)
+    monkeypatch.setattr(runtime, "_STARTUP_RETRY_MAX_SECONDS", 0.05)
+    expired = await task(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    pending = await task(operation_id="pending", goal="still due")
+    locked = observe_sqlite_lock(db)
+    reader = hold_sqlite_reader(tmp_path)
+    worker = runtime.ReminderService(SimpleNamespace(model="default"), accounts=lambda: [])
+    starters = [asyncio.create_task(worker.start()) for _ in range(2)]
+    try:
+        await asyncio.wait_for(locked.wait(), 2)
+        assert not worker._started
+        assert not any(starter.done() for starter in starters)
+        assert (await store.get_task_for_service(expired.task_ref)).status == "active"
+        reader.rollback()
+        await asyncio.wait_for(asyncio.gather(*starters), 5)
 
-    async def traced_migration():
-        sequence.append("migration")
-        await migrate()
+        current = await store.get_task_for_service(expired.task_ref)
+        assert current.status == "completed"
+        assert current.revision == 1
+        assert current.current_occurrence == 0
+        current = await store.get_task_for_service(pending.task_ref)
+        assert current.status == "active"
+        assert current.due_at == pending.due_at
+        assert current.revision == current.current_occurrence == 0
+        assert worker._started
+        assert worker._loop is not None
+        assert not worker._loop.done()
+    finally:
+        reader.rollback()
+        reader.close()
+        await worker.aclose()
+        await asyncio.gather(*starters, return_exceptions=True)
 
-    async def traced_recovery():
-        sequence.append("query")
-        await query()
 
-    monkeypatch.setattr(runtime, "migrate_turn_origin_columns", traced_migration)
-    monkeypatch.setattr(runtime, "recover_stale", traced_recovery)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("db", [0.02], indirect=True)
+@pytest.mark.parametrize("stop", ["close", "cancel"])
+async def test_stopped_startup_cannot_resume_after_database_unlocks(db, tmp_path, monkeypatch, stop):
+    monkeypatch.setattr(runtime, "_STARTUP_RETRY_SECONDS", 0.02)
+    monkeypatch.setattr(runtime, "_STARTUP_RETRY_MAX_SECONDS", 0.05)
+    expired = await task(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    locked = observe_sqlite_lock(db)
+    reader = hold_sqlite_reader(tmp_path)
+    worker = runtime.ReminderService(SimpleNamespace(model="default"), accounts=lambda: [])
+    starter = asyncio.create_task(worker.start())
+    try:
+        await asyncio.wait_for(locked.wait(), 2)
+        if stop == "close":
+            await asyncio.wait_for(worker.aclose(), 2)
+        else:
+            starter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await starter
+        reader.rollback()
+        await asyncio.sleep(0.1)
+
+        current = await store.get_task_for_service(expired.task_ref)
+        assert current.status == "active"
+        assert current.revision == current.current_occurrence == 0
+        assert not worker._started
+        assert worker._startup is worker._loop is None
+    finally:
+        reader.rollback()
+        reader.close()
+        await worker.aclose()
+        await asyncio.gather(starter, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_non_lock_startup_error_is_reported_without_retry_or_fake_readiness(db):
+    async with db() as session:
+        await session.execute(text("DROP TABLE chat_reminder_tasks"))
+        await session.commit()
     worker = runtime.ReminderService(SimpleNamespace(model="default"), accounts=lambda: [])
     try:
-        await worker.start()
-        assert sequence[:2] == ["migration", "query"]
+        from sqlalchemy.exc import OperationalError
+
+        with pytest.raises(OperationalError, match="no such table"):
+            await asyncio.wait_for(worker.start(), 2)
+        assert not worker._started
+        assert worker._startup is worker._loop is None
     finally:
         await worker.aclose()
 

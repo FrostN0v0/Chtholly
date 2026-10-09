@@ -320,7 +320,7 @@ async def expire_tasks() -> int:
             ReminderOccurrence.state.in_(CLAIM_STATES),
         )
     )
-    async with get_session() as db:
+    async with get_session() as db, db.begin():
         result = await db.execute(
             update(ReminderTask)
             .where(
@@ -331,7 +331,6 @@ async def expire_tasks() -> int:
             )
             .values(status="completed", revision=ReminderTask.revision + 1, updated_at=now)
         )
-        await db.commit()
         return result.rowcount
 
 
@@ -905,9 +904,8 @@ async def _recover_stale_in_session(db: Any, now: datetime) -> int:
 
 async def recover_stale(*, now: datetime | None = None) -> int:
     now_naive = _now_naive(now)
-    async with get_session() as db:
+    async with get_session() as db, db.begin():
         count = await _recover_stale_in_session(db, now_naive)
-        await db.commit()
         return count
 
 

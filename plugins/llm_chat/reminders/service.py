@@ -6,6 +6,7 @@ from copy import deepcopy
 from typing import Any
 import asyncio
 from pathlib import Path
+import sqlite3
 from datetime import datetime, timezone
 import traceback
 from collections.abc import Mapping, Callable, Iterable, Sequence, Awaitable
@@ -14,6 +15,7 @@ from satori import User, Event, Guild, Channel, ChannelType, LoginStatus
 from launart import Launart, Service
 from arclet.entari import Session
 from launart.status import Phase
+from sqlalchemy.exc import OperationalError
 from arclet.entari.const import ITEM_SESSION
 from arclet.entari.logger import log
 from arclet.entari.event.base import InternalEvent
@@ -51,8 +53,24 @@ from ..session_manager import migrate_turn_origin_columns
 from ..agent_turn_setup import prepare_scheduled_agent_turn
 
 _LOGGER = log.wrapper("[llm_chat.reminders]")
+_STARTUP_RETRY_SECONDS = 1.0
+_STARTUP_RETRY_MAX_SECONDS = 10.0
 AccountKey = tuple[str, str]
 Runner = Callable[..., Awaitable[str]]
+
+
+def _sqlite_lock_error(error: Exception) -> bool:
+    if not isinstance(error, OperationalError) or not isinstance(error.orig, sqlite3.OperationalError):
+        return False
+    code = getattr(error.orig, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return code & 0xFF in (5, 6)
+    # Python 3.10 does not expose SQLite result codes on exceptions.
+    return str(error.orig).split(": ", 1)[0] in (
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+    )
 
 
 def _online(account: Any) -> bool:
@@ -122,6 +140,7 @@ class ReminderService(Service):
         self._workers: dict[str, asyncio.Task[None]] = {}
         self._claims: dict[str, ReminderClaim] = {}
         self._loop: asyncio.Task[None] | None = None
+        self._startup: asyncio.Task[None] | None = None
         self._closed = False
         self._started = False
         self._start_lock = asyncio.Lock()
@@ -163,15 +182,35 @@ class ReminderService(Service):
         async with self._start_lock:
             if self._started or self._closed:
                 return
-            await migrate_turn_origin_columns()
-            await recover_stale()
-            await expire_tasks()
-            self._refresh_accounts()
+            self._startup = asyncio.create_task(self._initialize(), name="reminder-startup")
+            try:
+                await self._startup
+            finally:
+                self._startup = None
+
+    async def _initialize(self) -> None:
+        delay = _STARTUP_RETRY_SECONDS
+        while not self._closed:
+            try:
+                await migrate_turn_origin_columns()
+                await recover_stale()
+                await expire_tasks()
+                self._refresh_accounts()
+            except Exception as exc:
+                if not _sqlite_lock_error(exc):
+                    _LOGGER.error(f"reminder startup failed: {type(exc).__name__}")
+                    raise
+                _LOGGER.warning(f"reminder startup waiting for SQLite lock; retrying in {delay:g}s")
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, _STARTUP_RETRY_MAX_SECONDS)
+                continue
             if self._closed:
                 return
             self._started = True
             self._loop = asyncio.create_task(self._run_loop(), name="reminder-wakeup-loop")
             self.wake()
+            _LOGGER.info("reminder wakeup loop started")
+            return
 
     async def _run_loop(self) -> None:
         while not self._closed:
@@ -444,6 +483,10 @@ class ReminderService(Service):
                 return
             self._closed = True
             self._wake.set()
+            startup = self._startup
+            if startup is not None:
+                startup.cancel()
+                await asyncio.gather(startup, return_exceptions=True)
             loop = self._loop
             if loop is not None:
                 loop.cancel()

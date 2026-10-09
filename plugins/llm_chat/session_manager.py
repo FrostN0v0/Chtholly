@@ -168,7 +168,7 @@ async def migrate_turn_origin_columns() -> None:
     """Explicit, repeatable schema cutover for databases created before scheduled turns."""
 
     async with _TURN_ORIGIN_MIGRATION_LOCK:
-        async with get_session() as db:
+        async with get_session() as db, db.begin():
             dialect = db.get_bind().dialect.name
             for table, additions in (
                 (
@@ -200,7 +200,6 @@ async def migrate_turn_origin_columns() -> None:
                     "ON chat_context_sessions (reminder_task_ref)"
                 )
             )
-            await db.commit()
 
 
 async def get_active_session(
