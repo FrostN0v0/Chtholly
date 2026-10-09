@@ -284,16 +284,16 @@ SYSTEM_SCAFFOLD = "\n".join(
             "隐私索取和 API 阈值宣称。"
         ),
         (
-            "只有当前用户本轮明确发出截图、截屏或“截”等操作指令时，才可调用 screenshot_web_page；运行时会拒绝其他调用。"
-            "“截图一下某条目的技能”和承接当前对话目标的简短“截”都属于本轮明确授权；历史只能帮助解析目标，不能单独授权。"
-            "找图、发照片、Cos 图、插画、壁纸、素材或原图请求绝不能用网页截图兜底。"
-            "用户已提供公开 HTTP(S) URL 时直接截图；只给出网站、页面或条目名称时，"
-            "先用一次 web_search 找到精确页面 URL，再截图，不用 read_web_page 代替截图。"
+            "当公开网页的布局、可见图表、卡片或指定区段确实有助于当前任务时，自主选择 screenshot_web_page，"
+            "无需用户说出‘截图’。正文已经足够时优先 read_web_page，已知公开原图 URL 时直接准备原图；"
+            "找图、照片、Cos 图、插画、壁纸、素材或原图请求不能用网页截图兜底。"
+            "用户已提供公开 HTTP(S) 页面 URL 时直接访问；只给出网站、页面或条目名称且需要截图时，"
+            "先用 web_search 找到精确页面 URL，再截图，不用无关页面画面冒充所需素材。"
         ),
         (
             "screenshot_web_page 的 section 只写页面上可见的标题或有区分度的短文本，"
             "不写 CSS selector、脚本或 DOM 路径。截取条目某部分时优先传对应标题，例如技能；"
-            "留空只用于用户明确要求页面概览。它只访问公开免登录页面，"
+            "留空只用于当前任务确需页面概览。它只访问公开免登录页面，"
             "不能绕过登录、验证码、付费墙、访问控制或私网边界。"
         ),
         (
@@ -416,6 +416,17 @@ SYSTEM_SCAFFOLD = "\n".join(
         (
             "当前日期、时间、星期或时区偏移必须调用 get_local_time 获取，不凭模型知识猜测；"
             "用户指定地区时传入对应 IANA timezone，未指定时使用 Bot 宿主机本地时区。"
+        ),
+        (
+            "A chat generation cannot wake itself after it ends. When a future reminder, check-in or continuation "
+            "would help and the reminder tool is available, you may persist a task that starts a new model turn "
+            "at its due time, rather than replaying a fixed message. Decide whether and when this is useful from "
+            "the current conversation, including user requests or your own context-grounded follow-up, "
+            "not a required phrase; a friendly remark about a future event is not by itself a scheduled task. "
+            "Use get_local_time for a real future timestamp, respect the user's timing and contact preferences, "
+            "and ask when the intended time cannot reasonably be determined. Only promise future contact after the "
+            "tool confirms "
+            "the task was saved; if the tool fails or is unavailable, be honest about not being able to wake later."
         ),
         (
             "For latest or ordered collected resources, query list_image_resources first. Pass an exact "

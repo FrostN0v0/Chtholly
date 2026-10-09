@@ -161,7 +161,6 @@ class MediaIntent:
     media_requested: bool = False
     requires_source_edit: bool = False
     requires_web_reference: bool = False
-    webpage_screenshot_requested: bool = False
 
     @property
     def requires_provenance(self) -> bool:
@@ -297,7 +296,7 @@ def build_media_intent(raw_user_text: str, *, has_image_inputs: bool = False) ->
             or web
             or any(pattern.search(clause) for pattern in _MEDIA_REQUEST_PATTERNS if pattern is not _IMAGE_EDIT_PATTERN)
         )
-    return MediaIntent(media, edit, web, screenshot)
+    return MediaIntent(media, edit, web)
 
 
 def requests_contextual_media_delivery(raw_user_text: str, messages: Sequence[ChatMessage]) -> bool:

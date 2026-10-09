@@ -50,6 +50,11 @@ def _participant_turn_scope(session: Session) -> _ParticipantTurnScope:
     )
 
 
+def participant_turn_active(platform: str, account_id: str, channel_id: str, user_id: str) -> bool:
+    active = _ACTIVE_PARTICIPANT_TURNS.get((platform, account_id, channel_id, user_id))
+    return active is not None and not active.task.done()
+
+
 def current_participant_turn_superseded() -> bool:
     state = _CURRENT_PARTICIPANT_TURN_STATE.get()
     return state.superseded if state is not None else False

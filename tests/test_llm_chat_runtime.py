@@ -2698,9 +2698,8 @@ async def test_generation_separates_enriched_media_timeout_hint_from_host_author
 
     async def fake_generate(_messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
         requests.append(kwargs)
-        for tool in ("capture_web_reference", "screenshot_web_page"):
-            with pytest.raises(web_policy_module.WebAccessError):
-                web_policy_module.consume_llm_chat_web_access(cast(Any, tool))
+        with pytest.raises(web_policy_module.WebAccessError):
+            web_policy_module.consume_llm_chat_web_access("capture_web_reference")
         if authorized:
             mark_delivery_success(state, media=True)
             return _handler_response("[END_OF_RESPONSE]")
@@ -2746,50 +2745,30 @@ async def test_generation_separates_enriched_media_timeout_hint_from_host_author
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("content", "expected_authorized"),
-    [
-        ("请截图这个网页", True),
-        ("截图一下异格安洁莉娜的技能给我", True),
-        ("截", True),
-        ('<at id="2123673121" name="珂朵莉"/> 截', True),
-        ("请找一下陈千语 cosplay 图片", False),
-    ],
-)
-async def test_generation_authorizes_webpage_screenshot_only_for_explicit_current_request(
+async def test_generation_allows_model_chosen_public_screenshot_without_a_keyword(
     monkeypatch: pytest.MonkeyPatch,
-    content: str,
-    expected_authorized: bool,
 ) -> None:
-    observed: list[bool] = []
     state = DeliveryState()
 
     async def fake_generate(_messages: list[dict[str, Any]], **_kwargs: Any) -> SimpleNamespace:
-        try:
-            web_policy_module.consume_llm_chat_web_access("screenshot_web_page")
-        except web_policy_module.WebAccessError:
-            observed.append(False)
-        else:
-            observed.append(True)
-            mark_delivery_success(state, media=True)
-        return _handler_response("done")
+        web_policy_module.consume_llm_chat_web_access("screenshot_web_page")
+        return _handler_response("The page uses a two-column layout.")
 
     monkeypatch.setattr(generation_module, "llm", SimpleNamespace(generate=fake_generate))
-
     response = await generation_module.generate_chat_response(
-        cast(list[Any], [{"role": "user", "content": content}]),
+        cast(list[Any], [{"role": "user", "content": "Describe the visual layout of this public page"}]),
         system="system",
         model="deepseek",
         channel_id="group",
         ctx=Contexts(),
         web_limits=generation_module.WebAccessLimits(0, 1, 1),
         delivery_state=state,
-        agent_access=AgentAccessContext(10, 20, 30, "same-user", raw_user_text=content),
+        agent_access=AgentAccessContext(
+            10, 20, 30, "same-user", raw_user_text="Describe the visual layout of this public page"
+        ),
         request_timeout=12.5,
     )
-
-    assert generation_module.response_content(response) == "done"
-    assert observed == [expected_authorized]
+    assert generation_module.response_content(response) == "The page uses a two-column layout."
 
 
 @pytest.mark.asyncio
@@ -2804,7 +2783,7 @@ async def test_generation_rejects_native_image_until_required_provenance_is_deli
     requires_web_reference: bool,
 ) -> None:
     requests: list[dict[str, Any]] = []
-    authorization: list[tuple[bool, bool]] = []
+    reference_capture_allowed: list[bool] = []
     state = DeliveryState()
     session = cast(Session, _ChatSession("Create the requested image"))
     intent = MediaIntent(
@@ -2827,15 +2806,12 @@ async def test_generation_rejects_native_image_until_required_provenance_is_deli
             assert requirements is not None
             assert requirements.confirmed is False
             if len(requests) == 1:
-                allowed = []
-                for tool in ("capture_web_reference", "screenshot_web_page"):
-                    try:
-                        web_policy_module.consume_llm_chat_web_access(cast(Any, tool))
-                    except web_policy_module.WebAccessError:
-                        allowed.append(False)
-                    else:
-                        allowed.append(True)
-                authorization.append((allowed[0], allowed[1]))
+                try:
+                    web_policy_module.consume_llm_chat_web_access("capture_web_reference")
+                except web_policy_module.WebAccessError:
+                    reference_capture_allowed.append(False)
+                else:
+                    reference_capture_allowed.append(True)
                 response = _handler_response("")
                 response.images = [SimpleNamespace(content=_PNG_BYTES, filepath=None, url=None)]
                 return response
@@ -2886,7 +2862,7 @@ async def test_generation_rejects_native_image_until_required_provenance_is_deli
 
     assert generation_module.response_content(response) == "[END_OF_RESPONSE]"
     assert generation_module.response_images(response) == ()
-    assert authorization == [(requires_web_reference, False)]
+    assert reference_capture_allowed == [requires_web_reference]
     assert len(requests) == 2
     assert all(request["parallel_tool_calls"] is False for request in requests)
     assert state.confirmed_media_deliveries == 1

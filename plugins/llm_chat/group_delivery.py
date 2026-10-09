@@ -65,8 +65,9 @@ class _Turn:
     runtime: _Runtime
     key: _ChannelKey
     channel: _Channel
-    source: MessageCreatedEvent
+    source: object
     message_id: str
+    scheduled_reminder: bool = False
     token: object = field(default_factory=object)
     closed: bool = False
     pending_attribution: bool = False
@@ -84,18 +85,17 @@ def _key(session: Session) -> _ChannelKey:
 
 
 @contextmanager
-def group_delivery_scope(session: Session) -> Iterator[None]:
+def group_delivery_scope(session: Session, *, scheduled_reminder: bool = False) -> Iterator[None]:
     """Bind the full claimed turn, without reserving any channel sending time."""
     runtime = _RUNTIME
     source = session.event
     if (
         runtime is None
         or runtime.closed
-        or not isinstance(source, MessageCreatedEvent)
+        or (not scheduled_reminder and not isinstance(source, MessageCreatedEvent))
         or source.channel is None
         or source.channel.type == ChannelType.DIRECT
-        or source.message is None
-        or not source.message.id
+        or (not scheduled_reminder and (source.message is None or not source.message.id))
     ):
         yield
         return
@@ -108,7 +108,9 @@ def group_delivery_scope(session: Session) -> Iterator[None]:
         channel.expiry.cancel()
         channel.expiry = None
     channel.references += 1
-    turn = _Turn(runtime, key, channel, source, str(source.message.id))
+    turn = _Turn(
+        runtime, key, channel, source, "" if scheduled_reminder else str(source.message.id), scheduled_reminder
+    )
     token = _CURRENT.set(turn)
     try:
         yield
@@ -163,7 +165,7 @@ async def send_group_delivery(
         async with turn.channel.queue.slot(turn.token, not_before=not_before, interval=interval) as permit:
             if turn.closed or turn.runtime.closed:
                 raise asyncio.CancelledError
-            quotable = supports_reply(content, turn.key[0])
+            quotable = not turn.scheduled_reminder and supports_reply(content, turn.key[0])
             quoted = quotable and (permit.reply or turn.pending_attribution)
             outgoing = quote_request(content, turn.message_id) if quoted else content
             started = False
@@ -173,7 +175,9 @@ async def send_group_delivery(
                 token = _SENDING.set(turn)
                 try:
                     started = True
-                    return await session.send(outgoing)
+                    from .reminders.delivery import send_reminder_transport
+
+                    return await send_reminder_transport(lambda: session.send(outgoing))
                 finally:
                     _SENDING.reset(token)
 
@@ -190,7 +194,7 @@ async def send_group_delivery(
             turn.last_send = turn.runtime.clock()
             if quoted:
                 turn.pending_attribution = False
-            elif not quotable and permit.reply:
+            elif not turn.scheduled_reminder and not quotable and permit.reply:
                 turn.pending_attribution = True
             return True
     finally:

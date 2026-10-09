@@ -190,6 +190,7 @@ async def test_message_image_sources_are_resolved_on_demand_within_current_scope
         SimpleNamespace(
             account=SimpleNamespace(platform="onebot", self_id="bot-1"),
             guild=SimpleNamespace(id="group-1"),
+            event=SimpleNamespace(guild=SimpleNamespace(id="group-1")),
             channel=SimpleNamespace(id="group-1"),
             message_get=message_get,
         ),
@@ -206,6 +207,7 @@ async def test_message_image_sources_are_resolved_on_demand_within_current_scope
         SimpleNamespace(
             account=SimpleNamespace(platform="onebot", self_id="bot-2"),
             guild=SimpleNamespace(id="group-1"),
+            event=SimpleNamespace(guild=SimpleNamespace(id="group-1")),
             channel=SimpleNamespace(id="group-1"),
             message_get=AsyncMock(),
         ),
@@ -341,6 +343,7 @@ async def test_participant_search_refreshes_matching_protocol_roster(perception_
     class RosterSession:
         account = SimpleNamespace(platform="onebot", self_id="bot-1")
         guild = SimpleNamespace(id="group-1")
+        event = SimpleNamespace(guild=SimpleNamespace(id="group-1"))
         channel = SimpleNamespace(id="group-1")
 
         def __init__(self) -> None:
@@ -387,6 +390,7 @@ async def test_platform_user_resolution_hydrates_and_reuses_current_channel_part
     class DirectMemberSession:
         account = SimpleNamespace(platform="onebot", self_id="bot-1")
         guild = SimpleNamespace(id="group-1")
+        event = SimpleNamespace(guild=SimpleNamespace(id="group-1"))
         channel = SimpleNamespace(id="group-1")
 
         def __init__(self) -> None:
@@ -423,6 +427,7 @@ async def test_participant_search_does_not_turn_unsupported_roster_into_false_ab
     class UnsupportedRosterSession:
         account = SimpleNamespace(platform="qq", self_id="bot-1")
         guild = SimpleNamespace(id="group-1")
+        event = SimpleNamespace(guild=SimpleNamespace(id="group-1"))
         channel = SimpleNamespace(id="group-1")
 
         def guild_member_list(self):

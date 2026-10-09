@@ -44,7 +44,7 @@ class ActiveChatTurn:
     """Own one persisted user turn and its confirmed assistant deliveries."""
 
     channel_id: str
-    user_message_id: int
+    user_message_id: int | None
     delivery_state: DeliveryState
     append_history: HistoryAppender
     delete_history: HistoryDeleter
@@ -121,7 +121,7 @@ class ActiveChatTurn:
     async def rollback_if_unstarted(self) -> None:
         """Delete the user history row only when no delivery attempt occurred."""
 
-        if self.delivery_state.delivery_attempts:
+        if self.user_message_id is None or self.delivery_state.delivery_attempts:
             return
         try:
             await self.delete_history(self.user_message_id)

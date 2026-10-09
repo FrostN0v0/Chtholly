@@ -88,6 +88,8 @@ class ContextSession(Base):
     previous_session_id: Mapped[int | None] = mapped_column(default=None)
     sequence: Mapped[int]
     status: Mapped[str] = mapped_column(default="active")
+    purpose: Mapped[str] = mapped_column(default="chat")
+    reminder_task_ref: Mapped[str] = mapped_column(default="", index=True)
     start_reason: Mapped[str] = mapped_column(default="initial")
     close_reason: Mapped[str] = mapped_column(default="")
     model_name: Mapped[str] = mapped_column(default="")
@@ -127,6 +129,7 @@ class AgentTurn(Base):
     session_id: Mapped[int] = mapped_column(index=True)
     sequence: Mapped[int]
     trigger_message_id: Mapped[str] = mapped_column(default="")
+    trigger_kind: Mapped[str] = mapped_column(default="message")
     conversation_user_id: Mapped[int | None] = mapped_column(default=None, index=True)
     user_id: Mapped[str] = mapped_column(index=True)
     user_name: Mapped[str]
@@ -279,3 +282,91 @@ class ImageTag(Base):
     tags: Mapped[str]
     """Canonical structured JSON metadata; legacy comma tags remain readable during migration."""
     embedding_json: Mapped[str] = mapped_column(Text, default="")
+
+
+class ReminderTask(Base):
+    __tablename__ = "chat_reminder_tasks"
+    __table_args__ = (
+        UniqueConstraint("platform", "account_id", "source_execution_ref", name="uq_chat_reminder_source_execution"),
+        Index("ix_chat_reminder_owner_status", "platform", "account_id", "unified_user_id", "status"),
+        Index("ix_chat_reminder_due", "status", "due_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_ref: Mapped[str] = mapped_column(default=lambda: _opaque_ref("reminder"), unique=True)
+    platform: Mapped[str] = mapped_column(default="")
+    account_id: Mapped[str] = mapped_column(index=True)
+    source_scope_id: Mapped[int | None] = mapped_column(default=None, index=True)
+    source_channel_id: Mapped[str] = mapped_column(default="", index=True)
+    unified_user_id: Mapped[str] = mapped_column(index=True)
+    platform_user_id: Mapped[str] = mapped_column(default="")
+    delivery_target_type: Mapped[str] = mapped_column(default="channel")
+    delivery_channel_id: Mapped[str] = mapped_column(default="")
+    delivery_user_id: Mapped[str] = mapped_column(default="")
+    dm_authorized: Mapped[bool] = mapped_column(default=False)
+    origin: Mapped[str] = mapped_column(default="user")
+    mode: Mapped[str] = mapped_column(default="once")
+    goal: Mapped[str] = mapped_column(Text, default="")
+    background: Mapped[str] = mapped_column(Text, default="")
+    continuation_state: Mapped[str] = mapped_column(Text, default="")
+    source_turn_ref: Mapped[str] = mapped_column(default="")
+    source_event_ref: Mapped[str] = mapped_column(default="")
+    source_execution_ref: Mapped[str | None] = mapped_column(default=None, index=True)
+    timezone: Mapped[str] = mapped_column(default="UTC")
+    due_at: Mapped[datetime] = mapped_column(index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(default=None)
+    status: Mapped[str] = mapped_column(default="active", index=True)
+    revision: Mapped[int] = mapped_column(default=0)
+    current_occurrence: Mapped[int] = mapped_column(default=0)
+    context_session_id: Mapped[int | None] = mapped_column(default=None)
+    paused_reason: Mapped[str] = mapped_column(default="")
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+
+class ReminderOccurrence(Base):
+    __tablename__ = "chat_reminder_occurrences"
+    __table_args__ = (
+        UniqueConstraint("task_ref", "sequence", name="uq_chat_reminder_occurrence_sequence"),
+        Index("ix_chat_reminder_occurrence_lease", "state", "lease_deadline"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_ref: Mapped[str] = mapped_column(index=True)
+    sequence: Mapped[int]
+    task_revision: Mapped[int] = mapped_column(default=0)
+    lease_token: Mapped[str | None] = mapped_column(default=None, unique=True)
+    lease_deadline: Mapped[datetime | None] = mapped_column(default=None)
+    scheduled_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(default=None)
+    model_started_at: Mapped[datetime | None] = mapped_column(default=None)
+    dm_started_at: Mapped[datetime | None] = mapped_column(default=None)
+    transport_started_at: Mapped[datetime | None] = mapped_column(default=None)
+    model_started: Mapped[bool] = mapped_column(default=False)
+    dm_started: Mapped[bool] = mapped_column(default=False)
+    transport_started: Mapped[bool] = mapped_column(default=False)
+    confirmed_count: Mapped[int] = mapped_column(default=0)
+    confirmed_receipts_json: Mapped[str] = mapped_column(Text, default="[]")
+    turn_ref: Mapped[str] = mapped_column(default="")
+    state: Mapped[str] = mapped_column(default="claimed", index=True)
+    failure_reason: Mapped[str] = mapped_column(Text, default="")
+    finished_at: Mapped[datetime | None] = mapped_column(default=None)
+
+
+class ReminderMutation(Base):
+    __tablename__ = "chat_reminder_mutations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    operation_id: Mapped[str] = mapped_column(unique=True)
+    task_ref: Mapped[str | None] = mapped_column(default=None, index=True)
+    action: Mapped[str]
+    revision: Mapped[int] = mapped_column(default=0)
+    outcome: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+
+class ReminderPreference(Base):
+    __tablename__ = "chat_reminder_preferences"
+    account_id: Mapped[str] = mapped_column(primary_key=True)
+    unified_user_id: Mapped[str] = mapped_column(primary_key=True)
+    enabled: Mapped[bool] = mapped_column(default=True)
+    updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)

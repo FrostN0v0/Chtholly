@@ -52,12 +52,37 @@ if plug is not None and plug.module.__name__ == __name__:
     from . import model_state_runtime as model_state_runtime  # entari: package
 
     from . import tool_runtime as tool_runtime  # entari: package
+    from . import reminders as reminders  # entari: subplugin
     from . import chat_handler as chat_handler  # entari: package
+    from arclet.entari import add_service
+    from arclet.entari.event.lifespan import AccountUpdate
+    from arclet.entari.scheduler import schedule, timer
+    from .reminders.service import ReminderService  # entari: package
+
+    registered_tool_schemas = [
+        *getattr(tool_runtime, "registered_tool_schemas", ()),
+        *getattr(reminders, "registered_tool_schemas", ()),
+    ]
+
+    reminder_service = add_service(ReminderService(chat_handler.config, tool_schemas=registered_tool_schemas))
+    plugin.collect_disposes(reminder_service.aclose)
+
+    @plugin.listen(AccountUpdate)
+    async def wake_reminders_for_account(event: AccountUpdate) -> None:
+        reminder_service.account_update(event.account)
+
+    @schedule(timer.every_seconds(5))
+    async def wake_reminder_heartbeat() -> None:
+        reminder_service.wake()
+
     from . import agent_command as agent_command  # entari: package
+    from . import reminder_command as reminder_command  # entari: subplugin
+
     from . import agent_runtime as agent_runtime  # entari: package
     from . import tag_runtime as tag_runtime  # entari: package
     from . import meme_webui as meme_webui  # entari: package
     from . import agent_webui as agent_webui  # entari: package
+    from . import reminder_webui as reminder_webui  # entari: package
 
-    registered_tools = tool_runtime.registered_tools
+    registered_tools = [*tool_runtime.registered_tools, *getattr(reminders, "registered_tools", ())]
     _LOGGER.info(f"registered LLM tools: {', '.join(registered_tools) or '(none)'}")

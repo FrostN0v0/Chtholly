@@ -12,6 +12,7 @@ from arclet.entari.event.plugin import PluginLoadedSuccess
 from .config import LLMChatConfig
 from .agent_migration import migrate_legacy_agent_events
 from .chat_evaluation import resume_relationship_evaluations
+from .session_manager import migrate_turn_origin_columns
 from .relationships.recovery import recover_unqueued_evidence
 from .relationships.migration import initialize_relationship_store
 
@@ -26,6 +27,7 @@ async def _initialize_store() -> None:
     async with _INITIALIZE_LOCK:
         if _initialized:
             return
+        await migrate_turn_origin_columns()
         imported = await migrate_legacy_agent_events()
         await initialize_relationship_store()
         recovered = await recover_unqueued_evidence(_CONFIG.eval_model or _CONFIG.model or "default")

@@ -139,7 +139,13 @@ class ToolTraceRecorder:
         self._append(
             call,
             status=status,
-            effect=tool_error_effect(call.tool_name, before, after, terminal_status=status),
+            effect=tool_error_effect(
+                call.tool_name,
+                before,
+                after,
+                terminal_status=status,
+                arguments=call.arguments,
+            ),
             outcome=error,
             recorded_result=error,
             audit_result=sanitize_audit_value(error),
@@ -156,7 +162,13 @@ class ToolTraceRecorder:
         self._append(
             call,
             status="cancelled",
-            effect=tool_error_effect(call.tool_name, before, after, terminal_status="cancelled"),
+            effect=tool_error_effect(
+                call.tool_name,
+                before,
+                after,
+                terminal_status="cancelled",
+                arguments=call.arguments,
+            ),
             outcome=error,
             recorded_result=error,
             audit_result=sanitize_audit_value(error),

@@ -847,25 +847,8 @@ async def test_screenshot_web_page_uses_public_url_budget_and_confirmed_media_de
         target = _tool_callable(runtime, "screenshot_web_page")
         state = runtime.DeliveryState()
 
-        unauthorized_state = runtime.DeliveryState()
         with (
             local_modules.web_access.llm_chat_web_access_scope(local_modules.web_access.WebAccessLimits(0, 1, 1)),
-            llm_chat_delivery_scope(unauthorized_state),
-        ):
-            with pytest.raises(
-                local_modules.web_access.WebAccessError,
-                match="explicit webpage screenshot request",
-            ):
-                await target(session, "https://prts.wiki/w/%E6%BE%84%E9%97%AA", "技能", 1200)
-        assert captures == []
-        assert session.sent == []
-        assert unauthorized_state.media_messages == unauthorized_state.confirmed_media_deliveries == 0
-
-        with (
-            local_modules.web_access.llm_chat_web_access_scope(
-                local_modules.web_access.WebAccessLimits(0, 1, 1),
-                allow_webpage_screenshots=True,
-            ),
             llm_chat_delivery_scope(state),
         ):
             result = await target(
@@ -897,10 +880,7 @@ async def test_screenshot_web_page_uses_public_url_budget_and_confirmed_media_de
         runtime.web_screenshot_context.capture = invalid_capture
         invalid_state = runtime.DeliveryState()
         with (
-            local_modules.web_access.llm_chat_web_access_scope(
-                local_modules.web_access.WebAccessLimits(0, 1, 1),
-                allow_webpage_screenshots=True,
-            ),
+            local_modules.web_access.llm_chat_web_access_scope(local_modules.web_access.WebAccessLimits(0, 1, 1)),
             llm_chat_delivery_scope(invalid_state),
         ):
             with pytest.raises(runtime.DeliveryError, match="webpage screenshot failed"):
@@ -949,10 +929,7 @@ async def test_screenshot_web_page_delivers_three_requested_operations_in_one_ge
         sections = ("作战一", "作战二", "作战三")
 
         with (
-            local_modules.web_access.llm_chat_web_access_scope(
-                local_modules.web_access.WebAccessLimits(16, 24, 32),
-                allow_webpage_screenshots=True,
-            ),
+            local_modules.web_access.llm_chat_web_access_scope(local_modules.web_access.WebAccessLimits(16, 24, 32)),
             llm_chat_delivery_scope(state),
         ):
             results = [
@@ -4165,6 +4142,242 @@ async def test_local_generation_exposes_only_original_authorized_external_functi
 
 
 @pytest.mark.asyncio
+async def test_native_reminder_schema_accepts_create_and_rejects_wrong_fields() -> None:
+    from jsonschema import Draft202012Validator
+
+    from plugins.llm_chat.reminders.tool import register_reminder_tools
+
+    async with _temporary_plugin() as harness:
+        register_reminder_tools(harness.dispatcher)
+        parameters = available_functions["reminder"][1].parameters
+        validator = Draft202012Validator(parameters)
+        valid = {
+            "request": {
+                "action": "create",
+                "goal": "Check in later",
+                "schedule": "2030-01-01T12:00:00+00:00",
+                "timezone": "UTC",
+            }
+        }
+        assert list(validator.iter_errors(valid)) == []
+        assert list(validator.iter_errors({"request": {"action": "create", "content": "hi", "due_time": "soon"}}))
+
+
+@pytest.mark.asyncio
+async def test_native_reminder_create_persists_and_continues_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy import select
+    from entari_plugin_database import Base
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from plugins.llm_chat.models import ReminderTask, ReminderMutation
+    from plugins.llm_chat.reminders import store
+    from plugins.llm_chat.agent_context import AgentAccessContext, agent_access_scope
+    from plugins.llm_chat.reminders.tool import register_reminder_tools
+
+    due = datetime.now(datetime_timezone.utc) + timedelta(hours=1)
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(
+                tool_calls=[
+                    _tool_call(
+                        "create-reminder",
+                        "reminder",
+                        {
+                            "request": {
+                                "action": "create",
+                                "goal": "Check in later",
+                                "schedule": due.isoformat(),
+                                "timezone": "UTC",
+                            }
+                        },
+                    )
+                ]
+            ),
+            _model_response("Reminder scheduled."),
+        ],
+    )
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'reminder-bridge.db'}")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    monkeypatch.setattr(store, "get_session", factory)
+    trace = ToolTraceRecorder()
+    try:
+        async with _temporary_plugin() as harness:
+            register_reminder_tools(harness.dispatcher)
+            with (
+                agent_access_scope(
+                    AgentAccessContext(1, 2, 3, "unified-user", capability_names=frozenset({"reminder"}))
+                ),
+                llm_chat_context_scope(_tool_context(_DeliveryToolSession())),
+                llm_chat_tool_trace_scope(trace),
+            ):
+                response = await LLMService().generate("Remind me later.", model="test-model")
+
+        async with factory() as db:
+            tasks = list((await db.execute(select(ReminderTask))).scalars())
+            mutations = list((await db.execute(select(ReminderMutation))).scalars())
+        assert response.content == "Reminder scheduled."
+        assert len(tasks) == len(mutations) == 1
+        assert tasks[0].goal == "Check in later"
+        assert tasks[0].due_at == due.replace(tzinfo=None)
+        assert mutations[0].task_ref == tasks[0].task_ref
+        assert [(event.status, event.effect) for event in trace.events] == [("succeeded", "confirmed")]
+        result = json.loads(_tool_messages(payloads[1])[0]["content"])
+        assert json.loads(result["data"])["task_ref"] == tasks[0].task_ref
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["completed", "continue"])
+async def test_native_reminder_resolve_survives_continuation_and_service_settlement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decision: str
+) -> None:
+    from satori import MessageObject
+    from sqlalchemy import select
+    from entari_plugin_database import Base
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from plugins.llm_chat.models import AgentTurn, ReminderOccurrence
+    from plugins.llm_chat.reminders import store, service as reminder_service
+    from plugins.llm_chat.agent_context import AgentAccessContext, agent_access_scope
+    from plugins.llm_chat.core.delivery import DeliveryState
+    from plugins.llm_chat.reminders.tool import register_reminder_tools
+    from plugins.llm_chat.tools.send_msg import SendMsgToolContext, register_send_msg
+    from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
+
+    now = datetime.now(datetime_timezone.utc)
+    next_due = (now + timedelta(days=2)).replace(hour=12, minute=0, second=0, microsecond=0)
+    request = {"action": "resolve", "decision": decision}
+    if decision == "continue":
+        request.update(schedule=next_due.isoformat(), timezone="UTC")
+    script = [
+        _model_response(tool_calls=[_tool_call("resolve-reminder", "reminder", {"request": request})]),
+        _model_response("[END_OF_RESPONSE]"),
+    ]
+    if decision == "completed":
+        script.insert(
+            0,
+            _model_response(
+                tool_calls=[
+                    _tool_call(
+                        "send-reminder", "send_msg", {"segments": [{"type": "text", "text": "Time for a break."}]}
+                    )
+                ]
+            ),
+        )
+    payloads = _install_completion_script(monkeypatch, script)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'resolve-bridge.db'}")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    monkeypatch.setattr(store, "get_session", factory)
+    monkeypatch.setattr(reminder_service, "migrate_turn_origin_columns", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(reminder_service, "get_model_config", lambda *_: SimpleNamespace(name="test-model"))
+    monkeypatch.setattr(reminder_service, "pin_main_model", lambda model: model)
+    trace = ToolTraceRecorder()
+    audit = AgentTurnRecorder()
+
+    class Protocol:
+        def __init__(self):
+            self.sent: list[str] = []
+
+        async def send_message(self, channel, message, *args, **kwargs):
+            self.sent.append(str(message))
+            return [MessageObject(id=f"receipt-{len(self.sent)}")]
+
+    async def resolve_participant(_session, _reference):
+        return None
+
+    account = SimpleNamespace(
+        platform="test",
+        self_id="bot",
+        self_info=Login(platform="test", user=User(id="bot")),
+        connected=asyncio.Event(),
+        protocol=Protocol(),
+    )
+    account.connected.set()
+
+    async def prepare(_config, _session, _identity, **_kwargs):
+        async with factory() as db:
+            turn = AgentTurn(session_id=2, sequence=1, user_id="owner", user_name="Owner", trigger_kind="scheduled")
+            db.add(turn)
+            await db.commit()
+        return SimpleNamespace(lifecycle=SimpleNamespace(agent_turn_id=turn.id), agent_events=audit)
+
+    async def runner(session, ctx, prepared, **_kwargs):
+        access = AgentAccessContext(
+            1,
+            2,
+            prepared.lifecycle.agent_turn_id,
+            "owner",
+            trigger_kind="scheduled",
+            reminder_task_ref=task.task_ref,
+            capability_names=frozenset({"reminder.resolve"}),
+        )
+        with (
+            agent_access_scope(access),
+            llm_chat_context_scope(ctx),
+            llm_chat_tool_trace_scope(trace),
+            llm_chat_delivery_scope(DeliveryState()),
+        ):
+            await LLMService().generate("Evaluate this scheduled task.", model="test-model")
+        return "completed" if decision == "completed" else "silent"
+
+    monkeypatch.setattr(reminder_service, "prepare_scheduled_agent_turn", prepare)
+    service = reminder_service.ReminderService(
+        SimpleNamespace(model="test-model"), accounts=lambda: [account], runner=runner
+    )
+    try:
+        task = await store.create_task(
+            operation_id="native-resolution",
+            platform="test",
+            account_id="bot",
+            unified_user_id="owner",
+            platform_user_id="user",
+            delivery_channel_id="group",
+            goal="Check progress",
+            due_at=now - timedelta(minutes=1),
+            mode="adaptive" if decision == "continue" else "once",
+        )
+        async with _temporary_plugin() as harness:
+            register_reminder_tools(harness.dispatcher)
+            register_send_msg(harness.dispatcher, SendMsgToolContext(resolve_participant))
+            await service.start()
+            for _ in range(250):
+                async with factory() as db:
+                    occurrence = await db.scalar(
+                        select(ReminderOccurrence).where(ReminderOccurrence.task_ref == task.task_ref)
+                    )
+                if occurrence is not None and occurrence.finished_at is not None:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                pytest.fail("Native reminder execution did not settle")
+            result = json.loads(_tool_messages(payloads[-1])[-1]["content"])
+            assert result["ok"] is True
+            assert json.loads(result["data"])["proposed"] is True
+            persisted = await store.get_task_for_service(task.task_ref)
+            assert persisted.status == ("active" if decision == "continue" else "completed")
+            assert persisted.paused_reason == ""
+            assert occurrence.state == "completed"
+            assert occurrence.confirmed_count == (1 if decision == "completed" else 0)
+            assert account.protocol.sent == (["Time for a break."] if decision == "completed" else [])
+            assert (trace.events[-1].status, trace.events[-1].effect) == ("succeeded", "none")
+            if decision == "continue":
+                assert persisted.due_at == next_due.replace(tzinfo=None)
+            await service.claim_ready()
+            assert (await store.get_task_for_service(task.task_ref)).current_occurrence == 1
+    finally:
+        await service.aclose()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("audit_enabled", [False, True])
 async def test_function_wire_schema_preserves_upstream_external_pause_and_continue(
     local_modules: SimpleNamespace,
@@ -4549,6 +4762,41 @@ async def test_external_reference_capture_completes_before_dependent_edit(local_
             await llm_service_module.run_llm_tools(RunOutput(requirements=requirements))
     assert effects == ["captured", "edited"]
     assert all(json.loads(req.external_execution_result)["ok"] for req in requirements)
+
+
+@pytest.mark.asyncio
+async def test_invalid_tool_arguments_return_error_and_allow_corrected_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(tool_calls=[_tool_call("invalid", "probe", {"arguments": {"text": "first"}})]),
+            _model_response(tool_calls=[_tool_call("corrected", "probe", {"text": "second"})]),
+            _model_response("The corrected tool call succeeded."),
+        ],
+    )
+    invoked: list[str] = []
+
+    async def probe(text: str) -> str:
+        invoked.append(text)
+        return text
+
+    trace = ToolTraceRecorder()
+    async with _temporary_plugin() as harness:
+        probe.__module__ = harness.module.__name__
+        harness.dispatcher(probe)
+        with llm_chat_tool_trace_scope(trace):
+            response = await LLMService().generate("Use the probe.", model="test-model")
+
+    assert response.content == "The corrected tool call succeeded."
+    assert invoked == ["second"]
+    assert [event.status for event in trace.events] == ["rejected", "succeeded"]
+    assert trace.events[0].outcome["error_code"] == "invalid_request"
+    assert [result["tool_call_id"] for result in _tool_messages(payloads[1])] == ["invalid"]
+    assert json.loads(_tool_messages(payloads[1])[0]["content"])["ok"] is False
+    corrected = next(result for result in _tool_messages(payloads[2]) if result["tool_call_id"] == "corrected")
+    assert json.loads(corrected["content"]) == {"ok": True, "data": "second"}
 
 
 @pytest.mark.asyncio

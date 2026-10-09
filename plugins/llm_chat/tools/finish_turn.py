@@ -20,7 +20,12 @@ from ..core.delivery import (
 )
 from ..core.tool_trace import current_tool_trace
 from ..core.media_delivery import current_media_requirements
-from ..core.tool_trace_policy import _DELIVERY_TOOLS, _OBSERVATION_TOOLS, _PREPARATION_TOOLS
+from ..core.tool_trace_policy import (
+    _DELIVERY_TOOLS,
+    _OBSERVATION_TOOLS,
+    _PREPARATION_TOOLS,
+    reminder_action_from_arguments,
+)
 
 _MAX_REASON = 240
 _MAX_REPLY = 600
@@ -42,10 +47,14 @@ def _check_effects(outcome: str) -> None:
     for event in trace.events:
         if event.tool_name == "finish_turn":
             continue
+        reminder_action = reminder_action_from_arguments(event.arguments) if event.tool_name == "reminder" else ""
         if event.status == "pending" or event.effect in {"partial", "unknown"}:
             raise DeliveryRejected("Cannot finish while a tool effect is unresolved")
-        if event.status in {"failed", "cancelled"} and event.tool_name not in _OBSERVATION_TOOLS | _PREPARATION_TOOLS:
-            raise DeliveryRejected("Cannot finish after an unsettled write or delivery failure")
+        if event.status in {"failed", "cancelled"}:
+            if event.tool_name == "reminder" and reminder_action in {"list", "resolve"}:
+                continue
+            if event.tool_name not in _OBSERVATION_TOOLS | _PREPARATION_TOOLS:
+                raise DeliveryRejected("Cannot finish after an unsettled write or delivery failure")
         if (
             outcome in {"silent", "declined"}
             and event.effect == "confirmed"

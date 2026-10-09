@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from dataclasses import replace, dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import func, text, select
 from arclet.entari import Session
 from entari_plugin_database import get_session
 
@@ -14,6 +15,7 @@ from .models import AgentTurn, ChatScope, AgentEvent, ContextAnchor, ContextSess
 _DISPLAY_NAME_CACHE: dict[tuple[str, str, str], str] = {}
 _NAME_LOOKUP_BACKOFF: dict[tuple[str, str, str], datetime] = {}
 _NAME_LOOKUP_RETRY = timedelta(minutes=30)
+_TURN_ORIGIN_MIGRATION_LOCK = asyncio.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +43,8 @@ class SessionHandle:
 
 
 def scope_identity(session: Session) -> ScopeIdentity:
-    guild = getattr(session, "guild", None)
+    event = getattr(session, "event", None)
+    guild = getattr(event, "guild", None) or getattr(session, "guild", None)
     channel = session.channel
     platform = str(session.account.platform)
     account_id = str(session.account.self_id)
@@ -151,22 +154,84 @@ async def get_scope_by_ref(scope_ref: str) -> ChatScope | None:
         return (await db.execute(select(ChatScope).where(ChatScope.scope_ref == scope_ref))).scalar_one_or_none()
 
 
-async def get_active_session(scope_id: int) -> ContextSession | None:
+def _session_owner(purpose: str, reminder_task_ref: str) -> tuple[str, str]:
+    if purpose not in {"chat", "reminder"}:
+        raise ValueError("Unknown context session purpose")
+    if purpose == "reminder" and not reminder_task_ref:
+        raise ValueError("Reminder sessions require a task reference")
+    if purpose == "chat" and reminder_task_ref:
+        raise ValueError("Chat sessions cannot be bound to a reminder")
+    return purpose, reminder_task_ref
+
+
+async def migrate_turn_origin_columns() -> None:
+    """Explicit, repeatable schema cutover for databases created before scheduled turns."""
+
+    async with _TURN_ORIGIN_MIGRATION_LOCK:
+        async with get_session() as db, db.begin():
+            dialect = db.get_bind().dialect.name
+            for table, additions in (
+                (
+                    "chat_context_sessions",
+                    (
+                        ("purpose", "VARCHAR NOT NULL DEFAULT 'chat'"),
+                        ("reminder_task_ref", "VARCHAR NOT NULL DEFAULT ''"),
+                    ),
+                ),
+                ("chat_agent_turns", (("trigger_kind", "VARCHAR NOT NULL DEFAULT 'message'"),)),
+            ):
+                if dialect == "sqlite":
+                    columns = {row[1] for row in (await db.execute(text(f"PRAGMA table_info({table})"))).all()}
+                else:
+                    columns = set(
+                        (
+                            await db.execute(
+                                text("SELECT column_name FROM information_schema.columns WHERE table_name = :table"),
+                                {"table": table},
+                            )
+                        ).scalars()
+                    )
+                for name, definition in additions:
+                    if name not in columns:
+                        await db.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}"))
+            await db.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_chat_context_sessions_reminder_task_ref "
+                    "ON chat_context_sessions (reminder_task_ref)"
+                )
+            )
+
+
+async def get_active_session(
+    scope_id: int, *, purpose: str = "chat", reminder_task_ref: str = ""
+) -> ContextSession | None:
+    purpose, reminder_task_ref = _session_owner(purpose, reminder_task_ref)
     async with get_session() as db:
         return (
             await db.execute(
                 select(ContextSession)
-                .where(ContextSession.scope_id == scope_id, ContextSession.status == "active")
+                .where(
+                    ContextSession.scope_id == scope_id,
+                    ContextSession.status == "active",
+                    ContextSession.purpose == purpose,
+                    ContextSession.reminder_task_ref == reminder_task_ref,
+                )
                 .order_by(ContextSession.sequence.desc())
                 .limit(1)
             )
         ).scalar_one_or_none()
 
 
-async def get_session_by_ref(session_ref: str) -> ContextSession | None:
+async def get_session_by_ref(session_ref: str, *, purpose: str = "chat") -> ContextSession | None:
+    if purpose not in {"chat", "reminder"}:
+        raise ValueError("Unknown context session purpose")
     async with get_session() as db:
         return (
-            await db.execute(select(ContextSession).where(ContextSession.session_ref == session_ref))
+            await db.execute(
+                select(ContextSession).where(
+                    ContextSession.session_ref == session_ref, ContextSession.purpose == purpose
+                )
+            )
         ).scalar_one_or_none()
 
 
@@ -182,13 +247,18 @@ async def create_session(
     start_reason: str,
     previous_session_id: int | None = None,
     handoff_json: str = "{}",
+    purpose: str = "chat",
+    reminder_task_ref: str = "",
 ) -> ContextSession:
+    purpose, reminder_task_ref = _session_owner(purpose, reminder_task_ref)
     async with get_session() as db:
         session = ContextSession(
             scope_id=scope_id,
             previous_session_id=previous_session_id,
             sequence=await _next_session_sequence(db, scope_id),
             status="active",
+            purpose=purpose,
+            reminder_task_ref=reminder_task_ref,
             start_reason=start_reason,
             model_name=baseline.model_name,
             persona_hash=baseline.persona_hash,
@@ -210,10 +280,14 @@ async def ensure_active_session(
     idle_minutes: int,
     max_turns: int,
     now: datetime | None = None,
+    purpose: str = "chat",
+    reminder_task_ref: str = "",
 ) -> tuple[ContextSession, str | None]:
-    current = await get_active_session(scope.id)
+    current = await get_active_session(scope.id, purpose=purpose, reminder_task_ref=reminder_task_ref)
     if current is None:
-        return await create_session(scope.id, baseline, start_reason="initial"), None
+        return await create_session(
+            scope.id, baseline, start_reason="initial", purpose=purpose, reminder_task_ref=reminder_task_ref
+        ), None
 
     current_time = now or datetime.utcnow()
     reason: str | None = None
@@ -250,7 +324,10 @@ async def rollover_session(
     reason: str,
     handoff_json: str = "{}",
     carry_handoff: bool = True,
+    purpose: str = "chat",
 ) -> ContextSession:
+    if current.purpose != purpose or current.scope_id != scope.id:
+        raise ValueError("Session does not belong to the requested scope and purpose")
     await close_session(current.id, reason, handoff_json=handoff_json)
     return await create_session(
         scope.id,
@@ -258,6 +335,8 @@ async def rollover_session(
         start_reason=reason,
         previous_session_id=current.id,
         handoff_json=handoff_json if carry_handoff else "{}",
+        purpose=purpose,
+        reminder_task_ref=current.reminder_task_ref,
     )
 
 
@@ -269,7 +348,12 @@ async def start_turn(
     user_name: str,
     conversation_user_id: int | None,
     fresh_context: bool,
+    trigger_kind: str = "message",
 ) -> AgentTurn:
+    if trigger_kind not in {"message", "scheduled"} or (trigger_kind == "scheduled") != (
+        context_session.purpose == "reminder"
+    ):
+        raise ValueError("Turn trigger must match its session purpose")
     async with get_session() as db:
         sequence = (
             int(
@@ -282,6 +366,7 @@ async def start_turn(
             session_id=context_session.id,
             sequence=sequence,
             trigger_message_id=trigger_message_id,
+            trigger_kind=trigger_kind,
             conversation_user_id=conversation_user_id,
             user_id=user_id,
             user_name=user_name,
@@ -296,13 +381,15 @@ async def start_turn(
         return turn
 
 
-async def list_scope_sessions(scope_id: int, *, limit: int = 20) -> list[ContextSession]:
+async def list_scope_sessions(scope_id: int, *, limit: int = 20, purpose: str = "chat") -> list[ContextSession]:
     async with get_session() as db:
+        if purpose not in {"chat", "reminder"}:
+            raise ValueError("Unknown context session purpose")
         return list(
             (
                 await db.execute(
                     select(ContextSession)
-                    .where(ContextSession.scope_id == scope_id)
+                    .where(ContextSession.scope_id == scope_id, ContextSession.purpose == purpose)
                     .order_by(ContextSession.sequence.desc())
                     .limit(max(1, limit))
                 )
@@ -401,10 +488,18 @@ async def finish_turn(turn_id: int, *, status: str, final_text: str = "") -> Non
         await db.commit()
 
 
-async def seal_scope_sessions(scope_id: int, *, reason: str = "hard_reset") -> None:
+async def seal_scope_sessions(scope_id: int, *, reason: str = "hard_reset", purpose: str = "chat") -> None:
+    if purpose not in {"chat", "reminder"}:
+        raise ValueError("Unknown context session purpose")
     async with get_session() as db:
         sessions = list(
-            (await db.execute(select(ContextSession).where(ContextSession.scope_id == scope_id))).scalars().all()
+            (
+                await db.execute(
+                    select(ContextSession).where(ContextSession.scope_id == scope_id, ContextSession.purpose == purpose)
+                )
+            )
+            .scalars()
+            .all()
         )
         closed_at = datetime.utcnow()
         for context_session in sessions:
