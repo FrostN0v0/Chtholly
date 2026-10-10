@@ -763,16 +763,18 @@ async def test_running_turn_exposes_recorded_context_without_replaying_operator_
     assert captured["capture_status"] == "redacted"
     assert captured["messages"] == prepared.chat_messages
     assert snapshots[0].model_visible is False
-    user_payload = load_event_payload(started[0])
+    user_event = next(event for event in started if event.event_type == "user_input")
+    user_payload = load_event_payload(user_event)
     assert cast(list[dict[str, object]], user_payload["attachments"])[0]["attachment_ref"] == (
         "input_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     )
-    user_view = serialize_event_view(started[0], user_payload)
+    user_view = serialize_event_view(user_event, user_payload)
     assert cast(list[dict[str, object]], user_view["images"])[0]["url"] == (
-        "/api/llm-chat/sessions/events/" + started[0].event_ref + "/attachments/input_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "/api/llm-chat/sessions/events/" + user_event.event_ref + "/attachments/input_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     )
 
-    persona_payload = load_event_payload(started[1])
+    persona_event = next(event for event in started if event.event_type == "persona_state")
+    persona_payload = load_event_payload(persona_event)
     assert cast(dict[str, Any], persona_payload["memory"])["stored_memories"] == 40
     assert persona_payload["prompt_memories"] == ["上次部署回滚点在 /var/lib"]
 

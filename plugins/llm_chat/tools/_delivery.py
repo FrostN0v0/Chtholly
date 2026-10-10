@@ -35,19 +35,30 @@ async def send_with_delivery(
         return
     if state is not None:
         await wait_for_delivery(state, delay_seconds)
-    try:
-        from ..reminders.delivery import send_reminder_transport
+    started = False
+    confirmed = False
 
-        receipts = await asyncio.wait_for(send_reminder_transport(lambda: session.send(payload)), timeout=30.0)
+    def acknowledge() -> None:
+        nonlocal confirmed
+        confirmed = True
+        if state is not None:
+            mark_delivery_success(state, texts, media=media, text_message=text_message)
+
+    async def native_send():
+        nonlocal started
+        started = True
+        return await session.send(payload)
+    try:
+        from ..transport import send_turn_transport
+
+        receipts = await asyncio.wait_for(send_turn_transport(native_send, on_confirmed=acknowledge), timeout=30.0)
         if not receipts:
             raise DeliveryError("Transport returned no confirmed delivery receipt")
     except asyncio.CancelledError:
-        if state is not None:
+        if started and not confirmed and state is not None:
             mark_delivery_attempt(state)
         raise
     except Exception:
-        if state is not None:
+        if started and not confirmed and state is not None:
             mark_delivery_attempt(state)
         raise
-    if state is not None:
-        mark_delivery_success(state, texts, media=media, text_message=text_message)

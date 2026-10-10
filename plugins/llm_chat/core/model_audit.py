@@ -21,6 +21,10 @@ ADMIN_ONLY_EVENT_TYPES = frozenset(
         "persona_state",
         "relationship_evaluation",
         "response_decision",
+        "companion_trigger",
+        "companion_reflection",
+        "companion_state",
+        "conversation_mode",
     }
 )
 _SECRET_KEY = re.compile(

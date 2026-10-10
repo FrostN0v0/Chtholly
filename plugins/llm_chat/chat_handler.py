@@ -55,6 +55,7 @@ from .forward_context import resolve_merged_forward_messages
 from .tools._delivery import send_with_delivery
 from .agent_turn_setup import PreparedAgentTurn, prepare_agent_turn
 from .agent_attachments import capture_user_input_images
+from .companion.runtime import record_companion_chat, interrupt_companion_for_input
 from .reaction_feedback import MessageReactionFeedback, settle_reaction_update, llm_chat_reaction_scope
 from .native_image_delivery import native_image_delivery_scope
 
@@ -102,6 +103,12 @@ plugin.collect_disposes(cancel_pending_evaluations)
 @enter_if(_should_handle_chat)
 @latest_participant_turn
 async def on_chat(session: Session, ctx: Contexts):
+    return await handle_chat_turn(session, ctx)
+
+
+async def handle_chat_turn(session: Session, ctx: Contexts):
+    """Share one inbound lifecycle between group chat and opt-in companion DMs."""
+    interrupt_companion_for_input(session)
     reaction = MessageReactionFeedback(session, _LOGGER.warning)
     inputs = ImageInputs(warn=_LOGGER.warning)
     with (
@@ -447,6 +454,10 @@ async def run_prepared_agent_turn(
                     persona_prompt=prepared.persona.prompt,
                     warn=_LOGGER.warning,
                 )
+                try:
+                    await record_companion_chat(session, prepared)
+                except Exception as exc:
+                    _LOGGER.warning(f"companion chat observation failed: {type(exc).__name__}")
 
         finalize_task = asyncio.create_task(finalize_with_delivery_audit())
         try:

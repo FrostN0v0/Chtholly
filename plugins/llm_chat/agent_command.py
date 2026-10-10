@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from arclet.entari import Session, command, plugin_config
@@ -14,6 +14,7 @@ from entari_plugin_llm.config import get_model_config
 
 from .config import LLMChatConfig
 from .models import ChatScope, ContextSession, ScopePersonaSelection, SessionPersonaSnapshot
+from .companion import store as companion_store
 from .personality import session_persona, persona_scope_lock, resolve_scope_persona, remember_session_persona
 from .tool_runtime import registered_tool_schemas
 from .context_builder import build_baseline_fingerprint
@@ -28,6 +29,8 @@ from .session_manager import (
     resolve_scope_identity,
 )
 from .core.personality import ResolvedPersona, resolve_persona
+from .companion.context import mode_baseline
+from .companion.runtime import current_companion_service
 from .session_inspection import session_usage, session_context_summary
 from .core.self_reference import resolve_self_reference_image
 
@@ -39,12 +42,14 @@ async def _is_superuser(session: Session) -> bool:
     return await _superuser_check(session) is not STOP
 
 
-def _baseline(channel_id: str, persona: ResolvedPersona):
-    return build_baseline_fingerprint(
-        model_name=get_model_config(config.model, channel_id).name,
+async def _baseline(scope: ChatScope, persona: ResolvedPersona):
+    baseline = build_baseline_fingerprint(
+        model_name=get_model_config(config.model, scope.channel_id).name,
         persona=persona.baseline_text,
         tool_schemas=registered_tool_schemas,
     )
+    mode = await companion_store.get_mode(scope.id, session_factory=get_session)
+    return mode_baseline(baseline, mode.mode)
 
 
 async def _existing_scope(session: Session) -> ChatScope | None:
@@ -62,7 +67,7 @@ async def _existing_scope(session: Session) -> ChatScope | None:
 
 
 async def _clean_session(scope: ChatScope, channel_id: str, persona: ResolvedPersona, reason: str):
-    baseline = _baseline(channel_id, persona)
+    baseline = await _baseline(scope, persona)
     current = await get_active_session(scope.id)
     if current is None:
         created = await create_session(scope.id, baseline, start_reason=reason)
@@ -94,7 +99,7 @@ async def rollover_session_command(session: Session) -> str:
     scope = await get_or_create_scope(await resolve_scope_identity(session))
     async with persona_scope_lock(scope.id):
         persona = await resolve_scope_persona(config, scope.id)
-        baseline = _baseline(session.channel.id, persona)
+        baseline = await _baseline(scope, persona)
         current = await get_active_session(scope.id)
         if current is None or current.persona_hash != baseline.persona_hash:
             created = await _clean_session(scope, session.channel.id, persona, "manual_new")
@@ -125,7 +130,7 @@ async def hard_reset_session_command(session: Session) -> str:
     scope = await get_or_create_scope(await resolve_scope_identity(session))
     async with persona_scope_lock(scope.id):
         persona = await resolve_scope_persona(config, scope.id)
-        baseline = _baseline(session.channel.id, persona)
+        baseline = await _baseline(scope, persona)
         await seal_scope_sessions(scope.id)
         created = await create_session(scope.id, baseline, start_reason="hard_reset")
         await remember_session_persona(created.id, persona)
@@ -155,7 +160,6 @@ async def persona_command(session: Session, key: str = "") -> str:
         persona = resolve_persona(config, key)
         if persona.reference_image and resolve_self_reference_image(persona.reference_image) is None:
             return "角色参考图当前不可用，未切换角色。请检查配置。"
-        baseline = _baseline(session.channel.id, persona)
     except ValueError:
         return "角色键或配置无效，未切换角色。使用 /llmchat persona 查看可用角色。"
     scope = await _existing_scope(session)
@@ -165,6 +169,7 @@ async def persona_command(session: Session, key: str = "") -> str:
         scope = await get_or_create_scope(await resolve_scope_identity(session))
     async with persona_scope_lock(scope.id):
         selected = await resolve_scope_persona(config, scope.id)
+        baseline = await _baseline(scope, persona)
         current = await get_active_session(scope.id)
         if selected == persona and (current is None or current.persona_hash == baseline.persona_hash):
             return f"当前已使用角色 {persona.name}，无需创建新会话。"
@@ -207,6 +212,13 @@ async def persona_command(session: Session, key: str = "") -> str:
                 selection.persona_key = persona.key
                 selection.updated_at = now
             await db.commit()
+        mode = await companion_store.get_mode(scope.id, session_factory=get_session)
+        if mode.mode == "companion":
+            await companion_store.rebind_persona(scope.id, persona.key, now=datetime.now(timezone.utc))
+            runtime = current_companion_service()
+            if runtime is not None:
+                await runtime.cancel_scope(scope.id)
+                runtime.wake()
     return f"已切换为 {persona.name}，创建新会话（#{sequence}）；不继承上一话题，关系与长期记忆未清除。"
 
 

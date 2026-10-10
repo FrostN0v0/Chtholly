@@ -46,6 +46,39 @@ class LLMChatConfig(BasicConfModel, extra="forbid"):
 
     def __post_init__(self) -> None:
         validate_personas(self)
+        from utils.companion_core import normalize_limits
+
+        normalize_limits(
+            {
+                "request_timeout": self.companion_request_timeout,
+                "reflection_interval_minutes": self.companion_reflection_interval_minutes,
+                "daily_reflections": self.companion_daily_reflections,
+                "daily_contacts": self.companion_daily_contacts,
+                "contact_interval_minutes": self.companion_contact_interval_minutes,
+                "member_idle_days": self.companion_member_idle_days,
+                "input_chars": self.companion_input_chars,
+                "output_tokens": self.companion_output_tokens,
+            }
+        )
+
+    companion_model: str | None = None
+    """Model for private companion reflection; None uses the current chat model."""
+    companion_request_timeout: float = 60.0
+    """Single reflection request deadline; automatic provider retries remain disabled."""
+    companion_reflection_interval_minutes: int = 60
+    """Default internal review interval in explicitly enabled scopes; this is not a sending schedule."""
+    companion_daily_reflections: int = 12
+    """Durable Shanghai-calendar-day model review budget per enabled scope."""
+    companion_daily_contacts: int = 3
+    """Maximum autonomous contacts per member per Shanghai day; zero disables contacts, not internal life."""
+    companion_contact_interval_minutes: int = 180
+    """Minimum outbound contact gap before unanswered-contact backoff."""
+    companion_member_idle_days: int = 14
+    """Maximum age of a real member interaction considered for autonomous contact."""
+    companion_input_chars: int = 32000
+    """Maximum combined reflection input characters, including bounded member evidence."""
+    companion_output_tokens: int = 4096
+    """Maximum output tokens requested for one structured companion reflection."""
 
     max_input_tokens: int = 48000
     """Maximum input token budget for one chat model request."""

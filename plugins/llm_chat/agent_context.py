@@ -63,6 +63,8 @@ SCHEDULED_TOOL_CAPABILITIES = frozenset(
     }
 )
 
+AUTONOMOUS_TOOL_CAPABILITIES = frozenset({"safe_read", "safe_prepare", "web_read", "send_msg"})
+
 
 _ACTIVE_AGENT_CONTEXT: ContextVar[AgentAccessContext | None] = ContextVar(
     "llm_chat_agent_access_context",

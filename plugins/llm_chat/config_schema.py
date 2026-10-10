@@ -11,6 +11,69 @@ from .config import LLMChatConfig
 _CONFIG_SCHEMA_TEXT = {
     "default_persona": ("默认角色", "未选择角色或已选角色被删除时使用的角色键，必须存在于角色配置中。"),
     "personas": ("角色配置", "按唯一角色键配置名称、人格、外观与配套参考图；在聊天中使用 llmchat persona 切换。"),
+    "companion_model": (
+        "\u81ea\u4e3b\u590d\u76d8\u6a21\u578b",
+        (
+            "\u4ec5\u7528\u4e8e\u5df2\u542f\u7528 companion"
+            " \u6a21\u5f0f\u7684\u5185\u90e8\u590d\u76d8\uff1b\u7559\u7a7a\u65f6\u4f7f\u7528\u5f53\u524d"
+            "\u804a\u5929\u6a21\u578b\u3002"
+        ),
+    ),
+    "companion_request_timeout": (
+        "\u81ea\u4e3b\u590d\u76d8\u8bf7\u6c42\u8d85\u65f6",
+        (
+            "\u5355\u6b21\u5185\u90e8\u6a21\u578b\u8bf7\u6c42\u8d85\u65f6\uff08\u79d2\uff09\uff1b\u4e0d\u81ea"
+            "\u52a8\u91cd\u8bd5\u3002"
+        ),
+    ),
+    "companion_reflection_interval_minutes": (
+        "\u9ed8\u8ba4\u5185\u90e8\u590d\u76d8\u95f4\u9694",
+        (
+            "\u5df2\u542f\u7528\u8303\u56f4\u7684\u9ed8\u8ba4\u590d\u76d8\u95f4\u9694\uff08\u5206\u949f\uff09"
+            "\uff1b\u590d\u76d8\u4e0d\u7b49\u4e8e\u53d1\u9001\u3002"
+        ),
+    ),
+    "companion_daily_reflections": (
+        "\u6bcf\u65e5\u81ea\u4e3b\u590d\u76d8\u4e0a\u9650",
+        (
+            "\u6309\u4e0a\u6d77\u65f6\u533a\u6301\u4e45\u8bb0\u5f55\u7684\u6bcf\u8303\u56f4\u6bcf\u65e5\u590d"
+            "\u76d8\u6a21\u578b\u8bf7\u6c42\u4e0a\u9650\u3002"
+        ),
+    ),
+    "companion_daily_contacts": (
+        "\u6bcf\u65e5\u81ea\u4e3b\u8054\u7cfb\u4e0a\u9650",
+        (
+            "\u6bcf\u6210\u5458\u6bcf\u65e5\u8054\u7cfb\u4e0a\u9650\uff0c\u5305\u542b\u7ed3\u679c\u672a\u77e5"
+            "\u7684\u53d1\u9001\uff1b0 \u4ec5\u5173\u95ed\u8054\u7cfb\u3002"
+        ),
+    ),
+    "companion_contact_interval_minutes": (
+        "\u81ea\u4e3b\u8054\u7cfb\u6700\u5c0f\u95f4\u9694",
+        (
+            "\u51fa\u7ad9\u8054\u7cfb\u6700\u5c0f\u95f4\u9694\uff08\u5206\u949f\uff09\uff1b\u672a\u56de\u5e94"
+            "\u65f6\u9010\u6b65\u964d\u4f4e\u5bc6\u5ea6\u3002"
+        ),
+    ),
+    "companion_member_idle_days": (
+        "\u81ea\u4e3b\u8054\u7cfb\u4ea4\u4e92\u6709\u6548\u671f",
+        (
+            "\u53ea\u8003\u8651\u6b64\u5929\u6570\u5185\u6709\u771f\u5b9e\u4ea4\u4e92\u7684\u6210\u5458\u3002"
+        ),
+    ),
+    "companion_input_chars": (
+        "\u81ea\u4e3b\u590d\u76d8\u8f93\u5165\u4e0a\u9650",
+        (
+            "\u89d2\u8272\u72b6\u6001\u4e0e\u8131\u654f\u5bf9\u8bdd\u8bc1\u636e\u5408\u8ba1\u5b57\u7b26\u4e0a"
+            "\u9650\u3002"
+        ),
+    ),
+    "companion_output_tokens": (
+        "\u81ea\u4e3b\u590d\u76d8\u8f93\u51fa\u4e0a\u9650",
+        (
+            "\u5355\u6b21\u5185\u90e8\u7ed3\u6784\u5316\u590d\u76d8\u7684\u8f93\u51fa Tok"
+            "en \u4e0a\u9650\u3002"
+        ),
+    ),
     "max_input_tokens": ("模型输入 Token 上限", "单次主聊天模型请求允许使用的最大输入 Token 数。"),
     "output_reserve_tokens": ("输出预留 Token", "从输入预算中预留给模型输出的 Token 数。"),
     "context_rollover_ratio": ("会话切换阈值", "当前会话上下文达到可用输入预算的比例后自动生成交接并切换。"),

@@ -14,9 +14,11 @@ from entari_plugin_llm.tools import available_functions
 from utils.turn_resolution_core import TurnResolution
 from utils.relationship_core.policy import read_emotions, build_relationship_context
 
+from . import session_manager as context_sessions
 from .config import LLMChatConfig
 from .models import UserRelation
 from .identity import ChatIdentity
+from .companion import store as companion_store
 from .core.types import JSONType, ChatMessage
 from .perception import MentionedParticipant
 from .web.policy import WebAccessLimits, normalize_web_access_limits
@@ -26,7 +28,7 @@ from .chat_context import build_chat_messages, serialize_user_turn, requests_rec
 from .core.compose import energy_at, compose_persona_prompt
 from .core.forward import ForwardedMessage
 from .image_inputs import ImageInputs
-from .agent_context import SCHEDULED_TOOL_CAPABILITIES, AgentAccessContext
+from .agent_context import SCHEDULED_TOOL_CAPABILITIES, AUTONOMOUS_TOOL_CAPABILITIES, AgentAccessContext
 from .core.delivery import DeliveryState, normalize_delivery_limits
 from .persona.store import get_mood, append_message, delete_message
 from .turn_lifecycle import ActiveChatTurn
@@ -52,6 +54,7 @@ from .session_manager import (
 )
 from .core.agent_trace import AgentTurnRecorder
 from .core.personality import ResolvedPersona
+from .companion.context import AUTONOMOUS_CONTACT_CONTRACT, mode_baseline, companion_prompt
 from .core.media_delivery import MediaIntent, build_media_intent
 from .relationships.state import load_relationship_snapshot
 from .core.artifact_access import is_artifact_request
@@ -80,6 +83,8 @@ class PreparedAgentTurn:
     agent_access: AgentAccessContext
     relationship_snapshot: dict[str, JSONType]
     resolution: TurnResolution
+    conversation_mode: str = "normal"
+    companion_revision: int = 0
 
 
 async def prepare_scheduled_agent_turn(
@@ -118,6 +123,41 @@ async def prepare_scheduled_agent_turn(
         scheduled_context=scheduled_context,
         persist_user_message=False,
         capability_names=capability_names,
+    )
+
+
+async def prepare_autonomous_agent_turn(
+    config: LLMChatConfig,
+    session: Session,
+    identity: ChatIdentity,
+    *,
+    model_name: str,
+    content: str,
+    contact_context: Mapping[str, object],
+    image_inputs: ImageInputs,
+    warn: WarningSink,
+    tool_schemas: Sequence[Mapping[str, object]],
+) -> PreparedAgentTurn:
+    """Prepare one exact-target contact without fabricating an inbound user turn."""
+    return await prepare_agent_turn(
+        config,
+        session,
+        identity,
+        model_name=model_name,
+        model_text="",
+        raw_user_text="",
+        image_inputs=image_inputs,
+        content=content,
+        current_content=None,
+        forwarded_messages=(),
+        mentioned_participants=(),
+        warn=warn,
+        tool_schemas=tool_schemas,
+        purpose="companion",
+        trigger_kind="autonomous",
+        autonomous_context=contact_context,
+        persist_user_message=False,
+        capability_names=AUTONOMOUS_TOOL_CAPABILITIES,
     )
 
 
@@ -218,22 +258,34 @@ async def prepare_agent_turn(
     trigger_kind: str = "message",
     reminder_task_ref: str | None = None,
     scheduled_context: Mapping[str, object] | None = None,
+    autonomous_context: Mapping[str, object] | None = None,
     persist_user_message: bool = True,
     capability_names: frozenset[str] = frozenset(),
 ) -> PreparedAgentTurn:
-    if (purpose, trigger_kind) not in {("chat", "message"), ("reminder", "scheduled")}:
-        raise ValueError("Scheduled turns require a reminder context session")
+    if (purpose, trigger_kind) not in {
+        ("chat", "message"), ("reminder", "scheduled"), ("companion", "autonomous")
+    }:
+        raise ValueError("A host-triggered turn requires its exact context session purpose")
     scheduled = trigger_kind == "scheduled"
+    autonomous = trigger_kind == "autonomous"
+    host_triggered = scheduled or autonomous
     if scheduled:
         model_text, scheduled_facts = _scheduled_input(content, reminder_task_ref or "", scheduled_context or {})
         current_content = model_text
+    elif autonomous:
+        if autonomous_context is None:
+            raise ValueError("Autonomous contact requires host-bound contact context")
+        scheduled_facts = dict(autonomous_context)
+        model_text = json.dumps({"host_autonomous_contact": scheduled_facts}, ensure_ascii=False, separators=(",", ":"))
+        current_content = model_text
+    else:
+        scheduled_facts = {}
+    if host_triggered:
         raw_user_text = ""
         persist_user_message = False
         is_operator = False
     elif not persist_user_message:
         raise ValueError("Message turns require user history persistence")
-    else:
-        scheduled_facts = {}
     channel_id = session.channel.id
     user_id = identity.user_id
     user_name = identity.display_name
@@ -285,14 +337,31 @@ async def prepare_agent_turn(
     resolution = TurnResolution()
     delivery_state = DeliveryState(limits=delivery_limits)
     scheduled_chat_snapshot: ScheduledChatSnapshot | None = None
+    conversation_mode = "normal"
+    companion_revision = 0
+    companion_snapshot: dict[str, object] | None = None
     scope = await get_or_create_scope(await resolve_scope_identity(session))
     async with persona_scope_lock(scope.id):
         persona = await resolve_scope_persona(config, scope.id)
+        if not scheduled:
+            mode = await companion_store.get_mode(scope.id, session_factory=context_sessions.get_session)
+            conversation_mode = mode.mode
+            companion_revision = mode.revision
+            if autonomous and (mode.mode != "companion" or mode.persona_key != persona.key):
+                raise ValueError("Autonomous contact mode or persona is no longer current")
+            if mode.mode == "companion":
+                companion_snapshot = await companion_store.read_companion_context(
+                    scope.id, persona.key, user_id, session_factory=context_sessions.get_session
+                )
+                if companion_snapshot is None:
+                    raise ValueError("Enabled companion state does not match the captured persona")
         baseline = build_baseline_fingerprint(
             model_name=model_name or "default",
             persona=persona.baseline_text,
             tool_schemas=tool_schemas,
         )
+        if not scheduled:
+            baseline = mode_baseline(baseline, conversation_mode)
         context_session, rollover_reason = await ensure_active_session(
             scope,
             baseline,
@@ -303,7 +372,7 @@ async def prepare_agent_turn(
         )
         if rollover_reason is not None:
             persona_changed = context_session.persona_hash != baseline.persona_hash
-            handoff = "{}" if persona_changed else await _handoff(config, context_session, channel_id)
+            handoff = "{}" if persona_changed or autonomous else await _handoff(config, context_session, channel_id)
             context_session = await rollover_session(
                 scope,
                 context_session,
@@ -311,16 +380,16 @@ async def prepare_agent_turn(
                 reason="persona_change" if persona_changed else rollover_reason,
                 purpose=purpose,
                 handoff_json=handoff,
-                carry_handoff=not persona_changed,
+                carry_handoff=not (persona_changed or autonomous),
             )
-        if scheduled:
+        if host_triggered:
             scheduled_chat_snapshot = await read_scheduled_chat_snapshot(
                 scope.id,
                 max_chars=_scheduled_chat_snapshot_budget(config),
             )
             current_messages[-1] = _attach_scheduled_chat_snapshot(current_messages[-1], scheduled_chat_snapshot)
 
-        anchors = [] if scheduled else await load_scope_anchors(scope.id)
+        anchors = [] if host_triggered else await load_scope_anchors(scope.id)
 
         def compose_system() -> str:
             system = compose_persona_prompt(
@@ -341,11 +410,14 @@ async def prepare_agent_turn(
                 web_total_limit=web_limits.total_limit,
                 delivery_limits=delivery_limits,
             )
-            return f"{system}\n\n{_SCHEDULED_REMINDER_CONTRACT}" if scheduled else system
+            if scheduled:
+                return f"{system}\n\n{_SCHEDULED_REMINDER_CONTRACT}"
+            system = f"{system}\n\n{companion_prompt(companion_snapshot)}"
+            return f"{system}\n\n{AUTONOMOUS_CONTACT_CONTRACT}" if autonomous else system
 
         system = compose_system()
         fresh_context = (
-            False if scheduled else requests_fresh_context(model_text) or requests_recent_channel_context(model_text)
+            False if host_triggered else requests_fresh_context(model_text) or requests_recent_channel_context(model_text)
         )
         selection = await _select_context(
             config,
@@ -356,13 +428,14 @@ async def prepare_agent_turn(
             fresh_context=fresh_context,
         )
         if selection.rollover_required:
-            handoff = await _handoff(config, context_session, channel_id)
+            handoff = "{}" if autonomous else await _handoff(config, context_session, channel_id)
             context_session = await rollover_session(
                 scope,
                 context_session,
                 baseline,
                 reason="context_budget",
                 handoff_json=handoff,
+                carry_handoff=not autonomous,
                 purpose=purpose,
             )
             system = compose_system()
@@ -379,7 +452,7 @@ async def prepare_agent_turn(
     user_message_id = (
         await append_message(channel_id, user_id, user_name, "user", content) if persist_user_message else None
     )
-    event_message = getattr(session.event, "message", None) if not scheduled else None
+    event_message = getattr(session.event, "message", None) if not host_triggered else None
     try:
         agent_turn = await start_turn(
             context_session,
@@ -396,9 +469,14 @@ async def prepare_agent_turn(
         raise
 
     agent_events = AgentTurnRecorder()
-    if scheduled:
+    if not scheduled:
         agent_events.append(
-            "reminder_trigger",
+            "conversation_mode", payload={"mode": conversation_mode, "revision": companion_revision},
+            model_visible=False,
+        )
+    if host_triggered:
+        agent_events.append(
+            "companion_trigger" if autonomous else "reminder_trigger",
             payload=scheduled_facts,
             model_visible=False,
             status="started",
@@ -447,7 +525,7 @@ async def prepare_agent_turn(
         "included_turn_refs": list(selection.included_turn_refs),
         "excluded_turn_refs": list(selection.excluded_turn_refs),
     }
-    if scheduled:
+    if host_triggered:
         selection_audit["ordinary_chat"] = _ordinary_chat_provenance(scheduled_chat_snapshot)
     agent_events.append("context_selection", payload=selection_audit, model_visible=False)
     snapshot_selection: dict[str, object] = {
@@ -457,7 +535,7 @@ async def prepare_agent_turn(
         "excluded_turn_refs": list(selection.excluded_turn_refs),
         "fresh_context": fresh_context,
     }
-    if scheduled:
+    if host_triggered:
         snapshot_selection["ordinary_chat"] = _ordinary_chat_provenance(scheduled_chat_snapshot)
     agent_events.append(
         "context_snapshot",
@@ -513,19 +591,21 @@ async def prepare_agent_turn(
         agent_events=agent_events,
         relationship_snapshot=relationship_snapshot,
         resolution=resolution,
+        conversation_mode=conversation_mode,
+        companion_revision=companion_revision,
         agent_access=AgentAccessContext(
             scope_id=scope.id,
             session_id=context_session.id,
             turn_id=agent_turn.id,
             user_id=user_id,
-            allow_archived_sessions=False if scheduled else requests_archived_context(raw_user_text),
-            allow_payload_delivery=False if scheduled else requests_tool_payload(raw_user_text),
-            allow_context_pin=False if scheduled else requests_context_pin(raw_user_text),
+            allow_archived_sessions=False if host_triggered else requests_archived_context(raw_user_text),
+            allow_payload_delivery=False if host_triggered else requests_tool_payload(raw_user_text),
+            allow_context_pin=False if host_triggered else requests_context_pin(raw_user_text),
             raw_user_text=raw_user_text,
             is_operator=is_operator,
             trigger_kind=trigger_kind,
             reminder_task_ref=reminder_task_ref if scheduled else None,
-            capability_names=capability_names if scheduled else frozenset({"reminder"}),
+            capability_names=capability_names if host_triggered else frozenset({"reminder"}),
             context_read_grants=await collect_context_read_grants(
                 context_session, selection, anchors, turn_id=agent_turn.id
             ),

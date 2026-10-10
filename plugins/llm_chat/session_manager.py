@@ -44,7 +44,7 @@ class SessionHandle:
 
 def scope_identity(session: Session) -> ScopeIdentity:
     event = getattr(session, "event", None)
-    guild = getattr(event, "guild", None) or getattr(session, "guild", None)
+    guild = event.guild if hasattr(event, "guild") else getattr(session, "guild", None)
     channel = session.channel
     platform = str(session.account.platform)
     account_id = str(session.account.self_id)
@@ -155,12 +155,12 @@ async def get_scope_by_ref(scope_ref: str) -> ChatScope | None:
 
 
 def _session_owner(purpose: str, reminder_task_ref: str) -> tuple[str, str]:
-    if purpose not in {"chat", "reminder"}:
+    if purpose not in {"chat", "reminder", "companion", "companion_reflection"}:
         raise ValueError("Unknown context session purpose")
     if purpose == "reminder" and not reminder_task_ref:
         raise ValueError("Reminder sessions require a task reference")
-    if purpose == "chat" and reminder_task_ref:
-        raise ValueError("Chat sessions cannot be bound to a reminder")
+    if purpose != "reminder" and reminder_task_ref:
+        raise ValueError("Only reminder sessions may be bound to a reminder")
     return purpose, reminder_task_ref
 
 
@@ -223,7 +223,7 @@ async def get_active_session(
 
 
 async def get_session_by_ref(session_ref: str, *, purpose: str = "chat") -> ContextSession | None:
-    if purpose not in {"chat", "reminder"}:
+    if purpose not in {"chat", "reminder", "companion", "companion_reflection"}:
         raise ValueError("Unknown context session purpose")
     async with get_session() as db:
         return (
@@ -350,9 +350,13 @@ async def start_turn(
     fresh_context: bool,
     trigger_kind: str = "message",
 ) -> AgentTurn:
-    if trigger_kind not in {"message", "scheduled"} or (trigger_kind == "scheduled") != (
-        context_session.purpose == "reminder"
-    ):
+    expected_trigger = {
+        "chat": "message",
+        "reminder": "scheduled",
+        "companion": "autonomous",
+        "companion_reflection": "reflection",
+    }.get(context_session.purpose)
+    if expected_trigger is None or trigger_kind != expected_trigger:
         raise ValueError("Turn trigger must match its session purpose")
     async with get_session() as db:
         sequence = (

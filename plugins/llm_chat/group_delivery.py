@@ -169,15 +169,25 @@ async def send_group_delivery(
             quoted = quotable and (permit.reply or turn.pending_attribution)
             outgoing = quote_request(content, turn.message_id) if quoted else content
             started = False
+            confirmed = False
+
+            def acknowledge() -> None:
+                nonlocal confirmed
+                confirmed = True
+                if state is not None:
+                    mark_delivery_success(state, texts, media=media, text_message=text_message)
+
+            async def native_send():
+                nonlocal started
+                started = True
+                return await session.send(outgoing)
 
             async def transmit():
-                nonlocal started
                 token = _SENDING.set(turn)
                 try:
-                    started = True
-                    from .reminders.delivery import send_reminder_transport
+                    from .transport import send_turn_transport
 
-                    return await send_reminder_transport(lambda: session.send(outgoing))
+                    return await send_turn_transport(native_send, on_confirmed=acknowledge)
                 finally:
                     _SENDING.reset(token)
 
@@ -186,11 +196,9 @@ async def send_group_delivery(
                 if not receipts:
                     raise DeliveryError("Transport returned no confirmed delivery receipt")
             except BaseException:
-                if started and state is not None:
+                if started and not confirmed and state is not None:
                     mark_delivery_attempt(state)
                 raise
-            if state is not None:
-                mark_delivery_success(state, texts, media=media, text_message=text_message)
             turn.last_send = turn.runtime.clock()
             if quoted:
                 turn.pending_attribution = False

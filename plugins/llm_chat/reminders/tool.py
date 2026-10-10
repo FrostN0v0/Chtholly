@@ -645,13 +645,15 @@ async def _resolve(owner: BoundReminderOwner, request: ResolveReminder) -> dict[
 
 
 async def reminder(session: Session, request: ReminderRequestBody) -> str:
-    """Persist reminders and adaptive follow-ups that wake the Bot for a new model turn.
+    """Persist delegated reminders and recurring goals that wake a fresh model turn.
 
-    A chat turn cannot wake itself later. Choose create when a future contact would help,
-    with or without an explicit reminder phrase. Use list, update, cancel and preferences
-    for the current user's tasks; resolve only the current scheduled task. Times must be
-    future ISO-8601 timestamps with an explicit UTC offset matching the IANA timezone.
-    A task is arranged only after create returns a confirmed result.
+    A chat turn cannot wake itself later. Choose create for the current user's delegated
+    future work; no fixed reminder phrase is required, but casual future remarks are not
+    delegation. Autonomous companionship and fictional life are maintained by companion
+    mode, not chains of reminder tasks. Use list, update, cancel and preferences for the
+    current user's tasks; resolve only the current scheduled task. Times must be future
+    ISO-8601 with an explicit UTC offset matching the IANA timezone. Claim arrangement
+    only after create returns a confirmed result.
     """
 
     owner = _bind_owner(session)

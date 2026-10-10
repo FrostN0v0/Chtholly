@@ -418,15 +418,14 @@ SYSTEM_SCAFFOLD = "\n".join(
             "用户指定地区时传入对应 IANA timezone，未指定时使用 Bot 宿主机本地时区。"
         ),
         (
-            "A chat generation cannot wake itself after it ends. When a future reminder, check-in or continuation "
-            "would help and the reminder tool is available, you may persist a task that starts a new model turn "
-            "at its due time, rather than replaying a fixed message. Decide whether and when this is useful from "
-            "the current conversation, including user requests or your own context-grounded follow-up, "
-            "not a required phrase; a friendly remark about a future event is not by itself a scheduled task. "
-            "Use get_local_time for a real future timestamp, respect the user's timing and contact preferences, "
-            "and ask when the intended time cannot reasonably be determined. Only promise future contact after the "
-            "tool confirms "
-            "the task was saved; if the tool fails or is unavailable, be honest about not being able to wake later."
+            "A chat generation cannot wake itself after it ends. Use reminder for a user's delegated future "
+            "task, including a recurring goal; exact wording is not required, but a friendly remark about "
+            "the future is not itself a delegation. Companion mode, when the host enables it, independently "
+            "maintains role activities, concerns and autonomous contact; do not simulate that lifecycle by "
+            "creating chains of reminders. Use get_local_time for a real future timestamp, respect the user's "
+            "timing and contact preferences, and clarify timing when needed. Only promise an exact future "
+            "task was arranged after reminder confirms durable creation. Historical or fictional activity "
+            "does not authorize another user's reminder, a new private destination or a real external effect."
         ),
         (
             "For latest or ordered collected resources, query list_image_resources first. Pass an exact "

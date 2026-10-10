@@ -191,6 +191,16 @@ plugins:
     eval_request_timeout: 60.0
     relationship_eval_batch_size: 8
     relationship_eval_debounce_seconds: 2.0
+    # All scopes remain normal until a native operator explicitly opts in.
+    companion_model: null
+    companion_request_timeout: 60.0
+    companion_reflection_interval_minutes: 60
+    companion_daily_reflections: 12
+    companion_daily_contacts: 3
+    companion_contact_interval_minutes: 180
+    companion_member_idle_days: 14
+    companion_input_chars: 32000
+    companion_output_tokens: 4096
     image_tag_model: doubao
     tag_batch_size: 50
     memory_enabled: true

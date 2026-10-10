@@ -12,6 +12,7 @@ from entari_plugin_llm.config import get_model_config
 
 from .config import LLMChatConfig
 from .models import AgentTurn, ChatScope, AgentEvent, ContextSession, RelationshipEvidence
+from .companion import store as companion_store
 from .personality import session_persona, persona_scope_lock, resolve_scope_persona, remember_session_persona
 from .agent_events import load_event_payload, select_payload_path
 from .context_builder import build_baseline_fingerprint
@@ -36,6 +37,7 @@ from .agent_attachments import (
     resolve_agent_attachment,
     event_attachment_metadata,
 )
+from .companion.context import mode_baseline
 from .session_inspection import (
     turn_events,
     session_usage,
@@ -71,13 +73,15 @@ class AgentAdminService:
     tool_schemas: list[dict[str, str]]
     attachment_root: Path | None = None
 
-    def _baseline(self, channel_id: str, persona: ResolvedPersona):
-        model_name = get_model_config(self.config.model, channel_id).name
-        return build_baseline_fingerprint(
+    async def _baseline(self, scope: ChatScope, persona: ResolvedPersona):
+        model_name = get_model_config(self.config.model, scope.channel_id).name
+        baseline = build_baseline_fingerprint(
             model_name=model_name,
             persona=persona.baseline_text,
             tool_schemas=self.tool_schemas,
         )
+        mode = await companion_store.get_mode(scope.id, session_factory=get_session)
+        return mode_baseline(baseline, mode.mode)
 
     async def list_scopes(self, limit: int = 100) -> list[dict[str, object]]:
         scopes = await list_scopes(limit=max(1, min(500, limit)))
@@ -356,7 +360,7 @@ class AgentAdminService:
             created = await rollover_session(
                 scope,
                 context_session,
-                self._baseline(scope.channel_id, persona),
+                await self._baseline(scope, persona),
                 reason=reason,
                 handoff_json=handoff,
                 carry_handoff=carry_handoff,
@@ -368,7 +372,7 @@ class AgentAdminService:
         scope = await self._scope(scope_ref)
         async with persona_scope_lock(scope.id):
             persona = await resolve_scope_persona(self.config, scope.id)
-            baseline = self._baseline(scope.channel_id, persona)
+            baseline = await self._baseline(scope, persona)
             await seal_scope_sessions(scope.id)
             created = await create_session(scope.id, baseline, start_reason="webui_hard_reset")
             await remember_session_persona(created.id, persona)
@@ -424,6 +428,7 @@ class AgentAdminService:
             "user_name": turn.user_name,
             "status": turn.status,
             "fresh_context": turn.fresh_context,
+            "trigger_kind": turn.trigger_kind,
             "final_text": turn.final_text,
             "created_at": turn.created_at.isoformat() if turn.created_at else None,
             "finished_at": turn.finished_at.isoformat() if turn.finished_at else None,
@@ -443,6 +448,7 @@ class AgentAdminService:
             "sequence": item.sequence,
             "status": item.status,
             "start_reason": item.start_reason,
+            "purpose": item.purpose,
             "close_reason": item.close_reason,
             "model": item.model_name,
             "turn_count": item.turn_count,

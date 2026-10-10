@@ -127,6 +127,7 @@ _SCHEDULED_ALLOWED_TOOLS = frozenset(
         "web_search",
     }
 )
+_AUTONOMOUS_ALLOWED_TOOLS = (_SCHEDULED_ALLOWED_TOOLS - {"reminder"}) | {"finish_turn"}
 _INTERNAL_PARTICIPANT_REFERENCE_TOOLS = {
     "get_channel_avatar",
     "inspect_image",
@@ -267,6 +268,8 @@ def _authorized(name: str) -> bool:
     if entry is None or not _is_compat_wrapper(entry[0].handle) or entry[1].external_execution is not True:
         return False
     access = current_agent_access()
+    if access is not None and access.trigger_kind == "autonomous":
+        return name in _AUTONOMOUS_ALLOWED_TOOLS and "send_msg" in access.capability_names
     if access is not None and access.trigger_kind == "scheduled":
         if name not in _SCHEDULED_ALLOWED_TOOLS:
             return False
