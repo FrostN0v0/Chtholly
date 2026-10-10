@@ -1,0 +1,23 @@
+--- a/llbot.js
++++ b/llbot.js
+@@ -45838,6 +45838,20 @@
+ 			this.nestedForwardCache.delete(fileName);
+ 			this.nestedForwardCache.set(fileName, messages);
+ 		}
++		for (const messages of decodedByFileName.values()) {
++			for (const message of messages) {
++				for (const element of message.elements ?? []) {
++					const forward = element.multiForwardMsgElement;
++					if (!forward || forward.fileName === top.fileName) continue;
++					const nestedMessages = decodedByFileName.get(forward.fileName);
++					if (!nestedMessages) continue;
++					const nestedId = forward.resId || (forward.xmlContent || "").match(/\b(?:m_)?resid=["']([^"']+)["']/i)?.[1] || forward.fileName;
++					if (!nestedId || nestedId === resId) continue;
++					this.nestedForwardCache.delete(nestedId);
++					this.nestedForwardCache.set(nestedId, nestedMessages);
++				}
++			}
++		}
+ 		while (this.nestedForwardCache.size > 256) {
+ 			const oldest = this.nestedForwardCache.keys().next().value;
+ 			if (oldest === void 0) break;

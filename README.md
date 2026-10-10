@@ -136,6 +136,8 @@ Caddy 只代理明确的管理页面、API 与两个管理 WebSocket；Satori/On
 
 转发图片预算配置已更名为 `llm_chat.merged_forward_max_images`，默认仍为 12。若旧配置含 `merged_forward_max_described_images`，停服后用 `uv run python scripts/migrate_image_input_config.py entari.yml --apply` 保留原值迁移；不带 `--apply` 仅检查。群历史新增列在服务开始写入前自动幂等迁移；部署须统一更新代码和配置 schema 后受控重启，不在线逐文件覆盖。
 
+嵌套合并转发按原位置递归读取，但仍受深度、消息数和总字符预算限制。LLBot `8.3.0` 需要保留已有嵌套缓存及 `patches/llbot-8.3.0-nested-resid-cache.patch`：即使子卡片的 `resId` 非空，真实记录也可能仅在外层同批 bundle 中。协议端更新后应复核补丁和真实子记录读取，不把空载荷解压失败当成完整聊天记录。
+
 关系与情绪按成员持续保存，普通对话不再套用固定回应档位：模型可以自然聊天、只发表情、明确拒绝或主动沉默。后台评估合并完整的未处理互动，失败保留证据；短期情绪随时间回落，不每天清空长期关系。`relationship_eval_batch_size`（默认 8）是单批上限，`relationship_eval_debounce_seconds`（默认 2 秒）是合并窗口，不是每隔若干条只评最后一次。
 
 模型通过有序 `segments` 自主组合文字、艾特、图片、链接和表情：同一条消息可以先说话、在中间艾特，再插图或继续文字；运行时不加空格、不把艾特挪到开头、不强制图片先发。每次 `send_msg` 对应一条原生消息，不代表一轮只能发一条；回答有独立的结论、理由、建议等段落时，模型应再次调用 `send_msg` 自然分条，短答仍可单条，不机械拆句或凑条数。最终普通文本保留内部换行，不再按换行偷偷拆条，也不用于把多部分回答挤成一个长气泡。当前 OneBot 无法保持单条的语音、视频、文件及合并转发组合会在发送前明确拒绝，而不是自动拆开。
