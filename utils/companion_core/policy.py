@@ -17,7 +17,7 @@ _LIMIT_RANGES = {
     "request_timeout": (5.0, 180.0),
     "reflection_interval_minutes": (10, 1440),
     "daily_reflections": (1, 48),
-    "daily_contacts": (0, 12),
+    "daily_contacts": (0, 48),
     "contact_interval_minutes": (5, 10080),
     "member_idle_days": (1, 90),
     "input_chars": (1000, 64000),
@@ -54,7 +54,7 @@ class CompanionLimits:
     request_timeout: float = 60.0
     reflection_interval_minutes: int = 60
     daily_reflections: int = 12
-    daily_contacts: int = 3
+    daily_contacts: int = 24
     contact_interval_minutes: int = 5
     member_idle_days: int = 14
     input_chars: int = 32000

@@ -478,7 +478,7 @@ def test_limits_have_safe_defaults_exact_names_and_immutable_values() -> None:
         {"daily_contacts": 3.0},
         {"daily_contacts": "3"},
         {"daily_contacts": -1},
-        {"daily_contacts": 13},
+        {"daily_contacts": 49},
         {"daily_reflections": 0},
         {"daily_reflections": 49},
         {"reflection_interval_minutes": 9},
@@ -567,9 +567,10 @@ def test_real_user_age_has_an_inclusive_idle_limit_and_rejects_future_time() -> 
 def test_persistent_daily_count_includes_active_unknown_reservations() -> None:
     now = _utc("2026-10-10T04:00:00Z")
 
-    assert _ready(now, contacts_today=2)
-    assert not _ready(now, contacts_today=3)
-    assert not _ready(now, contacts_today=4)
+    assert _ready(now, contacts_today=3)
+    assert _ready(now, contacts_today=23)
+    assert not _ready(now, contacts_today=24)
+    assert not _ready(now, contacts_today=25)
     assert not _ready(now, limits=CompanionLimits(daily_contacts=0))
 
 

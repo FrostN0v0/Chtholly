@@ -188,7 +188,7 @@ llmchat handoff
 
 `normal` 立即取消该范围的自主工作，保留已有状态，并且不再新增本机制的后台模型请求；普通聊天、关系评估和明确委托的提醒保持各自原有语义。重新启用只安排新的判断，不补发停用期间的积压。真实回执才表示送达，未知结果不自动重发；无人回应不会额外延长主动联系间隔，也不会伪造负面关系反馈。本人仍可通过 `llmchat reminder off` 关闭对自己的自主联系，不影响明确委托提醒。
 
-`companion_*` 配置控制内部模型、输入输出预算、复盘及联系上限。`companion_contact_interval_minutes` 是主动联系之间的固定短时防重复间隔，未回复不会触发额外退避；完整默认值见 `entari.full.example.yml`。`companion_daily_contacts: 0` 只停止主动联系，内部活动仍可能调用模型；停止该机制的后台开销请切回 `normal`。
+`companion_*` 配置控制内部模型、输入输出预算、复盘及联系上限。`companion_contact_interval_minutes` 是主动联系之间的固定短时防重复间隔，未回复不会触发额外退避。`companion_daily_contacts` 默认每成员每范围每日 24 次，仅作防失控兜底，不是发送目标；支持 0–48，设为 0 只停止主动联系，内部活动仍可能调用模型。内部复盘频率和模型预算独立，不会因提高联系上限强制增加请求。完整默认值见 `entari.full.example.yml`；停止该机制的后台开销请切回 `normal`。
 
 ### 持久提醒
 

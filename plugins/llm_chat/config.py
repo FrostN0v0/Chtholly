@@ -69,8 +69,8 @@ class LLMChatConfig(BasicConfModel, extra="forbid"):
     """Default internal review interval in explicitly enabled scopes; this is not a sending schedule."""
     companion_daily_reflections: int = 12
     """Durable Shanghai-calendar-day model review budget per enabled scope."""
-    companion_daily_contacts: int = 3
-    """Maximum autonomous contacts per member per Shanghai day; zero disables contacts, not internal life."""
+    companion_daily_contacts: int = 24
+    """Daily runaway guard per member and scope; not a sending target. Zero disables autonomous contacts."""
     companion_contact_interval_minutes: int = 5
     """Fixed minimum outbound contact gap in minutes; no-reply backoff is disabled."""
     companion_member_idle_days: int = 14

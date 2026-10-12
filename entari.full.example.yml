@@ -196,7 +196,7 @@ plugins:
     companion_request_timeout: 60.0
     companion_reflection_interval_minutes: 60
     companion_daily_reflections: 12
-    companion_daily_contacts: 3
+    companion_daily_contacts: 24
     companion_contact_interval_minutes: 5
     companion_member_idle_days: 14
     companion_input_chars: 32000
