@@ -155,6 +155,9 @@ plugins:
     web_artifacts_capture_url: http://127.0.0.1:8131/internal/capture
     web_artifacts_capture_token: ${{ env.get('WEB_ARTIFACT_CAPTURE_TOKEN', '') }}
     web_artifacts_ttl_hours: 24
+    # Optional local history before an addressed group message; no automatic image recognition.
+    channel_context_enabled: false
+    channel_context_messages: 10  # 1-50; subject to the shared character and input-token budgets.
     channel_message_max_images: 12
     merged_forward_max_images: 12
     web_search_enabled: true

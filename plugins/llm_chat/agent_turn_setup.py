@@ -32,6 +32,7 @@ from .agent_context import SCHEDULED_TOOL_CAPABILITIES, AUTONOMOUS_TOOL_CAPABILI
 from .core.delivery import DeliveryState, normalize_delivery_limits
 from .persona.store import get_mood, append_message, delete_message
 from .turn_lifecycle import ActiveChatTurn
+from .channel_context import read_channel_context
 from .context_builder import (
     requests_context_pin,
     requests_tool_payload,
@@ -58,6 +59,7 @@ from .companion.context import AUTONOMOUS_CONTACT_CONTRACT, mode_baseline, compa
 from .core.media_delivery import MediaIntent, build_media_intent
 from .relationships.state import load_relationship_snapshot
 from .core.artifact_access import is_artifact_request
+from .core.channel_context import attach_channel_context
 from .core.context_snapshot import build_context_snapshot
 from .persona.memory_context import MemoryContext, load_memory_context
 from .scheduled_chat_context import ScheduledChatSnapshot, read_scheduled_chat_snapshot
@@ -262,9 +264,7 @@ async def prepare_agent_turn(
     persist_user_message: bool = True,
     capability_names: frozenset[str] = frozenset(),
 ) -> PreparedAgentTurn:
-    if (purpose, trigger_kind) not in {
-        ("chat", "message"), ("reminder", "scheduled"), ("companion", "autonomous")
-    }:
+    if (purpose, trigger_kind) not in {("chat", "message"), ("reminder", "scheduled"), ("companion", "autonomous")}:
         raise ValueError("A host-triggered turn requires its exact context session purpose")
     scheduled = trigger_kind == "scheduled"
     autonomous = trigger_kind == "autonomous"
@@ -311,6 +311,9 @@ async def prepare_agent_turn(
             current_mentioned_participants=mentioned_participants,
         ),
     )
+    channel_context = None if host_triggered else await read_channel_context(config, session, warn=warn)
+    if channel_context is not None:
+        current_messages[-1] = attach_channel_context(current_messages[-1], channel_context)
     artifact_requested = is_artifact_request(raw_user_text)
     media_intent = build_media_intent(raw_user_text, has_image_inputs=bool(image_inputs.input_views()))
     if artifact_requested:
@@ -417,7 +420,9 @@ async def prepare_agent_turn(
 
         system = compose_system()
         fresh_context = (
-            False if host_triggered else requests_fresh_context(model_text) or requests_recent_channel_context(model_text)
+            False
+            if host_triggered
+            else requests_fresh_context(model_text) or requests_recent_channel_context(model_text)
         )
         selection = await _select_context(
             config,
@@ -471,7 +476,8 @@ async def prepare_agent_turn(
     agent_events = AgentTurnRecorder()
     if not scheduled:
         agent_events.append(
-            "conversation_mode", payload={"mode": conversation_mode, "revision": companion_revision},
+            "conversation_mode",
+            payload={"mode": conversation_mode, "revision": companion_revision},
             model_visible=False,
         )
     if host_triggered:
@@ -527,6 +533,8 @@ async def prepare_agent_turn(
     }
     if host_triggered:
         selection_audit["ordinary_chat"] = _ordinary_chat_provenance(scheduled_chat_snapshot)
+    if channel_context is not None:
+        selection_audit["recent_channel_context"] = channel_context.provenance
     agent_events.append("context_selection", payload=selection_audit, model_visible=False)
     snapshot_selection: dict[str, object] = {
         "estimated_tokens": selection.estimated_tokens,
@@ -537,6 +545,8 @@ async def prepare_agent_turn(
     }
     if host_triggered:
         snapshot_selection["ordinary_chat"] = _ordinary_chat_provenance(scheduled_chat_snapshot)
+    if channel_context is not None:
+        snapshot_selection["recent_channel_context"] = channel_context.provenance
     agent_events.append(
         "context_snapshot",
         payload=build_context_snapshot(

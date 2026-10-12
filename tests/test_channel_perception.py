@@ -549,6 +549,142 @@ async def test_scope_isolation_and_retention_limit(perception_store) -> None:
 
 
 @pytest.mark.asyncio
+async def test_recent_messages_anchor_by_message_id_is_scoped_and_readable(perception_store) -> None:
+    scope = _scope()
+    foreign_scope = _scope(account_id="bot-2")
+    foreign_platform_scope = PerceptionScope(
+        platform="discord",
+        account_id="bot-1",
+        guild_id="group-1",
+        channel_id="group-1",
+    )
+    foreign_channel_scope = _scope(channel_id="group-2")
+    started = datetime.utcnow()
+    store_config = ChannelPerceptionConfig(retention_days=7, max_messages_per_channel=20)
+    read_config = ChannelPerceptionConfig(retention_days=7, max_messages_per_channel=6)
+
+    async def record(
+        message_scope,
+        message_id: str,
+        content: str,
+        observed_at: datetime,
+        *,
+        directed_to_bot: bool = False,
+        is_command: bool = False,
+        is_bot: bool = False,
+    ) -> None:
+        await message_store_module.store_observation(
+            MessageObservation(
+                kind="message",
+                participant=_participant(message_scope, card="History", observed_at=observed_at),
+                message_id=message_id,
+                message=_message(content),
+                display_name="bot" if is_bot else "History",
+                directed_to_bot=directed_to_bot,
+                is_command=is_command,
+                is_bot=is_bot,
+                observed_at=observed_at,
+            ),
+            store_config,
+        )
+
+    await record(scope, "retention-old", "retention old", started - timedelta(hours=2))
+    await record(scope, "expired", "expired", started - timedelta(days=8))
+    await record(scope, "addressed", "addressed context", started - timedelta(minutes=90), directed_to_bot=True)
+    await record(scope, "bot", "bot context", started - timedelta(minutes=80), is_bot=True)
+    await record(scope, "deleted", "deleted context", started - timedelta(minutes=70))
+    await message_store_module.store_observation(
+        MessageMutation(
+            kind="message_delete",
+            scope=scope,
+            message_id="deleted",
+            message=None,
+            observed_at=started - timedelta(minutes=69),
+        ),
+        store_config,
+    )
+    await record(scope, "command", "command context", started - timedelta(minutes=60), is_command=True)
+    await record(scope, "current", "current turn", started - timedelta(minutes=1))
+    await record(scope, "later", "later turn", started)
+    await record(foreign_scope, "foreign-anchor", "foreign context", started - timedelta(minutes=50))
+    await record(foreign_platform_scope, "foreign-platform-anchor", "foreign platform context", started)
+    await record(foreign_channel_scope, "foreign-channel-anchor", "foreign channel context", started)
+
+    anchored, next_cursor = await queries_module.get_recent_messages(
+        scope,
+        limit=2,
+        before_message_id="current",
+        config=read_config,
+    )
+    assert [message["content"] for message in anchored] == ["addressed context", "bot context"]
+    assert next_cursor == ""
+    latest_prior, page_cursor = await queries_module.get_recent_messages(
+        scope,
+        limit=1,
+        before_message_id="current",
+        config=read_config,
+    )
+    assert [message["content"] for message in latest_prior] == ["bot context"]
+    assert page_cursor
+    older_prior, _ = await queries_module.get_recent_messages(
+        scope,
+        limit=1,
+        before_cursor=page_cursor,
+        before_message_id="current",
+        config=read_config,
+    )
+    assert [message["content"] for message in older_prior] == ["addressed context"]
+
+    deleted_anchor, _ = await queries_module.get_recent_messages(
+        scope,
+        limit=10,
+        before_message_id="deleted",
+        config=read_config,
+    )
+    command_anchor, _ = await queries_module.get_recent_messages(
+        scope,
+        limit=10,
+        before_message_id="command",
+        config=read_config,
+    )
+    assert [message["content"] for message in deleted_anchor] == ["addressed context", "bot context"]
+    assert [message["content"] for message in command_anchor] == ["addressed context", "bot context"]
+
+    session = cast(
+        Session,
+        SimpleNamespace(
+            account=SimpleNamespace(platform="onebot", self_id="bot-1"),
+            guild=SimpleNamespace(id="group-1"),
+            event=SimpleNamespace(guild=SimpleNamespace(id="group-1")),
+            channel=SimpleNamespace(id="group-1"),
+        ),
+    )
+    service = service_module.ChannelPerceptionService(read_config)
+    service_page, _ = await service.recent_messages(session, limit=2, before_message_id="current")
+    assert [message["content"] for message in service_page] == ["addressed context", "bot context"]
+
+    with pytest.raises(ValueError, match="Unknown message anchor"):
+        await queries_module.get_recent_messages(scope, limit=2, before_message_id="missing", config=read_config)
+    for foreign_anchor in ("foreign-anchor", "foreign-platform-anchor", "foreign-channel-anchor"):
+        with pytest.raises(ValueError, match="Unknown message anchor"):
+            await queries_module.get_recent_messages(
+                scope,
+                limit=2,
+                before_message_id=foreign_anchor,
+                config=read_config,
+            )
+    retention_page, _ = await queries_module.get_recent_messages(
+        scope,
+        limit=2,
+        before_message_id="retention-old",
+        config=read_config,
+    )
+    assert retention_page == []
+    with pytest.raises(ValueError, match="Unknown message anchor"):
+        await queries_module.get_recent_messages(scope, limit=2, before_message_id="expired", config=read_config)
+
+
+@pytest.mark.asyncio
 async def test_participant_retention_is_bounded(perception_store) -> None:
     scope = _scope()
     started = datetime.utcnow() - timedelta(minutes=30)

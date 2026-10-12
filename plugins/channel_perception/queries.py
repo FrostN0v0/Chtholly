@@ -239,6 +239,7 @@ async def get_recent_messages(
     *,
     limit: int,
     before_cursor: str = "",
+    before_message_id: str = "",
     participant_ref: str = "",
     config: ChannelPerceptionConfig | None = None,
 ) -> tuple[list[MessageView], str]:
@@ -253,6 +254,18 @@ async def get_recent_messages(
             raise ValueError("Invalid message cursor") from exc
         filters.append(AmbientMessage.id < cursor_id)
     async with get_session() as session:
+        if before_message_id:
+            anchor_id = (
+                await session.execute(
+                    select(AmbientMessage.id).where(
+                        *_scope_filters(AmbientMessage, scope),
+                        AmbientMessage.message_id == before_message_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if anchor_id is None:
+                raise ValueError("Unknown message anchor")
+            filters.append(AmbientMessage.id < anchor_id)
         rows = list(
             (
                 await session.execute(

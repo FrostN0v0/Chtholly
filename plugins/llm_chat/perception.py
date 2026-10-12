@@ -49,6 +49,7 @@ class ChannelPerceptionLike(Protocol):
         *,
         limit: int,
         before_cursor: str = "",
+        before_message_id: str = "",
         participant_ref: str = "",
     ) -> tuple[list[dict[str, object]], str]: ...
 

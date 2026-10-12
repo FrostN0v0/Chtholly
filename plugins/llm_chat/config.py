@@ -45,6 +45,12 @@ class LLMChatConfig(BasicConfModel, extra="forbid"):
     """Independent persona profiles and their matching reference images."""
 
     def __post_init__(self) -> None:
+        if (
+            isinstance(self.channel_context_messages, bool)
+            or not isinstance(self.channel_context_messages, int)
+            or not 1 <= self.channel_context_messages <= 50
+        ):
+            raise ValueError("channel_context_messages must be an integer between 1 and 50")
         validate_personas(self)
         from utils.companion_core import normalize_limits
 
@@ -124,6 +130,10 @@ class LLMChatConfig(BasicConfModel, extra="forbid"):
     """Maximum forwarded images read in one generation, with original references preserved."""
     channel_message_max_images: int = 12
     """Maximum channel-message images exposed as generation-local references per history page."""
+    channel_context_enabled: bool = False
+    """Preload recent prior messages for ordinary addressed public chat only; disabled by default."""
+    channel_context_messages: int = 10
+    """Maximum prior messages to preload (1-50); no image recognition, subject to joint character and token budgets."""
     model: str | None = None
     """Model alias for conversation; None uses the llm plugin default."""
     eval_model: str | None = None

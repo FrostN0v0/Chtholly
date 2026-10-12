@@ -189,6 +189,7 @@ class ChannelPerceptionService(Service):
         *,
         limit: int,
         before_cursor: str = "",
+        before_message_id: str = "",
         participant_ref: str = "",
     ) -> tuple[list[MessageView], str]:
         await self.flush()
@@ -196,6 +197,7 @@ class ChannelPerceptionService(Service):
             self._history_scope(session),
             limit=limit,
             before_cursor=before_cursor,
+            before_message_id=before_message_id,
             participant_ref=participant_ref,
             config=self.config,
         )

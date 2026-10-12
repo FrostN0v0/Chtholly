@@ -58,9 +58,7 @@ _CONFIG_SCHEMA_TEXT = {
     ),
     "companion_member_idle_days": (
         "\u81ea\u4e3b\u8054\u7cfb\u4ea4\u4e92\u6709\u6548\u671f",
-        (
-            "\u53ea\u8003\u8651\u6b64\u5929\u6570\u5185\u6709\u771f\u5b9e\u4ea4\u4e92\u7684\u6210\u5458\u3002"
-        ),
+        ("\u53ea\u8003\u8651\u6b64\u5929\u6570\u5185\u6709\u771f\u5b9e\u4ea4\u4e92\u7684\u6210\u5458\u3002"),
     ),
     "companion_input_chars": (
         "\u81ea\u4e3b\u590d\u76d8\u8f93\u5165\u4e0a\u9650",
@@ -71,10 +69,7 @@ _CONFIG_SCHEMA_TEXT = {
     ),
     "companion_output_tokens": (
         "\u81ea\u4e3b\u590d\u76d8\u8f93\u51fa\u4e0a\u9650",
-        (
-            "\u5355\u6b21\u5185\u90e8\u7ed3\u6784\u5316\u590d\u76d8\u7684\u8f93\u51fa Tok"
-            "en \u4e0a\u9650\u3002"
-        ),
+        ("\u5355\u6b21\u5185\u90e8\u7ed3\u6784\u5316\u590d\u76d8\u7684\u8f93\u51fa Token \u4e0a\u9650\u3002"),
     ),
     "max_input_tokens": ("模型输入 Token 上限", "单次主聊天模型请求允许使用的最大输入 Token 数。"),
     "output_reserve_tokens": ("输出预留 Token", "从输入预算中预留给模型输出的 Token 数。"),
@@ -121,6 +116,27 @@ _CONFIG_SCHEMA_TEXT = {
         "\u5355\u6b21\u751f\u6210\u6700\u591a\u8bfb\u53d6\u7684\u8f6c\u53d1\u539f\u56fe\u6570\u91cf\uff0c\u89c6\u89c9\u6a21\u578b\u76f4\u63a5\u4f7f\u7528\u539f\u56fe\u3002",
     ),
     "channel_message_max_images": ("频道历史图片上限", "每页频道历史中最多作为本轮引用暴露的图片数。"),
+    "channel_context_enabled": (
+        "\u542f\u7528\u81ea\u52a8\u9891\u9053\u4e0a\u4e0b\u6587",
+        (
+            "\u9ed8\u8ba4\u5173\u95ed\uff1b\u4ec5\u5728\u666e\u901a\u5df2\u5bfb\u5740\u516c\u5f00"
+            "\u7fa4\u804a\u8f6e\u6b21\u4e2d\u9644\u5e26\u89e6\u53d1\u6d88\u606f\u4e4b\u524d"
+            "\u7684\u8fd1\u671f\u9891\u9053\u6d88\u606f\uff0c\u4e0d\u6539\u53d8\u63d0\u53ca"
+            "\u6216\u56de\u590d\u89e6\u53d1\u89c4\u5219\uff0c\u4e0d\u81ea\u52a8\u8bc6\u522b"
+            "\u56fe\u7247\uff0c\u5e76\u53d7\u5b57\u7b26\u4e0e Token \u8054\u5408\u9884\u7b97"
+            "\u9650\u5236\u3002"
+        ),
+    ),
+    "channel_context_messages": (
+        "\u81ea\u52a8\u9891\u9053\u4e0a\u4e0b\u6587\u6d88\u606f\u4e0a\u9650",
+        (
+            "\u666e\u901a\u5df2\u5bfb\u5740\u516c\u5f00\u7fa4\u804a\u8f6e\u6b21\u4e2d\u6700"
+            "\u591a\u9644\u5e26\u7684\u8fd1\u671f\u5148\u524d\u6d88\u606f\u6570\uff0c\u9ed8"
+            "\u8ba4 10\uff0c\u5fc5\u987b\u4e3a 1 \u81f3 50 \u7684\u6574\u6570\uff1b\u5b9e"
+            "\u9645\u5185\u5bb9\u8fd8\u53d7\u5b57\u7b26\u4e0e Token \u8054\u5408\u9884\u7b97"
+            "\u9650\u5236\uff0c\u4e0d\u81ea\u52a8\u8bc6\u522b\u56fe\u7247\u3002"
+        ),
+    ),
     "model": ("主聊天模型", "会话使用的模型别名；留空时使用 LLM 插件默认模型。"),
     "eval_model": ("关系评估模型", "关系评估使用的模型别名；留空时使用主聊天模型。"),
     "model_request_timeout": ("主模型请求超时", "普通聊天模型单次请求的超时时间（秒）。"),
@@ -270,6 +286,7 @@ class LLMChatWebUIConfig(BaseModel):
             property_schema["title"] = title
             property_schema["description"] = description
         properties["companion_daily_contacts"].update(minimum=0, maximum=48)
+        properties["channel_context_messages"].update(minimum=1, maximum=50)
         definitions = schema.get("$defs", {})
         persona_schema = definitions.get("PersonaConfig")
         if not isinstance(persona_schema, dict):

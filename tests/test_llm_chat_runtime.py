@@ -3274,37 +3274,6 @@ async def test_on_chat_persists_current_tool_trace_as_agent_event(
 
 
 @pytest.mark.asyncio
-async def test_on_chat_leaves_channel_history_to_model_tools(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async with _temporary_chat_handler() as harness:
-        module = harness.module
-        records = _install_handler_stubs(monkeypatch, module)
-        captured_refs: list[str] = []
-        captured_image_references: list[Any] = []
-
-        def compose_prompt(*_args: Any, **kwargs: Any) -> str:
-            assert "ambient_channel_context" not in kwargs
-            captured_refs.append(kwargs["current_participant_ref"])
-            return "on-demand context system"
-
-        async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
-            captured_image_references.append(kwargs["image_inputs"])
-            return _handler_response("Current reply")
-
-        monkeypatch.setattr(module, "compose_persona_prompt", compose_prompt)
-        monkeypatch.setattr(module, "generate_chat_response", generate)
-        session = _ChatSession("current turn")
-
-        result = await module.on_chat.callable_target(session, SimpleNamespace())
-
-        assert result is BLOCK
-        assert captured_refs == ["participant_current"]
-        assert len(captured_image_references) == 1
-        assert records.appended[0][-1] == "current turn"
-
-
-@pytest.mark.asyncio
 async def test_on_chat_excludes_addressed_history_for_explicit_recent_channel_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
