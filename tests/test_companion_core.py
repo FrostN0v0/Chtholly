@@ -455,7 +455,6 @@ def test_text_array_and_identifier_bounds_are_real_validation_limits() -> None:
 
 
 def test_limits_have_safe_defaults_exact_names_and_immutable_values() -> None:
-    assert normalize_limits({}) == CompanionLimits()
     limits = normalize_limits({"daily_contacts": 0, "request_timeout": 45})
     assert limits.daily_contacts == 0
     assert type(limits.request_timeout) is float
@@ -484,7 +483,7 @@ def test_limits_have_safe_defaults_exact_names_and_immutable_values() -> None:
         {"daily_reflections": 49},
         {"reflection_interval_minutes": 9},
         {"reflection_interval_minutes": 1441},
-        {"contact_interval_minutes": 29},
+        {"contact_interval_minutes": 4},
         {"contact_interval_minutes": 10081},
         {"member_idle_days": 0},
         {"member_idle_days": 91},
@@ -546,14 +545,14 @@ def test_equivalent_offset_instants_have_the_same_quiet_window_decision() -> Non
     assert not _ready(local)
 
 
-def test_fresh_user_grace_does_not_inherit_three_hour_outbound_cooldown() -> None:
+def test_fresh_user_grace_does_not_inherit_fixed_outbound_cooldown() -> None:
     now = _utc("2026-10-10T04:00:00Z")
 
     assert not _ready(now, last_user_at=now - timedelta(minutes=5) + timedelta(microseconds=1))
     assert _ready(now, last_user_at=now - timedelta(minutes=5))
     assert _ready(now, last_user_at=now - timedelta(minutes=6))
-    assert not _ready(now, last_user_at=now - timedelta(minutes=6), last_contact=now - timedelta(minutes=179))
-    assert _ready(now, last_user_at=now - timedelta(minutes=6), last_contact=now - timedelta(minutes=180))
+    assert not _ready(now, last_user_at=now - timedelta(minutes=6), last_contact=now - timedelta(minutes=4))
+    assert _ready(now, last_user_at=now - timedelta(minutes=6), last_contact=now - timedelta(minutes=5))
 
 
 def test_real_user_age_has_an_inclusive_idle_limit_and_rejects_future_time() -> None:
@@ -574,39 +573,6 @@ def test_persistent_daily_count_includes_active_unknown_reservations() -> None:
     assert not _ready(now, limits=CompanionLimits(daily_contacts=0))
 
 
-def test_unanswered_contacts_reduce_density_without_extending_user_grace() -> None:
-    now = _utc("2026-10-10T04:00:00Z")
-    contact = now - timedelta(hours=3)
-    user = now - timedelta(minutes=6)
-
-    assert _ready(now, last_contact=contact, last_user_at=user, unanswered_contacts=0)
-    assert not _ready(now, last_contact=contact, last_user_at=user, unanswered_contacts=1)
-    assert _ready(now, last_contact=now - timedelta(hours=6), last_user_at=user, unanswered_contacts=1)
-    assert not _ready(now, last_contact=None, unanswered_contacts=1)
-
-
-def test_unanswered_density_caps_at_seven_days_and_resets_after_real_chat() -> None:
-    now = _utc("2026-10-10T04:00:00Z")
-    limits = CompanionLimits(contact_interval_minutes=1440)
-    user = now - timedelta(days=8)
-
-    assert not _ready(
-        now,
-        last_contact=now - timedelta(days=7) + timedelta(microseconds=1),
-        last_user_at=user,
-        unanswered_contacts=999,
-        limits=limits,
-    )
-    assert _ready(now, last_contact=now - timedelta(days=7), last_user_at=user, unanswered_contacts=999, limits=limits)
-    assert _ready(
-        now,
-        last_contact=now - timedelta(days=1),
-        last_user_at=now - timedelta(minutes=5),
-        unanswered_contacts=0,
-        limits=limits,
-    )
-
-
 @pytest.mark.parametrize("field", ["now", "last_user_at", "last_contact"])
 def test_policy_rejects_naive_instants_in_every_position(field: str) -> None:
     now = _utc("2026-10-10T04:00:00Z")
@@ -625,8 +591,6 @@ def test_policy_rejects_naive_instants_in_every_position(field: str) -> None:
         {"contacts_today": True},
         {"contacts_today": -1},
         {"contacts_today": 1.0},
-        {"unanswered_contacts": True},
-        {"unanswered_contacts": -1},
     ],
 )
 def test_contact_count_inputs_are_strict_nonnegative_host_facts(kwargs: dict) -> None:

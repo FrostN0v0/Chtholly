@@ -71,8 +71,8 @@ class LLMChatConfig(BasicConfModel, extra="forbid"):
     """Durable Shanghai-calendar-day model review budget per enabled scope."""
     companion_daily_contacts: int = 3
     """Maximum autonomous contacts per member per Shanghai day; zero disables contacts, not internal life."""
-    companion_contact_interval_minutes: int = 180
-    """Minimum outbound contact gap before unanswered-contact backoff."""
+    companion_contact_interval_minutes: int = 5
+    """Fixed minimum outbound contact gap in minutes; no-reply backoff is disabled."""
     companion_member_idle_days: int = 14
     """Maximum age of a real member interaction considered for autonomous contact."""
     companion_input_chars: int = 32000

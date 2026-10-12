@@ -457,21 +457,24 @@ async def test_unknown_prefix_recovery_is_terminal_and_unknown_key_never_replaye
 
 
 @pytest.mark.asyncio
-async def test_unanswered_backoff_and_actual_new_chat_reset(companion_db):
+async def test_fixed_contact_debounce_and_actual_new_chat_reset(companion_db):
     member = await enable_member(companion_db)
-    claim = await contact(companion_db, member)
-    assert await store.record_transport_started(claim, now=NOW)
-    await store.record_receipts(claim, ["real"], now=NOW)
-    assert await store.finish_contact(claim, status="delivered", now=NOW)
-    # One unanswered outbound doubles the three-hour base interval.
-    assert await contact(companion_db, member, at=NOW + timedelta(hours=4), key="different") is None
-    assert await contact(companion_db, member, at=NOW + timedelta(hours=6), key="different") is not None
+    first = await contact(companion_db, member)
+    assert await store.record_transport_started(first, now=NOW)
+    await store.record_receipts(first, ["real"], now=NOW)
+    assert await store.finish_contact(first, status="delivered", now=NOW)
+    assert await contact(companion_db, member, at=NOW + timedelta(minutes=4), key="too-soon") is None
+    second = await contact(companion_db, member, at=NOW + timedelta(minutes=5), key="different")
+    assert second is not None
+    assert await store.record_transport_started(second, now=NOW + timedelta(minutes=5))
+    await store.record_receipts(second, ["real-2"], now=NOW + timedelta(minutes=5))
+    assert await store.finish_contact(second, status="delivered", now=NOW + timedelta(minutes=5))
     chat_time = NOW + timedelta(hours=6, minutes=1)
     native = await turn(companion_db, at=chat_time)
     updated = await store.record_chat(
         1, "alice", user_id="u1", platform_user_id="p1", display_name="u1", turn_id=native, now=chat_time
     )
-    assert await contact(companion_db, updated, at=chat_time + timedelta(minutes=6), key="after-real-chat") is not None
+    assert await contact(companion_db, updated, at=chat_time + timedelta(minutes=5), key="after-real-chat") is not None
 
 
 @pytest.mark.asyncio
@@ -727,7 +730,7 @@ async def test_off_on_cannot_reauthorize_unreserved_old_motive(companion_db):
 
 
 @pytest.mark.asyncio
-async def test_persona_switch_preserves_same_user_cooldown(companion_db):
+async def test_persona_switch_preserves_fixed_same_user_cooldown(companion_db):
     member = await enable_member(companion_db)
     first = await contact(companion_db, member)
     assert await store.record_transport_started(first, now=NOW)
@@ -744,5 +747,5 @@ async def test_persona_switch_preserves_same_user_cooldown(companion_db):
         display_name="u1",
         now=NOW - timedelta(minutes=10),
     )
-    assert await contact(companion_db, second, at=NOW + timedelta(minutes=10), key="bob-greeting") is None
-    assert (await store.read_contact_history(1, "bob")) == ()
+    assert await contact(companion_db, second, at=NOW + timedelta(minutes=4), key="bob-too-soon") is None
+    assert await contact(companion_db, second, at=NOW + timedelta(minutes=5), key="bob-greeting") is not None

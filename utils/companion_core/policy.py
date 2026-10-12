@@ -18,7 +18,7 @@ _LIMIT_RANGES = {
     "reflection_interval_minutes": (10, 1440),
     "daily_reflections": (1, 48),
     "daily_contacts": (0, 12),
-    "contact_interval_minutes": (30, 10080),
+    "contact_interval_minutes": (5, 10080),
     "member_idle_days": (1, 90),
     "input_chars": (1000, 64000),
     "output_tokens": (256, 8192),
@@ -55,7 +55,7 @@ class CompanionLimits:
     reflection_interval_minutes: int = 60
     daily_reflections: int = 12
     daily_contacts: int = 3
-    contact_interval_minutes: int = 180
+    contact_interval_minutes: int = 5
     member_idle_days: int = 14
     input_chars: int = 32000
     output_tokens: int = 4096
@@ -118,21 +118,16 @@ def contact_ready(
     last_user_at: datetime,
     contacts_today: int,
     limits: CompanionLimits,
-    unanswered_contacts: int = 0,
 ) -> bool:
-    """Evaluate host facts, not message wording or the presence of a task.
+    """Evaluate host facts without wording or no-reply backoff.
 
-    contacts_today includes active and unknown durable reservations for the
-    Shanghai calendar day. last_contact includes started unknown attempts;
-    unanswered_contacts counts started attempts since the last real user
-    chat. The host separately fences mode, member, authorization and active
-    turns before every send. A false result never forbids internal reflection.
+    ``contact_interval_minutes`` is a fixed debounce between started contacts.
+    A false result never forbids internal reflection.
     """
     current = _aware_utc(now, label="now")
     user_time = _aware_utc(last_user_at, label="last_user_at")
     contact_time = _aware_utc(last_contact, label="last_contact") if last_contact is not None else None
     count = _nonnegative_count(contacts_today, label="contacts_today")
-    unanswered = _nonnegative_count(unanswered_contacts, label="unanswered_contacts")
     if not isinstance(limits, CompanionLimits):
         raise CompanionPolicyError("limits must be CompanionLimits")
     try:
@@ -147,8 +142,5 @@ def contact_ready(
     if user_age < timedelta(minutes=USER_QUIET_GRACE_MINUTES) or user_age > timedelta(days=limits.member_idle_days):
         return False
     if contact_time is None:
-        return unanswered == 0
-    # No reply reduces outreach density without inventing resentment or
-    # treating silence as a failed relationship. A real chat resets the count.
-    cooldown = min(limits.contact_interval_minutes * 2 ** min(unanswered, 5), 7 * 24 * 60)
-    return current - contact_time >= timedelta(minutes=cooldown)
+        return True
+    return current - contact_time >= timedelta(minutes=limits.contact_interval_minutes)

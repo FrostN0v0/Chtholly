@@ -84,7 +84,7 @@ async def _user_history(
     member: CompanionMember,
     *,
     excluding: str | None = None,
-) -> tuple[datetime | None, datetime, int]:
+) -> tuple[datetime | None, datetime]:
     latest_user = await db.scalar(
         select(func.max(CompanionMember.last_user_at)).where(
             CompanionMember.scope_id == member.scope_id,
@@ -92,18 +92,15 @@ async def _user_history(
         )
     )
     last_user = max(member.last_user_at, latest_user or member.last_user_at)
-    query = select(
-        func.max(CompanionContact.transport_started_at),
-        func.count().filter(CompanionContact.transport_started_at > last_user),
-    ).where(
+    query = select(func.max(CompanionContact.transport_started_at)).where(
         CompanionContact.scope_id == member.scope_id,
         CompanionContact.user_id == member.user_id,
         CompanionContact.transport_started_at.is_not(None),
     )
     if excluding is not None:
         query = query.where(CompanionContact.attempt_ref != excluding)
-    result = (await db.execute(query)).one()
-    return result[0], last_user, int(result[1])
+    last_contact = await db.scalar(query)
+    return last_contact, last_user
 
 
 async def claim_contact(
@@ -184,14 +181,13 @@ async def claim_contact(
         if blocked is not None:
             return None
         count = await _budget(db, scope_id, member.user_id, day)
-        last_contact, last_user, unanswered = await _user_history(db, member)
+        last_contact, last_user = await _user_history(db, member)
         if not contact_ready(
             now,
             last_contact=aware(last_contact),
             last_user_at=aware(last_user),
             contacts_today=count,
             limits=validated_limits,
-            unanswered_contacts=unanswered,
         ):
             return None
         base = {"key": validated.key, "evidence": sorted(validated.evidence_turn_ids)}
@@ -299,14 +295,13 @@ async def record_transport_started(claim: ContactClaim, *, now: datetime) -> boo
         member = await db.get(CompanionMember, (claim.scope_id, claim.persona_key, claim.member_ref))
         limits = _limits(row)
         used = await _budget(db, claim.scope_id, claim.user_id, day, excluding=row.attempt_ref)
-        last_contact, last_user, unanswered = await _user_history(db, member, excluding=row.attempt_ref)
+        last_contact, last_user = await _user_history(db, member, excluding=row.attempt_ref)
         if not contact_ready(
             now,
             last_contact=aware(last_contact),
             last_user_at=aware(last_user),
             contacts_today=used,
             limits=limits,
-            unanswered_contacts=unanswered,
         ):
             return False
         # Commit this boundary before the caller attempts each native send.
