@@ -329,8 +329,10 @@ async def test_handoff_source_excludes_nonvisible_nonadmin_events(grant_store):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("event_type", ["steer_received", "steer_applied", "steer_checkpoint"])
-async def test_steering_audit_never_issues_anchor_grants_or_handoff(grant_store, event_type):
+@pytest.mark.parametrize(
+    "event_type", ["steer_received", "steer_applied", "steer_checkpoint", "companion_contact_decision"]
+)
+async def test_private_audit_never_issues_anchor_grants_or_handoff(grant_store, event_type):
     scope, context_session = await _session()
     call, _result = await _execution(grant_store, context_session)
     async with grant_store() as db:

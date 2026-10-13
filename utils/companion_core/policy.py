@@ -111,19 +111,15 @@ def next_review_at(now: datetime, minutes: int, *, limits: CompanionLimits) -> d
         raise CompanionPolicyError("review time exceeds the supported datetime range") from exc
 
 
-def contact_ready(
+def contact_block_reason(
     now: datetime,
     *,
     last_contact: datetime | None,
     last_user_at: datetime,
     contacts_today: int,
     limits: CompanionLimits,
-) -> bool:
-    """Evaluate host facts without wording or no-reply backoff.
-
-    ``contact_interval_minutes`` is a fixed debounce between started contacts.
-    A false result never forbids internal reflection.
-    """
+) -> str | None:
+    """Return the first actual host gate, without changing contact eligibility."""
     current = _aware_utc(now, label="now")
     user_time = _aware_utc(last_user_at, label="last_user_at")
     contact_time = _aware_utc(last_contact, label="last_contact") if last_contact is not None else None
@@ -135,12 +131,35 @@ def contact_ready(
     except (OverflowError, ValueError) as exc:
         raise CompanionPolicyError("now cannot be represented in Shanghai") from exc
     if local.hour >= 23 or local.hour < 7:
-        return False
+        return "quiet_hours"
     if count >= limits.daily_contacts:
-        return False
+        return "daily_contact_limit"
     user_age = current - user_time
-    if user_age < timedelta(minutes=USER_QUIET_GRACE_MINUTES) or user_age > timedelta(days=limits.member_idle_days):
-        return False
-    if contact_time is None:
-        return True
-    return current - contact_time >= timedelta(minutes=limits.contact_interval_minutes)
+    if user_age < timedelta(minutes=USER_QUIET_GRACE_MINUTES):
+        return "recent_user_activity"
+    if user_age > timedelta(days=limits.member_idle_days):
+        return "member_inactive"
+    if contact_time is not None and current - contact_time < timedelta(minutes=limits.contact_interval_minutes):
+        return "contact_interval"
+    return None
+
+
+def contact_ready(
+    now: datetime,
+    *,
+    last_contact: datetime | None,
+    last_user_at: datetime,
+    contacts_today: int,
+    limits: CompanionLimits,
+) -> bool:
+    """Evaluate the same policy at reservation and immediately before transport."""
+    return (
+        contact_block_reason(
+            now,
+            last_contact=last_contact,
+            last_user_at=last_user_at,
+            contacts_today=contacts_today,
+            limits=limits,
+        )
+        is None
+    )

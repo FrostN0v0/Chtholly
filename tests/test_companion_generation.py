@@ -219,6 +219,8 @@ async def test_default_reflection_keeps_full_state_and_stable_persona_baseline_w
                     "companion_reflection",
                     "companion_state",
                     "context_snapshot",
+                    "conversation_mode",
+                    "companion_contact_decision",
                 }
             )
             assert not any(row.event_type == "user_input" for row in events)

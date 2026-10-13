@@ -30,6 +30,7 @@ from .accounts import AccountAvailability
 from .internal import settle_owned, run_reflection
 from ..personality import persona_scope_lock, select_scope_persona, resolve_scope_persona
 from ..channel_turns import participant_turn_active
+from .decision_audit import ContactDecision, persist_review_decision
 from ..session_manager import finish_turn
 from ..agent_turn_setup import PreparedAgentTurn
 
@@ -368,6 +369,7 @@ class CompanionService(Service):
         limits = companion_limits(config)
         review_finished = False
         failure = "reflection_failed"
+        decision = ContactDecision()
         try:
             snapshot = await store.load_reflection(
                 claim,
@@ -386,8 +388,13 @@ class CompanionService(Service):
                 for member in snapshot.members
             ):
                 failure = "reflection_interrupted"
+                decision.set("interrupted", "participant_active", at=self._clock())
                 return
-            if not await self._review_current(worker) or not await self._availability.online(worker.account):
+            if not await self._review_current(worker):
+                decision.set("blocked", "mode_changed", at=self._clock())
+                raise CompanionConflict("Companion reflection was revoked before generation")
+            if not await self._availability.online(worker.account):
+                decision.set("blocked", "account_unavailable", at=self._clock())
                 raise CompanionConflict("Companion reflection was revoked before generation")
             proposal = await asyncio.wait_for(
                 self._reflection(
@@ -404,6 +411,7 @@ class CompanionService(Service):
             if not isinstance(proposal, ReflectionProposal):
                 raise TypeError("Companion reflection must return a validated ReflectionProposal")
             if not await self._review_current(worker):
+                decision.set("blocked", "mode_changed", at=self._clock())
                 raise CompanionConflict("Companion reflection changed before state commit")
             committed_at = self._clock()
             worker.review_committing = True
@@ -413,7 +421,14 @@ class CompanionService(Service):
                 now=committed_at,
                 next_review_at=next_review_at(committed_at, proposal.review_after_minutes, limits=limits),
             )
-            if not review_finished or self._closed or worker.stopped or proposal.contact is None:
+            if not review_finished:
+                decision.set("blocked", "state_not_committed", at=self._clock())
+                return
+            if self._closed or worker.stopped:
+                decision.set("interrupted", "service_stopped", at=self._clock())
+                return
+            if proposal.contact is None:
+                decision.set("not_proposed", "no_contact_proposed", at=self._clock())
                 return
             current = await store.get_mode(claim.scope_id)
             if (current.mode, current.persona_key, current.revision, current.context_revision) != (
@@ -422,6 +437,7 @@ class CompanionService(Service):
                 claim.mode_revision,
                 claim.context_revision,
             ):
+                decision.set("blocked", "mode_changed", at=self._clock())
                 return
             if participant_turn_active(
                 worker.scope.platform,
@@ -436,6 +452,7 @@ class CompanionService(Service):
                     "",
                 ),
             ):
+                decision.set("blocked", "participant_active", at=self._clock())
                 return
             contact = await store.claim_contact(
                 claim.scope_id,
@@ -446,6 +463,7 @@ class CompanionService(Service):
                 now=self._clock(),
                 limits=limits,
                 lease_seconds=300,
+                decision=decision,
             )
             if contact is None:
                 return
@@ -463,23 +481,37 @@ class CompanionService(Service):
             )
         except asyncio.CancelledError:
             failure = "reflection_interrupted"
+            if decision.status != "reserved":
+                decision.set("interrupted", "reflection_interrupted", at=self._clock())
             raise
         except Exception as exc:
             failure = type(exc).__name__
+            if decision.status == "failed":
+                decision.set("failed", failure, at=self._clock())
             _LOGGER.warning(f"companion scope execution failed: {failure}")
         finally:
-            if not review_finished:
-                now = self._clock()
-                retry = (
-                    now + timedelta(minutes=1)
-                    if failure == "reflection_interrupted"
-                    else next_review_at(
-                        now,
-                        limits.reflection_interval_minutes,
-                        limits=limits,
+
+            async def audit_decision() -> None:
+                try:
+                    await persist_review_decision(claim, decision, now=self._clock(), session_factory=get_session)
+                except Exception as exc:
+                    _LOGGER.warning(f"companion decision audit failed: {type(exc).__name__}")
+
+            try:
+                if not review_finished:
+                    now = self._clock()
+                    retry = (
+                        now + timedelta(minutes=1)
+                        if failure == "reflection_interrupted"
+                        else next_review_at(
+                            now,
+                            limits.reflection_interval_minutes,
+                            limits=limits,
+                        )
                     )
-                )
-                await settle_owned(store.fail_review(claim, now=now, retry_at=retry, reason=failure))
+                    await settle_owned(store.fail_review(claim, now=now, retry_at=retry, reason=failure))
+            finally:
+                await settle_owned(audit_decision())
 
     async def record_chat(self, session: Session, prepared: PreparedAgentTurn) -> None:
         """Record only completed native ordinary-chat feedback under its captured mode."""

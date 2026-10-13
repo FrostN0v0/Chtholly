@@ -164,6 +164,16 @@ async def run_reflection(
                 "life_version": claim.life_version,
             },
         )
+        recorder.append(
+            "conversation_mode",
+            model_visible=False,
+            payload={
+                "mode": "companion",
+                "revision": claim.mode_revision,
+                "context_revision": claim.context_revision,
+                "persona_key": claim.persona_key,
+            },
+        )
         try:
             if not await recorder.flush():
                 raise RuntimeError("Companion internal-turn start audit could not be persisted")

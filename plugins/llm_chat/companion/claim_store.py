@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from sqlalchemy import func, select
 
 from utils.companion_core import CompanionLimits, ContactProposal, contact_ready, normalize_limits
+from utils.companion_core.policy import contact_block_reason
 
 from .types import ReviewClaim, ContactClaim, CompanionConflict, CompanionCorruptState
 from .models import CompanionLife, CompanionMode, CompanionMember, CompanionReview, CompanionContact, CompanionAttention
@@ -37,6 +38,7 @@ from .persistence import (
     contact_proposal,
 )
 from .state_store import validate_evidence
+from .decision_audit import ContactDecision
 
 
 def _claim(row: CompanionContact) -> ContactClaim:
@@ -113,8 +115,11 @@ async def claim_contact(
     origin: ReviewClaim,
     limits: CompanionLimits,
     lease_seconds: int = 300,
+    decision: ContactDecision | None = None,
 ) -> ContactClaim | None:
     current_time = naive(now)
+    if decision is not None:
+        decision.set("failed", "contact_claim_failed", at=now)
     positive(lease_seconds, "lease_seconds", maximum=3600)
     validated = ContactProposal.model_validate(proposal.model_dump(mode="json"))
     validated_limits = normalize_limits(asdict(limits))
@@ -124,6 +129,8 @@ async def claim_contact(
     async with transaction() as db:
         mode = await enabled_mode(db, scope_id, persona_key)
         if mode is None:
+            if decision is not None:
+                decision.set("blocked", "mode_changed")
             return None
         if (origin.scope_id, origin.persona_key, origin.mode_revision, origin.context_revision) != (
             scope_id,
@@ -131,6 +138,8 @@ async def claim_contact(
             mode.revision,
             mode.context_revision,
         ):
+            if decision is not None:
+                decision.set("blocked", "mode_changed")
             return None
         review = await db.get(CompanionReview, origin.lease_token)
         life = await db.get(CompanionLife, (scope_id, persona_key))
@@ -154,6 +163,8 @@ async def claim_contact(
             or review.status != "completed"
             or review.committed_life_version != life_version
         ):
+            if decision is not None:
+                decision.set("blocked", "review_changed")
             return None
         if review.contact_proposal_json != dumps(validated.model_dump(mode="json")):
             raise CompanionConflict("Contact motive does not match its committed originating review")
@@ -179,16 +190,34 @@ async def claim_contact(
             .limit(1)
         )
         if blocked is not None:
+            if decision is not None:
+                decision.set("blocked", "contact_inflight_or_unknown")
             return None
         count = await _budget(db, scope_id, member.user_id, day)
         last_contact, last_user = await _user_history(db, member)
-        if not contact_ready(
+        user_time = aware(last_user)
+        contact_time = aware(last_contact)
+        assert user_time is not None
+        reason = contact_block_reason(
             now,
-            last_contact=aware(last_contact),
-            last_user_at=aware(last_user),
+            last_contact=contact_time,
+            last_user_at=user_time,
             contacts_today=count,
             limits=validated_limits,
-        ):
+        )
+        if reason is not None:
+            if decision is not None:
+                decision.set(
+                    "blocked",
+                    reason,
+                    facts={
+                        "contacts_today": count,
+                        "limits": asdict(validated_limits),
+                        "last_contact_at": contact_time.isoformat() if contact_time else None,
+                        "last_user_at": user_time.isoformat(),
+                        "timezone": "Asia/Shanghai",
+                    },
+                )
             return None
         base = {"key": validated.key, "evidence": sorted(validated.evidence_turn_ids)}
         if validated.purpose == "free_chat":
@@ -206,6 +235,8 @@ async def claim_contact(
             )
         )
         if prior is not None:
+            if decision is not None:
+                decision.set("blocked", "duplicate_contact")
             return None
         row = CompanionContact(
             attempt_ref=token("contact"),
@@ -231,7 +262,13 @@ async def claim_contact(
             status=ACTIVE,
         )
         db.add(row)
-        return _claim(row)
+        claim = _claim(row)
+    if decision is not None:
+        decision.set(
+            "reserved", "contact_reserved", facts={"contacts_today": count, "limits": asdict(validated_limits)}
+        )
+        decision.attempt_ref = claim.attempt_ref
+    return claim
 
 
 async def contact_valid(claim: ContactClaim, *, now: datetime) -> bool:

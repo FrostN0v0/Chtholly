@@ -31,13 +31,14 @@ const labels = {
   silent: "\u81ea\u4e3b\u6c89\u9ed8", declined: "\u5df2\u7ec8\u6b62 (declined)", superseded: "\u5df2\u88ab\u65b0\u8f6e\u6b21\u66ff\u4ee3",
   steer_received: "\u8865\u5145\u8f93\u5165\u5df2\u63a5\u6536", steer_applied: "\u8865\u5145\u8f93\u5165\u5df2\u5e94\u7528", steer_checkpoint: "\u8865\u5145\u8f93\u5165\u68c0\u67e5\u70b9",
   applied: "\u5df2\u5e94\u7528", received: "\u5df2\u63a5\u6536\uff0c\u7b49\u5f85\u5e94\u7528", unapplied: "\u672a\u5e94\u7528", refused: "\u672a\u63a5\u7eb3",
+  blocked: "\u5bbf\u4e3b\u963b\u6b62", reserved: "\u5df2\u9884\u7559\u8054\u7cfb", not_proposed: "\u672a\u63d0\u8bae\u8054\u7cfb",
 };
 const $ = (id) => document.getElementById(id);
 const state = {
   scopes: [], scope: null, sessions: [], session: null, detail: null, turns: [], turn: null,
   inspection: null, events: [], navigation: 0, scopeLoad: 0, sessionLoad: 0,
   pollTimer: null, pollBusy: false, payload: null, action: null, actionBusy: false,
-  newestFirst: true,
+  newestFirst: true, purposeFilter: "chat", activeView: "sessions", companion: null,
 };
 
 function node(tag, className = "", text = "") {
@@ -61,6 +62,11 @@ function short(value, limit = 140) {
   return source.length > limit ? `${source.slice(0, limit)}…` : source;
 }
 function label(value) { return labels[value] || value || "未知"; }
+const purposeLabels = { chat: "\u666e\u901a\u804a\u5929", reminder: "\u63d0\u9192", companion: "\u4e3b\u52a8\u8054\u7cfb", companion_reflection: "\u966a\u4f34\u53cd\u601d" };
+function purposeLabel(value) { return purposeLabels[value] || value || "\u7528\u9014\u672a\u8bb0\u5f55"; }
+function turnSpeaker(turn) {
+  return turn.purpose === "companion_reflection" ? "\u5185\u90e8\u590d\u76d8" : turn.user_name || "\u7528\u6237";
+}
 function date(value) {
   if (!value) return "时间未记录";
   const source = /(?:Z|[+-]\d\d:\d\d)$/i.test(value) ? value : `${value}Z`;
@@ -300,13 +306,23 @@ function affectIndicators(view, turnStatus) {
 }
 async function selectEvidenceTurn(evidence) {
   if (!evidence?.turn_ref || !evidence.session_ref) return;
+  const fromCompanion = state.activeView === "companion";
   if (state.session?.session_ref !== evidence.session_ref) {
     const generation = state.navigation;
     const result = await request(`/sessions/${encodeURIComponent(evidence.session_ref)}`);
     if (generation !== state.navigation) return;
     if (!state.sessions.some((session) => session.session_ref === evidence.session_ref)) state.sessions.push(result.item);
+    if (fromCompanion) setActiveView("sessions");
+    state.purposeFilter = result.item.purpose || "chat";
+    $("purpose-select").value = state.purposeFilter;
     await selectSession(result.item, evidence.turn_ref);
-  } else await selectTurn(state.turns.find((turn) => turn.turn_ref === evidence.turn_ref) || evidence);
+  } else {
+    if (fromCompanion) setActiveView("sessions");
+    state.purposeFilter = state.session.purpose || "chat";
+    $("purpose-select").value = state.purposeFilter;
+    await selectTurn(state.turns.find((turn) => turn.turn_ref === evidence.turn_ref) || evidence);
+  }
+  if (fromCompanion) selectTab($((state.session?.purpose === "companion_reflection") ? "tab-decision" : "tab-io"));
 }
 function evidenceLinks(ids, recordKey) {
   const row = node("div", "actions evidence-links");
@@ -375,13 +391,6 @@ function relationshipPanel() {
     impression.content.append(feelings);
     panel.append(impression.item);
   }
-  const decision = view.response_decision;
-  if (decision) {
-    const more = disclosure("\u81ea\u4e3b\u56de\u5e94\u4f9d\u636e");
-    more.item.dataset.detailKey = "decision-evidence";
-    more.content.append(SessionContent.markdown(decision.reason || "\u539f\u56e0\u672a\u8bb0\u5f55"), eventButton(decision.event_ref, "\u5b8c\u6574\u51b3\u7b56"));
-    panel.append(more.item);
-  }
   if (evaluation || snapshot) {
     const evidence = disclosure("\u8bc1\u636e\u4e0e\u539f\u59cb\u8bb0\u5f55", count ? `${count} \u8f6e\u8bc1\u636e` : "");
     evidence.item.dataset.detailKey = "evaluation-evidence";
@@ -429,6 +438,7 @@ async function loadScopes() {
   $("scope-select").value = state.scope?.scope_ref || "";
   renderScope();
   await loadSessions(state.session?.session_ref);
+  if (generation === state.scopeLoad && state.activeView === "companion") await state.companion.activate(state.scope);
   if (generation === state.scopeLoad) status(state.scopes.length ? "已同步" : "暂无聊天范围");
 }
 function renderScope() {
@@ -438,7 +448,7 @@ function renderScope() {
     $("scope-meta").append(node("p", "", `${scope.platform || ""}${scope.persona ? ` · 当前 ${personaName(scope.persona)}` : ""}`));
     $("scope-meta").append(rawDetails("范围标识", { channel_id: scope.channel_id, scope_ref: scope.scope_ref }));
   }
-  const active = Boolean(scope) && state.session?.status === "active";
+  const active = Boolean(scope) && state.session?.status === "active" && (state.session?.purpose || "chat") === "chat";
   $("new-session-button").disabled = !active || state.actionBusy;
   $("rollover-button").disabled = !active || state.actionBusy;
   $("hard-reset-button").disabled = !scope || state.actionBusy;
@@ -450,19 +460,22 @@ async function loadSessions(preferredRef = "") {
   const result = scope ? await request(`/scopes/${encodeURIComponent(scope.scope_ref)}/sessions?limit=500`) : { items: [] };
   if (generation !== state.sessionLoad || scope !== state.scope) return;
   state.sessions = result.items || [];
-  const selected = state.sessions.find((item) => item.session_ref === preferredRef)
-    || state.sessions.find((item) => item.status === "active") || state.sessions[0] || null;
+  const visible = state.sessions.filter((item) => !state.purposeFilter || (item.purpose || "chat") === state.purposeFilter);
+  const selected = visible.find((item) => item.session_ref === preferredRef)
+    || visible.find((item) => item.status === "active") || visible[0] || null;
   const turnRef = selected?.session_ref === state.session?.session_ref ? state.turn?.turn_ref : "";
   await selectSession(selected, turnRef);
 }
 function renderSessions() {
+  const visible = state.sessions.filter((session) => !state.purposeFilter || (session.purpose || "chat") === state.purposeFilter || session.session_ref === state.session?.session_ref);
   $("session-count").textContent = state.sessions.length ? `(${state.sessions.length})` : "";
   const select = $("session-select");
   select.replaceChildren();
-  select.disabled = !state.sessions.length;
-  if (!state.sessions.length) select.append(node("option", "", "\u6682\u65e0\u4f1a\u8bdd"));
-  for (const session of state.sessions) {
-    const option = node("option", "", `#${session.sequence} \xb7 ${personaName(session.persona)} \xb7 ${label(session.status)} \xb7 ${date(session.created_at)}`);
+  select.disabled = !visible.length;
+  if (!visible.length) select.append(node("option", "", state.sessions.length ? "\u5f53\u524d\u7528\u9014\u65e0\u4f1a\u8bdd" : "\u6682\u65e0\u4f1a\u8bdd"));
+  for (const session of visible) {
+    const sessionPurpose = session.purpose || "chat";
+    const option = node("option", "", `#${session.sequence} \xb7 ${purposeLabel(sessionPurpose)} \xb7 ${personaName(session.persona)} \xb7 ${label(session.status)} \xb7 ${date(session.created_at)}`);
     option.value = session.session_ref;
     select.append(option);
   }
@@ -494,7 +507,7 @@ function renderSession() {
   $("session-details-button").disabled = !state.detail;
   if (!state.detail) return empty(container, state.session ? "\u6b63\u5728\u8bfb\u53d6\u4f1a\u8bdd\u2026" : "\u8bf7\u9009\u62e9\u4e00\u4e2a\u4f1a\u8bdd");
   const detail = state.detail;
-  $("session-title").textContent = `\u4f1a\u8bdd #${detail.sequence} \xb7 ${personaName(detail.persona)}`;
+  $("session-title").textContent = `\u4f1a\u8bdd #${detail.sequence} \xb7 ${purposeLabel(detail.purpose || "chat")} \xb7 ${personaName(detail.persona)}`;
   const overview = node("div", "session-summary");
   overview.append(metric("\u72b6\u6001", label(detail.status)), metric("\u8f6e\u6b21", number(detail.turn_count)), metric("\u521b\u5efa\u65f6\u95f4", date(detail.created_at)));
   container.append(overview);
@@ -528,8 +541,9 @@ function renderTurns() {
     item.classList.toggle("is-active", turn.turn_ref === state.turn?.turn_ref);
     item.setAttribute("aria-current", String(turn.turn_ref === state.turn?.turn_ref));
     const heading = node("div", "item-heading");
-    heading.append(node("strong", "", turn.user_name || "用户"), badge(turn.status));
-    item.append(heading, node("p", "snippet", turn.input_preview == null ? "用户输入摘要未记录" : short(turn.input_preview, 180)));
+    heading.append(node("strong", "", turnSpeaker(turn)), badge(turn.status), node("span", "muted turn-purpose", purposeLabel(turn.purpose || state.session?.purpose || "chat")));
+    const missingInput = turn.purpose === "companion_reflection" ? "\u7cfb\u7edf\u89e6\u53d1\uff0c\u65e0\u65b0\u7528\u6237\u8f93\u5165" : "\u7528\u6237\u8f93\u5165\u6458\u8981\u672a\u8bb0\u5f55";
+    item.append(heading, node("p", "snippet", turn.input_preview == null ? missingInput : short(turn.input_preview, 180)));
     const meta = node("div", "turn-list-meta");
     const timing = node("span", "", compactDuration(turn));
     timing.title = turnDuration(turn);
@@ -572,12 +586,13 @@ function renderWorkspace() {
   $("collapse-details-button").disabled = !state.inspection;
   if (!state.inspection) {
     header.append(node("p", "", state.turn ? "正在读取轮次…" : "请选择一个轮次。"));
-    for (const id of ["timeline-view", "context-view", "io-view", "relationship-view"]) empty($(id), state.turn ? "\u6b63\u5728\u8bfb\u53d6\u2026" : "\u8bf7\u9009\u62e9\u4e00\u4e2a\u8f6e\u6b21\u3002");
+    for (const id of ["timeline-view", "context-view", "io-view", "relationship-view", "decision-view"]) empty($(id), state.turn ? "正在读取轮次…" : "请选择一个轮次。");
     return;
   }
   const inspection = state.inspection;
   const heading = node("div", "item-heading");
-  heading.append(node("h2", "", inspection.turn.user_name || "\u7528\u6237"), badge(inspection.turn.status));
+  heading.append(node("h2", "", turnSpeaker(inspection.turn)), badge(inspection.turn.status));
+  heading.append(node("span", "muted turn-purpose", purposeLabel(inspection.turn.purpose || state.session?.purpose || "chat")));
   heading.append(node("span", "muted turn-date", `#${inspection.turn.sequence} \xb7 ${date(inspection.turn.created_at)}`));
   const models = [...new Set((inspection.model_calls || []).map((call) => call.model).filter(Boolean))];
   const identity = node("p", "muted turn-identity", `${personaName(inspection.persona)} \xb7 ${models.length ? models.join(" / ") : inspection.turn.model || "\u6a21\u578b\u672a\u8bb0\u5f55"}`);
@@ -595,6 +610,7 @@ function renderWorkspace() {
   header.append(heading, identity, metrics, statistics);
   renderTimeline(); renderContext(); renderIO();
   $("relationship-view").replaceChildren(relationshipPanel());
+  $("decision-view").replaceChildren(SessionCompanion.decisionPanel(inspection, { node, section, disclosure, eventButton, date, number, outcomeLabel, badge, label }));
 }
 function callPanel(title, preview, ref, path = "") {
   const panel = node("div", "call-panel");
@@ -880,7 +896,10 @@ function renderIO() {
   const applied = new Set(state.events.filter((event) => event.event_type === "user_input" && event.steering).map((event) => event.steering.sequence));
   const checkpoints = new Map(state.events.filter((event) => event.event_type === "steer_checkpoint" && event.steering).map((event) => [event.steering.sequence, event.steering]));
   const inputs = state.events.filter((event) => event.event_type === "user_input" || (event.event_type === "steer_received" && event.steering && !applied.has(event.steering.sequence)));
-  if (!inputs.length) target.append(section("\u7528\u6237\u8f93\u5165", "\u672a\u8bb0\u5f55"));
+  if (!inputs.length) {
+    const internal = state.turn.purpose === "companion_reflection";
+    target.append(section(internal ? "\u8f6e\u6b21\u8f93\u5165" : "\u7528\u6237\u8f93\u5165", internal ? "\u7cfb\u7edf\u89e6\u53d1\uff0c\u65e0\u65b0\u7528\u6237\u8f93\u5165" : "\u672a\u8bb0\u5f55"));
+  }
   for (const [index, event] of inputs.entries()) {
     const steering = event.event_type === "user_input" ? event.steering : checkpoints.get(event.steering?.sequence) || event.steering;
     const card = section(steering ? `\u8865\u5145\u8f93\u5165 ${steering.sequence - 1}` : "\u7528\u6237\u8f93\u5165");
@@ -904,7 +923,7 @@ function renderIO() {
   }
   const outputs = state.inspection.outputs || [];
   if (!outputs.length) {
-    const message = state.turn.status === "silent" ? "\u672c\u8f6e\u4e3b\u52a8\u6c89\u9ed8" : state.turn.status === "running" ? "\u6b63\u5728\u751f\u6210\uff0c\u5c1a\u65e0\u786e\u8ba4\u56de\u590d" : "\u65e0\u5df2\u786e\u8ba4\u56de\u590d";
+    const message = state.turn.purpose === "companion_reflection" ? "\u5185\u90e8\u590d\u76d8\u4e0d\u76f4\u63a5\u53d1\u9001\u6d88\u606f\uff1b\u8054\u7cfb\u63d0\u6848\u4e0e\u5bbf\u4e3b\u95e8\u7981\u89c1\u56de\u5e94\u51b3\u7b56\u3002" : state.turn.status === "silent" ? "\u672c\u8f6e\u4e3b\u52a8\u6c89\u9ed8" : state.turn.status === "running" ? "\u6b63\u5728\u751f\u6210\uff0c\u5c1a\u65e0\u786e\u8ba4\u56de\u590d" : "\u65e0\u5df2\u786e\u8ba4\u56de\u590d";
     target.append(section("\u56de\u590d", message));
   }
   for (const [index, output] of outputs.entries()) {
@@ -1127,6 +1146,26 @@ function confirmUnpin(anchor) {
   } });
 }
 
+const companionRenderer = SessionCompanion.create({
+  $, node, button, section, disclosure, metric, date, number, short, request, status, showError, eventButton,
+  selectEvidenceTurn, duration, isPageActive: () => pageActive,
+});
+state.companion = companionRenderer;
+function setActiveView(view) {
+  const next = view === "companion" ? "companion" : "sessions";
+  if (state.activeView === next) return;
+  state.activeView = next;
+  const companion = next === "companion";
+  $("sessions-workspace").hidden = companion;
+  $("companion-workspace").hidden = !companion;
+  for (const control of document.querySelectorAll(".session-picker, .purpose-picker, .admin-menu")) control.hidden = companion;
+  $("session-details-button").hidden = companion;
+  if (companion) stopPolling();
+  $("companion-view-button").textContent = companion ? "\u4f1a\u8bdd\u68c0\u67e5" : "\u966a\u4f34\u89c6\u56fe";
+  if (companion) companionRenderer.activate(state.scope).catch(showError);
+  else { companionRenderer.suspend(); startPolling(); }
+}
+
 const tabs = [...document.querySelectorAll("[role=tab]")];
 function selectTab(selected) {
   for (const tab of tabs) {
@@ -1146,13 +1185,21 @@ for (const [index, tab] of tabs.entries()) {
     event.preventDefault(); selectTab(tabs[next]); tabs[next].focus();
   });
 }
-$("scope-select").addEventListener("change", () => {
+$('scope-select').addEventListener("change", () => {
   ++state.scopeLoad;
   beginNavigation();
   state.scope = state.scopes.find((scope) => scope.scope_ref === $("scope-select").value) || null;
   state.session = null;
-  renderScope(); loadSessions().catch(showError);
+  renderScope();
+  loadSessions().then(() => {
+    if (state.activeView === "companion") return state.companion.activate(state.scope);
+  }).catch(showError);
 });
+$('purpose-select').addEventListener("change", () => {
+  state.purposeFilter = $("purpose-select").value;
+  loadSessions(state.session?.session_ref).catch(showError);
+});
+$('companion-view-button').addEventListener("click", () => setActiveView(state.activeView === "companion" ? "sessions" : "companion"));
 $("session-select").addEventListener("change", () => {
   selectSession(state.sessions.find((session) => session.session_ref === $("session-select").value) || null).catch(showError);
 });
@@ -1225,10 +1272,15 @@ $("pin-event-button").addEventListener("click", () => {
     if (state.scope === scope) await loadSessions(state.session?.session_ref);
   } });
 });
-document.addEventListener("visibilitychange", () => document.hidden ? stopPolling() : startPolling());
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopPolling();
+  if (state.activeView === "companion") state.companion.visibility();
+  else if (!document.hidden) startPolling();
+});
 window.addEventListener("pagehide", () => {
   pageActive = false;
   stopPolling();
+  state.companion.suspend();
   pageController.abort();
   beginNavigation();
   attachmentVisibility.disconnect();
@@ -1239,6 +1291,6 @@ window.addEventListener("pageshow", (event) => {
   pageActive = true;
   pageController = new AbortController();
   attachmentRemoval.observe(document.body, { childList: true, subtree: true });
-  loadScopes().catch(showError);
+  loadScopes().then(() => { if (state.activeView === "companion") return state.companion.activate(state.scope); }).catch(showError);
 });
 loadScopes().catch(showError);

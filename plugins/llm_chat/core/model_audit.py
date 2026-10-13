@@ -24,6 +24,7 @@ ADMIN_ONLY_EVENT_TYPES = frozenset(
         "companion_trigger",
         "companion_reflection",
         "companion_state",
+        "companion_contact_decision",
         "conversation_mode",
         "steer_received",
         "steer_applied",

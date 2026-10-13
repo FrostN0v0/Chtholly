@@ -45,6 +45,7 @@ EVENT_TITLES = {
     "companion_trigger": "\u4e3b\u52a8\u8054\u7cfb\u6765\u6e90",
     "companion_reflection": "\u5185\u90e8\u81ea\u4e3b\u590d\u76d8",
     "companion_state": "\u89d2\u8272\u6d3b\u52a8\u4e0e\u6301\u7eed\u5173\u6ce8",
+    "companion_contact_decision": "\u5bbf\u4e3b\u8054\u7cfb\u51b3\u7b56",
 }
 ENGAGEMENT_LEVEL_LABELS = {
     "full": "完整回应",

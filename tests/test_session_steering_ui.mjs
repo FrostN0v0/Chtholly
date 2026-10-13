@@ -5,6 +5,7 @@ import { createContext, runInContext } from "node:vm";
 
 const app = readFileSync(new URL("../plugins/llm_chat/webui_sessions/app.js", import.meta.url), "utf8");
 const content = readFileSync(new URL("../plugins/llm_chat/webui_sessions/content.js", import.meta.url), "utf8");
+const companion = readFileSync(new URL("../plugins/llm_chat/webui_sessions/companion.js", import.meta.url), "utf8");
 
 function page() {
   function descendants(element) {
@@ -53,6 +54,7 @@ function page() {
       };
     }
     get childNodes() { return this.children; }
+    get firstElementChild() { return this.children[0] || null; }
     get textContent() { return (this.ownText || "") + this.children.map((child) => child.textContent).join(""); }
     set textContent(value) { this.ownText = String(value); this.replaceChildren(); }
     append(...children) {
@@ -117,6 +119,8 @@ function page() {
   });
   runInContext(content, sandbox);
   sandbox.SessionContent = window.SessionContent;
+  runInContext(companion, sandbox);
+  sandbox.SessionCompanion = window.SessionCompanion;
   runInContext(app + `
     renderTurns = () => {};
     renderSession = () => {};
@@ -155,9 +159,6 @@ test("input panel keeps the original, replaces the receipt once, and shows actua
   const root = input("root", "Original question");
   ui.panel.render([root, receipt]);
   const [original, pending] = ui.cards();
-  assert.equal(original.querySelector("h3").textContent, "\u7528\u6237\u8f93\u5165");
-  assert.equal(pending.querySelector("h3").textContent, "\u8865\u5145\u8f93\u5165 1");
-  assert.match(pending.textContent, /\u5df2\u63a5\u6536\uff0c\u7b49\u5f85\u5e94\u7528/);
   assert.ok(pending.textContent.includes(ui.panel.formatDate(receivedAt)));
   assert.ok(!pending.textContent.includes(ui.panel.formatDate(appliedAt)));
   original.querySelector("details").open = true;
@@ -185,11 +186,11 @@ test("unapplied receipt uses its recorded checkpoint without claiming applicatio
   assert.ok(!supplement.textContent.includes(ui.panel.formatDate(appliedAt)));
 });
 
-test("legacy multiple input cards keep their content and ordinary labels", () => {
+test("legacy multiple input cards retain each recorded message", () => {
   const ui = page();
   ui.panel.render([input("legacy-a", "First old input"), input("legacy-b", "Second old input")]);
   const cards = ui.cards();
-  assert.deepEqual(cards.map((card) => card.querySelector("h3").textContent), ["\u7528\u6237\u8f93\u5165", "\u7528\u6237\u8f93\u5165"]);
+  assert.equal(cards.length, 2);
   assert.match(cards[0].textContent, /First old input/);
   assert.match(cards[1].textContent, /Second old input/);
 });

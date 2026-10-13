@@ -25,9 +25,7 @@ from .session_manager import (
     get_scope_by_ref,
     rollover_session,
     clean_channel_name,
-    get_session_by_ref,
     load_scope_anchors,
-    list_scope_sessions,
     seal_scope_sessions,
 )
 from .agent_event_view import serialize_event_view, project_relationship_views
@@ -52,6 +50,9 @@ from .session_inspection import (
     session_context_summary,
 )
 from .relationships.identity import resolve_relationship_owner
+from .companion_admin_queries import companion_reviews, companion_review_detail
+from .companion_admin_overview import companion_overview
+from .companion_admin_projection import CompanionAdminError, project_companion
 
 
 class AgentAdminError(ValueError):
@@ -103,8 +104,45 @@ class AgentAdminService:
 
     async def list_sessions(self, scope_ref: str, limit: int = 100) -> list[dict[str, object]]:
         scope = await self._scope(scope_ref)
-        sessions = await list_scope_sessions(scope.id, limit=max(1, min(500, limit)))
+        async with get_session() as db:
+            sessions = list(
+                (
+                    await db.scalars(
+                        select(ContextSession)
+                        .where(ContextSession.scope_id == scope.id)
+                        .order_by(ContextSession.sequence.desc())
+                        .limit(max(1, min(500, limit)))
+                    )
+                ).all()
+            )
         return [await self._session_summary(item) for item in sessions]
+
+    async def companion_overview(self, scope_ref: str) -> dict[str, object]:
+        try:
+            return await companion_overview(self.config, scope_ref, session_factory=get_session)
+        except CompanionAdminError as exc:
+            raise AgentAdminError(str(exc), code=exc.code, status=exc.status) from exc
+
+    async def companion_reviews(
+        self, scope_ref: str, *, limit: int = 30, cursor: str = "", persona_key: str = "", status: str = ""
+    ) -> dict[str, object]:
+        try:
+            return await companion_reviews(
+                scope_ref,
+                limit=limit,
+                cursor=cursor,
+                persona_key=persona_key,
+                status=status,
+                session_factory=get_session,
+            )
+        except CompanionAdminError as exc:
+            raise AgentAdminError(str(exc), code=exc.code, status=exc.status) from exc
+
+    async def companion_review_detail(self, scope_ref: str, review_ref: str) -> dict[str, object]:
+        try:
+            return await companion_review_detail(scope_ref, review_ref, session_factory=get_session)
+        except CompanionAdminError as exc:
+            raise AgentAdminError(str(exc), code=exc.code, status=exc.status) from exc
 
     async def session_detail(self, session_ref: str) -> dict[str, object]:
         context_session = await self._session(session_ref)
@@ -152,7 +190,10 @@ class AgentAdminService:
         turns.reverse()
         summaries = await turn_list_summaries(turns)
         affect = await self._turn_relationship_summaries(turns)
-        return [{**self._serialize_turn(turn), **summaries[turn.id], **affect[turn.id]} for turn in turns]
+        return [
+            {**self._serialize_turn(turn), "purpose": context_session.purpose, **summaries[turn.id], **affect[turn.id]}
+            for turn in turns
+        ]
 
     async def list_events(self, turn_ref: str) -> list[dict[str, object]]:
         turn = await self._turn(turn_ref)
@@ -161,10 +202,12 @@ class AgentAdminService:
     async def turn_inspection(self, turn_ref: str) -> dict[str, object]:
         turn = await self._turn(turn_ref)
         events = await turn_events(turn.id)
+        context_session = await self._session_id(turn.session_id)
         relationship = project_relationship_views(events)
         return {
             "turn": {
                 **self._serialize_turn(turn),
+                "purpose": context_session.purpose,
                 **summarize_turn_events(events),
                 **project_turn_timing(turn, events),
             },
@@ -175,6 +218,7 @@ class AgentAdminService:
             "tool_calls": project_tool_calls(events, turn_status=turn.status),
             "outputs": project_outputs(events),
             **relationship,
+            "companion": project_companion(events),
             "evidence_turns": await self._relationship_evidence_turns(turn, relationship),
         }
 
@@ -342,6 +386,8 @@ class AgentAdminService:
             context_session = await self._session(session_ref)
             if context_session.scope_id != scope.id:
                 raise AgentAdminError("Session does not belong to scope", code="scope_mismatch", status=409)
+            if context_session.purpose != "chat":
+                raise AgentAdminError("Internal sessions are read-only", code="unsupported_purpose", status=409)
             if context_session.status != "active":
                 raise AgentAdminError("Only the active session can be rolled over", code="not_active", status=409)
             persona = await resolve_scope_persona(self.config, scope.id)
@@ -502,7 +548,10 @@ class AgentAdminService:
 
     @staticmethod
     async def _session(session_ref: str) -> ContextSession:
-        context_session = await get_session_by_ref(session_ref.strip())
+        async with get_session() as db:
+            context_session = await db.scalar(
+                select(ContextSession).where(ContextSession.session_ref == session_ref.strip())
+            )
         if context_session is None:
             raise AgentAdminError("Unknown session_ref", code="session_not_found", status=404)
         return context_session

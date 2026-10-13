@@ -18,10 +18,15 @@
         <label for="session-select">&#20250;&#35805; <span id="session-count"></span></label>
         <select id="session-select" aria-label="&#36873;&#25321;&#20250;&#35805;"></select>
       </div>
+      <div class="context-picker purpose-picker">
+        <label for="purpose-select">&#29992;&#36884;</label>
+        <select id="purpose-select" aria-label="&#25353;&#29992;&#36884;&#36807;&#28388;"><option value="chat">&#26222;&#36890;&#32842;&#22825;</option><option value="">&#20840;&#37096;&#29992;&#36884;</option><option value="reminder">&#25552;&#37266;</option><option value="companion">&#20027;&#21160;&#32852;&#31995;</option><option value="companion_reflection">&#38506;&#20276;&#21453;&#24605;</option></select>
+      </div>
       <div class="context-actions">
         <span id="status" role="status" aria-live="polite">正在连接…</span>
         <span id="auto-refresh" class="is-hidden">自动刷新中</span>
         <button id="refresh-button" type="button">刷新</button>
+        <button id="companion-view-button" type="button">&#38506;&#20276;&#35270;&#22270;</button>
         <button id="session-details-button" class="session-info" type="button" disabled>&#20250;&#35805;&#35814;&#24773;</button>
         <details class="admin-menu">
           <summary>&#31649;&#29702;</summary>
@@ -33,7 +38,7 @@
         </details>
       </div>
     </div>
-    <main class="workspace" data-mobile-view="detail">
+    <main id="sessions-workspace" class="workspace" data-mobile-view="detail">
       <section class="panel turn-panel" aria-label="&#36718;&#27425;&#21015;&#34920;">
         <div class="panel-head">
           <h2>&#36718;&#27425; <span id="turn-count" class="muted">0</span></h2>
@@ -50,6 +55,7 @@
           <button id="tab-timeline" class="tab" role="tab" aria-selected="false" aria-controls="timeline-view" data-tab="timeline" tabindex="-1" type="button">&#35843;&#29992;</button>
           <button id="tab-context" class="tab" role="tab" aria-selected="false" aria-controls="context-view" data-tab="context" tabindex="-1" type="button">&#19978;&#19979;&#25991;</button>
           <button id="tab-relationship" class="tab" role="tab" aria-selected="false" aria-controls="relationship-view" data-tab="relationship" tabindex="-1" type="button">&#20851;&#31995;</button>
+          <button id="tab-decision" class="tab" role="tab" aria-selected="false" aria-controls="decision-view" data-tab="decision" tabindex="-1" type="button">&#22238;&#24212;&#20915;&#23450;</button>
         </div>
           <button id="collapse-details-button" class="collapse-button" type="button" aria-label="折叠本轮全部详情" disabled>全部折叠</button>
         </div>
@@ -58,7 +64,31 @@
           <div id="timeline-view" class="view" role="tabpanel" aria-labelledby="tab-timeline" tabindex="0" hidden></div>
           <div id="context-view" class="view" role="tabpanel" aria-labelledby="tab-context" tabindex="0" hidden></div>
           <div id="relationship-view" class="view" role="tabpanel" aria-labelledby="tab-relationship" tabindex="0" hidden></div>
+          <div id="decision-view" class="view" role="tabpanel" aria-labelledby="tab-decision" tabindex="0" hidden></div>
         </div>
+      </section>
+    </main>
+    <main id="companion-workspace" class="companion-workspace" data-mobile-view="list" hidden>
+      <nav class="companion-mobile-navigation" aria-label="&#38506;&#20276;&#35270;&#22270;">
+        <button id="companion-overview-button" type="button" aria-pressed="false">&#27010;&#35272;</button>
+        <button id="companion-history-button" type="button" aria-pressed="true">&#22797;&#30424;</button>
+      </nav>
+      <section class="companion-overview-pane panel" aria-label="&#38506;&#20276;&#27010;&#35272;">
+        <div class="panel-head"><h2>&#38506;&#20276;&#27010;&#35272;</h2><span id="companion-poll-status" class="muted"></span></div>
+        <div id="companion-overview" class="scroll companion-scroll"></div>
+      </section>
+      <section class="companion-history-pane panel" aria-label="&#38506;&#20276;&#21453;&#24605;&#21015;&#34920;">
+        <div class="panel-head"><h2>&#21453;&#24605; <span id="companion-review-count" class="muted">0</span></h2><button id="companion-collapse-button" class="quiet-button" type="button">&#20840;&#37096;&#25240;&#21472;</button></div>
+        <div class="companion-filters">
+          <label>&#20154;&#26684;<select id="companion-persona-filter" aria-label="&#25353;&#20154;&#26684;&#36807;&#28388;"></select></label>
+          <label>&#29366;&#24577;<select id="companion-status-filter" aria-label="&#25353;&#29366;&#24577;&#36807;&#28388;"><option value="">&#20840;&#37096;&#29366;&#24577;</option><option value="active">&#36827;&#34892;&#20013;</option><option value="completed">&#24050;&#23436;&#25104;</option><option value="failed">&#22833;&#36133;</option><option value="cancelled">&#24050;&#21462;&#28040;</option><option value="expired">&#24050;&#36807;&#26399;</option></select></label>
+        </div>
+        <nav id="companion-review-list" class="scroll list" aria-label="&#36873;&#25321;&#21453;&#24605;"></nav>
+        <div class="companion-pagination actions"><button id="companion-previous-button" type="button">&#19978;&#19968;&#39029;</button><span id="companion-page-status" class="muted"></span><button id="companion-next-button" type="button">&#19979;&#19968;&#39029;</button></div>
+      </section>
+      <section class="companion-detail-pane panel" aria-label="&#21453;&#24605;&#35814;&#24773;">
+        <button id="companion-back-button" class="back-button" type="button">&#8592; &#21453;&#24605;&#21015;&#34920;</button>
+        <div id="companion-detail-scroll" class="scroll companion-detail-scroll"><div id="companion-review-detail" class="view"></div></div>
       </section>
     </main>
   </div>

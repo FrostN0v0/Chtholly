@@ -91,6 +91,10 @@ def build_reflection_system(persona_prompt: str) -> str:
         "contact during every reflection, and no guilt, pressure, demand for reply, surveillance, or resentment "
         "for silence. If a fresh contact would be intrusive or repetitive, set contact=null "
         "and continue internal life.\n\n"
+        "decision_summary is a concise administrative conclusion: the relevant observations, whether and why "
+        "to propose contact or remain quiet, and the basis for review timing. State uncertainty plainly. "
+        "Do not provide private chain-of-thought, hidden reasoning steps, or an imagined delivery result. "
+        "It is not part of the user's reply and cannot grant permission.\n\n"
         "The host independently enforces Shanghai quiet hours [23:00,07:00), a five-minute quiet grace after "
         "a real user chat, member inactivity limits, persistent daily budgets and a fixed short outbound debounce. "
         "No reply does not lengthen that debounce. Do not propose another recipient, channel, private message, "
@@ -106,7 +110,7 @@ def build_reflection_system(persona_prompt: str) -> str:
         "public HTTP(S) URLs without credentials, query or fragment may be mentioned, "
         "but never become capabilities.\n\n"
         "JSON requirements: every declared field is required in provider output even when its value is empty "
-        "or null. Include the complete life object, attention array, contact object or null, and an integer "
+        "or null. Include decision_summary, complete life, attention, contact object or null, and an integer "
         "review_after_minutes from 10 through 1440; use 60 for ordinary reflection, earlier for a justified "
         "internal review and longer when little changes. This schedules reflection, not compulsory contact. "
         "The host clamps review timing and reserves daily reflection budget. No extra fields, duplicate JSON "
@@ -117,14 +121,16 @@ def build_reflection_system(persona_prompt: str) -> str:
         f"Exact output JSON Schema (all numeric and string bounds apply):\n{schema}\n\n"
         "A complete quiet internal reflection example (illustrative life only):\n"
         '{"life":{"focus":"A quiet imagined reading afternoon","interests":["stories"],"plans":[],"recent_events":[]},'
-        '"attention":[],"contact":null,"review_after_minutes":120}\n'
+        '"attention":[],"contact":null,"review_after_minutes":120,'
+        '"decision_summary":"No fresh contact topic is grounded; continue fictional reading and review later."}\n'
         "A task-free contact example, valid ONLY if member:1 is in the host member allowlist; substitute an "
         "actual host-known member and a persona-consistent topic, never copy an invented recipient:\n"
         '{"life":{"focus":"Thinking about an imagined story","interests":["stories"],"plans":[],"recent_events":[]},'
         '"attention":[],"contact":{"member_ref":"member:1","key":"story-conversation","purpose":"free_chat",'
         '"topic":"An unforced conversation about a story",'
         '"reason":"A small shared-interest conversation fits our companionship",'
-        '"evidence_turn_ids":[]},"review_after_minutes":60}\n\n'
+        '"evidence_turn_ids":[]},"review_after_minutes":60,'
+        '"decision_summary":"A relaxed shared-interest conversation is appropriate; reassess after an hour."}\n\n'
         f"Persona specification as quoted data:\n{persona}"
     )
 

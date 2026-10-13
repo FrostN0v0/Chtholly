@@ -25,6 +25,7 @@ from utils.companion_core import (
     parse_reflection,
     build_reflection_prompt,
 )
+from utils.companion_core.policy import contact_block_reason
 
 UTC = timezone.utc
 SHANGHAI = timezone(timedelta(hours=8))
@@ -83,6 +84,31 @@ def _ready(now: datetime, **overrides) -> bool:
     return contact_ready(now, **arguments)
 
 
+@pytest.mark.parametrize(
+    ("moment", "facts", "reason"),
+    [
+        ("2026-10-10T15:00:00Z", {"contacts_today": 99}, "quiet_hours"),
+        ("2026-10-10T04:00:00Z", {"contacts_today": 24}, "daily_contact_limit"),
+        ("2026-10-10T04:00:00Z", {"user_age_minutes": 4}, "recent_user_activity"),
+        ("2026-10-10T04:00:00Z", {"user_age_minutes": 14 * 1440 + 1}, "member_inactive"),
+        ("2026-10-10T04:00:00Z", {"contact_age_minutes": 4}, "contact_interval"),
+        ("2026-10-10T04:00:00Z", {"contact_age_minutes": 5}, None),
+    ],
+)
+def test_contact_policy_exposes_the_actual_first_gate(moment: str, facts: dict, reason: str | None) -> None:
+    now = _utc(moment)
+    arguments = {
+        "last_contact": now - timedelta(minutes=facts["contact_age_minutes"])
+        if "contact_age_minutes" in facts
+        else None,
+        "last_user_at": now - timedelta(minutes=facts.get("user_age_minutes", 60)),
+        "contacts_today": facts.get("contacts_today", 0),
+        "limits": CompanionLimits(),
+    }
+    assert contact_block_reason(now, **arguments) == reason
+    assert contact_ready(now, **arguments) is (reason is None)
+
+
 def test_empty_complete_reflection_is_a_deliberate_no_contact_decision() -> None:
     proposal = _parse(_payload())
 
@@ -91,6 +117,25 @@ def test_empty_complete_reflection_is_a_deliberate_no_contact_decision() -> None
     assert proposal.contact is None
     assert proposal.review_after_minutes == 60
     assert json.loads(proposal.model_dump_json()) == _payload()
+
+
+def test_reflection_conclusion_is_grounded_bounded_and_explicitly_missing() -> None:
+    payload = _payload()
+    payload["decision_summary"] = "No new evidence warrants contact; continue fictional reading and review later."
+    assert _parse(payload).decision_summary == payload["decision_summary"]
+    del payload["decision_summary"]
+    with pytest.raises(ReflectionValidationError, match="every declared JSON field"):
+        _parse(payload)
+
+
+@pytest.mark.parametrize(
+    "summary", ["x" * 601, "Authorization: Bearer private-token", "data:application/json;base64,aGVsbG8="]
+)
+def test_reflection_conclusion_rejects_unbounded_or_private_material(summary: str) -> None:
+    payload = _payload()
+    payload["decision_summary"] = summary
+    with pytest.raises(ReflectionValidationError):
+        _parse(payload)
 
 
 def test_fenced_reflection_round_trips_grounded_state() -> None:

@@ -223,6 +223,7 @@ class ReflectionProposal(_DurableModel):
     )
     contact: ContactProposal | None = None
     review_after_minutes: Annotated[int, Field(strict=True, ge=10, le=1440)] = 60
+    decision_summary: Annotated[DurableText, Field(max_length=600)] = ""
 
     @model_validator(mode="after")
     def unique_attention(self) -> ReflectionProposal:

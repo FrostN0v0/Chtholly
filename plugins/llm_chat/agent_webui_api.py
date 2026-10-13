@@ -9,7 +9,11 @@ from secrets import token_urlsafe
 from collections.abc import Mapping, Callable
 
 from fastapi import Query, Depends, Request, APIRouter
+from fastapi.routing import APIRoute
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 
 from utils.webui_theme import themed_assets
 
@@ -19,6 +23,8 @@ _API_PREFIX = "/api/llm-chat/sessions"
 _ASSET_FILES = {
     "app.css": "text/css; charset=utf-8",
     "app.js": "text/javascript; charset=utf-8",
+    "companion.css": "text/css; charset=utf-8",
+    "companion.js": "text/javascript; charset=utf-8",
 }
 _PAGE_HEADERS = {
     "Cache-Control": "no-store",
@@ -50,6 +56,25 @@ async def _read_json(request: Request, *, maximum: int = 8192) -> Mapping[str, o
     return payload
 
 
+class _AgentSessionsRoute(APIRoute):
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def private_response(request: Request):
+            try:
+                response = await handler(request)
+            except HTTPException as exc:
+                response = await http_exception_handler(request, exc)
+            except RequestValidationError as exc:
+                response = await request_validation_exception_handler(request, exc)
+            if "/assets/" not in request.url.path:
+                response.headers.setdefault("Cache-Control", "private, no-store")
+                response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            return response
+
+        return private_response
+
+
 def create_agent_sessions_router(
     service: AgentAdminService,
     *,
@@ -57,7 +82,9 @@ def create_agent_sessions_router(
     auth_dependency: AuthDependency | None = None,
 ) -> APIRouter:
     dependencies = [Depends(auth_dependency)] if auth_dependency is not None else []
-    router = APIRouter(prefix=_API_PREFIX, tags=["agent-sessions"], dependencies=dependencies)
+    router = APIRouter(
+        prefix=_API_PREFIX, tags=["agent-sessions"], dependencies=dependencies, route_class=_AgentSessionsRoute
+    )
 
     @router.get("/page", include_in_schema=False, response_model=None)
     async def page() -> HTMLResponse | JSONResponse:
@@ -66,8 +93,8 @@ def create_agent_sessions_router(
             document = (asset_dir / "index.html").read_text(encoding="utf-8")
             stylesheet, script = themed_assets(
                 asset_dir,
-                script_names=("content.js", "charts.js", "app.js"),
-                style_names=("app.css", "content.css", "charts.css"),
+                script_names=("content.js", "charts.js", "companion.js", "app.js"),
+                style_names=("app.css", "content.css", "charts.css", "companion.css"),
             )
         except (OSError, UnicodeError):
             return JSONResponse(
@@ -111,6 +138,38 @@ def create_agent_sessions_router(
         except AgentAdminError as exc:
             return _error_response(exc)
         return {"success": True, "items": items}
+
+    @router.get("/scopes/{scope_ref}/companion", response_model=None)
+    async def companion_overview(scope_ref: str) -> dict[str, object] | JSONResponse:
+        try:
+            item = await service.companion_overview(scope_ref)
+        except AgentAdminError as exc:
+            return _error_response(exc)
+        return {"success": True, "item": item}
+
+    @router.get("/scopes/{scope_ref}/companion/reviews", response_model=None)
+    async def companion_reviews(
+        scope_ref: str,
+        limit: Annotated[int, Query(ge=1, le=100)] = 30,
+        cursor: Annotated[str, Query(max_length=1500)] = "",
+        persona_key: Annotated[str, Query(max_length=200)] = "",
+        status: Annotated[str, Query(max_length=32)] = "",
+    ) -> dict[str, object] | JSONResponse:
+        try:
+            page = await service.companion_reviews(
+                scope_ref, limit=limit, cursor=cursor, persona_key=persona_key, status=status
+            )
+        except AgentAdminError as exc:
+            return _error_response(exc)
+        return {"success": True, **page}
+
+    @router.get("/scopes/{scope_ref}/companion/reviews/{review_ref}", response_model=None)
+    async def companion_review_detail(scope_ref: str, review_ref: str) -> dict[str, object] | JSONResponse:
+        try:
+            item = await service.companion_review_detail(scope_ref, review_ref)
+        except AgentAdminError as exc:
+            return _error_response(exc)
+        return {"success": True, "item": item}
 
     @router.get("/sessions/{session_ref}", response_model=None)
     async def session_detail(session_ref: str) -> dict[str, object] | JSONResponse:
