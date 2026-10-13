@@ -20,10 +20,9 @@ ReactionStage = Literal[
     "success",
     "partial",
     "failed",
-    "superseded",
     "declined",
 ]
-TerminalReactionStage = Literal["success", "partial", "failed", "superseded", "declined"]
+TerminalReactionStage = Literal["success", "partial", "failed", "declined"]
 WarningSink = Callable[[str], object]
 
 _REACTION_TIMEOUT_SECONDS = 2.0
@@ -36,7 +35,6 @@ _REACTION_EMOJIS: dict[ReactionStage, str] = {
     "success": "124",
     "partial": "27",
     "failed": "123",
-    "superseded": "129",
     "declined": "284",
 }
 _RESEARCH_TOOLS = frozenset(

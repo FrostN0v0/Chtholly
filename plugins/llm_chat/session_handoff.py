@@ -13,6 +13,7 @@ from .models import ContextSession
 from .agent_events import load_session_events
 from .context_reads import model_readable_payload
 from .core.model_audit import ADMIN_ONLY_EVENT_TYPES
+from .scheduled_chat_context import _user_content, _join_user_inputs
 
 _HANDOFF_KEYS = (
     "topic",
@@ -30,6 +31,7 @@ def _event_summary(event) -> dict[str, object]:
     payload = model_readable_payload(event, compact=event.event_type not in {"user_input", "assistant_output"})
     item: dict[str, object] = {
         "event_ref": event.event_ref,
+        "turn_id": event.turn_id,
         "type": event.event_type,
         "status": event.status,
         "effect": event.effect,
@@ -37,7 +39,10 @@ def _event_summary(event) -> dict[str, object]:
     if event.tool_name:
         item["tool"] = event.tool_name
     if event.event_type in {"user_input", "assistant_output"}:
-        content = payload.get("content")
+        if event.event_type == "user_input":
+            _speaker, content = _user_content(payload, "user")
+        else:
+            content = payload.get("content")
         if isinstance(content, str):
             item["content"] = content[:2000]
     elif event.event_type == "assistant_tool_call":
@@ -54,15 +59,22 @@ async def _source_events(context_session: ContextSession, max_chars: int) -> lis
     selected: list[dict[str, object]] = []
     used = 2
     for _turn, events in reversed(rows):
-        for event in reversed(events):
-            if event.event_type in ADMIN_ONLY_EVENT_TYPES or not event.model_visible:
-                continue
-            item = _event_summary(event)
-            size = len(json.dumps(item, ensure_ascii=False, separators=(",", ":"))) + 1
-            if used + size > max_chars:
-                continue
+        summaries = [
+            _event_summary(event)
+            for event in events
+            if event.event_type not in ADMIN_ONLY_EVENT_TYPES and event.model_visible
+        ]
+        sizes = [len(json.dumps(item, ensure_ascii=False, separators=(",", ":"))) + 1 for item in summaries]
+        required = sum(size for item, size in zip(summaries, sizes) if item["type"] == "user_input")
+        if used + required > max_chars:
+            continue
+        used += required
+        for item, size in reversed(list(zip(summaries, sizes))):
+            if item["type"] != "user_input":
+                if used + size > max_chars:
+                    continue
+                used += size
             selected.insert(0, item)
-            used += size
     return selected
 
 
@@ -95,9 +107,19 @@ def _normalize_handoff(value: object, allowed_refs: set[str], max_chars: int) ->
 
 def _fallback_handoff(events: list[dict[str, object]], max_chars: int) -> dict[str, object]:
     visible = [event for event in events if event.get("type") in {"user_input", "assistant_output"}]
-    last_user = next(
-        (str(item.get("content", "")) for item in reversed(visible) if item.get("type") == "user_input"), ""
-    )
+    last_user_event = next((item for item in reversed(visible) if item.get("type") == "user_input"), None)
+    user_inputs = [
+        str(item.get("content", ""))
+        for item in visible
+        if item.get("type") == "user_input"
+        and last_user_event is not None
+        and (
+            item.get("turn_id") == last_user_event.get("turn_id")
+            if "turn_id" in last_user_event
+            else item is last_user_event
+        )
+    ]
+    last_user = _join_user_inputs(user_inputs, 2000)
     last_assistant = next(
         (str(item.get("content", "")) for item in reversed(visible) if item.get("type") == "assistant_output"),
         "",
@@ -108,20 +130,20 @@ def _fallback_handoff(events: list[dict[str, object]], max_chars: int) -> dict[s
         if item.get("type") == "tool_result" and item.get("effect") == "confirmed"
     ][-12:]
     handoff = {
-        "topic": last_user[:1000],
+        "topic": _join_user_inputs(user_inputs, 1000),
         "goals": [],
         "decisions": [],
         "constraints": [],
         "open_loops": [],
         "confirmed_deliveries": confirmed,
         "relevant_event_refs": [str(item["event_ref"]) for item in events[-12:]],
-        "last_visible_exchange": {"user": last_user[:2000], "assistant": last_assistant[:2000]},
+        "last_visible_exchange": {"user": last_user, "assistant": last_assistant[:2000]},
     }
     serialized = json.dumps(handoff, ensure_ascii=False, separators=(",", ":"))
     if len(serialized) <= max_chars:
         return handoff
     handoff["topic"] = ""
-    handoff["last_visible_exchange"] = {"user": last_user[:500], "assistant": last_assistant[:500]}
+    handoff["last_visible_exchange"] = {"user": _join_user_inputs(user_inputs, 500), "assistant": last_assistant[:500]}
     return handoff
 
 

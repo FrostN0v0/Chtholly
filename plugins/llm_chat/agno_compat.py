@@ -25,7 +25,9 @@ from entari_plugin_llm.sessions import SessionInfo
 from utils.turn_resolution_core import current_turn_resolution
 from utils.llm_model_core.snapshot import current_main_model
 
+from .steering import SteerPending, current_steering, check_steer_boundary
 from .core.errors import summarize_exception
+from .steer_model import invoke_with_steering, steer_request_parameters
 from .agent_context import current_agent_access
 from .core.delivery import (
     current_llm_chat_delivery,
@@ -196,10 +198,18 @@ def agno_tool_call_limit_scope(limit: int) -> Iterator[None]:
     """Count actual external calls across every pause in one generation attempt."""
 
     normalized = min(_MAX_TOOL_CALL_LIMIT, max(_MIN_TOOL_CALL_LIMIT, int(limit)))
-    token = _TOOL_BUDGET.set(_ToolBudget(normalized))
+    parent = _TOOL_BUDGET.get()
+    budget = (
+        _ToolBudget(normalized)
+        if parent is None
+        else _ToolBudget(min(parent.limit, parent.used + normalized), used=parent.used)
+    )
+    token = _TOOL_BUDGET.set(budget)
     try:
         yield
     finally:
+        if parent is not None:
+            parent.used = max(parent.used, budget.used)
         _TOOL_BUDGET.reset(token)
 
 
@@ -247,6 +257,7 @@ def register_llm_chat_tool(subscriber: Subscriber[Any]) -> None:
         if invocation is None or invocation.subscriber is not subscriber:
             return await previous(context, inner=inner)
         try:
+            check_steer_boundary()
             invocation.result = await previous(context, inner=inner)
             return invocation.result
         except BaseException as exc:
@@ -383,6 +394,17 @@ async def _run_local_tools(
         before = _delivery_snapshot()
         reaction = current_reaction_feedback()
         try:
+            check_steer_boundary()
+        except SteerPending:
+            recorder.finish_skipped(call, reason="New user input arrived before this tool started")
+            finished.add(index)
+            req.set_external_execution_result(
+                json.dumps({"ok": False, "error": "Not executed: apply the pending user input first"})
+            )
+            if execution is not None:
+                execution.tool_call_error = True
+            return
+        try:
             if index >= remaining:
                 error = f"Tool call limit reached. Generation budget exhausted after {budget.limit} calls."
                 req.set_external_execution_result(error)
@@ -427,6 +449,8 @@ async def _run_local_tools(
                         if isinstance(invocation.result, BaseException)
                         else RuntimeError(payload["error"])
                     )
+                if isinstance(error, SteerPending):
+                    raise error
                 recorder.finish_error(call, error, before=before, after=_delivery_snapshot())
                 req.external_execution_result = json.dumps(
                     {"ok": False, "error": summarize_exception(error)}, ensure_ascii=False
@@ -445,6 +469,14 @@ async def _run_local_tools(
                     audit_snapshot=sanitize_audit_value(payload.get("data")),
                 )
             finished.add(index)
+        except SteerPending:
+            recorder.finish_skipped(call, reason="New user input arrived before the external operation started")
+            finished.add(index)
+            req.set_external_execution_result(
+                json.dumps({"ok": False, "error": "Not executed: apply the pending user input first"})
+            )
+            if execution is not None:
+                execution.tool_call_error = True
         except asyncio.CancelledError:
             if index not in finished:
                 recorder.finish_cancelled(call, before=before, after=_delivery_snapshot())
@@ -469,7 +501,9 @@ async def _run_local_tools(
         finally:
             await _flush_tool_events(audit, recorder)
 
-    def stop_remaining(reason: str = "Tool was not executed because this turn deliberately ended") -> None:
+    def stop_remaining(
+        reason: str = "Tool was not executed because this turn deliberately ended", *, append_results: bool = True
+    ) -> None:
         for pending_index, requirement in enumerate(requirements):
             if pending_index in finished:
                 continue
@@ -485,13 +519,18 @@ async def _run_local_tools(
             )
             if requirement.tool_execution is not None:
                 requirement.tool_execution.tool_call_error = True
-        _append_stopped_results(response, requirements)
+        if append_results:
+            _append_stopped_results(response, requirements)
 
     try:
         if audit is not None:
             await audit.flush()
         index = 0
         while index < len(requirements):
+            steering = current_steering()
+            if steering is not None and steering.pending:
+                stop_remaining("Not executed: apply the pending user input first", append_results=False)
+                return True
             if calls[index].tool_name in _READ_ONLY_TOOLS:
                 end = index + 1
                 while (
@@ -563,7 +602,9 @@ def _wrap_litellm_model(previous_model: Any) -> Any:
             from .inspection_delivery import append_inspected_images
 
             append_inspected_images(messages)
-            return await super().ainvoke(messages, *args, **kwargs)
+            return await invoke_with_steering(
+                super().ainvoke, messages, *args, format_messages=self._format_messages, **kwargs
+            )
 
         async def ainvoke_stream(self, messages: list[Message], *args: Any, **kwargs: Any) -> Any:
             from .inspection_delivery import append_inspected_images
@@ -571,6 +612,9 @@ def _wrap_litellm_model(previous_model: Any) -> Any:
             append_inspected_images(messages)
             async for response in super().ainvoke_stream(messages, *args, **kwargs):
                 yield response
+
+        def get_request_params(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            return steer_request_parameters(super().get_request_params(*args, **kwargs))
 
         def _format_tools(self, tools: list[Function | dict[str, Any]] | None) -> list[dict[str, Any]]:
             declarations = super()._format_tools(tools)

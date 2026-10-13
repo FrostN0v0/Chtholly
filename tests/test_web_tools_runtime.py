@@ -5790,3 +5790,183 @@ async def test_native_inspection_continuation_carries_pixels_after_all_matched_t
         assert session.sent == []
     finally:
         await inputs.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arrival", ["provider", "first_tool", "queued_send", "final_send"])
+async def test_native_steering_preserves_effects_and_replaces_only_unstarted_output(
+    local_modules, monkeypatch, arrival
+):
+    from plugins.llm_chat.steering import SteeringState, steering_scope
+    from plugins.llm_chat.turn_lifecycle import ActiveChatTurn
+    from plugins.llm_chat.chat_completion import settle_chat_response
+    from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
+
+    session, supplement = _DeliveryToolSession(), _DeliveryToolSession()
+    session.event.message = SimpleNamespace(id="root", content="original request")
+    supplement.event.message = SimpleNamespace(id="extra", content="revised request")
+    steering = SteeringState(session, _tool_context(session))
+
+    async def process(entry):
+        return {"role": "user", "content": entry.session.event.message.content}
+
+    steering.processor = process
+    received = False
+
+    def receive():
+        nonlocal received
+        if not received:
+            assert steering.receive(supplement, _tool_context(supplement))
+            received = True
+
+    clock = _FakeClock()
+
+    async def pacing(seconds):
+        if arrival in {"queued_send", "final_send"}:
+            receive()
+        await clock.sleep(seconds)
+
+    state = local_modules.delivery.DeliveryState(sleep=pacing, clock=clock.monotonic)
+    if arrival in {"queued_send", "final_send"}:
+        state.last_delivery_at = 0.0
+    effects, history = [], []
+
+    async def append_history(_channel, _user, _name, role, content):
+        history.append((role, content))
+        return len(history)
+
+    async def delete_history(_message_id):
+        raise AssertionError("Successful steering must not delete accepted input")
+
+    turn = ActiveChatTurn(
+        channel_id="12345",
+        user_message_id=None,
+        delivery_state=state,
+        append_history=append_history,
+        delete_history=delete_history,
+        warn=lambda _message: None,
+        agent_events=AgentTurnRecorder(),
+    )
+    prepared = SimpleNamespace(lifecycle=turn, delivery_state=state, resolution=TurnResolution())
+
+    async def complete(response):
+        assert await settle_chat_response(session, prepared, response, None) == "completed"
+
+    async def steer_commit(value: str) -> str:
+        """Commit one operation and return its observed result."""
+        effects.append(value)
+        if arrival == "first_tool":
+            receive()
+        return "committed " + value
+
+    def first_response(_payload):
+        if arrival == "provider":
+            receive()
+            return _model_response(tool_calls=[_tool_call("stale", "steer_commit", {"value": "obsolete"})])
+        if arrival == "first_tool":
+            return _model_response(
+                tool_calls=[
+                    _tool_call("committed", "steer_commit", {"value": "once"}),
+                    _tool_call("skipped", "steer_commit", {"value": "obsolete"}),
+                ]
+            )
+        if arrival == "queued_send":
+            return _model_response(
+                tool_calls=[_tool_call("unsent", "send_msg", {"segments": [{"type": "text", "text": "obsolete"}]})]
+            )
+        return _model_response("obsolete")
+
+    payloads = _install_completion_script(monkeypatch, [first_response, _model_response("revised answer")])
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        steer_commit.__module__ = harness.module.__name__
+        harness.dispatcher(steer_commit)
+        with steering_scope(steering):
+            await local_modules.generation.generate_chat_response(
+                [{"role": "user", "content": "original request"}],
+                system="Apply real supplements without replaying completed operations.",
+                model="test-model",
+                channel_id="12345",
+                ctx=_tool_context(session),
+                web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+                delivery_state=state,
+                tool_trace=turn.tool_trace,
+                agent_events=turn.agent_events,
+                resolution=prepared.resolution,
+                complete=complete,
+            )
+        await steering.aclose()
+
+    assert effects == (["once"] if arrival == "first_tool" else [])
+    assert [MessageChain(message).extract_plain_text() for message in session.sent] == ["revised answer"]
+    assert state.delivery_attempts == state.confirmed_deliveries == state.text_messages == 1
+    assert history == [("assistant", "revised answer")]
+    messages = payloads[1]["messages"]
+    assert [message["content"] for message in messages if message["role"] == "user"] == [
+        "original request",
+        "revised request",
+    ]
+    tool_results = _tool_messages(payloads[1])
+    expected_ids = {"first_tool": ["committed", "skipped"], "queued_send": ["unsent"]}.get(arrival, [])
+    assert [result["tool_call_id"] for result in tool_results] == expected_ids
+    if tool_results:
+        last_result = max(index for index, message in enumerate(messages) if message["role"] == "tool")
+        assert messages[last_result + 1] == {"role": "user", "content": "revised request"}
+        assert json.loads(tool_results[-1]["content"])["ok"] is False
+    assert len(payloads) == 2
+    assert steering.applied_revision == 2
+    assert not steering.accepting
+
+
+@pytest.mark.asyncio
+async def test_native_steering_budget_includes_completed_tool_results(local_modules, monkeypatch):
+    from plugins.llm_chat.steering import SteeringState, steering_scope
+    from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
+
+    session, extra = _DeliveryToolSession(), _DeliveryToolSession()
+    steering = SteeringState(session, _tool_context(session))
+    steering.request_input_budget = 1024
+    effects = []
+
+    async def process(_entry):
+        return {"role": "user", "content": "supplement"}
+
+    async def long_result() -> str:
+        """Return a completed operation's large result."""
+        effects.append("committed")
+        steering.receive(extra, _tool_context(extra))
+        return "large-result " * 5000
+
+    steering.processor = process
+    recorder = AgentTurnRecorder()
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(tool_calls=[_tool_call("large", "long_result", {})]),
+        ],
+    )
+    async with _temporary_plugin() as harness:
+        long_result.__module__ = harness.module.__name__
+        harness.dispatcher(long_result)
+        with steering_scope(steering), pytest.raises(RuntimeError):
+            await local_modules.generation.generate_chat_response(
+                [{"role": "user", "content": "original"}],
+                system="system",
+                model="test-model",
+                channel_id="12345",
+                ctx=_tool_context(session),
+                web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+                delivery_state=local_modules.delivery.DeliveryState(),
+                agent_events=recorder,
+            )
+        await steering.aclose()
+    assert effects == ["committed"]
+    assert len(payloads) == 1
+    assert any(
+        event.event_type == "steer_checkpoint"
+        and event.status == "refused"
+        and event.payload.get("reason") == "request_input_budget_exceeded"
+        for event in recorder.events
+    )

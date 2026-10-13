@@ -294,6 +294,17 @@ def reserve_message(text: str, *, media_count: int = 0, text_message: bool = Tru
     )
 
 
+def release_unstarted_message(
+    state: DeliveryState, text: str, *, media_count: int = 0, text_message: bool = True
+) -> None:
+    """Release only a reservation rejected before the native send boundary."""
+    state.text_messages -= int(text_message)
+    state.text_chars -= len(text)
+    state.media_messages -= media_count
+    if not state.text_messages and not state.media_messages:
+        state.mode = None
+
+
 def reserve_media_messages_for_state(state: DeliveryState, count: int) -> DeliveryState:
     """Atomically reserve media deliveries for a completed generation state."""
 

@@ -29,6 +29,8 @@ const labels = {
   inline_event_chars: "内联事件字数", included_count: "选中轮次", excluded_count: "排除轮次",
   relationship: "\u5173\u7cfb\u4e0e\u60c5\u7eea", relationship_evaluation: "\u5173\u7cfb\u8bc4\u4f30", response_decision: "\u81ea\u4e3b\u56de\u5e94",
   silent: "\u81ea\u4e3b\u6c89\u9ed8", declined: "\u5df2\u7ec8\u6b62 (declined)", superseded: "\u5df2\u88ab\u65b0\u8f6e\u6b21\u66ff\u4ee3",
+  steer_received: "\u8865\u5145\u8f93\u5165\u5df2\u63a5\u6536", steer_applied: "\u8865\u5145\u8f93\u5165\u5df2\u5e94\u7528", steer_checkpoint: "\u8865\u5145\u8f93\u5165\u68c0\u67e5\u70b9",
+  applied: "\u5df2\u5e94\u7528", received: "\u5df2\u63a5\u6536\uff0c\u7b49\u5f85\u5e94\u7528", unapplied: "\u672a\u5e94\u7528", refused: "\u672a\u63a5\u7eb3",
 };
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -532,6 +534,7 @@ function renderTurns() {
     const timing = node("span", "", compactDuration(turn));
     timing.title = turnDuration(turn);
     meta.append(node("span", "", `#${turn.sequence} \xb7 ${date(turn.created_at)}`), timing);
+    if (turn.input_count > 1) meta.append(node("span", "", `${turn.input_count - 1} \u6761\u8865\u5145\u8f93\u5165`));
     item.append(meta);
     const evaluation = turn.relationship_evaluation;
     const changes = Object.entries(evaluation?.changes || {}).filter(([, change]) => typeof change.delta === "number" && change.delta !== 0);
@@ -874,16 +877,28 @@ function deliveryCard(output, recordKey) {
 function renderIO() {
   const target = $("io-view");
   target.replaceChildren();
-  const inputs = state.events.filter((event) => event.event_type === "user_input");
+  const applied = new Set(state.events.filter((event) => event.event_type === "user_input" && event.steering).map((event) => event.steering.sequence));
+  const checkpoints = new Map(state.events.filter((event) => event.event_type === "steer_checkpoint" && event.steering).map((event) => [event.steering.sequence, event.steering]));
+  const inputs = state.events.filter((event) => event.event_type === "user_input" || (event.event_type === "steer_received" && event.steering && !applied.has(event.steering.sequence)));
   if (!inputs.length) target.append(section("\u7528\u6237\u8f93\u5165", "\u672a\u8bb0\u5f55"));
   for (const [index, event] of inputs.entries()) {
-    const card = section("\u7528\u6237\u8f93\u5165");
+    const steering = event.event_type === "user_input" ? event.steering : checkpoints.get(event.steering?.sequence) || event.steering;
+    const card = section(steering ? `\u8865\u5145\u8f93\u5165 ${steering.sequence - 1}` : "\u7528\u6237\u8f93\u5165");
     card.classList.add("input-record");
-    card.dataset.recordKey = `input:${event.event_ref || index}`;
+    card.dataset.recordKey = steering ? `input:steer:${steering.sequence}` : `input:${event.event_ref || index}`;
+    if (steering) {
+      const timing = node("div", "event-meta");
+      timing.append(badge(steering.status), node("span", "", `\u63a5\u6536 ${date(steering.received_at)}`));
+      if (steering.applied_at) timing.append(node("span", "", `\u5e94\u7528 ${date(steering.applied_at)}`));
+      if (steering.reason) timing.append(node("span", "", steering.reason));
+      card.append(timing);
+    }
     card.append(SessionContent.message(event.message || { speaker: state.turn.user_name, content: eventPreview(event) ?? "\u672a\u8bb0\u5f55", quotes: [], mentions: [], truncated: false }));
     appendImages(card, event);
     const more = node("details", "raw-details");
-    more.append(node("summary", "", "\u8f93\u5165\u8bb0\u5f55"), eventButton(event.event_ref, "\u67e5\u770b\u5b8c\u6574\u8f93\u5165", "content"));
+    const fullInput = eventButton(event.event_ref, "\u67e5\u770b\u5b8c\u6574\u8f93\u5165", "content");
+    fullInput.dataset.focusKey = `${card.dataset.recordKey}|content`;
+    more.append(node("summary", "", "\u8f93\u5165\u8bb0\u5f55"), fullInput);
     card.append(more);
     target.append(card);
   }

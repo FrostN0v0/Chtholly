@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from .models import AgentTurn
 from .core.media import sanitize_assistant_history
@@ -61,6 +61,27 @@ def _safe_text(value: object, *, limit: int) -> str:
     return safe[:limit]
 
 
+def _own_input_text(payload: Mapping[str, object]) -> str | None:
+    """Read only the author's text, excluding serialized forwarded/quoted data."""
+    content = payload.get("content")
+    if not isinstance(content, str):
+        return None
+    try:
+        message = json.loads(content)
+    except ValueError:
+        message = None
+    if isinstance(message, Mapping) and "content" in message:
+        content = message.get("content")
+    if isinstance(content, str):
+        try:
+            stored = json.loads(content)
+        except ValueError:
+            stored = None
+        if isinstance(stored, Mapping) and "forwarded_messages" in stored:
+            content = stored.get("content")
+    return content if isinstance(content, str) else None
+
+
 def _user_content(payload: Mapping[str, object], fallback_speaker: str) -> tuple[str, str]:
     raw_content = payload.get("content")
     speaker = payload.get("speaker")
@@ -72,9 +93,8 @@ def _user_content(payload: Mapping[str, object], fallback_speaker: str) -> tuple
         except (TypeError, ValueError):
             nested = None
         if isinstance(nested, Mapping):
-            raw_content = nested.get("content")
             speaker = nested.get("speaker", speaker)
-    safe_content = _safe_text(raw_content, limit=_MAX_TEXT_CHARS)
+    safe_content = _safe_text(_own_input_text(payload), limit=_MAX_TEXT_CHARS)
     safe_speaker = _safe_text(speaker, limit=120) or _safe_text(fallback_speaker, limit=120) or "user"
     return safe_speaker, safe_content
 
@@ -84,7 +104,24 @@ def _assistant_content(payload: Mapping[str, object]) -> str:
     return _safe_text(sanitize_assistant_history(raw) if isinstance(raw, str) else None, limit=_MAX_TEXT_CHARS)
 
 
-def _trim_turn(speaker: str, user: str, assistant: str, remaining: int) -> dict[str, str] | None:
+def _join_user_inputs(inputs: Sequence[str], max_chars: int) -> str:
+    """Keep an ordered excerpt of every applied input within one text budget."""
+    joined = "\n\n".join(inputs)
+    if len(joined) <= max_chars:
+        return joined
+    remaining = max_chars - 2 * (len(inputs) - 1)
+    if remaining < len(inputs):
+        return ""
+    excerpts = []
+    for index, text in enumerate(inputs):
+        room = remaining // (len(inputs) - index)
+        excerpt = text[:room]
+        excerpts.append(excerpt)
+        remaining -= len(excerpt)
+    return "\n\n".join(excerpts)
+
+
+def _trim_turn(speaker: str, user: Sequence[str], assistant: str, remaining: int) -> dict[str, str] | None:
     # Keep both sides of a complete turn. The text is excerpted only at the
     # immutable snapshot boundary; the source session is never changed.
     overhead = len(
@@ -94,16 +131,19 @@ def _trim_turn(speaker: str, user: str, assistant: str, remaining: int) -> dict[
             separators=(",", ":"),
         )
     )
+    overhead += 2 * max(0, len(user) - 1)
     room = remaining - overhead
     if room < 2:
         return None
-    user_limit = min(len(user), max(1, room // 2))
+    user_chars = sum(len(text) for text in user) + 2 * max(0, len(user) - 1)
+    user_limit = min(user_chars, max(1, room // 2))
     assistant_limit = min(len(assistant), max(1, room - user_limit))
-    if user_limit <= 0 or assistant_limit <= 0:
+    user_text = _join_user_inputs(user, user_limit)
+    if not user_text or assistant_limit <= 0:
         return None
     return {
         "speaker": speaker,
-        "user": user[:user_limit],
+        "user": user_text,
         "assistant": assistant[:assistant_limit],
     }
 
@@ -127,27 +167,33 @@ async def read_scheduled_chat_snapshot(
     budget = max(64, int(max_chars))
     limit = max(1, int(max_turns))
     rows = await load_session_turns(active.id, limit=max(32, limit * 4))
-    complete: list[tuple[AgentTurn, str, str, str]] = []
+    complete: list[tuple[AgentTurn, str, list[str], str]] = []
     for turn in rows:
         if turn.status != "completed" or turn.trigger_kind != "message":
             continue
         events = await load_turn_events(turn.id, model_visible_only=True)
-        user_event = next((event for event in events if event.event_type == "user_input"), None)
+        user_events = [event for event in events if event.event_type == "user_input"]
         assistant_events = [
             event
             for event in events
             if event.event_type == "assistant_output"
             and event.status == "confirmed"
-            and event.sequence > (user_event.sequence if user_event is not None else -1)
+            and event.sequence > (user_events[-1].sequence if user_events else -1)
         ]
         assistant_event = assistant_events[-1] if assistant_events else None
-        if user_event is None or assistant_event is None:
+        if not user_events or assistant_event is None:
             continue
-        speaker, user_text = _user_content(load_event_payload(user_event), turn.user_name)
+        speaker = turn.user_name
+        user_texts = []
+        for event in user_events:
+            _speaker, text = _user_content(load_event_payload(event), turn.user_name)
+            if not user_texts:
+                speaker = _speaker
+            user_texts.append(text)
         assistant_text = _assistant_content(load_event_payload(assistant_event))
-        if not user_text or not assistant_text:
+        if not any(user_texts) or not assistant_text:
             continue
-        complete.append((turn, speaker, user_text, assistant_text))
+        complete.append((turn, speaker, user_texts, assistant_text))
 
     selected: list[tuple[AgentTurn, str, str, str]] = []
     used = 0

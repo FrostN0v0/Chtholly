@@ -178,7 +178,10 @@ def summarize_turn_events(events: Sequence[AgentEvent]) -> dict[str, object]:
     execution_refs = {event.execution_ref for event in tools if event.execution_ref}
     tool_count = len(execution_refs) if (tools or captured) and all(event.execution_ref for event in tools) else None
     return {
-        "input_preview": event_preview(inputs[0], load_event_payload(inputs[0])) if inputs else None,
+        "input_preview": "\n\n".join(event_preview(event, load_event_payload(event)) for event in inputs)
+        if inputs
+        else None,
+        "input_count": len(inputs),
         "model": ", ".join(models) if models else None,
         "model_call_count": len(groups) if captured else None,
         "tool_call_count": tool_count,

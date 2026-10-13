@@ -62,6 +62,7 @@ from plugins.llm_chat.persona import (
     memory_update as memory_update_module,
     memory_context as memory_context_module,
 )
+from plugins.llm_chat.steering import current_steering
 from plugins.llm_chat.core.eval import EvalResult
 from utils.turn_resolution_core import TurnResolution
 from plugins.llm_chat.core.media import RECENT_MEME_HISTORY_NOTE
@@ -3662,42 +3663,50 @@ async def test_on_chat_mention_only_returns_block_without_generation(
 
 
 @pytest.mark.asyncio
-async def test_on_chat_latest_turn_marks_old_message_superseded(
+async def test_on_chat_supplement_retains_original_turn_without_superseded_reaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with _temporary_chat_handler() as harness:
         module = harness.module
         _install_handler_stubs(monkeypatch, module)
-        first_started = asyncio.Event()
+        first_started, release = asyncio.Event(), asyncio.Event()
         calls = 0
+        seen_messages: list[ChatMessage] = []
 
-        async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        def bind_inputs(state: Any, *_args: Any, **_kwargs: Any) -> None:
+            async def process(entry: Any) -> ChatMessage:
+                return {"role": "user", "content": entry.session.elements.extract_plain_text()}
+
+            state.processor = process
+
+        async def generate(messages: list[ChatMessage], **_kwargs: Any) -> SimpleNamespace:
             nonlocal calls
             calls += 1
-            if calls == 1:
-                first_started.set()
-                await asyncio.Future()
-            return _handler_response("latest reply")
+            first_started.set()
+            await release.wait()
+            state = current_steering()
+            assert state is not None
+            seen_messages.extend([*messages, *await state.drain()])
+            return _handler_response("reply to original and supplement")
 
+        monkeypatch.setattr(module, "bind_steer_inputs", bind_inputs)
         monkeypatch.setattr(module, "generate_chat_response", generate)
-        first_session = _ChatSession("first")
-        latest_session = _ChatSession("latest")
-        first = asyncio.create_task(module.on_chat.callable_target(first_session, SimpleNamespace()))
+        first_session, supplement_session = _ChatSession("original"), _ChatSession("supplement")
+        first_session.event.message.id = "original-id"
+        supplement_session.event.message.id = "supplement-id"
+        first = asyncio.create_task(module.on_chat.callable_target(first_session, Contexts()))
         await first_started.wait()
-
-        latest_result = await module.on_chat.callable_target(latest_session, SimpleNamespace())
-        first_result = await first
-
-        assert latest_result is BLOCK
-        assert first_result is BLOCK
+        assert await module.on_chat.callable_target(supplement_session, Contexts()) is BLOCK
+        assert not first.done()
+        assert calls == 1
+        release.set()
+        assert await first is BLOCK
+        assert "original" in str(seen_messages[0]["content"])
+        assert seen_messages[-1] == {"role": "user", "content": "supplement"}
+        assert first_session.sent == ["reply to original and supplement"]
+        assert supplement_session.sent == []
+        assert supplement_session.reactions == []
         assert first_session.reactions == [
-            ("create", "125"),
-            ("delete", "125"),
-            ("create", "314"),
-            ("delete", "314"),
-            ("create", "129"),
-        ]
-        assert latest_session.reactions == [
             ("create", "125"),
             ("delete", "125"),
             ("create", "314"),
@@ -3725,7 +3734,7 @@ async def test_on_chat_plugin_cancellation_clears_transient_reaction(
         task = asyncio.create_task(module.on_chat.callable_target(session, SimpleNamespace()))
         await started.wait()
 
-        channel_turns_module.cancel_active_participant_turns()
+        await channel_turns_module.cancel_active_participant_turns()
         with pytest.raises(asyncio.CancelledError):
             await task
 
@@ -3738,42 +3747,49 @@ async def test_on_chat_plugin_cancellation_clears_transient_reaction(
 
 
 @pytest.mark.asyncio
-async def test_latest_participant_turn_cancels_superseded_generation_from_same_user() -> None:
+async def test_steer_participant_turn_keeps_root_and_appends_same_user_fifo() -> None:
     async with _temporary_chat_handler():
-        started = asyncio.Event()
-        cancelled = asyncio.Event()
-        superseded_states: list[bool] = []
+        started, release = asyncio.Event(), asyncio.Event()
+        cancelled: list[bool] = []
         calls = 0
 
-        async def handler(_session: Session, _ctx: Contexts) -> object:
+        async def handler(session: Session, _ctx: Contexts) -> object:
             nonlocal calls
             calls += 1
-            if calls == 1:
-                started.set()
-                try:
-                    await asyncio.Future()
-                except asyncio.CancelledError:
-                    superseded_states.append(channel_turns_module.current_participant_turn_superseded())
-                    cancelled.set()
-                    raise
-            return "latest"
+            state = current_steering()
+            assert state is not None
 
-        wrapped = channel_turns_module.latest_participant_turn(handler)
-        first = asyncio.create_task(wrapped(cast(Session, _ChatSession("first")), Contexts()))
+            async def process(entry: Any) -> ChatMessage:
+                return {"role": "user", "content": entry.session.elements.extract_plain_text()}
+
+            state.processor = process
+            started.set()
+            try:
+                await release.wait()
+                return [session.elements.extract_plain_text(), *[message["content"] for message in await state.drain()]]
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        wrapped = channel_turns_module.steer_participant_turn(handler)
+        sessions = [_ChatSession(text) for text in ("original", "second", "third")]
+        for index, session in enumerate(sessions):
+            session.event.message.id = f"message-{index}"
+        first = asyncio.create_task(wrapped(cast(Session, sessions[0]), Contexts()))
         await started.wait()
-
-        latest = await wrapped(cast(Session, _ChatSession("second")), Contexts())
-
-        assert latest == "latest"
-        assert await first is BLOCK
-        assert cancelled.is_set()
-        assert superseded_states == [True]
+        assert await wrapped(cast(Session, sessions[1]), Contexts()) is BLOCK
+        assert await wrapped(cast(Session, sessions[2]), Contexts()) is BLOCK
+        assert not first.done()
+        assert calls == 1
+        release.set()
+        assert await first == ["original", "second", "third"]
+        assert cancelled == []
         assert channel_turns_module._ACTIVE_PARTICIPANT_TURNS == {}
-        assert channel_turns_module._PARTICIPANT_TURN_GENERATIONS == {}
+        assert channel_turns_module._PARTICIPANT_ADMISSIONS == {}
 
 
 @pytest.mark.asyncio
-async def test_latest_participant_turn_keeps_different_users_in_same_channel_active() -> None:
+async def test_steer_participant_turn_keeps_different_users_in_same_channel_active() -> None:
     async with _temporary_chat_handler():
         first_started = asyncio.Event()
         second_started = asyncio.Event()
@@ -3790,7 +3806,7 @@ async def test_latest_participant_turn_keeps_different_users_in_same_channel_act
                 raise
             return user_id
 
-        wrapped = channel_turns_module.latest_participant_turn(handler)
+        wrapped = channel_turns_module.steer_participant_turn(handler)
         first = asyncio.create_task(wrapped(cast(Session, _ChatSession("first", user_id="user-a")), Contexts()))
         await first_started.wait()
         second = asyncio.create_task(wrapped(cast(Session, _ChatSession("second", user_id="user-b")), Contexts()))
@@ -3805,7 +3821,7 @@ async def test_latest_participant_turn_keeps_different_users_in_same_channel_act
         assert results == ["user-a", "user-b"]
         assert cancelled == []
         assert channel_turns_module._ACTIVE_PARTICIPANT_TURNS == {}
-        assert channel_turns_module._PARTICIPANT_TURN_GENERATIONS == {}
+        assert channel_turns_module._PARTICIPANT_ADMISSIONS == {}
 
 
 @pytest.mark.asyncio
@@ -4357,4 +4373,3 @@ async def test_on_chat_cancellation_during_post_preparation_reaction_finalizes_t
         assert records.agent_statuses == ["cancelled"]
         assert records.evaluations == []
         assert session.sent == []
-        assert channel_turns_module._PARTICIPANT_TURN_GENERATIONS == {}

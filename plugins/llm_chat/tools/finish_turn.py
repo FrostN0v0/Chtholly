@@ -10,6 +10,7 @@ from arclet.entari.plugin.model import PluginDispatcher
 
 from utils.turn_resolution_core import current_turn_resolution
 
+from ..steering import check_steer_boundary
 from ..core.types import JSONType
 from ._registration import register_tool
 from ..core.delivery import (
@@ -79,6 +80,7 @@ async def finish_turn(
         reason: A short state or factual cause for private administration, never inner reasoning.
         reply: A short truthful refusal, required only for declined; leave empty for silent or delivered.
     """
+    check_steer_boundary()
     resolution = current_turn_resolution()
     state = current_llm_chat_delivery()
     if resolution is None or state is None:

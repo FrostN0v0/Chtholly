@@ -16,13 +16,14 @@ from ..models import AgentTurn, ChatScope, AgentEvent, ContextSession, Relations
 from .identity import resolve_relationship_owner
 from ..core.media import sanitize_assistant_history
 from ..core.types import JSONType
+from ..scheduled_chat_context import _own_input_text
 
 _ELIGIBLE_OUTCOMES = frozenset({"completed", "silent", "declined"})
 
 
 def _input_text(payload: Mapping[str, JSONType]) -> str:
-    content = payload.get("content")
-    if not isinstance(content, str):
+    content = _own_input_text(payload)
+    if content is None:
         raise ValueError("Completed interaction has no recorded attributable user input")
     return content
 
@@ -72,12 +73,16 @@ async def enqueue_relationship_evidence(
                 )
             ).scalars()
         )
-        user_event = next((event for event in events if event.event_type == "user_input"), None)
-        if user_event is None:
+        user_inputs = []
+        for event in events:
+            if event.event_type != "user_input" or not event.model_visible:
+                continue
+            payload = json.loads(event.payload_json)
+            if not isinstance(payload, dict):
+                raise ValueError("Recorded user input is not an object")
+            user_inputs.append(_input_text(cast(Mapping[str, JSONType], payload)))
+        if not user_inputs:
             raise ValueError("Completed interaction is missing its user input event")
-        user_payload = json.loads(user_event.payload_json)
-        if not isinstance(user_payload, dict):
-            raise ValueError("Recorded user input is not an object")
         decision_event = next((event for event in reversed(events) if event.event_type == "response_decision"), None)
         if decision_event is None:
             return False
@@ -100,7 +105,7 @@ async def enqueue_relationship_evidence(
             raise ValueError("Response decision does not match confirmed delivery")
         episode: dict[str, JSONType] = {
             "turn_id": turn_id,
-            "user": _input_text(cast(Mapping[str, JSONType], user_payload)),
+            "user": "\n\n".join(user_inputs),
             "assistant": sanitize_assistant_history(turn.final_text) if turn.final_text else "",
             "outcome": turn.status,
             "delivered_media": delivered_media,

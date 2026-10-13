@@ -20,13 +20,14 @@ from entari_plugin_llm.config import ScopedModel, get_model_config
 from utils.turn_resolution_core import TurnResolution, turn_resolution_scope, current_turn_resolution
 from utils.llm_model_core.snapshot import current_main_model
 
+from .steering import SteerPending, current_steering
 from .core.media import has_meaningful_text, strip_internal_media_records
 from .core.types import ChatMessage
 from .web.policy import WebAccessLimits, llm_chat_web_access_scope
 from .agno_compat import agno_delivery_tool_scope, agno_tool_call_limit_scope, recommended_tool_call_limit
 from .core.errors import is_moderation_empty_choices_error
 from .image_inputs import ImageInputs, image_inputs_scope, current_image_inputs
-from .agent_context import AgentAccessContext, agent_access_scope
+from .agent_context import AgentAccessContext, agent_access_scope, current_agent_access
 from .core.delivery import DeliveryState, llm_chat_delivery_scope, strip_trailing_end_of_response
 from .prepared_media import list_prepared_media, prepared_media_scope
 from .core.tool_trace import ToolTraceRecorder, llm_chat_tool_trace_scope
@@ -354,6 +355,14 @@ async def _record_model_attempt(
     return response
 
 
+def _requested_media_confirmed(state: DeliveryState, requirements: MediaDeliveryRequirements) -> bool:
+    steering = current_steering()
+    baseline = steering.media_confirmation_baseline if steering is not None else 0
+    return state.confirmed_media_deliveries > baseline and (
+        not requirements.intent.requires_provenance or requirements.confirmed
+    )
+
+
 async def _recover_requested_media(
     messages: list[ChatMessage],
     *,
@@ -411,11 +420,11 @@ async def _recover_requested_media(
     if resolution is not None and resolution.explicit:
         _suppress_native_images(response)
         return response
-    if media_requirements.intent.requires_provenance:
-        if media_requirements.confirmed:
-            _suppress_native_images(response)
-            return response
-    elif delivery_state.confirmed_media_deliveries > 0:
+    steering = current_steering()
+    if steering is not None and not steering.media_requested:
+        return response
+    if _requested_media_confirmed(delivery_state, media_requirements):
+        _suppress_native_images(response)
         return response
     if is_media_unavailable_reply(response_content(response)):
         return response
@@ -439,6 +448,7 @@ async def generate_chat_response(
     agent_events: AgentTurnRecorder | None = None,
     agent_access: AgentAccessContext | None = None,
     resolution: TurnResolution | None = None,
+    complete: Callable[[GenerationResponse], Awaitable[None]] | None = None,
 ) -> GenerationResponse:
     """Generate with a longer single-attempt timeout for explicit media requests."""
 
@@ -466,7 +476,6 @@ async def generate_chat_response(
     media_timeout_hint = latest_user_requests_media(messages)
     generation_timeout = media_request_timeout if delivery_requested or media_timeout_hint else request_timeout
     generation_max_retries = 0 if delivery_requested else None
-    tool_loop_exhausted = False
     active_tool_trace = tool_trace or ToolTraceRecorder()
     active_message_references = ChannelMessageReferences()
     async with AsyncExitStack() as scopes:
@@ -489,48 +498,99 @@ async def generate_chat_response(
         scopes.enter_context(llm_chat_context_scope(ctx))
         scopes.enter_context(agent_access_scope(agent_access) if agent_access is not None else nullcontext())
         await scopes.enter_async_context(prepared_media_scope())
-        response: GenericResponse[None] | None = None
-        response_context = messages
-        try:
-            response = cast(
-                GenericResponse[None],
-                await _record_model_attempt(
-                    lambda: _generate_with_tools(
-                        messages,
+
+        async def run() -> GenerationResponse:
+            nonlocal \
+                raw_user_text, \
+                intent, \
+                media_requested, \
+                delivery_requested, \
+                generation_timeout, \
+                generation_max_retries
+            tool_loop_exhausted = False
+            access = current_agent_access()
+            raw_user_text = access.raw_user_text if access is not None else raw_user_text
+            intent = active_media_requirements.intent
+            media_requested = intent.media_requested or requests_contextual_media_delivery(raw_user_text, messages)
+            delivery_requested = (
+                media_requested or is_artifact_request(raw_user_text) or is_artifact_request(raw_user_text, "send")
+            )
+            generation_timeout = media_request_timeout if delivery_requested or media_timeout_hint else request_timeout
+            generation_max_retries = 0 if delivery_requested else None
+            response: GenericResponse[None] | None = None
+            response_context = messages
+            try:
+                response = cast(
+                    GenericResponse[None],
+                    await _record_model_attempt(
+                        lambda: _generate_with_tools(
+                            messages,
+                            system=system,
+                            model=model,
+                            request_timeout=generation_timeout,
+                            max_retries=generation_max_retries,
+                            parallel_tool_calls=False if delivery_requested else None,
+                        ),
+                        recorder=agent_events,
+                        tool_trace=active_tool_trace,
+                        model_name=model or "default",
+                    ),
+                )
+            except RuntimeError as exc:
+                if (
+                    is_moderation_empty_choices_error(exc)
+                    and not active_tool_trace.events
+                    and delivery_state.delivery_attempts == 0
+                ):
+                    response_context = _isolated_latest_user_turn(messages)
+                    response = await _recover_moderation_empty_choices(
+                        response_context,
                         system=system,
                         model=model,
                         request_timeout=generation_timeout,
-                        max_retries=generation_max_retries,
-                        parallel_tool_calls=False if delivery_requested else None,
-                    ),
-                    recorder=agent_events,
-                    tool_trace=active_tool_trace,
-                    model_name=model or "default",
-                ),
+                        agent_events=agent_events,
+                        tool_trace=active_tool_trace,
+                    )
+                elif str(exc) == _TOOL_LOOP_EXHAUSTED:
+                    tool_loop_exhausted = True
+                    if media_requested and not _requested_media_confirmed(delivery_state, active_media_requirements):
+                        return await _recover_requested_media(
+                            messages,
+                            system=system,
+                            model=model,
+                            delivery_state=delivery_state,
+                            media_requirements=active_media_requirements,
+                            request_timeout=generation_timeout,
+                            max_retries=generation_max_retries,
+                            agent_events=agent_events,
+                            tool_trace=active_tool_trace,
+                        )
+                else:
+                    raise
+            access = current_agent_access()
+            raw_user_text = access.raw_user_text if access is not None else raw_user_text
+            intent = active_media_requirements.intent
+            media_requested = intent.media_requested or requests_contextual_media_delivery(raw_user_text, messages)
+            delivery_requested = (
+                media_requested or is_artifact_request(raw_user_text) or is_artifact_request(raw_user_text, "send")
             )
-        except RuntimeError as exc:
-            if (
-                is_moderation_empty_choices_error(exc)
-                and not active_tool_trace.events
-                and delivery_state.delivery_attempts == 0
-            ):
-                response_context = _isolated_latest_user_turn(messages)
-                response = await _recover_moderation_empty_choices(
-                    response_context,
-                    system=system,
-                    model=model,
-                    request_timeout=generation_timeout,
-                    agent_events=agent_events,
-                    tool_trace=active_tool_trace,
-                )
-            elif str(exc) == _TOOL_LOOP_EXHAUSTED:
-                tool_loop_exhausted = True
-                if media_requested and (
-                    delivery_state.confirmed_media_deliveries == 0
-                    or (intent.requires_provenance and not active_media_requirements.confirmed)
-                ):
+            generation_timeout = media_request_timeout if delivery_requested or media_timeout_hint else request_timeout
+            generation_max_retries = 0 if delivery_requested else None
+            active_resolution = resolution or current_turn_resolution()
+            if response is not None and active_resolution is not None and active_resolution.explicit:
+                _suppress_native_images(response)
+                return response
+
+            if response is not None:
+                transcript = _response_transcript(response, response_context)
+                native_images = response_images(response)
+                if intent.requires_provenance and active_media_requirements.confirmed:
+                    _suppress_native_images(response)
+                    native_images = ()
+                elif native_images and intent.requires_provenance:
+                    _suppress_native_images(response)
                     return await _recover_requested_media(
-                        messages,
+                        _without_invalid_tail(transcript),
                         system=system,
                         model=model,
                         delivery_state=delivery_state,
@@ -540,92 +600,82 @@ async def generate_chat_response(
                         agent_events=agent_events,
                         tool_trace=active_tool_trace,
                     )
-            else:
-                raise
-        active_resolution = resolution or current_turn_resolution()
-        if response is not None and active_resolution is not None and active_resolution.explicit:
-            _suppress_native_images(response)
-            return response
-
-        if response is not None:
-            transcript = _response_transcript(response, response_context)
-            native_images = response_images(response)
-            if intent.requires_provenance and active_media_requirements.confirmed:
-                _suppress_native_images(response)
-                native_images = ()
-            elif native_images and intent.requires_provenance:
-                _suppress_native_images(response)
-                return await _recover_requested_media(
-                    _without_invalid_tail(transcript),
-                    system=system,
-                    model=model,
-                    delivery_state=delivery_state,
-                    media_requirements=active_media_requirements,
-                    request_timeout=generation_timeout,
-                    max_retries=generation_max_retries,
-                    agent_events=agent_events,
-                    tool_trace=active_tool_trace,
-                )
-            native_prepared = any(item.get("source_tool") == "native_image" for item in list_prepared_media())
-            if (media_requested or native_prepared) and (
-                delivery_state.confirmed_media_deliveries == 0
-                or (intent.requires_provenance and not active_media_requirements.confirmed)
-            ):
-                return await _recover_requested_media(
-                    _without_invalid_tail(transcript),
-                    system=system,
-                    model=model,
-                    delivery_state=delivery_state,
-                    media_requirements=active_media_requirements,
-                    request_timeout=generation_timeout,
-                    max_retries=generation_max_retries,
-                    agent_events=agent_events,
-                    tool_trace=active_tool_trace,
-                )
-            if _tool_call_limit_hit(response):
-                visible_reply_required = _requires_visible_reply(delivery_state)
+                native_prepared = any(item.get("source_tool") == "native_image" for item in list_prepared_media())
+                if (media_requested or native_prepared) and not _requested_media_confirmed(
+                    delivery_state, active_media_requirements
+                ):
+                    return await _recover_requested_media(
+                        _without_invalid_tail(transcript),
+                        system=system,
+                        model=model,
+                        delivery_state=delivery_state,
+                        media_requirements=active_media_requirements,
+                        request_timeout=generation_timeout,
+                        max_retries=generation_max_retries,
+                        agent_events=agent_events,
+                        tool_trace=active_tool_trace,
+                    )
+                if _tool_call_limit_hit(response):
+                    visible_reply_required = _requires_visible_reply(delivery_state)
+                    return await _finalize_without_tools(
+                        transcript,
+                        system=system,
+                        model=model,
+                        channel_id=channel_id,
+                        suffix=_FINALIZATION_SUFFIX,
+                        require_visible=visible_reply_required,
+                        request_timeout=request_timeout,
+                        agent_events=agent_events,
+                        tool_trace=active_tool_trace,
+                    )
+                if _has_visible_reply(response):
+                    return response
+                if delivery_state.delivery_attempts:
+                    return response
+                _LOGGER.warning("model returned no visible reply; retrying once without tools")
                 return await _finalize_without_tools(
-                    transcript,
+                    _without_invalid_tail(transcript),
                     system=system,
                     model=model,
                     channel_id=channel_id,
-                    suffix=_FINALIZATION_SUFFIX,
-                    require_visible=visible_reply_required,
+                    suffix=_VISIBLE_RETRY_SUFFIX,
+                    require_visible=True,
                     request_timeout=request_timeout,
                     agent_events=agent_events,
                     tool_trace=active_tool_trace,
                 )
-            if _has_visible_reply(response):
-                return response
-            if delivery_state.delivery_attempts:
-                return response
-            _LOGGER.warning("model returned no visible reply; retrying once without tools")
+
+            if not tool_loop_exhausted:
+                raise RuntimeError(_TOOL_LOOP_EXHAUSTED)
+            visible_reply_required = _requires_visible_reply(delivery_state)
             return await _finalize_without_tools(
-                _without_invalid_tail(transcript),
+                messages,
                 system=system,
                 model=model,
                 channel_id=channel_id,
-                suffix=_VISIBLE_RETRY_SUFFIX,
-                require_visible=True,
+                suffix=_FINALIZATION_SUFFIX,
+                require_visible=visible_reply_required,
                 request_timeout=request_timeout,
                 agent_events=agent_events,
                 tool_trace=active_tool_trace,
             )
 
-    if not tool_loop_exhausted:
-        raise RuntimeError(_TOOL_LOOP_EXHAUSTED)
-    visible_reply_required = _requires_visible_reply(delivery_state)
-    return await _finalize_without_tools(
-        messages,
-        system=system,
-        model=model,
-        channel_id=channel_id,
-        suffix=_FINALIZATION_SUFFIX,
-        require_visible=visible_reply_required,
-        request_timeout=request_timeout,
-        agent_events=agent_events,
-        tool_trace=active_tool_trace,
-    )
+        while True:
+            response = await run()
+            if complete is None:
+                return response
+            delivered_before = len(delivery_state.delivered_texts)
+            try:
+                await complete(response)
+                return response
+            except SteerPending:
+                messages = _without_invalid_tail(_response_transcript(response, messages))
+                for text in delivery_state.delivered_texts[delivered_before:]:
+                    messages.append({"role": "assistant", "content": text})
+                active_resolution = current_turn_resolution()
+                if active_resolution is not None:
+                    active_resolution.outcome = "automatic"
+                    active_resolution.reason = active_resolution.reply = ""
 
 
 async def _finalize_without_tools(

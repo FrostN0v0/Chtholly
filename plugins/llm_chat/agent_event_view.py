@@ -36,6 +36,9 @@ EVENT_TITLES = {
     "assistant_output": "旧版回复摘要（送达记录不完整）",
     "message_delivery": "确认送达消息",
     "turn_timing": "用户输入接收时间",
+    "steer_received": "\u8865\u5145\u8f93\u5165\u5df2\u63a5\u6536",
+    "steer_applied": "\u8865\u5145\u8f93\u5165\u5df2\u5e94\u7528",
+    "steer_checkpoint": "\u8865\u5145\u8f93\u5165\u68c0\u67e5\u70b9",
     "context_selection": "上下文选择",
     "persona_state": "人格与记忆",
     "conversation_mode": "\u5bf9\u8bdd\u6a21\u5f0f",
@@ -873,4 +876,24 @@ def serialize_event_view(event: AgentEvent, payload: Mapping[str, JSONType]) -> 
     }
     if event.event_type == "user_input":
         view["message"] = _message_projection(payload.get("content"))
+        sequence = payload.get("steer_sequence")
+        if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 2:
+            view["title"] = "\u8865\u5145\u8f93\u5165"
+    if event.event_type in {"user_input", "steer_received", "steer_applied", "steer_checkpoint"}:
+        sequence = payload.get("steer_sequence")
+        if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 2:
+            view["steering"] = {
+                "sequence": sequence,
+                "status": "applied"
+                if event.event_type in {"user_input", "steer_applied"}
+                else event.status or "received",
+                "received_at": payload.get("received_at") if isinstance(payload.get("received_at"), str) else None,
+                "applied_at": payload.get("applied_at") if isinstance(payload.get("applied_at"), str) else None,
+                "reason": payload.get("reason") if isinstance(payload.get("reason"), str) else None,
+            }
+            if event.event_type == "steer_received":
+                view["message"] = _message_projection(payload.get("content"))
+                message = view["message"]
+                if isinstance(message, dict) and payload.get("text_truncated") is True:
+                    message["truncated"] = True
     return view

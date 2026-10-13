@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 import asyncio
 from hashlib import sha256
 from pathlib import Path
@@ -18,6 +18,9 @@ from arclet.entari import Session
 from .agent_attachments import MAX_INPUT_ATTACHMENTS, store_agent_attachment, remove_agent_attachments
 from .core.image_source import IMAGE_FETCH_MAX_BYTES, raw_to_image_data_url
 from .core.self_reference import load_self_reference_image
+
+if TYPE_CHECKING:
+    from .steering import SteeringState
 
 ImageSource = Literal["direct", "quoted", "forward", "channel", "avatar", "web", "persona"]
 ImagePurpose = Literal["inspect", "send", "edit", "reference", "collect"]
@@ -71,6 +74,9 @@ class _Input:
     index: int
     acquisition: _Acquisition
     snapshot: ImageSnapshot | None = None
+    owner: tuple[str, ...] = ()
+    original_index: int = 0
+    steer_sequence: int = 1
 
 
 def _session_owner(session: Session) -> tuple[str, ...]:
@@ -106,21 +112,51 @@ class ImageInputs:
         self._closed = False
         self._entries: dict[str, _Input] = {}
         self._positions: dict[int, str] = {}
-        self._references: dict[tuple[str, Hashable, int], str] = {}
+        self._references: dict[tuple[tuple[str, ...], str, Hashable, int], str] = {}
         self._acquisitions: dict[Hashable, _Acquisition] = {}
         self._pixels: dict[str, _Pixels] = {}
-        self._input_audit_committed = False
+        self._committed_input_owners: set[tuple[str, ...]] = set()
+        self._admitted: dict[tuple[str, ...], tuple[object, int]] = {}
+        self._steering: SteeringState | None = None
+        self._input_offsets: dict[tuple[str, ...], int] = {}
         self._byte_count = 0
         self._inspections: dict[str, ImageSnapshot] = {}
 
-    def _check(self, session: Session) -> None:
-        if self._closed:
+    def _check(self, session: Session) -> tuple[str, ...]:
+        if self._closed or (self._steering is not None and self._steering.closed):
             raise ImageInputError("Image inputs are no longer available for this turn")
         owner = _session_owner(session)
         if self._owner is None:
             self._owner = owner
+        if self._steering is not None:
+            admitted = self._admitted.get(owner)
+            if admitted is None or admitted[0] is not getattr(session, "event", None):
+                raise ImageInputError("Image input was not admitted to this task")
         elif owner != self._owner:
             raise ImageInputError("Image reference belongs to another account, channel, or turn")
+        return owner
+
+    def admit_input(self, session: Session, *, state: SteeringState) -> None:
+        """Admit only an exact real event already owned by the host's logical task."""
+        if self._closed or state.closed or not state.owns(session):
+            raise ImageInputError("Image input was not admitted to this task")
+        root = state.inputs[0].session
+        root_owner = _session_owner(root)
+        owner = _session_owner(session)
+        if owner[:4] != root_owner[:4] or (self._owner is not None and self._owner != root_owner):
+            raise ImageInputError("Image reference belongs to another account, channel, or turn")
+        if self._steering is not None and self._steering is not state:
+            raise ImageInputError("Image registry belongs to another task")
+        entry = next(
+            (item for item in state.inputs if getattr(item.session, "event", None) is getattr(session, "event", None)),
+            None,
+        )
+        if entry is None:
+            raise ImageInputError("Image input was not admitted to this task")
+        self._steering = state
+        self._owner = root_owner
+        self._admitted[root_owner] = (getattr(root, "event", None), 1)
+        self._admitted[owner] = (getattr(session, "event", None), entry.sequence)
 
     def register(
         self,
@@ -131,10 +167,10 @@ class ImageInputs:
         load: Callable[[], Awaitable[bytes]],
         index: int = 0,
     ) -> str:
-        self._check(session)
+        owner = self._check(session)
         if source not in _PERMISSIONS:
             raise ImageInputError("Unsupported image source")
-        identity = (source, key, index)
+        identity = (owner, source, key, index)
         existing = self._references.get(identity)
         if existing is not None:
             return existing
@@ -142,11 +178,19 @@ class ImageInputs:
             raise ImageInputError("The channel image reference capacity for this turn is exhausted")
         if len(self._entries) >= MAX_IMAGE_INPUT_REFERENCES:
             raise ImageInputError("The image reference capacity for this turn is exhausted")
-        if source in {"direct", "quoted"} and index in self._positions:
-            raise ImageInputError("The original image position is already registered")
+        original_index = index
+        if source in {"direct", "quoted"} and index > 0:
+            if owner != self._owner:
+                offset = self._input_offsets.setdefault(owner, max(self._positions, default=0))
+                index += offset
+            if index in self._positions:
+                raise ImageInputError("The original image position is already registered")
         acquisition = self._acquisitions.setdefault(key, _Acquisition(load))
         ref = f"image_{token_hex(16)}"
-        self._entries[ref] = _Input(source, index, acquisition)
+        sequence = self._admitted.get(owner, (None, 1))[1]
+        self._entries[ref] = _Input(
+            source, index, acquisition, owner=owner, original_index=original_index, steer_sequence=sequence
+        )
         self._references[identity] = ref
         if source in {"direct", "quoted"} and index > 0:
             self._positions[index] = ref
@@ -209,10 +253,12 @@ class ImageInputs:
             acquisition.load = None
 
     async def resolve(self, session: Session, image_ref: str, *, purpose: ImagePurpose) -> ImageSnapshot:
-        self._check(session)
+        owner = self._check(session)
         entry = self._entries.get(image_ref)
         if entry is None:
             raise ImageInputError("Unknown image reference for this turn")
+        if owner != self._owner and entry.owner != owner:
+            raise ImageInputError("Image reference belongs to another admitted input")
         if purpose not in _PERMISSIONS[entry.source]:
             raise ImageInputError("This image source is not authorized for the requested use")
         if entry.snapshot is not None:
@@ -230,7 +276,7 @@ class ImageInputs:
         if entry.snapshot is None:
             attachment = None
             try:
-                if entry.source not in {"direct", "quoted"} or entry.index <= MAX_INPUT_ATTACHMENTS:
+                if entry.source not in {"direct", "quoted"} or entry.original_index <= MAX_INPUT_ATTACHMENTS:
                     attachment = MappingProxyType(
                         store_agent_attachment(
                             pixels.data,
@@ -272,15 +318,29 @@ class ImageInputs:
             raise ImageInputError("Image index does not identify an original input in this turn")
         return self._positions[index]
 
-    def input_views(self) -> list[dict[str, object]]:
-        return [self.view(ref) for _, ref in sorted(self._positions.items())] if not self._closed else []
+    def input_views(self, *, session: Session | None = None) -> list[dict[str, object]]:
+        owner = self._check(session) if session is not None else None
+        return (
+            [
+                self.view(ref)
+                for _, ref in sorted(self._positions.items())
+                if owner is None or self._entries[ref].owner == owner
+            ]
+            if not self._closed
+            else []
+        )
 
     def source_count(self, source: ImageSource) -> int:
         return sum(entry.source == source for entry in self._entries.values())
 
-    def commit_input_audit(self) -> None:
-        """Transfer initial attachment ownership after the user-input event is stored."""
-        self._input_audit_committed = True
+    def commit_input_audit(self, *, session: Session | None = None) -> None:
+        """Transfer only attachments represented by an applied user-input event."""
+        if session is not None:
+            self._committed_input_owners.add(self._check(session))
+        else:
+            self._committed_input_owners.update(entry.owner for entry in self._entries.values())
+            if self._owner is not None:
+                self._committed_input_owners.add(self._owner)
 
     def audit_view(self, image_ref: str) -> dict[str, object]:
         view = self.view(image_ref)
@@ -293,12 +353,16 @@ class ImageInputs:
             view["audit_status"] = "unrecorded"
         return view
 
-    def input_audit_views(self) -> list[dict[str, object]]:
+    def input_audit_views(self, *, session: Session | None = None) -> list[dict[str, object]]:
+        owner = self._check(session) if session is not None else None
         return [
             self.audit_view(ref)
             for ref, entry in self._entries.items()
-            if entry.source == "forward"
-            or (entry.source in {"direct", "quoted"} and entry.index <= MAX_INPUT_ATTACHMENTS)
+            if (owner is None or entry.owner == owner)
+            and (
+                entry.source == "forward"
+                or (entry.source in {"direct", "quoted"} and entry.original_index <= MAX_INPUT_ATTACHMENTS)
+            )
         ]
 
     def view(self, image_ref: str) -> dict[str, object]:
@@ -311,7 +375,15 @@ class ImageInputs:
             if acquisition.error
             else ("ready" if acquisition.pixels is not None else "loading" if acquisition.task else "unloaded")
         )
-        return {"index": entry.index, "image_ref": image_ref, "source": entry.source, "status": status}
+        view: dict[str, object] = {
+            "index": entry.index,
+            "image_ref": image_ref,
+            "source": entry.source,
+            "status": status,
+        }
+        if entry.steer_sequence > 1:
+            view.update(steer_sequence=entry.steer_sequence, original_index=entry.original_index)
+        return view
 
     def queue_inspection(self, snapshot: ImageSnapshot) -> None:
         entry = self._entries.get(snapshot.image_ref)
@@ -336,21 +408,26 @@ class ImageInputs:
                 task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        if not self._input_audit_committed:
-            remove_agent_attachments(
-                [
-                    dict(entry.snapshot.attachment)
-                    for entry in self._entries.values()
-                    if entry.snapshot is not None and entry.snapshot.attachment is not None
-                ],
-                root=self.attachment_root,
-            )
+        remove_agent_attachments(
+            [
+                dict(entry.snapshot.attachment)
+                for entry in self._entries.values()
+                if entry.snapshot is not None
+                and entry.snapshot.attachment is not None
+                and entry.owner not in self._committed_input_owners
+            ],
+            root=self.attachment_root,
+        )
         self._entries.clear()
         self._positions.clear()
         self._references.clear()
         self._acquisitions.clear()
         self._pixels.clear()
         self._inspections.clear()
+        self._admitted.clear()
+        self._committed_input_owners.clear()
+        self._input_offsets.clear()
+        self._steering = None
         self._byte_count = 0
 
 

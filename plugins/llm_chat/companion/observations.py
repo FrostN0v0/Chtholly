@@ -49,8 +49,8 @@ async def reflection_input(
         raise ValueError("Complete companion life state exceeds the configured reflection input budget")
     source_map = snapshot.member_turn_ids
     ids = {turn_id for member in snapshot.members for turn_id in source_map.get(member.member_ref, ())[-6:]}
-    rows: list[tuple[object, ...]] = []
-    events: list[tuple[object, ...]] = []
+    rows: list[tuple[int, str, str, str]] = []
+    events: list[tuple[int, str, str]] = []
     if ids:
         async with get_session() as db:
             rows = list(
@@ -69,7 +69,9 @@ async def reflection_input(
                         .order_by(AgentTurn.id.desc())
                         .limit(96)
                     )
-                ).all()
+                )
+                .tuples()
+                .all()
             )
             valid_ids = [int(row[0]) for row in rows]
             if valid_ids:
@@ -84,7 +86,9 @@ async def reflection_input(
                             )
                             .order_by(AgentEvent.turn_id, AgentEvent.sequence)
                         )
-                    ).all()
+                    )
+                    .tuples()
+                    .all()
                 )
     by_turn: dict[int, dict[str, object]] = {}
     for turn_id, event_type, raw in events:
@@ -94,7 +98,8 @@ async def reflection_input(
         item = by_turn.setdefault(int(turn_id), {})
         if event_type == "user_input":
             _speaker, text = _user_content(parsed, "user")
-            item["user"] = text[:800]
+            previous = item.get("user")
+            item["user"] = f"{previous}\n\n{text[:800]}" if isinstance(previous, str) else text[:800]
         elif event_type == "assistant_output":
             item["assistant"] = _assistant_content(parsed)[:800]
     selected: list[dict[str, object]] = []

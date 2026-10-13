@@ -25,6 +25,9 @@ ADMIN_ONLY_EVENT_TYPES = frozenset(
         "companion_reflection",
         "companion_state",
         "conversation_mode",
+        "steer_received",
+        "steer_applied",
+        "steer_checkpoint",
     }
 )
 _SECRET_KEY = re.compile(

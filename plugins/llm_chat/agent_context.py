@@ -82,4 +82,19 @@ def agent_access_scope(context: AgentAccessContext) -> Iterator[None]:
 
 
 def current_agent_access() -> AgentAccessContext | None:
-    return _ACTIVE_AGENT_CONTEXT.get()
+    original = _ACTIVE_AGENT_CONTEXT.get()
+    if original is None:
+        return None
+    from .steering import current_steering
+
+    state = current_steering()
+    access = state.access if state is not None and not state.closed else None
+    if access is not None and (
+        access.scope_id,
+        access.session_id,
+        access.turn_id,
+        access.user_id,
+        access.trigger_kind,
+    ) == (original.scope_id, original.session_id, original.turn_id, original.user_id, original.trigger_kind):
+        return access
+    return original

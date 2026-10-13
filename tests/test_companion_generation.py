@@ -344,6 +344,72 @@ async def test_default_reflection_unload_cancels_provider_and_drains_private_aud
 
 
 @pytest.mark.asyncio
+async def test_reflection_keeps_ordered_supplements_in_one_owner_episode(companion_db):
+    native_scope = await scope(companion_db)
+    alice = await enable_member(companion_db, native_scope)
+    bob = await enable_member(companion_db, native_scope, user="bob-unified", platform_user="platform-bob")
+    existing = await native_rows(companion_db, AgentEvent)
+    output = next(
+        event for event in existing if event.turn_id == alice.last_turn_id and event.event_type == "assistant_output"
+    )
+    async with companion_db.factory() as db, db.begin():
+        stored = await db.get(AgentEvent, output.id)
+        stored.sequence = 10
+        await db.flush()
+        for sequence, event_type, text in (
+            (2, "steer_received", "Private receipt, not applied text"),
+            (3, "user_input", "I am also worried about tomorrow"),
+            (4, "context_snapshot", "Other group members' ambient conversation"),
+            (5, "user_input", "Please remember this clarification"),
+            (6, "steer_received", "Still pending and not part of the interaction"),
+        ):
+            db.add(
+                AgentEvent(
+                    turn_id=alice.last_turn_id,
+                    sequence=sequence,
+                    event_type=event_type,
+                    role="user",
+                    model_visible=event_type == "user_input",
+                    payload_json=json.dumps(
+                        {
+                            "content": json.dumps(
+                                {
+                                    "speaker": "Alice",
+                                    "content": json.dumps(
+                                        {"content": text, "forwarded_messages": [{"content": "Bob's quote"}]}
+                                    ),
+                                }
+                            ),
+                            "steer_sequence": 2 if sequence == 3 else 3,
+                        }
+                    ),
+                )
+            )
+    claim = await store.claim_review(native_scope.id, "alpha", now=NOW)
+    snapshot = await store.load_reflection(claim, now=NOW)
+    payload, ownership = await reflection_input(
+        snapshot,
+        scope_id=native_scope.id,
+        channel_id=native_scope.channel_id,
+        limits=companion_limits(config()),
+        now=NOW,
+        available_chars=config().companion_input_chars,
+    )
+    members = {item["member_ref"]: item for item in payload["members"]}
+    alice_episodes = members[alice.member_ref]["episodes"]
+    assert len(alice_episodes) == 1
+    assert alice_episodes[0]["turn_id"] == alice.last_turn_id
+    assert alice_episodes[0]["user"] == (
+        "I am waiting for my exam result\n\nI am also worried about tomorrow\n\nPlease remember this clarification"
+    )
+    assert members[bob.member_ref]["episodes"][0]["user"] == "I am waiting for my exam result"
+    assert "Private receipt" not in json.dumps(payload)
+    assert "ambient conversation" not in json.dumps(payload)
+    assert "Bob's quote" not in json.dumps(payload)
+    assert ownership[alice.member_ref] == (alice.last_turn_id,)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("budget_delta", [0, -1])
 async def test_native_reflection_reserves_all_member_attention_before_optional_observations(
     companion_db,

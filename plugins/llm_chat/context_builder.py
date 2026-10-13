@@ -21,7 +21,7 @@ from .context_reads import payload_digest, public_payload_path, model_readable_p
 from .session_manager import BaselineFingerprint
 from .core.model_audit import ADMIN_ONLY_EVENT_TYPES
 
-SYSTEM_SCAFFOLD_VERSION = "agent-context-v7-channel-preload"
+SYSTEM_SCAFFOLD_VERSION = "agent-context-v8-participant-steering"
 AGENT_POLICY_VERSION = "agent-events-v3-context-grants"
 _ARCHIVED_CONTEXT_TERMS = (
     "上次",
@@ -232,13 +232,20 @@ def _turn_messages(
         if event.event_type == "assistant_tool_call":
             attempt = event.attempt
             call_events: list[tuple[int, AgentEvent]] = []
-            while (
-                event_index < len(events)
-                and events[event_index].event_type == "assistant_tool_call"
-                and events[event_index].attempt == attempt
-            ):
-                call_events.append((event_index, events[event_index]))
-                event_index += 1
+            batch_end = event_index
+            scan_index = event_index
+            while scan_index <= batch_end:
+                call_event = events[scan_index]
+                if call_event.event_type == "assistant_tool_call" and call_event.attempt == attempt:
+                    key = (call_event.attempt, call_event.execution_ref or _event_tool_call_id(call_event))
+                    paired_result = result_index.get(key)
+                    if key not in emitted and paired_result is not None and paired_result[0] > scan_index:
+                        call_events.append((scan_index, call_event))
+                        batch_end = max(batch_end, paired_result[0])
+                scan_index += 1
+            # Receipt/application events can interleave with a running batch. Emit
+            # every matching result first; the outer walk emits each later input once.
+            event_index += 1
 
             result_events: list[tuple[int, AgentEvent]] = []
             calls: list[tuple[AgentEvent, object]] = []

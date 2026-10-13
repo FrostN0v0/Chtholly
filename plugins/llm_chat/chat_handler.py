@@ -29,7 +29,8 @@ from utils.llm_model_core.snapshot import pin_main_model, main_model_scope
 
 from .config import LLMChatConfig
 from .identity import resolve_chat_identity, resolve_mentioned_participants
-from .generation import response_content, generate_chat_response
+from .steering import current_steering
+from .generation import generate_chat_response
 from .core.errors import summarize_exception
 from .chat_context import (
     build_image_notes,
@@ -42,14 +43,12 @@ from .chat_context import (
 )
 from .core.forward import render_forwarded_storage
 from .image_inputs import ImageInputs, image_inputs_scope, current_image_inputs
+from .steer_inputs import bind_steer_inputs
 from .tool_runtime import registered_tool_schemas
-from .channel_turns import (
-    latest_participant_turn,
-    cancel_active_participant_turns,
-    current_participant_turn_superseded,
-)
+from .channel_turns import steer_participant_turn, cancel_active_participant_turns
 from .delivery_audit import delivery_audit_scope, current_delivery_audit
 from .group_delivery import group_delivery_scope
+from .chat_completion import settle_chat_response
 from .chat_evaluation import cancel_pending_evaluations, schedule_relationship_evaluation
 from .forward_context import resolve_merged_forward_messages
 from .tools._delivery import send_with_delivery
@@ -101,7 +100,7 @@ plugin.collect_disposes(cancel_pending_evaluations)
 
 @plug.dispatch(MessageCreatedEvent).register(priority=900)
 @enter_if(_should_handle_chat)
-@latest_participant_turn
+@steer_participant_turn
 async def on_chat(session: Session, ctx: Contexts):
     return await handle_chat_turn(session, ctx)
 
@@ -125,10 +124,7 @@ async def handle_chat_turn(session: Session, ctx: Contexts):
                 await reaction.finish("failed")
             return result
         except asyncio.CancelledError:
-            if current_participant_turn_superseded():
-                await settle_reaction_update(reaction.finish("superseded"))
-            else:
-                await settle_reaction_update(reaction.clear_transient())
+            await settle_reaction_update(reaction.clear_transient())
             raise
         except Exception:
             await settle_reaction_update(reaction.finish("failed"))
@@ -238,6 +234,9 @@ async def _run_chat(
         is_operator=await _is_operator(session),
     )
     inputs.commit_input_audit()
+    steering = current_steering()
+    if steering is not None:
+        bind_steer_inputs(steering, prepared, config, session, model_name=model_name, warn=_LOGGER.warning)
     await run_prepared_agent_turn(session, ctx, prepared, model_name=model_name, turn_config=config, reaction=reaction)
     return BLOCK
 
@@ -270,6 +269,13 @@ async def run_prepared_agent_turn(
     agent_events = prepared.agent_events
     agent_access = prepared.agent_access
     turn_status = "failed"
+    completion_status: str | None = None
+
+    async def complete(response: object) -> None:
+        nonlocal completion_status
+        if completion_status is None:
+            completion_status = await settle_chat_response(session, prepared, response, reaction)
+
     try:
         try:
             if reaction is not None:
@@ -291,6 +297,7 @@ async def run_prepared_agent_turn(
                     agent_events=agent_events,
                     agent_access=agent_access,
                     resolution=resolution,
+                    complete=complete,
                 )
         except asyncio.CancelledError:
             turn.capture_tool_events()
@@ -323,110 +330,8 @@ async def run_prepared_agent_turn(
             await reaction.finish("failed")
             return turn_status
 
-        turn.capture_tool_events()
-        if delivery_state.delivery_attempts > delivery_state.confirmed_deliveries or any(
-            event.status in {"failed", "cancelled"} and event.effect in {"partial", "unknown"}
-            for event in turn.tool_trace.events
-        ):
-            await turn.preserve_and_rollback()
-            turn_status = "partial" if delivery_state.confirmed_deliveries else "failed"
-            if reaction is not None:
-                await reaction.finish("partial" if delivery_state.confirmed_deliveries else "failed")
-            return turn_status
-        if resolution.outcome == "silent":
-            turn.agent_events.append(
-                "response_decision",
-                role="assistant",
-                model_visible=False,
-                payload={
-                    "outcome": "silent",
-                    "source": resolution.source,
-                    "reason": resolution.reason[:240],
-                    "actual_delivery": {
-                        "text_messages": 0,
-                        "media_messages": 0,
-                        "confirmed_deliveries": delivery_state.confirmed_deliveries,
-                    },
-                },
-            )
-            turn_status = "silent"
-            if reaction is not None:
-                await reaction.finish_silent()
-            return turn_status
-        if resolution.outcome == "declined":
-            previous_deliveries = delivery_state.confirmed_deliveries
-            if not resolution.reply or not await turn.deliver_model_reply(session, resolution.reply):
-                raise RuntimeError("explicit refusal was not confirmed")
-            if delivery_state.confirmed_deliveries <= previous_deliveries:
-                raise RuntimeError("explicit refusal was suppressed without new delivery")
-            await turn.persist_delivered_text()
-            turn.agent_events.append(
-                "response_decision",
-                role="assistant",
-                model_visible=False,
-                payload={
-                    "outcome": "declined",
-                    "source": resolution.source,
-                    "reason": resolution.reason[:240],
-                    "actual_delivery": {
-                        "text_messages": delivery_state.confirmed_text_deliveries,
-                        "media_messages": delivery_state.confirmed_media_deliveries,
-                        "confirmed_deliveries": delivery_state.confirmed_deliveries,
-                    },
-                },
-            )
-            turn_status = "declined"
-            if reaction is not None:
-                await reaction.finish("declined")
-            return turn_status
-        if resolution.outcome == "delivered":
-            if not delivery_state.confirmed_deliveries:
-                raise RuntimeError("explicit delivered outcome lacked confirmed output")
-            await turn.deliver_model_reply(session, "")
-            await turn.persist_delivered_text()
-            turn.agent_events.append(
-                "response_decision",
-                role="assistant",
-                model_visible=False,
-                payload={
-                    "outcome": "delivered",
-                    "source": resolution.source,
-                    "reason": resolution.reason[:240],
-                    "actual_delivery": {
-                        "text_messages": delivery_state.confirmed_text_deliveries,
-                        "media_messages": delivery_state.confirmed_media_deliveries,
-                        "confirmed_deliveries": delivery_state.confirmed_deliveries,
-                    },
-                },
-            )
-            turn_status = "completed"
-            if reaction is not None:
-                await reaction.finish("success")
-            return turn_status
-        if not await turn.deliver_model_reply(session, response_content(response)):
-            turn_status = "partial" if delivery_state.confirmed_deliveries else "failed"
-            if reaction is not None:
-                await reaction.finish(turn_status)
-            return turn_status
-        await turn.persist_delivered_text()
-        turn.agent_events.append(
-            "response_decision",
-            role="assistant",
-            model_visible=False,
-            payload={
-                "outcome": "automatic",
-                "source": "runtime",
-                "reason": "",
-                "actual_delivery": {
-                    "text_messages": delivery_state.confirmed_text_deliveries,
-                    "media_messages": delivery_state.confirmed_media_deliveries,
-                    "confirmed_deliveries": delivery_state.confirmed_deliveries,
-                },
-            },
-        )
-        turn_status = "completed"
-        if reaction is not None:
-            await reaction.finish("success")
+        await complete(response)
+        turn_status = completion_status or "failed"
         return turn_status
     except asyncio.CancelledError:
         if turn_status == "failed":

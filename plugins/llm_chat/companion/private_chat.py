@@ -14,7 +14,7 @@ from arclet.entari.plugin.model import Plugin
 from . import store
 from .. import chat_handler
 from ..models import ChatScope
-from ..channel_turns import latest_participant_turn
+from ..channel_turns import steer_participant_turn
 
 _owner = Plugin.current()
 if _owner is not None and _owner.module.__name__ == __name__:
@@ -49,7 +49,7 @@ if _owner is not None and _owner.module.__name__ == __name__:
 
     @_owner.dispatch(MessageCreatedEvent).register(priority=900)
     @enter_if(_should_handle_private)
-    @latest_participant_turn
+    @steer_participant_turn
     async def on_private_chat(session: Session, ctx: Contexts):
         await chat_handler.handle_chat_turn(session, ctx)
         return BLOCK

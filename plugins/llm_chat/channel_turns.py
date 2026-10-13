@@ -1,4 +1,4 @@
-"""Per-participant latest-turn cancellation within public channels."""
+"""Per-participant FIFO admission into cooperative ordinary-chat generations."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from typing import Any
 import asyncio
 from functools import wraps
 from contextlib import suppress
-from contextvars import ContextVar
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import field, dataclass
 from collections.abc import Callable, Coroutine
 
 from arclet.entari import Session
@@ -15,39 +15,34 @@ from arclet.letoderea import BLOCK
 from arclet.entari.logger import log
 from arclet.letoderea.context import Contexts
 
+from .steering import SteeringState, ParticipantScope, steering_scope, participant_scope
 from .core.errors import summarize_exception
 
 _LOGGER = log.wrapper("[llm_chat]")
-_ParticipantTurnScope = tuple[str, str, str, str]
-
-
-@dataclass(slots=True)
-class _ParticipantTurnState:
-    superseded: bool = False
+_Handler = Callable[[Session, Contexts], Coroutine[Any, Any, object]]
 
 
 @dataclass(slots=True)
 class _ActiveParticipantTurn:
     task: asyncio.Task[object]
-    generation: int
-    state: _ParticipantTurnState
+    state: SteeringState
 
 
-_ACTIVE_PARTICIPANT_TURNS: dict[_ParticipantTurnScope, _ActiveParticipantTurn] = {}
-_PARTICIPANT_TURN_GENERATIONS: dict[_ParticipantTurnScope, int] = {}
-_CURRENT_PARTICIPANT_TURN_STATE: ContextVar[_ParticipantTurnState | None] = ContextVar(
-    "llm_chat_participant_turn_state",
-    default=None,
-)
+@dataclass(slots=True, eq=False)
+class _Admission:
+    caller: asyncio.Task[Any] | None = None
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
 
 
-def _participant_turn_scope(session: Session) -> _ParticipantTurnScope:
-    return (
-        str(session.account.platform),
-        str(session.account.self_id),
-        str(session.channel.id),
-        str(session.user.id),
-    )
+@dataclass(slots=True)
+class _ParticipantAdmissionQueue:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    waiting: deque[_Admission] = field(default_factory=deque)
+
+
+_ACTIVE_PARTICIPANT_TURNS: dict[ParticipantScope, _ActiveParticipantTurn] = {}
+_PARTICIPANT_ADMISSIONS: dict[ParticipantScope, _ParticipantAdmissionQueue] = {}
+_UNLOAD_GENERATION = 0
 
 
 def participant_turn_active(platform: str, account_id: str, channel_id: str, user_id: str) -> bool:
@@ -55,74 +50,107 @@ def participant_turn_active(platform: str, account_id: str, channel_id: str, use
     return active is not None and not active.task.done()
 
 
-def current_participant_turn_superseded() -> bool:
-    state = _CURRENT_PARTICIPANT_TURN_STATE.get()
-    return state.superseded if state is not None else False
+async def _run_participant_turn(handler: _Handler, session: Session, ctx: Contexts, state: SteeringState) -> object:
+    with steering_scope(state):
+        try:
+            return await handler(session, ctx)
+        finally:
+            try:
+                await state.aclose()
+            except Exception as exc:
+                _LOGGER.warning(f"participant steering cleanup failed: {summarize_exception(exc)}")
+            finally:
+                active = _ACTIVE_PARTICIPANT_TURNS.get(state.scope)
+                if active is not None and active.state is state:
+                    _ACTIVE_PARTICIPANT_TURNS.pop(state.scope, None)
 
 
-async def _run_participant_turn(
-    handler: Callable[[Session, Contexts], Coroutine[Any, Any, object]],
-    session: Session,
-    ctx: Contexts,
-    state: _ParticipantTurnState,
-) -> object:
-    token = _CURRENT_PARTICIPANT_TURN_STATE.set(state)
-    try:
-        return await handler(session, ctx)
-    finally:
-        _CURRENT_PARTICIPANT_TURN_STATE.reset(token)
-
-
-def cancel_active_participant_turns() -> None:
-    for active in tuple(_ACTIVE_PARTICIPANT_TURNS.values()):
+async def cancel_active_participant_turns() -> None:
+    """Invalidate inherited scopes, then cancel and settle every unload-owned task."""
+    global _UNLOAD_GENERATION
+    _UNLOAD_GENERATION += 1
+    active_turns = tuple(_ACTIVE_PARTICIPANT_TURNS.values())
+    queued_callers: set[asyncio.Task[Any]] = set()
+    for queue in tuple(_PARTICIPANT_ADMISSIONS.values()):
+        for admission in queue.waiting:
+            admission.ready.set()
+            if admission.caller is not None and admission.caller is not asyncio.current_task():
+                queued_callers.add(admission.caller)
+    for active in active_turns:
+        active.state.closed = True
+        active.state.accepting = False
         if not active.task.done():
             active.task.cancel()
-    _ACTIVE_PARTICIPANT_TURNS.clear()
-    _PARTICIPANT_TURN_GENERATIONS.clear()
+    for caller in queued_callers:
+        caller.cancel()
+    settling = {active.task for active in active_turns} | queued_callers
+    if settling:
+        await asyncio.gather(*settling, return_exceptions=True)
 
 
-def latest_participant_turn(
-    handler: Callable[[Session, Contexts], Coroutine[Any, Any, object]],
-) -> Callable[[Session, Contexts], Coroutine[Any, Any, object]]:
-    """Cancel only an older turn from the same participant and channel."""
+def _release_admission(queue: _ParticipantAdmissionQueue, admission: _Admission) -> None:
+    with suppress(ValueError):
+        queue.waiting.remove(admission)
+    if queue.waiting:
+        queue.waiting[0].ready.set()
+
+
+def steer_participant_turn(handler: _Handler) -> _Handler:
+    """Append addressed input without canceling the owner or another participant."""
 
     @wraps(handler)
     async def wrapped(session: Session, ctx: Contexts) -> object:
-        scope = _participant_turn_scope(session)
-        generation = _PARTICIPANT_TURN_GENERATIONS.get(scope, 0) + 1
-        _PARTICIPANT_TURN_GENERATIONS[scope] = generation
-
-        previous = _ACTIVE_PARTICIPANT_TURNS.get(scope)
-        if previous is not None and not previous.task.done():
-            previous.state.superseded = True
-            previous.task.cancel()
-            try:
-                await previous.task
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:
-                _LOGGER.warning(f"superseded participant turn cleanup failed: {summarize_exception(exc)}")
-
-        if _PARTICIPANT_TURN_GENERATIONS.get(scope) != generation:
-            return BLOCK
-
-        state = _ParticipantTurnState()
-        task = asyncio.create_task(_run_participant_turn(handler, session, ctx, state))
-        active = _ActiveParticipantTurn(task=task, generation=generation, state=state)
-        _ACTIVE_PARTICIPANT_TURNS[scope] = active
+        scope = participant_scope(session)
+        unload_generation = _UNLOAD_GENERATION
+        queue = _PARTICIPANT_ADMISSIONS.setdefault(scope, _ParticipantAdmissionQueue())
+        admission = _Admission(caller=asyncio.current_task())
+        owner: asyncio.Task[object] | None = None
+        async with queue.lock:
+            queue.waiting.append(admission)
+            if queue.waiting[0] is admission:
+                admission.ready.set()
         try:
-            return await task
+            while True:
+                await admission.ready.wait()
+                async with queue.lock:
+                    if unload_generation != _UNLOAD_GENERATION:
+                        raise asyncio.CancelledError("Participant steering plugin unloaded")
+                    if queue.waiting[0] is not admission:
+                        admission.ready.clear()
+                        continue
+                    active = _ACTIVE_PARTICIPANT_TURNS.get(scope)
+                    if active is not None and active.task.done():
+                        _ACTIVE_PARTICIPANT_TURNS.pop(scope, None)
+                        active = None
+                    if active is None:
+                        state = SteeringState(session, ctx)
+                        owner = asyncio.create_task(_run_participant_turn(handler, session, ctx, state))
+                        _ACTIVE_PARTICIPANT_TURNS[scope] = _ActiveParticipantTurn(owner, state)
+                        _release_admission(queue, admission)
+                        received = False
+                    else:
+                        received = active.state.receive(session, ctx)
+                        if received:
+                            _release_admission(queue, admission)
+                if owner is not None:
+                    return await asyncio.shield(owner)
+                assert active is not None
+                if received:
+                    await active.state.flush()
+                    return BLOCK
+                # The head retains its place while a sealed/full owner settles.
+                # No scope admission lock or unrelated participant is held here.
+                await asyncio.wait((active.task,))
         except asyncio.CancelledError:
-            if active.state.superseded:
-                return BLOCK
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+            if owner is not None and not owner.done():
+                owner.cancel()
+                await asyncio.gather(owner, return_exceptions=True)
             raise
         finally:
-            if _ACTIVE_PARTICIPANT_TURNS.get(scope) is active:
-                _ACTIVE_PARTICIPANT_TURNS.pop(scope, None)
-            if _PARTICIPANT_TURN_GENERATIONS.get(scope) == generation:
-                _PARTICIPANT_TURN_GENERATIONS.pop(scope, None)
+            async with queue.lock:
+                _release_admission(queue, admission)
+                if not queue.waiting and scope not in _ACTIVE_PARTICIPANT_TURNS:
+                    if _PARTICIPANT_ADMISSIONS.get(scope) is queue:
+                        _PARTICIPANT_ADMISSIONS.pop(scope, None)
 
     return wrapped

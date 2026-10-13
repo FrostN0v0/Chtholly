@@ -32,6 +32,7 @@ from satori.element import Br
 from arclet.letoderea import Subscriber
 from arclet.entari.plugin.model import PluginDispatcher
 
+from ..steering import SteerPending, check_steer_boundary
 from ._delivery import send_with_delivery
 from ..core.media import has_meaningful_text
 from ..core.types import JSONType
@@ -43,6 +44,7 @@ from ..core.delivery import (
     reserve_message,
     clean_delivery_fragment,
     normalize_delivery_delay,
+    release_unstarted_message,
     require_llm_chat_delivery,
 )
 from ..prepared_media import PreparedMedia, confirm_media, consume_media, resolve_media
@@ -325,13 +327,12 @@ def register_send_msg(
             raise DeliveryError(f"send_msg mention resolution failed: {type(exc).__name__}") from None
         payload, projection = _compose(parsed, mentions, media, platform)
         text_message = any(not isinstance(segment, (MediaSegment, BreakSegment)) for segment in parsed)
+        check_steer_boundary()
         state = reserve_message(
             projection,
             media_count=len(media),
             text_message=text_message,
         )
-        if media:
-            consume_media(media)
         try:
             await send_with_delivery(
                 session,
@@ -341,7 +342,11 @@ def register_send_msg(
                 texts=[projection],
                 media=len(media),
                 text_message=text_message,
+                before_start=(lambda: consume_media(media)) if media else None,
             )
+        except SteerPending:
+            release_unstarted_message(state, projection, media_count=len(media), text_message=text_message)
+            raise
         except asyncio.CancelledError:
             raise
         except Exception as exc:

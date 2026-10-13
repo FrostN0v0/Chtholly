@@ -15,7 +15,6 @@ from .models import Conversation
 from .vision import describe_image_bytes
 from .core.media import format_image_note, sanitize_assistant_history
 from .perception import MentionedParticipant
-from .core.errors import summarize_exception
 from .core.forward import ForwardedMessage, ForwardedSpeakerRole, render_forwarded_storage
 from .image_inputs import ImageInputs, ImageInputError, current_image_inputs
 from .core.image_source import fetch_image_bytes, raw_to_image_data_url
@@ -240,7 +239,7 @@ async def build_multimodal_user_content(
 ) -> tuple[list[dict[str, Any]] | str, str]:
     """Expose original references and attach actual pixels with source provenance."""
     inputs = current_image_inputs()
-    views = inputs.input_views() if inputs is not None else []
+    views = inputs.input_views(session=session) if inputs is not None else []
     cap = max(0, config.image_describe_max_per_message) if config.image_understanding_enabled else 0
     quoted_context = _quoted_message_context(session)
     quoted_role = quoted_context.speaker_role if quoted_context is not None else None
@@ -336,14 +335,14 @@ async def build_image_notes(
     quoted_role = quoted_context.speaker_role if quoted_context is not None else None
     cap = max(0, config.image_describe_max_per_message)
     notes: list[str] = []
-    for offset, view in enumerate(inputs.input_views()):
+    for offset, view in enumerate(inputs.input_views(session=session)):
         description = ""
         if offset < cap:
             try:
                 snapshot = await inputs.resolve(session, str(view["image_ref"]), purpose="inspect")
                 description = await describe_image_bytes(config, snapshot.data)
             except Exception as exc:
-                warn(f"image describe failed: {summarize_exception(exc)}")
+                warn(f"image describe failed: {type(exc).__name__}")
         quoted = view["source"] == "quoted"
         notes.append(format_image_note(description, quoted=quoted, quoted_role=quoted_role if quoted else None))
     await _forward_image_content(config, session, forwarded_messages, warn, visual=False)

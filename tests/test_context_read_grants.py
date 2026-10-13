@@ -282,7 +282,9 @@ async def test_anchor_is_authoritative_and_private_fields_never_become_grants(gr
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mutation", ["sealed", "scope", "hidden", "admin", "changed"])
+@pytest.mark.parametrize(
+    "mutation", ["sealed", "scope", "hidden", "admin", "changed", "steer_received", "steer_applied", "steer_checkpoint"]
+)
 async def test_each_read_rechecks_authority_and_snapshot_after_grant(grant_store, mutation):
     scope, context_session = await _session()
     call, _result = await _execution(grant_store, context_session)
@@ -296,8 +298,8 @@ async def test_each_read_rechecks_authority_and_snapshot_after_grant(grant_store
             stored_session.scope_id = scope.id + 100
         elif mutation == "hidden":
             event.model_visible = False
-        elif mutation == "admin":
-            event.event_type = "model_request"
+        elif mutation == "admin" or mutation.startswith("steer_"):
+            event.event_type = "model_request" if mutation == "admin" else mutation
         else:
             event.payload_json = json.dumps({"arguments": {"source": "replacement" * 100}})
         await db.commit()
@@ -324,6 +326,33 @@ async def test_handoff_source_excludes_nonvisible_nonadmin_events(grant_store):
     )
     assert normalized is not None
     assert normalized["relevant_event_refs"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ["steer_received", "steer_applied", "steer_checkpoint"])
+async def test_steering_audit_never_issues_anchor_grants_or_handoff(grant_store, event_type):
+    scope, context_session = await _session()
+    call, _result = await _execution(grant_store, context_session)
+    async with grant_store() as db:
+        event = await db.get(AgentEvent, call.id)
+        event.event_type = event_type
+        event.model_visible = True
+        await db.commit()
+    call.event_type = event_type
+    anchor = await session_manager.pin_event(scope.id, call.id, label="Private receipt", created_by_user_id="alice")
+    selection = await _selection(context_session)
+    access = await _access(context_session, selection, ((anchor, call),))
+    assert access.context_read_grants == ()
+    assert not any(message.get("tool_calls") for message in selection.messages)
+    assert all(
+        item["event_ref"] != call.event_ref for item in await session_handoff._source_events(context_session, 10_000)
+    )
+    with pytest.raises(agent_query.AgentQueryError):
+        await agent_query.read_event_payload(access, event_ref=call.event_ref, path="arguments", max_chars=2000)
+    with pytest.raises(agent_query.AgentQueryError):
+        await agent_query.pin_context_payload(
+            replace(access, allow_context_pin=True), event_ref=call.event_ref, label="No receipt grant"
+        )
 
 
 @pytest.mark.asyncio

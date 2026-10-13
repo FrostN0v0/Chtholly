@@ -22,7 +22,8 @@ from arclet.entari.session import EntariProtocol
 from arclet.entari.event.api import SendRequest
 from satori.adapters.onebot11.message import OneBot11MessageEncoder
 
-from plugins.llm_chat.channel_turns import latest_participant_turn
+from plugins.llm_chat.steering import SteerPending, current_steering
+from plugins.llm_chat.channel_turns import steer_participant_turn
 from plugins.llm_chat.core.delivery import DeliveryState, llm_chat_delivery_scope
 from plugins.llm_chat.group_delivery import (
     group_delivery_scope,
@@ -220,40 +221,58 @@ async def test_deferred_child_of_closed_scope_cannot_fall_back_to_unscoped_send(
     assert state.delivery_attempts == state.confirmed_deliveries == 0
 
 
-async def test_latest_wins_removes_queued_old_reply_without_cancelling_other_user(transport) -> None:
+async def test_steering_revises_queued_reply_without_cancelling_started_other_user_send(transport) -> None:
     transport.network.hold = "holding"
     states = {}
-    queued = asyncio.Event()
+    queued, rejected = asyncio.Event(), asyncio.Event()
 
     async def handler(session, _ctx):
         state = states.setdefault(session.event.message.id, transport.state())
+        steering = current_steering()
+        assert steering is not None
+
+        async def process(entry):
+            return {"role": "user", "content": entry.session.event.message.id}
+
+        steering.processor = process
         with group_delivery_scope(session):
             text = "holding" if session.event.message.id == "other-user" else session.event.message.id
             if text == "old-request":
                 queued.set()
-            await send_with_delivery(session, text, state, texts=[text])
+            try:
+                await send_with_delivery(session, text, state, texts=[text])
+            except SteerPending:
+                rejected.set()
+                assert state.delivery_attempts == 0
+                supplements = await steering.drain()
+                text = " + ".join([text, *[message["content"] for message in supplements]])
+                await send_with_delivery(session, text, state, texts=[text])
         return BLOCK
 
-    wrapped = latest_participant_turn(handler)
+    wrapped = steer_participant_turn(handler)
     other = asyncio.create_task(wrapped(transport.session("other-user", user="30"), Contexts()))
     await transport.network.entered.wait()
     old = asyncio.create_task(wrapped(transport.session("old-request"), Contexts()))
     await queued.wait()
     newer = asyncio.create_task(wrapped(transport.session("new-request"), Contexts()))
     try:
-        await asyncio.wait_for(old, timeout=1)
+        assert await asyncio.wait_for(newer, timeout=1) is BLOCK
         assert not other.done()
+        assert not old.done()
         assert states["old-request"].delivery_attempts == 0
         transport.network.gate.set()
-        await asyncio.wait_for(asyncio.gather(other, newer), timeout=1)
+        await asyncio.wait_for(asyncio.gather(other, old), timeout=1)
     finally:
         for task in (other, old, newer):
             if not task.done():
                 task.cancel()
         await asyncio.gather(other, old, newer, return_exceptions=True)
+    assert rejected.is_set()
+    assert set(states) == {"other-user", "old-request"}
     wire = transport.network.wire
-    assert [chain.extract_plain_text() for chain, _ in wire] == ["holding", "new-request"]
-    assert [quotes(chain) for chain, _ in wire] == [["other-user"], ["new-request"]]
+    assert [chain.extract_plain_text() for chain, _ in wire] == ["holding", "old-request + new-request"]
+    assert [quotes(chain) for chain, _ in wire] == [["other-user"], ["old-request"]]
+    assert states["old-request"].delivery_attempts == states["old-request"].confirmed_deliveries == 1
 
 
 async def test_transport_timeout_is_unknown_once_and_releases_the_channel(transport) -> None:

@@ -130,6 +130,13 @@ def llm_chat_web_access_scope(
         _WEB_ACCESS_BUDGET.reset(token)
 
 
+def update_llm_chat_web_reference_access(allowed: bool) -> None:
+    """Refresh trusted input permission without resetting the logical task's budget."""
+    budget = _WEB_ACCESS_BUDGET.get()
+    if budget is not None:
+        budget.allow_reference_capture = bool(allowed)
+
+
 def require_llm_chat_web_access() -> None:
     """Reject web execution outside the llm_chat generation context."""
 

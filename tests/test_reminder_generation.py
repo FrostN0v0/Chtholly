@@ -64,7 +64,9 @@ def _baseline() -> BaselineFingerprint:
     return BaselineFingerprint("test", "persona", "system", "tools", "policy")
 
 
-async def _add_completed_chat_turn(store, context_session, *, user: str, assistant: str, speaker: str = "Alice"):
+async def _add_completed_chat_turn(
+    store, context_session, *, user: str, assistant: str, speaker: str = "Alice", supplements: tuple[str, ...] = ()
+):
     turn = await session_manager.start_turn(
         context_session,
         trigger_message_id="inbound",
@@ -87,9 +89,35 @@ async def _add_completed_chat_turn(store, context_session, *, user: str, assista
                     ),
                     model_visible=True,
                 ),
+                *[
+                    AgentEvent(
+                        turn_id=turn.id,
+                        sequence=sequence,
+                        event_type="user_input",
+                        role="user",
+                        payload_json=json.dumps(
+                            {
+                                "content": json.dumps(
+                                    {
+                                        "speaker": speaker,
+                                        "content": json.dumps(
+                                            {
+                                                "content": text,
+                                                "forwarded_messages": [{"content": "Quoted ambient context"}],
+                                            }
+                                        ),
+                                    }
+                                ),
+                                "steer_sequence": sequence,
+                            }
+                        ),
+                        model_visible=True,
+                    )
+                    for sequence, text in enumerate(supplements, start=2)
+                ],
                 AgentEvent(
                     turn_id=turn.id,
-                    sequence=2,
+                    sequence=len(supplements) + 2,
                     event_type="assistant_output",
                     role="assistant",
                     payload_json=json.dumps({"content": assistant}, ensure_ascii=False),
@@ -157,6 +185,32 @@ async def test_scheduled_snapshot_drops_old_chat_after_hard_reset_and_caps_text(
     assert old_turn.turn_ref not in snapshot.selected_turn_refs
     assert snapshot.selected_turn_refs
     assert sum(len(item["content"]) for item in snapshot.model_payload["turns"]) <= 512
+
+
+@pytest.mark.asyncio
+async def test_scheduled_snapshot_excerpts_every_applied_own_input_within_one_turn_budget(store):
+    scope = await session_manager.get_or_create_scope(ScopeIdentity("test", "bot", "guild", "steered", "steered"))
+    chat, _ = await session_manager.ensure_active_session(scope, _baseline(), idle_minutes=60, max_turns=20)
+    turn = await _add_completed_chat_turn(
+        store,
+        chat,
+        user="Original question " + "x" * 500,
+        supplements=("Supplement one " + "y" * 500, "Supplement two " + "z" * 500),
+        assistant="A complete answer " + "a" * 500,
+    )
+    snapshot = await scheduled_chat_context.read_scheduled_chat_snapshot(scope.id, max_chars=512)
+    assert snapshot is not None
+    assert snapshot.selected_turn_refs == (turn.turn_ref,)
+    messages = snapshot.model_payload["turns"]
+    assert len(messages) == 2
+    user_text = messages[0]["content"]
+    assert [text.split(" ", 2)[:2] for text in user_text.split("\n\n")] == [
+        ["Original", "question"],
+        ["Supplement", "one"],
+        ["Supplement", "two"],
+    ]
+    assert "Quoted ambient context" not in json.dumps(snapshot.model_payload)
+    assert len(json.dumps(messages, ensure_ascii=False, separators=(",", ":"))) <= 512
 
 
 @pytest.mark.asyncio

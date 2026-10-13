@@ -129,13 +129,13 @@ async def capture_user_input_images(
     """Capture evidence from authoritative snapshots, never refetch their sources."""
     from .image_inputs import ImageInputError
 
-    for view in inputs.input_views()[: max(0, min(MAX_INPUT_ATTACHMENTS, maximum))]:
+    for view in inputs.input_views(session=session)[: max(0, min(MAX_INPUT_ATTACHMENTS, maximum))]:
         try:
             await inputs.resolve(session, str(view["image_ref"]), purpose="inspect")
         except ImageInputError as exc:
             if warn is not None:
                 warn(f"user image attachment unavailable: {exc}")
-    return inputs.input_audit_views()
+    return inputs.input_audit_views(session=session)
 
 
 def resolve_agent_attachment(

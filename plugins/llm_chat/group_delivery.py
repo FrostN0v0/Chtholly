@@ -16,6 +16,7 @@ from arclet.entari.event.api import SendResponse
 
 from utils.group_delivery_core import DeliveryQueue
 
+from .steering import check_steer_boundary
 from .core.delivery import (
     DEFAULT_DELIVERY_LIMITS,
     DeliveryError,
@@ -109,7 +110,12 @@ def group_delivery_scope(session: Session, *, scheduled_reminder: bool = False) 
         channel.expiry = None
     channel.references += 1
     turn = _Turn(
-        runtime, key, channel, source, "" if scheduled_reminder else str(source.message.id), scheduled_reminder
+        runtime,
+        key,
+        channel,
+        source,
+        "" if scheduled_reminder or source.message is None else str(source.message.id),
+        scheduled_reminder,
     )
     token = _CURRENT.set(turn)
     try:
@@ -143,6 +149,7 @@ async def send_group_delivery(
     texts: Sequence[str] = (),
     media: bool | int = False,
     text_message: bool | None = None,
+    before_start: Callable[[], None] | None = None,
 ) -> bool:
     """Schedule prepared content only; preserve the caller's audit and authorization context."""
     turn = _turn_for(session)
@@ -179,6 +186,9 @@ async def send_group_delivery(
 
             async def native_send():
                 nonlocal started
+                check_steer_boundary()
+                if before_start is not None:
+                    before_start()
                 started = True
                 return await session.send(outgoing)
 

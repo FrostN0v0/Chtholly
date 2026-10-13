@@ -18,13 +18,13 @@ from plugins.llm_chat.agent_attachments import resolve_agent_attachment
 _PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=")
 
 
-def _session(*, channel: str = "group", account: str = "bot", turn: str = "turn") -> Session:
+def _session(*, channel: str = "group", account: str = "bot", turn: str = "turn", user: str = "user") -> Session:
     return cast(
         Session,
         SimpleNamespace(
             account=SimpleNamespace(platform="test", self_id=account),
             channel=SimpleNamespace(id=channel),
-            user=SimpleNamespace(id="user"),
+            user=SimpleNamespace(id=user),
             event=SimpleNamespace(message=SimpleNamespace(id=turn)),
         ),
     )
@@ -290,3 +290,141 @@ async def test_nested_forward_pixels_keep_node_identity_and_failed_image_positio
     stored_nodes = json.loads(stored)["forwarded_messages"]
     assert all("image_ref" not in image for node in stored_nodes for image in node.get("images", []))
     await inputs.aclose()
+
+
+@pytest.mark.asyncio
+async def test_admitted_input_shares_original_snapshot_only_with_root_and_own_event(tmp_path: Path):
+    from arclet.letoderea.context import Contexts
+
+    from plugins.llm_chat.steering import SteeringState
+
+    root = _session()
+    extra = _session(turn="extra")
+    later = _session(turn="later")
+    state = SteeringState(root, Contexts())
+    inputs = ImageInputs(attachment_root=tmp_path)
+    first = inputs.register_bytes(root, source="direct", key="first", data=_PNG, index=1)
+    inputs.admit_input(root, state=state)
+    assert state.receive(extra, Contexts())
+    inputs.admit_input(extra, state=state)
+    downloads = 0
+
+    async def acquire() -> bytes:
+        nonlocal downloads
+        downloads += 1
+        return _PNG + b"extra"
+
+    added = inputs.register(extra, source="direct", key="new", load=acquire, index=1)
+    inspected = await inputs.resolve(extra, added, purpose="inspect")
+    assert await inputs.resolve(root, added, purpose="edit") is inspected
+    assert await inputs.resolve(root, added, purpose="send") is inspected
+    assert await inputs.resolve(extra, added, purpose="collect") is inspected
+    assert downloads == 1
+    assert inputs.input_ref(1) == first
+    assert inputs.input_ref(2) == added
+    assert inputs.input_views(session=extra) == [
+        {
+            "index": 2,
+            "image_ref": added,
+            "source": "direct",
+            "status": "ready",
+            "steer_sequence": 2,
+            "original_index": 1,
+        }
+    ]
+    assert state.receive(later, Contexts())
+    inputs.admit_input(later, state=state)
+    for stranger in (
+        later,
+        _session(turn="extra"),
+        _session(turn="historical"),
+        _session(turn="extra", user="other"),
+        _session(turn="extra", channel="elsewhere"),
+    ):
+        with pytest.raises(ImageInputError):
+            await inputs.resolve(stranger, added, purpose="edit")
+    with pytest.raises(ImageInputError):
+        inputs.admit_input(_session(turn="historical"), state=state)
+    with pytest.raises(ImageInputError):
+        await inputs.resolve(extra, first, purpose="send")
+    assert (await inputs.resolve(root, first, purpose="send")).data == _PNG
+    await inputs.aclose()
+    await state.aclose()
+
+
+@pytest.mark.asyncio
+async def test_supplement_attachment_limit_is_per_input_not_global_position(tmp_path: Path):
+    from arclet.letoderea.context import Contexts
+
+    from plugins.llm_chat.steering import SteeringState
+    from plugins.llm_chat.agent_attachments import capture_user_input_images
+
+    root = _session()
+    extra = _session(turn="extra")
+    state = SteeringState(root, Contexts())
+    inputs = ImageInputs(attachment_root=tmp_path)
+    for index in range(1, 7):
+        inputs.register_bytes(root, source="direct", key=("root", index), data=_PNG, index=index)
+    inputs.admit_input(root, state=state)
+    original = await capture_user_input_images(root, inputs)
+    inputs.commit_input_audit(session=root)
+    assert state.receive(extra, Contexts())
+    inputs.admit_input(extra, state=state)
+    ref = inputs.register_bytes(extra, source="direct", key="extra", data=_PNG, index=1)
+    added = await capture_user_input_images(extra, inputs)
+    assert len(original) == 6
+    assert len(added) == 1
+    assert added[0]["index"] == 7
+    assert added[0]["original_index"] == 1
+    assert added[0]["steer_sequence"] == 2
+    assert added[0]["audit_status"] == "recorded"
+    snapshot = await inputs.resolve(root, ref, purpose="inspect")
+    assert snapshot.attachment is not None
+    path = resolve_agent_attachment(str(snapshot.attachment["attachment_ref"]), snapshot.mime, root=tmp_path)
+    await inputs.aclose()
+    assert not path.exists()
+    assert all(
+        resolve_agent_attachment(str(item["attachment_ref"]), str(item["mime"]), root=tmp_path).exists()
+        for item in original
+    )
+    await state.aclose()
+
+
+@pytest.mark.asyncio
+async def test_new_payload_never_duplicates_earlier_image_notes_or_pixels(tmp_path: Path):
+    import json
+
+    from arclet.entari import MessageChain
+    from arclet.letoderea.context import Contexts
+
+    from plugins.llm_chat.config import LLMChatConfig
+    from plugins.llm_chat.steering import SteeringState
+    from plugins.llm_chat.chat_context import build_multimodal_user_content
+    from plugins.llm_chat.image_inputs import image_inputs_scope
+
+    root = _session()
+    extra = _session(turn="extra")
+    for session in (root, extra):
+        runtime = cast(SimpleNamespace, session)
+        runtime.elements = MessageChain()
+        runtime.quote = None
+        runtime.reply = None
+    state = SteeringState(root, Contexts())
+    inputs = ImageInputs(attachment_root=tmp_path)
+    old = inputs.register_bytes(root, source="direct", key="old", data=_PNG, index=1)
+    inputs.admit_input(root, state=state)
+    assert state.receive(extra, Contexts())
+    inputs.admit_input(extra, state=state)
+    new = inputs.register_bytes(extra, source="direct", key="new", data=_PNG, index=1)
+    with image_inputs_scope(inputs):
+        content, stored = await build_multimodal_user_content(
+            LLMChatConfig(), extra, "Alice", "Use this instead", lambda _: None
+        )
+    assert isinstance(content, list)
+    payload = json.loads(content[0]["text"])
+    assert [image["image_ref"] for image in payload["input_images"]] == [new]
+    assert old not in content[0]["text"]
+    assert len([part for part in content if part["type"] == "image_url"]) == 1
+    assert stored == payload["content"]
+    await inputs.aclose()
+    await state.aclose()

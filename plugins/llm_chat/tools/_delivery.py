@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from arclet.entari import Session, MessageChain
 
+from ..steering import check_steer_boundary
 from ..core.delivery import (
     DeliveryError,
     DeliveryState,
@@ -26,11 +27,19 @@ async def send_with_delivery(
     texts: Sequence[str] = (),
     media: bool | int = False,
     text_message: bool | None = None,
+    before_start: Callable[[], None] | None = None,
 ) -> None:
     """Send one payload while recording delivery attempts and confirmations."""
 
     if await send_group_delivery(
-        session, payload, state, delay_seconds=delay_seconds, texts=texts, media=media, text_message=text_message
+        session,
+        payload,
+        state,
+        delay_seconds=delay_seconds,
+        texts=texts,
+        media=media,
+        text_message=text_message,
+        before_start=before_start,
     ):
         return
     if state is not None:
@@ -46,8 +55,12 @@ async def send_with_delivery(
 
     async def native_send():
         nonlocal started
+        check_steer_boundary()
+        if before_start is not None:
+            before_start()
         started = True
         return await session.send(payload)
+
     try:
         from ..transport import send_turn_transport
 

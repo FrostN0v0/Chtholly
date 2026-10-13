@@ -9,11 +9,13 @@ from collections.abc import Callable, Sequence, Awaitable
 
 from arclet.entari import Session
 
+from .steering import SteerPending, check_steer_boundary
 from .core.media import strip_internal_media_records
 from .core.delivery import (
     DeliveryError,
     DeliveryState,
     render_delivered_text,
+    release_unstarted_message,
     reserve_final_text_messages,
     strip_trailing_end_of_response,
 )
@@ -57,8 +59,11 @@ class ActiveChatTurn:
     _tool_events_recorded: bool = field(default=False, init=False)
     _agent_finalize_attempted: bool = field(default=False, init=False)
     _assistant_persist_attempted: bool = field(default=False, init=False)
+    _user_message_ids: list[int] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
+        if self.user_message_id is not None:
+            self._user_message_ids.append(self.user_message_id)
         self.agent_events.warn = self.warn
         if self.agent_turn_id is not None and self.persist_agent_event_rows is not None:
 
@@ -68,6 +73,11 @@ class ActiveChatTurn:
                 return await self.persist_agent_event_rows(self.agent_turn_id, events)
 
             self.agent_events.sink = persist
+
+    def add_user_message(self, message_id: int) -> None:
+        """Keep each real supplemental input under this logical turn's settlement."""
+        if message_id not in self._user_message_ids:
+            self._user_message_ids.append(message_id)
 
     async def persist_delivered_text(self, *, preserve_original: bool = False) -> str:
         """Persist confirmed text deliveries at most once."""
@@ -121,14 +131,15 @@ class ActiveChatTurn:
     async def rollback_if_unstarted(self) -> None:
         """Delete the user history row only when no delivery attempt occurred."""
 
-        if self.user_message_id is None or self.delivery_state.delivery_attempts:
+        if self.delivery_state.delivery_attempts:
             return
-        try:
-            await self.delete_history(self.user_message_id)
-        except asyncio.CancelledError:
-            self.warn("user turn rollback cancelled")
-        except Exception as exc:
-            self.warn(f"user turn rollback failed: {type(exc).__name__}")
+        for message_id in self._user_message_ids:
+            try:
+                await self.delete_history(message_id)
+            except asyncio.CancelledError:
+                self.warn("user turn rollback cancelled")
+            except Exception as exc:
+                self.warn(f"user turn rollback failed: {type(exc).__name__}")
 
     async def preserve_and_rollback(self) -> None:
         """Preserve any confirmed prefix and remove an unstarted user turn."""
@@ -158,6 +169,7 @@ class ActiveChatTurn:
     async def deliver_model_reply(self, session: Session, raw_reply: str) -> bool:
         """Sanitize and deliver final model text after any tool-delivered prefix."""
 
+        check_steer_boundary()
         stripped_raw_reply = raw_reply.strip()
         reply_without_media = strip_internal_media_records(raw_reply).strip()
         if reply_without_media != stripped_raw_reply:
@@ -186,6 +198,9 @@ class ActiveChatTurn:
             for final_reply in final_replies:
                 try:
                     await send_with_delivery(session, final_reply, self.delivery_state, texts=[final_reply])
+                except SteerPending:
+                    release_unstarted_message(self.delivery_state, final_reply)
+                    raise
                 except BaseException:
                     await self.preserve_and_rollback()
                     raise

@@ -70,6 +70,7 @@ async def _turn(
     channel: str = "channel",
     persona: str = "A thoughtful conversational character.",
     decision: bool = True,
+    supplements: tuple[str, ...] = (),
 ):
     await persona_store.get_relation(user, channel)
     scope = await session_manager.get_or_create_scope(ScopeIdentity("test", "bot", "guild", channel, channel))
@@ -87,6 +88,30 @@ async def _turn(
     )
     recorder = AgentTurnRecorder()
     recorder.record_user_input(json.dumps({"speaker": user, "content": content}), user_name=user, fresh_context=False)
+    for sequence, supplement in enumerate(supplements, start=2):
+        recorder.append(
+            "steer_received",
+            payload={"content": "Private pending receipt", "steer_sequence": sequence},
+            status="received",
+            model_visible=False,
+        )
+        recorder.append(
+            "user_input",
+            role="user",
+            payload={
+                "content": json.dumps(
+                    {
+                        "speaker": user,
+                        "content": json.dumps(
+                            {"content": supplement, "forwarded_messages": [{"content": "Bob's quoted context"}]}
+                        ),
+                    }
+                ),
+                "steer_sequence": sequence,
+                "received_at": "2026-10-13T00:00:00",
+                "applied_at": "2026-10-13T00:00:01",
+            },
+        )
     recorder.append("context_snapshot", payload={"persona": {"prompt": persona}}, model_visible=False)
     reply = "I understand." if status in {"completed", "declined"} else ""
     if reply:
@@ -183,6 +208,30 @@ async def test_complete_batch_is_consumed_once_without_cross_member_scoring(rela
     assert all(item["evidence_turn_ids"] == [first.id, second.id] for item in evaluated)
     assert {item["evaluation_ref"] for item in evaluated} == {batch.evaluation_ref}
     assert all(item["changes"]["trust"] == {"before": 30.0, "after": 34.0, "delta": 4.0} for item in evaluated)
+
+
+@pytest.mark.asyncio
+async def test_steered_turn_scores_all_own_inputs_once_without_receipts_or_quotes(relationship_store):
+    turn = await _turn("alice", "Original question", supplements=("More detail", "More detail", "Final correction"))
+    other = await _turn("bob", "Another member's ambient input")
+    assert await _enqueue(turn)
+    assert await _enqueue(other)
+    assert not await _enqueue(turn)
+    batch = await evaluation_store.claim_evaluation("alice", "channel", batch_size=8, model="test")
+    assert batch is not None
+    assert batch.turn_ids == (turn.id,)
+    assert len(batch.episodes) == 1
+    assert batch.episodes[0]["user"] == "Original question\n\nMore detail\n\nMore detail\n\nFinal correction"
+    assert "Bob" not in json.dumps(batch.episodes)
+    assert "Private pending receipt" not in json.dumps(batch.episodes)
+    await evaluation_store.commit_evaluation(batch, _result(batch))
+    assert await evaluation_store.claim_evaluation("alice", "channel", batch_size=8, model="test") is None
+    async with relationship_store.factory() as db:
+        relation = await db.get(UserRelation, ("alice", "channel"))
+        jobs = list((await db.execute(select(RelationshipEvidence))).scalars())
+    assert relation.trust == 34.0
+    assert len(jobs) == 2
+    assert [job.status for job in sorted(jobs, key=lambda job: job.turn_id)] == ["processed", "pending"]
 
 
 @pytest.mark.asyncio

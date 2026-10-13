@@ -872,6 +872,90 @@ async def test_interleaved_tool_results_remain_paired_without_operator_snapshots
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("inline_chars", [4000, 256])
+async def test_steering_inputs_follow_complete_tool_batch_once(agent_store: SimpleNamespace, inline_chars: int) -> None:
+    _scope, context_session = await _scope_and_session()
+    turn = await session_manager.start_turn(
+        context_session,
+        trigger_message_id="steered-batch",
+        user_id="alice",
+        user_name="Alice",
+        conversation_user_id=None,
+        fresh_context=False,
+    )
+    recorder = AgentTurnRecorder()
+    recorder.record_user_input("Original question", user_name="Alice", fresh_context=False)
+    for kind, ref in (
+        ("assistant_tool_call", "a"),
+        ("steer_received", "private-receipt"),
+        ("user_input", "Supplement one"),
+        ("assistant_tool_call", "b"),
+        ("tool_result", "a"),
+        ("user_input", "Supplement two"),
+        ("tool_result", "b"),
+        ("steer_applied", "private-application"),
+        ("steer_checkpoint", "private-checkpoint"),
+    ):
+        if kind in {"assistant_tool_call", "tool_result"}:
+            recorder.append(
+                kind,
+                tool_name="lookup",
+                execution_ref=ref,
+                tool_call_id=ref,
+                payload={"arguments": {"key": ref * 500}}
+                if kind == "assistant_tool_call"
+                else {"result": {"found": ref}},
+                status="succeeded" if kind == "tool_result" else "running",
+            )
+        else:
+            recorder.append(kind, payload={"content": ref}, model_visible=True)
+    recorder.record_assistant_output("Complete answer")
+    await agent_events.persist_agent_events(turn.id, recorder.events)
+    await session_manager.finish_turn(turn.id, status="completed", final_text="Complete answer")
+    selection = await context_builder.select_session_context(
+        context_session,
+        system="system",
+        current_message={"role": "user", "content": "next question"},
+        model_name="test-model",
+        max_input_tokens=100_000,
+        output_reserve_tokens=1000,
+        rollover_ratio=0.9,
+        minimum_recent_turns=1,
+        inline_event_chars=inline_chars,
+        fresh_context=False,
+        tool_parameters=_TOOL_PARAMETERS,
+    )
+    messages = selection.messages
+    assert [message["content"] for message in messages if message["role"] == "user"] == [
+        "Original question",
+        "Supplement one",
+        "Supplement two",
+        "next question",
+    ]
+    if inline_chars == 4000:
+        assert [message["role"] for message in messages] == [
+            "user",
+            "assistant",
+            "tool",
+            "tool",
+            "user",
+            "user",
+            "assistant",
+            "user",
+        ]
+        assert [call["id"] for call in messages[1]["tool_calls"]] == ["a", "b"]
+        assert [message["tool_call_id"] for message in messages[2:4]] == ["a", "b"]
+    else:
+        assert [message["role"] for message in messages] == ["user", "assistant", "user", "user", "assistant", "user"]
+        batch = json.loads(messages[1]["content"])["historical_tool_batch"]
+        assert [call["id"] for call in batch["calls"]] == ["a", "b"]
+        assert [result["tool_call_id"] for result in batch["results"]] == ["a", "b"]
+    assert "private-" not in json.dumps(messages)
+    handoff = await session_handoff._source_events(context_session, 20_000)
+    assert all(not item["type"].startswith("steer_") for item in handoff)
+
+
+@pytest.mark.asyncio
 async def test_user_input_images_are_copied_to_private_audit_attachments(tmp_path: Path) -> None:
     png = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
@@ -1366,3 +1450,122 @@ async def test_flushed_event_sequences_stay_frozen_against_earlier_tool_timestam
     assert [event.event_type for event in pending] == ["assistant_tool_call", "tool_result"]
     assert [event.sequence for event in pending] == [3, 4]
     assert all(event.created_at >= recorder.events[1].created_at for event in pending)
+
+
+@pytest.mark.asyncio
+async def test_turn_inspection_retains_root_supplements_and_actual_application_times(
+    agent_store: SimpleNamespace,
+) -> None:
+    _scope, context_session = await _scope_and_session()
+    turn = await session_manager.start_turn(
+        context_session,
+        trigger_message_id="inspect-steering",
+        user_id="alice",
+        user_name="Alice",
+        conversation_user_id=None,
+        fresh_context=False,
+    )
+    received_at = "2026-10-13T00:00:01"
+    applied_at = "2026-10-13T00:00:04"
+    recorder = AgentTurnRecorder()
+    recorder.record_user_input("Original question", user_name="Alice", fresh_context=False)
+    recorder.append(
+        "steer_received",
+        payload={"content": "More detail", "steer_sequence": 2, "received_at": received_at, "text_truncated": True},
+        status="received",
+        model_visible=False,
+    )
+    recorder.append(
+        "user_input",
+        role="user",
+        payload={
+            "content": json.dumps({"speaker": "Alice", "content": "More detail"}),
+            "steer_sequence": 2,
+            "received_at": received_at,
+            "applied_at": applied_at,
+        },
+    )
+    recorder.append(
+        "steer_received",
+        payload={"content": "Pending request", "steer_sequence": 3, "received_at": received_at},
+        status="received",
+        model_visible=False,
+    )
+    recorder.append(
+        "steer_checkpoint",
+        payload={"steer_sequence": 3, "received_at": received_at, "reason": "turn_failed"},
+        status="unapplied",
+        model_visible=False,
+    )
+    await agent_events.persist_agent_events(turn.id, recorder.events)
+    events = await agent_events.load_turn_events(turn.id)
+    views = [serialize_event_view(event, load_event_payload(event)) for event in events]
+    assert views[0]["title"] == "\u7528\u6237\u8f93\u5165"
+    assert "steering" not in views[0]
+    assert views[2]["title"] == "\u8865\u5145\u8f93\u5165"
+    assert views[2]["message"]["content"] == "More detail"
+    assert views[2]["steering"] == {
+        "sequence": 2,
+        "status": "applied",
+        "received_at": received_at,
+        "applied_at": applied_at,
+        "reason": None,
+    }
+    assert views[1]["steering"]["status"] == "received"
+    assert views[1]["message"]["truncated"] is True
+    assert views[3]["steering"]["applied_at"] is None
+    assert views[4]["steering"]["status"] == "unapplied"
+    summaries = await session_inspection.turn_list_summaries([turn])
+    assert summaries[turn.id]["input_count"] == 2
+    assert summaries[turn.id]["input_preview"] == "Original question\n\nMore detail"
+
+
+@pytest.mark.asyncio
+async def test_handoff_keeps_one_turns_own_inputs_in_order_and_never_partial_source_inputs(
+    agent_store: SimpleNamespace,
+) -> None:
+    _scope, context_session = await _scope_and_session()
+    turn = await session_manager.start_turn(
+        context_session,
+        trigger_message_id="handoff-steering",
+        user_id="alice",
+        user_name="Alice",
+        conversation_user_id=None,
+        fresh_context=False,
+    )
+    recorder = AgentTurnRecorder()
+    recorder.record_user_input(
+        json.dumps({"speaker": "Alice", "content": "Original question"}), user_name="Alice", fresh_context=False
+    )
+    for sequence, content in enumerate(("More detail", "More detail"), start=2):
+        stored = json.dumps({"content": content, "forwarded_messages": [{"content": "Bob's quoted context"}]})
+        recorder.append(
+            "user_input",
+            payload={"content": json.dumps({"speaker": "Alice", "content": stored}), "steer_sequence": sequence},
+        )
+    recorder.append("steer_received", payload={"content": "Pending administrative input"}, model_visible=False)
+    recorder.append("context_snapshot", payload={"content": "Ambient group context"}, model_visible=False)
+    recorder.record_assistant_output("Final answer")
+    await agent_events.persist_agent_events(turn.id, recorder.events)
+    await session_manager.finish_turn(turn.id, status="completed", final_text="Final answer")
+    source = await session_handoff._source_events(context_session, 20_000)
+    assert [item["content"] for item in source if item["type"] == "user_input"] == [
+        "Original question",
+        "More detail",
+        "More detail",
+    ]
+    assert "Bob's quoted context" not in json.dumps(source)
+    assert "Ambient group context" not in json.dumps(source)
+    assert "Pending administrative input" not in json.dumps(source)
+    fallback = session_handoff._fallback_handoff(source, 5000)
+    assert fallback["topic"] == "Original question\n\nMore detail\n\nMore detail"
+    assert fallback["last_visible_exchange"] == {
+        "user": "Original question\n\nMore detail\n\nMore detail",
+        "assistant": "Final answer",
+    }
+    required = sum(
+        len(json.dumps(item, ensure_ascii=False, separators=(",", ":"))) + 1
+        for item in source
+        if item["type"] == "user_input"
+    )
+    assert await session_handoff._source_events(context_session, required + 1) == []
