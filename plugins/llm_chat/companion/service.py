@@ -334,7 +334,19 @@ class CompanionService(Service):
                 if scope is None:
                     continue
                 account = self._accounts.get((scope.platform, scope.account_id))
-                if account is None or not await self._availability.online(account):
+                if account is None:
+                    continue
+                members = await store.read_members(
+                    scope.id, mode.persona_key, now=self._clock(), member_idle_days=limits.member_idle_days
+                )
+                if any(
+                    participant_turn_active(
+                        scope.platform, scope.account_id, scope.channel_id, member.platform_user_id
+                    )
+                    for member in members
+                ):
+                    continue
+                if not await self._availability.online(account):
                     continue
                 input_revision = self._input_revisions.get((scope.platform, scope.account_id, scope.channel_id), 0)
                 claim = await store.claim_review(

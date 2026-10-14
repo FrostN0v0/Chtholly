@@ -16,10 +16,12 @@ from companion_helpers import (
     until,
     config,
     settled,
+    response,
     native_rows,
     enable_member,
     install_provider,
 )
+from arclet.letoderea.context import Contexts
 
 from plugins.llm_chat import agent_turn_setup
 from utils.companion_core import LifePlan, LifeEvent, LifeState, AttentionUpdate, ContactProposal, ReflectionProposal
@@ -27,6 +29,7 @@ from plugins.llm_chat.models import AgentTurn, Conversation, RelationshipEvidenc
 from plugins.llm_chat.identity import ChatIdentity
 from plugins.llm_chat.companion import store
 from plugins.llm_chat.image_inputs import ImageInputs
+from plugins.llm_chat.channel_turns import steer_participant_turn
 from plugins.llm_chat.core.delivery import DeliveryState
 from plugins.llm_chat.group_delivery import group_delivery_scope
 from plugins.llm_chat.tools._delivery import send_with_delivery
@@ -93,6 +96,46 @@ async def test_missing_normal_and_off_modes_make_zero_requests_and_no_native_pro
         await settled(worker)
         assert payloads == native_transport.network.lookups == native_transport.network.wire == []
     finally:
+        await worker.aclose()
+
+
+@pytest.mark.asyncio
+async def test_active_ordinary_chat_preserves_the_daily_reflection_slot(
+    companion_db, native_transport, monkeypatch
+):
+    native_scope = await scope(companion_db)
+    await enable_member(companion_db, native_scope)
+    payloads = install_provider(monkeypatch, [response(ReflectionProposal(life=LifeState()).model_dump_json())])
+    entered, release = asyncio.Event(), asyncio.Event()
+    clock = Clock()
+
+    @steer_participant_turn
+    async def ordinary_chat(session, ctx):
+        entered.set()
+        await release.wait()
+
+    worker = CompanionService(
+        config(companion_daily_reflections=1), accounts=lambda: [native_transport.account], clock=clock
+    )
+    ordinary = asyncio.create_task(ordinary_chat(native_transport.session(), Contexts()))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await worker.start()
+        for _ in range(3):
+            await settled(worker)
+            clock.advance(minutes=1)
+        assert payloads == []
+        assert await native_rows(companion_db, CompanionReview) == []
+
+        release.set()
+        await asyncio.wait_for(ordinary, 5)
+        await settled(worker)
+        assert len(payloads) == 1
+        reviews = await native_rows(companion_db, CompanionReview)
+        assert [review.status for review in reviews] == ["completed"]
+    finally:
+        release.set()
+        await asyncio.wait_for(ordinary, 5)
         await worker.aclose()
 
 

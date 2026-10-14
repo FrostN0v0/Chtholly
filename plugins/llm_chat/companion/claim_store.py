@@ -105,6 +105,30 @@ async def _user_history(
     return last_contact, last_user
 
 
+async def read_contact_timing(
+    db: Any, member: CompanionMember, *, now: datetime, limits: CompanionLimits
+) -> dict[str, object]:
+    """Expose sampled timing facts, never a reservation or delivery capability."""
+    day = now.astimezone(SHANGHAI).date().isoformat()
+    count = await _budget(db, member.scope_id, member.user_id, day)
+    last_contact, last_user = await _user_history(db, member)
+    user_time = aware(last_user)
+    assert user_time is not None
+    reason = contact_block_reason(
+        now,
+        last_contact=aware(last_contact),
+        last_user_at=user_time,
+        contacts_today=count,
+        limits=limits,
+    )
+    return {
+        "eligible": reason is None,
+        "block_reason": reason,
+        "contacts_today": count,
+        "activity_after_contact": None if last_contact is None else last_user > last_contact,
+    }
+
+
 async def claim_contact(
     scope_id: int,
     persona_key: str,
