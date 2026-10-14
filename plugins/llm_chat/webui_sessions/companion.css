@@ -45,10 +45,6 @@
   .companion-workspace { grid-template-columns: minmax(300px, 1fr) minmax(360px, 1.1fr) minmax(440px, 1.7fr); }
 }
 @media (max-width: 1100px) {
-  .companion-workspace { grid-template-columns: minmax(230px, .9fr) minmax(280px, 1fr) minmax(320px, 1.5fr); }
-  .companion-detail-scroll { padding: 18px; }
-}
-@media (max-width: 760px) {
   .companion-workspace { display: flex; flex-direction: column; }
   .companion-workspace > .panel { flex: 1; border-right: 0; }
   .companion-mobile-navigation { display: flex; flex: none; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
