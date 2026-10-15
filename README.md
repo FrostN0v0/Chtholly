@@ -88,7 +88,7 @@ uv run --locked main.py --check
 
 检查提示配置迁移时，按对应迁移说明操作；提示缺少资源时运行 `--prepare`，检查通过后再启动。仅 `git pull` 后直接用旧虚拟环境运行，不会自动完成依赖和配置升级。
 
-`uv.lock` 固定兼容组合，包含 Entari、WebUI、HTMLRender 补丁 wheel 与 LLM Git 版本。HTMLRender `0.1.0+chtholly.1` 修复驱动与安装器浏览器缓存不一致；补丁 wheel 随仓库提供，可用 `python scripts/build_patched_wheel.py --package entari`、`--package webui` 或 `--package htmlrender` 重建，不手改 `.venv`。干净环境验证入口为 `uv run --locked python scripts/smoke_startup.py`，CI 在 Windows 与 Linux 上检查新安装及本地配置升级路径。
+`uv.lock` 固定兼容组合，包含 Entari、WebUI、HTMLRender、Satori 补丁 wheel 与 LLM Git 版本。HTMLRender `0.1.0+chtholly.1` 修复驱动与安装器浏览器缓存不一致；Satori 补丁防止单个协议适配器结束时卸载整个 WebUI。`satori-python` 和 `satori-python-server` 都携带服务端源码，必须同时使用仓库制品，避免安装顺序覆盖修复。补丁可用 `python scripts/build_patched_wheel.py --package entari`、`--package webui`、`--package htmlrender`、`--package satori` 和 `--package satori-server` 分别重建，不手改 `.venv`。干净环境验证入口为 `uv run --locked python scripts/smoke_startup.py`，CI 在 Windows 与 Linux 上检查新安装及本地配置升级路径。
 
 更多框架用法见 [Entari 文档](https://arclet.top/tutorial/entari/)。
 

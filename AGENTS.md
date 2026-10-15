@@ -25,6 +25,7 @@
 - **命令系统**: arclet-alconna（Entari 内建 `command` 模块）
 - **服务管理**: launart（`Service` 基类用于跨插件依赖注入）
 - **协议适配器**: `satori-python-adapter-onebot11`（默认）；`entari-plugin-server` 使用 `direct_adapter: true` 与 Entari 直连，此模式不得再配置 `basic.network`。官方 QQ 沙箱群聊与单聊事件必须在 `@qq.websocket` 的 `intent.c2c_group_at_messages` 下启用；写在适配器顶层会被配置模型忽略。QQ WebSocket 的 `token` 字段已废弃，不得配置。当前协议栈仍以 Python 3.10 运行，待 Python 3.14 兼容性确认后升级
+- **Satori 服务生命周期**: `satori-python 1.3.9.post1+chtholly.1` 与 `satori-python-server 1.3.7+chtholly.1` 共同固定服务端补丁；两个官方分发均携带 `satori/server/__init__.py`，必须用 `scripts/build_patched_wheel.py --package satori` 与 `--package satori-server` 配套重建并安装，避免干净同步时互相覆盖。共享 HTTP 挂载属于 Server，不能因某个适配器的 `blocking-completed` 提前清理；插件 Service 由 Launart sideload 时，这会造成 Uvicorn 仍监听但 WebUI、静态资源及 API 全部返回空 404。回归必须使用真实 sideload 生命周期，覆盖适配器自然结束、卸载、其他适配器继续存活及宿主正常关闭；部署须验证实际页面和认证，不能仅凭 systemd active 判断恢复。
 - **Satori 服务鉴权**: `server.token` 只校验 Satori 事件 WebSocket 的 Identify token；当前锁定的 Satori Server HTTP action API 不校验该 token，因此共享的 Satori/WebUI 后端必须保持 `127.0.0.1` 监听。公网管理只能通过独立 HTTPS/OIDC 网关与明确的管理路由白名单进入，不得直接反代整个端口；Satori/OneBot 和自动 API 文档不得公开。SSH 隧道保留应急访问。OneBot 适配器的 `access_token` 只保护对应适配器连接，三者不得混用。
 - **配置模型**: `BasicConfModel`（默认，dataclass 风格）/ Pydantic `BaseModel`（`arclet.entari.config.models.pyd`）/ msgspec `Struct`
 - **HTTP 客户端**: httpx；浏览器截图的受控公网出口使用 aiohttp 自定义 resolver 固定已校验公网 IP
