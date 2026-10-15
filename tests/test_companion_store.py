@@ -285,6 +285,7 @@ async def test_scope_and_persona_states_are_private_and_rebinding_fences(compani
 @pytest.mark.asyncio
 async def test_real_chat_is_idempotent_neutral_feedback_and_late_review_loses(companion_db):
     member = await enable_member(companion_db)
+    before = await store.get_mode(1)
     review = await store.claim_review(1, "alice", now=NOW)
     native_id = await turn(companion_db, at=NOW)
     changed = await store.record_chat(
@@ -296,6 +297,7 @@ async def test_real_chat_is_idempotent_neutral_feedback_and_late_review_loses(co
         turn_id=native_id,
         now=NOW,
     )
+    after = await store.get_mode(1)
     replay = await store.record_chat(
         1,
         "alice",
@@ -307,14 +309,90 @@ async def test_real_chat_is_idempotent_neutral_feedback_and_late_review_loses(co
     )
     assert changed == replay
     assert changed.version == member.version + 1
+    assert changed.last_turn_id == native_id
+    assert changed.last_user_at == NOW
+    assert after.context_revision == before.context_revision + 1
+    assert await store.get_mode(1) == after
     assert not await store.finish_review(
         review, ReflectionProposal(life=LifeState(focus="Stale")), now=NOW, next_review_at=NOW
     )
-    assert (await store.get_mode(1)).next_review_at <= NOW + timedelta(minutes=1)
+    assert not await store.fail_review(
+        review, now=NOW, retry_at=NOW + timedelta(minutes=1), reason="late_interruption"
+    )
+    grace_due = NOW + timedelta(minutes=5)
+    before_grace = grace_due - timedelta(seconds=1)
+    assert await store.due_scopes(now=before_grace) == ()
+    assert await store.claim_review(1, "alice", now=before_grace) is None
+    assert tuple(mode.scope_id for mode in await store.due_scopes(now=grace_due)) == (1,)
+    replacement = await store.claim_review(1, "alice", now=grace_due)
+    assert replacement is not None
+    snapshot = await store.load_reflection(replacement, now=grace_due)
+    assert snapshot.members == (changed,)
+    assert set(snapshot.member_turn_ids[changed.member_ref]) == {native_id, member.last_turn_id}
     async with companion_db.factory() as db:
         relation = await db.get(UserRelation, ("u1", "group1"))
         assert (relation.affection, relation.trust) == (42.0, 53.0)
         assert await db.scalar(select(func.count()).select_from(CompanionChatEvidence)) == 2
+        assert (await db.get(CompanionReview, review.lease_token)).status == "cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheduled_minutes", [60, 180])
+async def test_completed_chats_preserve_later_review_without_spending_reservations(companion_db, scheduled_minutes):
+    member = await enable_member(companion_db)
+    first = await store.claim_review(1, "alice", now=NOW)
+    scheduled_at = NOW + timedelta(minutes=scheduled_minutes)
+    assert await store.finish_review(
+        first, ReflectionProposal(life=LifeState()), now=NOW, next_review_at=scheduled_at
+    )
+    before = await store.get_mode(1)
+    turn_ids = [member.last_turn_id]
+    for minute in (1, 10, 30):
+        chatted_at = NOW + timedelta(minutes=minute)
+        native_id = await turn(companion_db, at=chatted_at)
+        turn_ids.append(native_id)
+        updated = await store.record_chat(
+            1, "alice", user_id="u1", platform_user_id="p1", display_name="One", turn_id=native_id, now=chatted_at
+        )
+        assert updated.last_turn_id == native_id
+        assert (await store.get_mode(1)).next_review_at == scheduled_at
+        quiet_at = chatted_at + timedelta(minutes=5)
+        assert await store.due_scopes(now=quiet_at) == ()
+        assert await store.claim_review(1, "alice", now=quiet_at) is None
+    after = await store.get_mode(1)
+    assert after.context_revision == before.context_revision + 3
+    assert updated.version == member.version + 3
+    assert tuple(mode.scope_id for mode in await store.due_scopes(now=scheduled_at)) == (1,)
+    next_claim = await store.claim_review(1, "alice", now=scheduled_at)
+    assert next_claim is not None
+    snapshot = await store.load_reflection(next_claim, now=scheduled_at)
+    assert set(snapshot.member_turn_ids[member.member_ref]) == set(turn_ids)
+    async with companion_db.factory() as db:
+        assert await db.scalar(select(func.count()).select_from(CompanionReview)) == 2
+        assert await db.scalar(select(func.count()).select_from(CompanionChatEvidence)) == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheduled_minutes", [None, -30, 0, 2])
+async def test_completed_chat_defers_unscheduled_or_near_due_review_through_quiet_grace(
+    companion_db, scheduled_minutes
+):
+    await enable_member(companion_db)
+    async with companion_db.factory() as db, db.begin():
+        mode = await db.get(CompanionMode, 1)
+        mode.next_review_at = (
+            (NOW + timedelta(minutes=scheduled_minutes)).replace(tzinfo=None) if scheduled_minutes is not None else None
+        )
+    native_id = await turn(companion_db)
+    await store.record_chat(
+        1, "alice", user_id="u1", platform_user_id="p1", display_name="One", turn_id=native_id, now=NOW
+    )
+    grace_due = NOW + timedelta(minutes=5)
+    before_grace = grace_due - timedelta(seconds=1)
+    assert await store.due_scopes(now=before_grace) == ()
+    assert await store.claim_review(1, "alice", now=before_grace) is None
+    assert tuple(mode.scope_id for mode in await store.due_scopes(now=grace_due)) == (1,)
+    assert await store.claim_review(1, "alice", now=grace_due) is not None
 
 
 @pytest.mark.asyncio
@@ -351,6 +429,19 @@ async def test_review_contention_budget_and_sparse_rearm_without_contact(compani
     mode = await store.get_mode(1)
     assert mode.mode == "companion"
     assert mode.next_review_at == datetime(2026, 10, 10, 16, tzinfo=UTC)
+    for hour in (3, 6):
+        chatted_at = NOW + timedelta(hours=hour)
+        native_id = await turn(companion_db, at=chatted_at)
+        await store.record_chat(
+            1, "alice", user_id="u1", platform_user_id="p1", display_name="One", turn_id=native_id, now=chatted_at
+        )
+        assert (await store.get_mode(1)).next_review_at == mode.next_review_at
+        quiet_at = chatted_at + timedelta(minutes=5)
+        assert await store.due_scopes(now=quiet_at) == ()
+        assert await store.claim_review(1, "alice", now=quiet_at, daily_limit=1) is None
+    async with companion_db.factory() as db:
+        assert await db.scalar(select(func.count()).select_from(CompanionReview)) == 1
+        assert await db.scalar(select(func.count()).select_from(CompanionChatEvidence)) == 2
     next_claim = await store.claim_review(1, "alice", now=mode.next_review_at, daily_limit=1)
     assert next_claim is not None
     assert await store.fail_review(

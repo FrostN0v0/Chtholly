@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from entari_plugin_database import Base, get_session
 
+from utils.companion_core.policy import USER_QUIET_GRACE_MINUTES
+
 from .types import ModeSnapshot, MemberSnapshot, CompanionConflict
 from .models import (
     OWNED_TABLES,
@@ -311,9 +313,9 @@ async def record_chat(
         await invalidate(db, mode, current_time, "real_chat_feedback")
         mode.context_revision += 1
         mode.updated_at = current_time
-        # Debounce ordinary responses without consuming a model request here.
-        proposed_due = current_time + timedelta(minutes=1)
-        mode.next_review_at = min(mode.next_review_at, proposed_due) if mode.next_review_at else proposed_due
+        # Real chats postpone due reviews without pulling future reviews forward.
+        grace_due = current_time + timedelta(minutes=USER_QUIET_GRACE_MINUTES)
+        mode.next_review_at = max(mode.next_review_at, grace_due) if mode.next_review_at else grace_due
         return member_snapshot(member)
 
 

@@ -140,6 +140,47 @@ async def test_active_ordinary_chat_preserves_the_daily_reflection_slot(
 
 
 @pytest.mark.asyncio
+async def test_completed_chats_do_not_pull_forward_an_hourly_model_review(companion_db, native_transport, monkeypatch):
+    native_scope = await scope(companion_db)
+    member = await enable_member(companion_db, native_scope)
+    reflection = ReflectionProposal(life=LifeState(), review_after_minutes=60)
+    payloads = install_provider(monkeypatch, [response(reflection.model_dump_json()) for _ in range(2)])
+    clock = Clock()
+    worker = CompanionService(config(), accounts=lambda: [native_transport.account], clock=clock)
+    prepared_turns = []
+    try:
+        await worker.start()
+        await settled(worker)
+        assert len(payloads) == 1
+        for minute in (1, 10, 30):
+            clock.advance(minutes=minute - int((clock.now - NOW).total_seconds() / 60))
+            incoming = native_transport.session(message=f"completed-chat-{minute}")
+            prepared = await prepare_chat(incoming, content=f"A completed ordinary chat at minute {minute}")
+            prepared_turns.append(prepared)
+            await prepared.lifecycle.finalize_agent_turn("completed")
+            await worker.record_chat(incoming, prepared)
+            await settled(worker)
+            clock.advance(minutes=1)
+            await settled(worker)
+            assert len(payloads) == 1
+            assert (await store.get_mode(native_scope.id)).next_review_at == NOW + timedelta(hours=1)
+        members = await store.read_members(native_scope.id, "alpha", now=clock.now)
+        assert members[0].version == member.version + 3
+        assert members[0].last_turn_id == prepared_turns[-1].agent_access.turn_id
+        assert len(await native_rows(companion_db, CompanionChatEvidence)) == 4
+        assert len(await native_rows(companion_db, CompanionReview)) == 1
+        clock.advance(minutes=29)
+        await settled(worker)
+        assert len(payloads) == 2
+        assert [row.status for row in await native_rows(companion_db, CompanionReview)] == ["completed", "completed"]
+        assert native_transport.network.wire == []
+    finally:
+        await worker.aclose()
+        for prepared in prepared_turns:
+            await prepared.image_inputs.aclose()
+
+
+@pytest.mark.asyncio
 async def test_life_and_concerns_continue_across_no_contact_rounds_and_restart(companion_db, native_transport):
     native_scope = await scope(companion_db)
     member = await enable_member(companion_db, native_scope)
@@ -442,8 +483,11 @@ async def test_cancel_after_native_ack_before_receipt_commit_preserves_confirmed
 @pytest.mark.asyncio
 async def test_real_chat_interrupts_old_idea_and_resolves_only_own_concern(companion_db, native_transport, monkeypatch):
     native_scope = await scope(companion_db)
-    alice = await enable_member(companion_db, native_scope)
-    bob = await enable_member(companion_db, native_scope, user="bob-unified", platform_user="platform-bob")
+    chatted_at = NOW - timedelta(minutes=15)
+    alice = await enable_member(companion_db, native_scope, at=chatted_at)
+    bob = await enable_member(
+        companion_db, native_scope, user="bob-unified", platform_user="platform-bob", at=chatted_at
+    )
     seeded_at = NOW - timedelta(minutes=10)
     initial = await store.claim_review(native_scope.id, "alpha", now=seeded_at)
     assert await store.finish_review(
@@ -516,6 +560,9 @@ async def test_real_chat_interrupts_old_idea_and_resolves_only_own_concern(compa
         assert (await store.read_companion_context(native_scope.id, "alpha", alice.user_id))["attention"][0][
             "status"
         ] == "open"
+        clock.advance(minutes=4)
+        await settled(worker)
+        assert len(calls) == 1
         clock.advance(minutes=1)
         await settled(worker)
         assert len(calls) == 2

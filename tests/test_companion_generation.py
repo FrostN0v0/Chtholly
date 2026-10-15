@@ -21,6 +21,7 @@ from companion_helpers import (
     native_rows,
     native_tools,
     enable_member,
+    completed_turn,
     install_provider,
 )
 from arclet.entari.const import ITEM_SESSION
@@ -69,7 +70,7 @@ from plugins.llm_chat.companion.service import CompanionService
 from plugins.llm_chat.reminders.runtime import reminder_decision_scope, current_reminder_decision
 from plugins.llm_chat.tools.finish_turn import register_finish_turn
 from plugins.llm_chat.companion.internal import run_reflection
-from plugins.llm_chat.companion.observations import reflection_input
+from plugins.llm_chat.companion.observations import _episode_time, reflection_input
 
 pytest_plugins = ["companion_helpers"]
 
@@ -149,6 +150,10 @@ async def test_default_reflection_keeps_full_state_and_stable_persona_baseline_w
         assert snapshot["members"][0]["known_evidence_turn_ids"] == [member.last_turn_id]
         assert snapshot["members"][0]["episodes"][0]["turn_id"] == member.last_turn_id
         assert "I am waiting for my exam result" in snapshot["members"][0]["episodes"][0]["user"]
+        assert snapshot["members"][0]["episodes"][0]["created_at"] == (
+            NOW - timedelta(minutes=10, seconds=1)
+        ).isoformat()
+        assert snapshot["members"][0]["episodes"][0]["age_minutes"] == number * 10
         assert "Alpha is a quiet fictional painter." in system["content"]
         serialized = json.dumps(payload["messages"])
         assert native_scope.channel_id not in serialized
@@ -246,7 +251,7 @@ async def test_default_reflection_provider_failure_preserves_life_rearms_and_fin
     monkeypatch,
 ):
     native_scope = await scope(companion_db)
-    member = await enable_member(companion_db, native_scope)
+    member = await enable_member(companion_db, native_scope, at=NOW - timedelta(minutes=15))
     seeded_at = NOW - timedelta(minutes=10)
     attention = AttentionUpdate(
         member_ref=member.member_ref,
@@ -295,7 +300,7 @@ async def test_default_reflection_unload_cancels_provider_and_drains_private_aud
     companion_db, native_transport, monkeypatch
 ):
     native_scope = await scope(companion_db)
-    member = await enable_member(companion_db, native_scope)
+    member = await enable_member(companion_db, native_scope, at=NOW - timedelta(minutes=15))
     seeded_at = NOW - timedelta(minutes=10)
     attention = AttentionUpdate(
         member_ref=member.member_ref,
@@ -343,6 +348,100 @@ async def test_default_reflection_unload_cancels_provider_and_drains_private_aud
         assert await native_rows(companion_db, Conversation) == []
     finally:
         await worker.aclose()
+
+
+def test_absent_legacy_episode_time_remains_explicitly_unknown():
+    assert _episode_time(None, NOW) == {
+        "created_at": None,
+        "created_at_local": None,
+        "age_minutes": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_reflection_input_preserves_native_episode_times_ownership_and_whole_record_bounds(companion_db):
+    native_scope = await scope(companion_db)
+    alice_at = NOW - timedelta(hours=3)
+    bob_at = NOW - timedelta(minutes=35)
+    later_at = NOW - timedelta(minutes=20)
+    alice = await enable_member(companion_db, native_scope, at=alice_at)
+    bob = await enable_member(
+        companion_db, native_scope, user="bob-unified", platform_user="platform-bob", at=bob_at
+    )
+    later = await completed_turn(
+        companion_db, native_scope, user=alice.user_id, text="Please end this exchange for now.", at=later_at
+    )
+    assert await store.record_chat(
+        native_scope.id,
+        "alpha",
+        user_id=alice.user_id,
+        platform_user_id=alice.platform_user_id,
+        display_name=alice.display_name,
+        turn_id=later.id,
+        now=later_at,
+    )
+    other_scope = await scope(companion_db, channel="unrelated-group")
+    unrelated = await enable_member(companion_db, other_scope, at=NOW - timedelta(minutes=12))
+    claim = await store.claim_review(native_scope.id, "alpha", now=NOW)
+    snapshot = await store.load_reflection(claim, now=NOW)
+    local_now = NOW.astimezone(timezone(timedelta(hours=8)))
+    payload, ownership = await reflection_input(
+        snapshot,
+        scope_id=native_scope.id,
+        channel_id=native_scope.channel_id,
+        limits=companion_limits(config()),
+        now=local_now,
+        available_chars=config().companion_input_chars,
+    )
+    encoded = json.loads(build_reflection_prompt(payload, now=local_now).splitlines()[-1])
+    members = {item["member_ref"]: item for item in encoded["members"]}
+    assert ownership == {
+        alice.member_ref: (alice.last_turn_id, later.id),
+        bob.member_ref: (bob.last_turn_id,),
+    }
+    assert members[alice.member_ref]["last_user_age_minutes"] == 20
+    assert [item["turn_id"] for item in members[alice.member_ref]["episodes"]] == [alice.last_turn_id, later.id]
+    assert [item["turn_id"] for item in members[bob.member_ref]["episodes"]] == [bob.last_turn_id]
+    expected = {
+        alice.last_turn_id: (alice.user_id, alice_at, 180, "I am waiting for my exam result"),
+        later.id: (alice.user_id, later_at, 20, "Please end this exchange for now."),
+        bob.last_turn_id: (bob.user_id, bob_at, 35, "I am waiting for my exam result"),
+    }
+    episodes = {}
+    for member_ref, item in members.items():
+        assert item["known_evidence_turn_ids"] == list(ownership[member_ref])
+        for episode in item["episodes"]:
+            turn_id = episode["turn_id"]
+            owner, finished_at, age, text = expected[turn_id]
+            created_at = finished_at - timedelta(seconds=1)
+            assert turn_id in ownership[member_ref]
+            assert episode == {
+                "turn_id": turn_id,
+                "speaker": owner,
+                "outcome": "completed",
+                "created_at": created_at.isoformat(),
+                "created_at_local": created_at.astimezone(local_now.tzinfo).isoformat(),
+                "age_minutes": age,
+                "user": text,
+                "assistant": "I understand.",
+            }
+            episodes[turn_id] = episode
+    assert set(episodes) == set(expected)
+    assert unrelated.last_turn_id not in episodes
+    budget = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))) - 1
+    bounded, bounded_ownership = await reflection_input(
+        snapshot,
+        scope_id=native_scope.id,
+        channel_id=native_scope.channel_id,
+        limits=companion_limits(config()),
+        now=local_now,
+        available_chars=budget,
+    )
+    assert bounded_ownership == ownership
+    assert len(json.dumps(bounded, ensure_ascii=False, separators=(",", ":"))) <= budget
+    retained = [episode for item in bounded["members"] for episode in item["episodes"]]
+    assert 0 < len(retained) < len(episodes)
+    assert all(episode == episodes[episode["turn_id"]] for episode in retained)
 
 
 @pytest.mark.asyncio
@@ -420,8 +519,10 @@ async def test_native_reflection_reserves_all_member_attention_before_optional_o
     budget_delta,
 ):
     native_scope = await scope(companion_db)
-    alice = await enable_member(companion_db, native_scope)
-    bob = await enable_member(companion_db, native_scope, user="bob-unified", platform_user="platform-bob")
+    alice = await enable_member(companion_db, native_scope, at=NOW - timedelta(minutes=15))
+    bob = await enable_member(
+        companion_db, native_scope, user="bob-unified", platform_user="platform-bob", at=NOW - timedelta(minutes=15)
+    )
     attention = [
         AttentionUpdate(
             member_ref=member.member_ref,

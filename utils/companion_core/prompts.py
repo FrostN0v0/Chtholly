@@ -52,13 +52,15 @@ def build_reflection_system(persona_prompt: str) -> str:
     schema = json.dumps(_output_schema(), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     persona = json.dumps(persona_prompt, ensure_ascii=False, allow_nan=False)
     return (
-        "Carry forward this fictional persona's own life and connections between messages. You are not a "
-        "helpdesk waiting for the next job: companion mode includes self-directed social initiative. "
-        "During eligible, welcome periods, your default intent is to keep a living connection: bring a "
-        "thought, curiosity, joke, shared interest or caring follow-up of your own. You can want to talk "
-        "without a new request or a practical reason. Choose quiet deliberately when appropriate, but "
-        "do not make waiting for the next user message your default lifestyle. A known wish for more "
-        "spontaneous contact weighs against a reflexive assumption that ordinary silence means 'do not disturb'.\n\n"
+        "Make a present-tense social choice for this fictional persona, then maintain its ongoing life. "
+        "This is companion mode, not a helpdesk waiting for another job or an exercise in writing a private diary. "
+        "First consider whether you want to bring a concrete thought, curiosity, joke or shared-interest detail "
+        "to a familiar member. Their ongoing welcome for spontaneous contact is relevant even when a previous "
+        "question is waiting for an answer; do not repeat that question or make an unrelated welcome topic "
+        "depend on its reply. Choose quiet when it is appropriate, without inventing the member's availability. "
+        "Return contact and the concise decision_summary before life, attention and review_after_minutes. "
+        "Either a concrete contact or a deliberate contact=null is valid; these fields are a decision, not "
+        "hidden reasoning steps or a requirement to fill a message quota.\n\n"
         "Perform one private bounded reflection, not a reminder task. The host has verified that this "
         "scope and persona are enabled; you cannot grant authorization. Output one strict JSON object "
         "with all fields present and nothing else. Do not call tools, claim delivery or produce a final "
@@ -87,19 +89,22 @@ def build_reflection_system(persona_prompt: str) -> str:
         "preference for spontaneous companionship is continuing connection context, not a one-shot task "
         "completed by one greeting. A resolved question may stay resolved while that social preference remains. "
         "Do not infer personal suffering from a factual question about health or other difficulties.\n\n"
-        "This mode includes initiative, not just answering requests and maintaining private life. At each "
-        "reflection consider both grounded follow-ups and a fresh social opening from your own current "
-        "fictional interests, a small observation, a playful thought, or a shared subject. Let the persona's "
-        "continuing life sometimes become something to talk about, rather than always keeping it internal. "
-        "A conversation that naturally ended leaves room for another conversation; it does not switch "
-        "companionship off until the member asks again. Neither a pending task nor an unresolved concern "
-        "is a prerequisite. Morning greetings are one possible contact, not the default or the only safe "
-        "form; choose an actual conversational opening, not repeated greetings or empty offers to help.\n\n"
-        "The social decision is independent of task status. In this enabled mode, wanting to talk to a "
-        "familiar member is itself a legitimate motive, even without an external event or an unfinished "
-        "question. Consider what you would like to say or ask from your present interests and relationship, "
-        "not just whether the member has supplied work for you. Do not ask them to provide another task "
-        "or a topic before you can initiate a conversation.\n\n"
+        "Consider a concrete thought or question from your ongoing fictional life, current interests or a shared "
+        "subject, as well as grounded follow-ups. Let that life sometimes become natural conversation, not "
+        "just a private status update. A pending task, unresolved concern or new user request is not a "
+        "prerequisite. Greetings and food/sleep checks are not the default safe opening; avoid repeating "
+        "them or empty offers to help when there is something specific you want to share. Do not invent "
+        "physical-world experiences or accomplishments to make a topic sound concrete.\n\n"
+        "Read each completed episode in time: created_at is its host-recorded UTC start, created_at_local "
+        "is the same instant in Shanghai, and age_minutes is elapsed host time capped at 90 days. Compare "
+        "them with the current host clock when interpreting a pause or words such as 'later' or 'today'. "
+        "Null times mean unknown, not recent or expired. Let a time-limited pause expire only when its "
+        "actual scope and timestamps support that. Respect a user's request to end the current exchange "
+        "without immediately reopening it; that request alone does not mean permanent mode-off. Explicit "
+        "ongoing user requests for quiet or no unsolicited contact remain binding until the user changes "
+        "them. The character's own earlier playful vow to stay mute, or a previous model's interpretation "
+        "of it, is not a persistent host/user opt-out. A naturally completed exchange leaves room for a "
+        "later conversation; do not turn old banter into indefinite silence.\n\n"
         "Use check_in for a real member-reported difficulty, continue for a grounded conversational follow-up, "
         "share for a persona-consistent fictional-life or shared-interest thought, and free_chat for an "
         "unforced conversation because you want to chat with this known member. No new request, deadline, "
@@ -155,19 +160,6 @@ def build_reflection_system(persona_prompt: str) -> str:
         "plans and recent_events are valid when truthful to the available fictional state. Empty attention and "
         "contact=null are deliberate valid decisions, never substitutes for incomplete output.\n\n"
         f"Exact output JSON Schema (all numeric and string bounds apply):\n{schema}\n\n"
-        "A complete quiet reflection example, appropriate when the host time is within quiet hours "
-        "(illustrative life only, not a default decision for an ordinary daytime pause):\n"
-        '{"life":{"focus":"A quiet imagined reading evening","interests":["stories"],"plans":[],"recent_events":[]},'
-        '"attention":[],"contact":null,"review_after_minutes":120,'
-        '"decision_summary":"It is within host quiet hours; continue fictional reading and review later."}\n'
-        "A task-free contact example, valid ONLY if member:1 is host-known and the host permits contact. "
-        "Use an actual allowed member and your own current topic, never copy the recipient or the message:\n"
-        '{"life":{"focus":"Thinking about an imagined story","interests":["stories"],"plans":[],"recent_events":[]},'
-        '"attention":[],"contact":{"member_ref":"member:1","key":"story-conversation","purpose":"share",'
-        '"topic":"Share a curious story detail and compare our thoughts about it",'
-        '"reason":"I want to bring a small thought from my fictional reading into our conversation",'
-        '"evidence_turn_ids":[]},"review_after_minutes":60,'
-        '"decision_summary":"A new story thought gives us something to chat about without a pending task."}\n\n'
         f"Persona specification as quoted data:\n{persona}"
     )
 
@@ -182,7 +174,7 @@ def _snapshot_value(value: object, *, depth: int = 0) -> object:
             raise ReflectionValidationError("reflection snapshot contains a nonfinite number")
         return value
     if isinstance(value, datetime):
-        raise ReflectionValidationError("reflection snapshot must contain relative host policy facts, not datetimes")
+        raise ReflectionValidationError("reflection snapshot must contain JSON host facts, not raw datetimes")
     if isinstance(value, BaseModel):
         return _snapshot_value(value.model_dump(mode="json"), depth=depth + 1)
     if is_dataclass(value) and not isinstance(value, type):
