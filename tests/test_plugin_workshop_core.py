@@ -40,7 +40,7 @@ def accepted(store, record):
             "passed",
             record.source_hash,
             (CheckResult("execution", True, "Observed pong"),),
-            framework_version="0.19.0rc2+chtholly.2",
+            framework_version="0.19.0rc3+chtholly.1",
             python_version="3.10.20",
             image_id="sha256:" + "a" * 64,
         ),

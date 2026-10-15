@@ -88,13 +88,13 @@ uv run --locked main.py --check
 
 检查提示配置迁移时，按对应迁移说明操作；提示缺少资源时运行 `--prepare`，检查通过后再启动。仅 `git pull` 后直接用旧虚拟环境运行，不会自动完成依赖和配置升级。
 
-`uv.lock` 固定兼容组合，包含 Entari、WebUI、HTMLRender 补丁 wheel 与 LLM Git 版本。HTMLRender `0.1.0+chtholly.1` 修复驱动与安装器浏览器缓存不一致；补丁 wheel 随仓库提供，可用 `python scripts/build_patched_wheel.py --package entari`、`--package webui` 或 `--package htmlrender` 重建，不手改 `.venv`。干净环境验证入口为 `uv run --locked python scripts/smoke_startup.py`，CI 在 Windows 与 Linux 上检查新安装及本地配置升级路径。
+`uv.lock` 固定兼容组合，包含 Entari、WebUI、HTMLRender 补丁 wheel 与 LLM Git 版本。Entari `0.19.0rc3+chtholly.1` 以原生 staged reload、插件所有权、子插件和 Service 生命周期为基础，仅保留仓库边界补丁；可用 `python scripts/build_patched_wheel.py --package entari` 重建。HTMLRender `0.1.0+chtholly.1` 修复驱动与安装器浏览器缓存不一致，WebUI `1.0.3+chtholly.4` 保留连接生命周期修复并嵌入主题；对应 wheel 可用同一构建器的 `--package webui` 或 `--package htmlrender` 重建，不手改 `.venv`。干净环境验证入口为 `uv run --locked python scripts/smoke_startup.py`，CI 在 Windows 与 Linux 上检查新安装及本地配置升级路径。
 
 更多框架用法见 [Entari 文档](https://arclet.top/tutorial/entari/)。
 
 ## WebUI 外观与配置应用
 
-管理页保留 Entari Logo 原色，使用中文、中性色卡片和语义状态色，支持深浅色与窄屏布局。会话页默认展示格式化正文、引用和实际回复；系统指令、工具记录在实色弹窗中阅读，原始数据按需切换。关系前后数值与增减合并为一张五轴图；Token 显示 K/M，并提供精确值与输入/输出占比。轮次默认最新在上，可切换排序。原生主题随 WebUI `1.0.3+chtholly.3` 补丁 wheel 安装；升级需同步源码并运行 `uv sync --locked --all-extras`，扩展页后端、`utils/webui_theme/` 与页面资源必须配套更新。原生主题修改通过 `scripts/build_patched_wheel.py --package webui` 重建，不直接修改第三方安装目录。
+管理页保留 Entari Logo 原色，使用中文、中性色卡片和语义状态色，支持深浅色与窄屏布局。会话页默认展示格式化正文、引用和实际回复；系统指令、工具记录在实色弹窗中阅读，原始数据按需切换。关系前后数值与增减合并为一张五轴图；Token 显示 K/M，并提供精确值与输入/输出占比。轮次默认最新在上，可切换排序。原生主题随 WebUI `1.0.3+chtholly.4` 补丁 wheel 安装；升级需同步源码并运行 `uv sync --locked --all-extras`，扩展页后端、`utils/webui_theme/` 与页面资源必须配套更新。原生主题修改通过 `scripts/build_patched_wheel.py --package webui` 重建，不直接修改第三方安装目录。
 
 启用 `webui_config_apply` 后，已加载 LLM 的模型目录、全局及分模型凭证引用、接口地址、提示词与模型参数可通过原生“保存”直接热生效，不重启 Bot。正在执行的主聊天保持原模型直到本轮纠正与最终化结束，新轮次使用新配置；删除模型时同步修复默认选择，保留会话指针和历史。不显示常驻浮窗或独立重启菜单。
 

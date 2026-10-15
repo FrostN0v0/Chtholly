@@ -55,8 +55,8 @@ async def _load_native(record: VersionRecord, *, replace: bool) -> bool:
         package = module_name(record.plugin_name)
         configuration = dict(record.manifest.configuration)
         if replace:
-            return await reload_plugin(package, configuration)
-        return load_plugin(package, configuration) is not None
+            return bool(await reload_plugin(package, configuration))
+        return bool(load_plugin(package, configuration))
     finally:
         current_plugin.reset(token)
 

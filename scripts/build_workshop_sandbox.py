@@ -70,13 +70,18 @@ def collect_inputs(root: Path) -> tuple[dict[str, bytes], str, str]:
         "uv.lock": lock,
         wheel_path: wheel,
     }
-    webui_wheels = set(re.findall(r'vendor/webui/entari_plugin_webui-[^"\s/]+\.whl', lock.decode("utf-8")))
-    if len(webui_wheels) != 1:
-        raise ValueError("The current lock must identify exactly one vendored WebUI wheel")
-    webui_path = webui_wheels.pop()
-    if webui_path.encode() not in pyproject:
-        raise ValueError("Project and lock do not reference the same pinned WebUI wheel")
-    inputs[webui_path] = trusted_bytes(root, webui_path)
+    for directory, distribution in (
+        ("htmlrender", "entari_plugin_htmlrender"),
+        ("llm", "entari_plugin_llm"),
+        ("webui", "entari_plugin_webui"),
+    ):
+        matches = set(re.findall(rf'vendor/{directory}/{distribution}-[^"\s/]+\.whl', lock.decode("utf-8")))
+        if len(matches) != 1:
+            raise ValueError(f"The current lock must identify exactly one vendored {distribution} wheel")
+        path = matches.pop()
+        if path.encode() not in pyproject:
+            raise ValueError(f"Project and lock do not reference the same pinned {distribution} wheel")
+        inputs[path] = trusted_bytes(root, path)
     for name in WORKER_FILES:
         inputs[f"worker/{name}"] = trusted_bytes(root, f"utils/plugin_workshop_sandbox/{name}")
     return inputs, framework, hashlib.sha256(wheel).hexdigest()

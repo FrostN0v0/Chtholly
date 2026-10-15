@@ -2,27 +2,52 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+import asyncio
 from datetime import datetime, timezone, timedelta
 
 import pytest
 from jsonschema import ValidationError as SchemaValidationError, Draft202012Validator
+import pytest_asyncio
 from arclet.entari.config import config_model_validate
+from arclet.entari.plugin import niche
 from arclet.entari.plugin.model import PluginMetadata
 
 from utils.companion_core import CompanionLimits, contact_ready
 from plugins.llm_chat.config import LLMChatConfig
-from plugins.llm_chat.config_schema import LLMChatWebUIConfig
+from plugins.llm_chat.config_schema import localize_llm_chat_schema
 
 
-def test_llm_chat_metadata_exposes_localized_nested_persona_schema() -> None:
-    schema = PluginMetadata(name="llm_chat", config=LLMChatWebUIConfig).get_config_schema()
-    assert schema is not None
+@pytest_asyncio.fixture
+async def schema_owner():
+    owner = niche(f"llm-chat-schema-{uuid4().hex}", config={})(lambda _plugin: None)
+    owner.exec_apply()
+    owner.metadata = PluginMetadata(name="llm_chat", config=LLMChatConfig)
+    owner.register_schema(fragment=localize_llm_chat_schema, replace=True)
+    try:
+        yield owner
+    finally:
+        pending = owner.dispose()
+        if pending:
+            await asyncio.gather(*pending)
+
+
+def _persona_schema(schema):
+    ref = schema["properties"]["personas"]["additionalProperties"]["$ref"]
+    name = ref.rsplit("/", 1)[-1].replace("~1", "/").replace("~0", "~")
+    return schema["$defs"][name]
+
+
+def test_llm_chat_metadata_exposes_localized_nested_persona_schema(schema_owner) -> None:
+    assert schema_owner.metadata.config is LLMChatConfig
+    schema = schema_owner.config_schema()
     properties = schema["properties"]
     assert {"default_persona", "personas", "allowed_commands"} <= properties.keys()
     assert not {"persona", "self_reference_image"} & properties.keys()
-    persona_schema = properties["personas"]["additionalProperties"]
+    persona_schema = _persona_schema(schema)
     assert {"name", "prompt", "reference_image", "appearance"} == persona_schema["properties"].keys()
-    for item in [*properties.values(), *persona_schema["properties"].values()]:
+    config_fields = [item for name, item in properties.items() if not name.startswith(("$", "."))]
+    for item in [*config_fields, *persona_schema["properties"].values()]:
         for field in ("title", "description"):
             assert any("\u4e00" <= char <= "\u9fff" for char in item[field])
 
@@ -53,8 +78,8 @@ def test_unresolvable_persona_configuration_is_rejected(invalid: dict[str, objec
 
 
 @pytest.mark.parametrize("cap", [0, 24, 48])
-def test_contact_caps_are_accepted_by_native_schema_and_runtime(cap: int) -> None:
-    schema = PluginMetadata(name="llm_chat", config=LLMChatWebUIConfig).get_config_schema()
+def test_contact_caps_are_accepted_by_native_schema_and_runtime(cap: int, schema_owner) -> None:
+    schema = schema_owner.config_schema()
     validator = Draft202012Validator(schema["properties"]["companion_daily_contacts"])
     validator.validate(cap)
     configured = config_model_validate(LLMChatConfig, {"companion_daily_contacts": cap})
@@ -69,10 +94,60 @@ def test_contact_caps_are_accepted_by_native_schema_and_runtime(cap: int) -> Non
 
 
 @pytest.mark.parametrize("cap", [-1, 49, True])
-def test_unsupported_contact_caps_are_rejected_by_native_schema_and_runtime(cap: object) -> None:
-    schema = PluginMetadata(name="llm_chat", config=LLMChatWebUIConfig).get_config_schema()
+def test_unsupported_contact_caps_are_rejected_by_native_schema_and_runtime(cap: object, schema_owner) -> None:
+    schema = schema_owner.config_schema()
     validator = Draft202012Validator(schema["properties"]["companion_daily_contacts"])
     with pytest.raises(SchemaValidationError):
         validator.validate(cap)
     with pytest.raises((TypeError, ValueError)):
         config_model_validate(LLMChatConfig, {"companion_daily_contacts": cap})
+
+
+@pytest.mark.parametrize("limit", [1, 10, 50])
+def test_channel_context_bounds_are_accepted_by_native_schema_and_runtime(limit, schema_owner) -> None:
+    Draft202012Validator(schema_owner.config_schema()).validate({"channel_context_messages": limit})
+    assert config_model_validate(LLMChatConfig, {"channel_context_messages": limit}).channel_context_messages == limit
+
+
+@pytest.mark.parametrize("limit", [0, 51, True])
+def test_channel_context_bounds_are_rejected_by_native_schema_and_runtime(limit, schema_owner) -> None:
+    with pytest.raises(SchemaValidationError):
+        Draft202012Validator(schema_owner.config_schema()).validate({"channel_context_messages": limit})
+    with pytest.raises((TypeError, ValueError)):
+        config_model_validate(LLMChatConfig, {"channel_context_messages": limit})
+
+
+def test_native_nested_schema_references_validate_in_embedded_consumer(schema_owner) -> None:
+    embedded = schema_owner.config_schema(ref_root="/properties/llm_chat/")
+    schema = {"type": "object", "properties": {"llm_chat": embedded}}
+    configured = {
+        "default_persona": "custom",
+        "personas": {"custom": {"name": "Custom", "prompt": "Independent persona", "appearance": "Silver hair"}},
+    }
+    Draft202012Validator(schema).validate({"llm_chat": configured})
+    assert config_model_validate(LLMChatConfig, configured).personas["custom"].appearance == "Silver hair"
+
+
+@pytest.mark.parametrize(
+    "persona",
+    [
+        {"name": "Custom"},
+        {"prompt": "Independent persona"},
+        {"name": "Custom", "prompt": "Independent persona", "appearance": 7},
+    ],
+)
+def test_native_nested_schema_and_runtime_reject_invalid_persona(persona, schema_owner) -> None:
+    configured = {"default_persona": "custom", "personas": {"custom": persona}}
+    with pytest.raises(SchemaValidationError):
+        Draft202012Validator(schema_owner.config_schema()).validate(configured)
+    with pytest.raises((TypeError, ValueError)):
+        config_model_validate(LLMChatConfig, configured)
+
+
+def test_native_nested_schema_rejects_unknown_persona_fields(schema_owner) -> None:
+    configured = {
+        "default_persona": "custom",
+        "personas": {"custom": {"name": "Custom", "prompt": "Independent persona", "unknown": True}},
+    }
+    with pytest.raises(SchemaValidationError):
+        Draft202012Validator(schema_owner.config_schema()).validate(configured)

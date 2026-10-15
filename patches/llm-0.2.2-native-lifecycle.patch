@@ -1,0 +1,70 @@
+diff --git a/entari_plugin_llm/runtime.py b/entari_plugin_llm/runtime.py
+index b4f26c1..1ec6d23 100644
+--- a/entari_plugin_llm/runtime.py
++++ b/entari_plugin_llm/runtime.py
+@@ -14,7 +14,7 @@ from arclet.entari import Session
+ from arclet.letoderea.context import Contexts, generate_contexts
+ from arclet.letoderea.exceptions import ExitState, _ExitException
+ 
+-from .event import LLMToolEvent
++from .event import LLMToolEvent, tools_pub
+ from .sessions import SessionInfo
+ 
+ ToolExecutors = dict[str, tuple[Callable, Function]]
+@@ -60,6 +60,7 @@ async def run_llm_tools(
+ 
+     tool_context = await generate_contexts(
+         LLMToolEvent(session=session, llm_session=llm_session),
++        supplier=tools_pub.supplier,
+         inherit_ctx=ctx,
+     )
+     await asyncio.gather(*(execute_one(requirement, tool_context.copy()) for requirement in requirements))
+diff --git a/entari_plugin_llm/tools.py b/entari_plugin_llm/tools.py
+index 6fe1aa7..728d751 100644
+--- a/entari_plugin_llm/tools.py
++++ b/entari_plugin_llm/tools.py
+@@ -8,6 +8,7 @@ handles DI and lifecycle.
+ 
+ import importlib
+ import inspect
++import asyncio
+ from collections.abc import Awaitable, Callable, Iterable
+ from dataclasses import dataclass
+ from threading import Lock
+@@ -106,7 +107,7 @@ def load_tools(configured_tools: dict[str, dict[str, Any]]) -> None:
+             continue
+         if not path.startswith("agno."):
+             if plg := plugin.load_plugin(path):
+-                _configured_tool_plugins.add(plg.id)
++                _configured_tool_plugins.add(plg.plugin.id)
+             continue
+ 
+         module_path, _, class_name = path.rpartition(".")
+@@ -364,11 +365,25 @@ def get_agno_tools() -> tuple[list[Toolkit | Function], ToolExecutors]:
+         fn = registered.function.model_copy()
+         guard = guards.get(registered.plugin_id)
+ 
+-        async def execute(context, tool_args, sub=registered.subscriber, check=guard, tool_name=name):
++        async def execute(context, tool_args, entry=registered, check=guard, tool_name=name):
++            sub = entry.subscriber
++            if (
++                available_functions.get(sub.id) is not entry
++                or not sub.available
++                or (entry.owner is not None and not entry.owner.is_available)
++            ):
++                raise RuntimeError(f"Tool {tool_name} is no longer available")
+             if check is not None:
+                 check()
+             logger.debug(f"Calling tool: {tool_name} with args: {tool_args}")
+-            return await sub.handle(context, inner=True)
++            task = asyncio.current_task()
++            if task is not None:
++                sub._tasks.add(task)
++            try:
++                return await sub.handle(context, inner=True)
++            finally:
++                if task is not None:
++                    sub._tasks.discard(task)
+ 
+         executors[name] = (execute, fn)
+         tools.append(fn)

@@ -44,21 +44,33 @@ from plugins.llm_chat.web.policy import WebAccessLimits, llm_chat_web_access_sco
 from plugins.llm_chat.image_inputs import ImageInputs, image_inputs_scope
 from utils.llm_model_core.snapshot import pin_main_model, main_model_scope
 from plugins.llm_chat.core.delivery import llm_chat_delivery_scope
-from plugins.llm_chat.prepared_media import prepare_media, resolve_media, list_prepared_media, prepared_media_scope
+from plugins.llm_chat.prepared_media import (
+    prepare_media,
+    resolve_media,
+    list_prepared_media,
+    prepared_media_scope,
+)
 from plugins.llm_chat.core.tool_trace import (
     ToolTraceRecorder,
     llm_chat_tool_trace_scope,
     llm_chat_tool_execution_scope,
 )
 from plugins.llm_chat.runtime_context import llm_chat_context_scope
-from plugins.llm_chat.core.media_delivery import MediaIntent, ImageProvenance, media_intent_scope
+from plugins.llm_chat.core.media_delivery import (
+    MediaIntent,
+    ImageProvenance,
+    media_intent_scope,
+)
 from utils.tts_service_core.voice_catalog import (
     TTSVoiceOption,
     TTSVoiceCatalog,
     TTSReferenceOption,
     TTSSynthesisSelection,
 )
-from plugins.llm_chat.channel_message_refs import ChannelMessageReferences, channel_message_scope
+from plugins.llm_chat.channel_message_refs import (
+    ChannelMessageReferences,
+    channel_message_scope,
+)
 from plugins.llm_chat.web.reference_capture import WebReferenceCapture
 from plugins.llm_chat.web.screenshot_models import WebScreenshot
 from plugins.llm_chat.core.tool_trace_policy import DeliverySnapshot
@@ -78,6 +90,7 @@ from entari_plugin_htmlrender import (
 import entari_plugin_llm.service as llm_service_module
 from entari_plugin_llm.service import LLMService
 from arclet.entari.plugin.model import Plugin, PluginDispatcher, current_plugin
+from entari_plugin_llm.sessions import SessionInfo
 
 _LLM_CHAT_DIR = _ROOT / "plugins" / "llm_chat"
 _TOOL_RUNTIME_PATH = _LLM_CHAT_DIR / "tool_runtime.py"
@@ -104,7 +117,10 @@ async def _settle_dispose_tasks(pending: set[asyncio.Task[Any]] | None) -> None:
         else:
             raise AssertionError("Plugin cleanup escaped the active test event loop")
     if local_tasks:
-        await asyncio.gather(*local_tasks)
+        results = await asyncio.gather(*local_tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                raise result
 
 
 @dataclass
@@ -115,11 +131,11 @@ class _PluginHarness:
     snapshot: _RegistrySnapshot
     disposed: bool = False
 
-    async def dispose(self) -> None:
+    async def dispose(self, *, replacing: bool = False) -> None:
         if self.disposed:
             return
         try:
-            await _settle_dispose_tasks(self.plugin.dispose())
+            await _settle_dispose_tasks(self.plugin.dispose(replacing=replacing))
         finally:
             self.disposed = True
 
@@ -400,6 +416,7 @@ async def _temporary_plugin(
     *,
     config: Mapping[str, Any] | None = None,
     module_path: Path | None = None,
+    owner_id: str | None = None,
 ) -> AsyncIterator[_PluginHarness]:
     snapshot = _registry_snapshot()
     module_name = f"plugins.llm_chat._web_runtime_test_{uuid4().hex}"
@@ -422,7 +439,7 @@ async def _temporary_plugin(
     token: Any = None
     harness: _PluginHarness | None = None
     try:
-        plugin = Plugin(module_name, module, config=dict(config or {}))
+        plugin = Plugin(owner_id or module_name, module, config=dict(config or {}))
         setattr(module, "__plugin__", plugin)
         token = current_plugin.set(plugin)
         harness = _PluginHarness(
@@ -3790,7 +3807,7 @@ async def test_native_tool_runner_without_scope_blocks_before_factory(local_modu
         async with _registered_web_tools(local_modules, factory):
             requirement = _external_requirement("web_search", {"query": "attempted search"}, "native-search")
             response = RunOutput(requirements=[requirement])
-            assert await llm_service_module.run_llm_tools(response) is True
+            assert await llm_service_module.run_llm_tools(response, llm_service_module.get_agno_tools()[1]) is True
             result = json.loads(requirement.external_execution_result)
             assert result["ok"] is False
             assert "outside llm_chat" in result["error"]
@@ -3938,14 +3955,18 @@ async def test_native_artifact_tools_publish_source_and_deliver_exact_zip(
                     },
                     "publish-source",
                 )
-                await llm_service_module.run_llm_tools(RunOutput(requirements=[publication]))
+                await llm_service_module.run_llm_tools(
+                    RunOutput(requirements=[publication]), llm_service_module.get_agno_tools()[1]
+                )
                 result = json.loads(publication.external_execution_result)
                 assert result["ok"] is True, result
                 artifact = json.loads(result["data"])
                 delivery = _external_requirement(
                     "prepare_artifact", {"artifact_ref": artifact["artifact_ref"]}, "prepare-source"
                 )
-                await llm_service_module.run_llm_tools(RunOutput(requirements=[delivery]))
+                await llm_service_module.run_llm_tools(
+                    RunOutput(requirements=[delivery]), llm_service_module.get_agno_tools()[1]
+                )
                 delivered = json.loads(delivery.external_execution_result)
                 assert delivered["ok"] is True, delivered
                 prepared = json.loads(delivered["data"])
@@ -3955,7 +3976,9 @@ async def test_native_artifact_tools_publish_source_and_deliver_exact_zip(
                 delivery = _external_requirement(
                     "send_msg", {"segments": [{"type": "media", "media_ref": prepared["media_ref"]}]}, "send-source"
                 )
-                await llm_service_module.run_llm_tools(RunOutput(requirements=[delivery]))
+                await llm_service_module.run_llm_tools(
+                    RunOutput(requirements=[delivery]), llm_service_module.get_agno_tools()[1]
+                )
                 assert json.loads(delivery.external_execution_result)["ok"] is True
 
             data_url = session.sent[0][File][0].src
@@ -3975,7 +3998,7 @@ async def test_native_message_schema_accepts_ordered_segments_and_rejects_unsafe
         config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
         module_path=_TOOL_RUNTIME_PATH,
     ):
-        validator = Draft202012Validator(available_functions["send_msg"][1].parameters)
+        validator = Draft202012Validator(get_agno_tools()[1]["send_msg"][1].parameters)
         validator.validate(
             {
                 "segments": [
@@ -4029,7 +4052,7 @@ async def test_native_submission_schemas_accept_real_payloads_and_reject_wrong_n
                 local_modules.config.LLMChatConfig(web_artifacts_public_url=service.public_origin),
                 service=service,
             )
-            plugin_schema = Draft202012Validator(available_functions["submit_plugin"][1].parameters)
+            plugin_schema = Draft202012Validator(get_agno_tools()[1]["submit_plugin"][1].parameters)
             supplied = {"plugin_name": "dinner", "source_files": {"__init__.py": "pass"}, "manifest": manifest}
             plugin_schema.validate(supplied)
             assert not plugin_schema.is_valid({**supplied, "source_files": {"dinner/__init__.py": "pass"}})
@@ -4040,7 +4063,7 @@ async def test_native_submission_schemas_accept_real_payloads_and_reject_wrong_n
                 }
             )
             assert not plugin_schema.is_valid({"arguments": json.dumps(supplied)})
-            preview_schema = Draft202012Validator(available_functions["publish_web_preview"][1].parameters)
+            preview_schema = Draft202012Validator(get_agno_tools()[1]["publish_web_preview"][1].parameters)
             preview_schema.validate(
                 {"title": "Page", "source_files": [{"path": "index.html", "content": "<h1>Hello</h1>"}]}
             )
@@ -4092,7 +4115,9 @@ async def test_contextual_submission_saves_candidate_without_a_repeat_command(
             register_submit_plugin(harness.dispatcher, WorkshopToolContext(lambda: service, lambda _message: None))
             with llm_chat_tool_trace_scope(ToolTraceRecorder()):
                 outside = _external_requirement("submit_plugin", arguments, "outside-generation")
-                await llm_service_module.run_llm_tools(RunOutput(requirements=[outside]))
+                await llm_service_module.run_llm_tools(
+                    RunOutput(requirements=[outside]), llm_service_module.get_agno_tools()[1]
+                )
                 assert json.loads(outside.external_execution_result)["ok"] is False
                 assert await service.list_projects(observer) == []
                 with (
@@ -4100,7 +4125,9 @@ async def test_contextual_submission_saves_candidate_without_a_repeat_command(
                     llm_chat_delivery_scope(local_modules.delivery.DeliveryState()),
                 ):
                     submission = _external_requirement("submit_plugin", arguments, "contextual-submission")
-                    await llm_service_module.run_llm_tools(RunOutput(requirements=[submission]))
+                    await llm_service_module.run_llm_tools(
+                        RunOutput(requirements=[submission]), llm_service_module.get_agno_tools()[1]
+                    )
                     result = json.loads(submission.external_execution_result)
                     assert result["ok"] is True, result
             candidate = json.loads(result["data"])
@@ -4129,14 +4156,17 @@ async def test_local_generation_exposes_only_original_authorized_external_functi
 
         unrelated_builtin.__module__ = harness.module.__name__
         PluginDispatcher(harness.plugin, LLMToolEvent)(unrelated_builtin)
-        native = get_agno_tools()
+        native_tools, native_executors = get_agno_tools()
         with llm_chat_tool_trace_scope(ToolTraceRecorder()):
-            exposed = llm_service_module.get_agno_tools()
+            exposed, executors = llm_service_module.get_agno_tools()
         assert {function.name for function in exposed} == set(harness.module.registered_tools)
-        assert "unrelated_builtin" in {function.name for function in native}
+        assert set(executors) == set(harness.module.registered_tools)
+        assert "unrelated_builtin" in {function.name for function in native_tools}
+        assert "unrelated_builtin" in native_executors
         for function in exposed:
             assert "session" not in function.parameters["properties"]
-        assert llm_service_module.get_agno_tools() == native
+            assert executors[function.name][1] is function
+        assert set(llm_service_module.get_agno_tools()[1]) == set(native_executors)
         await harness.dispose()
         _assert_registry_matches(baseline)
 
@@ -4149,7 +4179,7 @@ async def test_native_reminder_schema_accepts_create_and_rejects_wrong_fields() 
 
     async with _temporary_plugin() as harness:
         register_reminder_tools(harness.dispatcher)
-        parameters = available_functions["reminder"][1].parameters
+        parameters = get_agno_tools()[1]["reminder"][1].parameters
         validator = Draft202012Validator(parameters)
         valid = {
             "request": {
@@ -4378,6 +4408,69 @@ async def test_native_reminder_resolve_survives_continuation_and_service_settlem
 
 
 @pytest.mark.asyncio
+async def test_configured_entari_tools_resolve_native_load_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    import entari_plugin_llm.tools as native_tools
+
+    register = importlib.import_module("plugins.llm_chat.tools._registration").register_tool
+
+    monkeypatch.setattr(native_tools, "_configured_tool_plugins", set())
+    monkeypatch.setattr(native_tools, "agno_tool_types", {})
+    baseline = {function.name for function in get_agno_tools()[0]}
+    async with _temporary_plugin() as harness:
+
+        async def configured_probe() -> str:
+            return "configured"
+
+        register(harness.dispatcher, configured_probe)
+        monkeypatch.setattr(native_tools._conf, "tools", {harness.plugin.id: {}})
+        native_tools.load_tools(native_tools._conf.tools)
+        tools, executors = get_agno_tools()
+        assert {function.name for function in tools} == baseline | {"configured_probe"}
+        requirement = _external_requirement("configured_probe", {}, "configured-plugin")
+        assert await llm_service_module.run_llm_tools(RunOutput(requirements=[requirement]), executors) is True
+        assert json.loads(requirement.external_execution_result) == {"ok": True, "data": "configured"}
+        await harness.dispose()
+        assert {function.name for function in get_agno_tools()[0]} == baseline
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inherit_session", [False, True])
+async def test_native_runner_supplies_session_dependencies_and_preserves_inherited_context(
+    inherit_session: bool,
+) -> None:
+    register = importlib.import_module("plugins.llm_chat.tools._registration").register_tool
+    session = _DeliveryToolSession()
+    llm_session = SessionInfo("native-session", 42, "Native DI", "test-model", True, 0, 0, datetime.now())
+    marker = object()
+    inherited = Contexts({"marker": marker})
+    if inherit_session:
+        inherited[ITEM_SESSION] = session
+        inherited["$llm_session"] = llm_session
+    observed: list[tuple[Session, SessionInfo, object]] = []
+
+    async def context_probe(session: Session, llm_session: SessionInfo, context: Contexts, count: int) -> int:
+        observed.append((session, llm_session, context["marker"]))
+        return count + 1
+
+    async with _temporary_plugin() as harness:
+        register(harness.dispatcher, context_probe)
+        _, executors = get_agno_tools()
+        requirement = _external_requirement("context_probe", {"count": 41}, "native-context")
+        assert (
+            await llm_service_module.run_llm_tools(
+                RunOutput(requirements=[requirement]),
+                executors,
+                llm_session=None if inherit_session else llm_session,
+                session=None if inherit_session else session,
+                ctx=inherited,
+            )
+            is True
+        )
+    assert observed == [(session, llm_session, marker)]
+    assert json.loads(requirement.external_execution_result) == {"ok": True, "data": 42}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("audit_enabled", [False, True])
 async def test_function_wire_schema_preserves_upstream_external_pause_and_continue(
     local_modules: SimpleNamespace,
@@ -4405,8 +4498,8 @@ async def test_function_wire_schema_preserves_upstream_external_pause_and_contin
 
     async with _temporary_plugin() as harness:
         wire_probe.__module__ = harness.module.__name__
-        harness.dispatcher(wire_probe)
-        function = available_functions["wire_probe"][1]
+        subscriber = harness.dispatcher(wire_probe)
+        function = available_functions[subscriber.id].function
         function.strict = True
         function.requires_confirmation = False
         function.approval_type = "audit"
@@ -4550,7 +4643,12 @@ async def test_external_session_di_is_isolated_between_simultaneous_generations(
             llm_chat_context_scope(_tool_context(session)),
             llm_chat_delivery_scope(local_modules.delivery.DeliveryState()),
         ):
-            assert await llm_service_module.run_llm_tools(RunOutput(requirements=[requirement])) is True
+            assert (
+                await llm_service_module.run_llm_tools(
+                    RunOutput(requirements=[requirement]), llm_service_module.get_agno_tools()[1]
+                )
+                is True
+            )
         assert json.loads(requirement.external_execution_result)["ok"] is True
         assert recorder.events[0].tool_call_id == text
 
@@ -4619,7 +4717,11 @@ async def test_read_only_batch_cancellation_settles_audit_and_does_not_start_que
             llm_chat_context_scope(_tool_context(session)),
             audit_module.model_audit_scope(audit),
         ):
-            task = asyncio.create_task(llm_service_module.run_llm_tools(RunOutput(requirements=requirements)))
+            task = asyncio.create_task(
+                llm_service_module.run_llm_tools(
+                    RunOutput(requirements=requirements), llm_service_module.get_agno_tools()[1]
+                )
+            )
             try:
                 await asyncio.wait_for(entered.wait(), timeout=1)
                 task.cancel()
@@ -4658,19 +4760,79 @@ async def test_staged_tool_replacement_retains_the_live_owner(
 
     async with _temporary_plugin() as original:
         register_sender(original, "old:")
-        async with _temporary_plugin() as staged:
+        async with _temporary_plugin(owner_id=original.plugin.id) as staged:
             register_sender(staged, "new:")
+            before_swap = _external_requirement("ownership_probe", {"text": "staging"}, "before-swap")
+            with llm_chat_tool_trace_scope(ToolTraceRecorder()), llm_chat_context_scope(_tool_context(session)):
+                _, executors = llm_service_module.get_agno_tools()
+                captured_executors = executors
+                assert await llm_service_module.run_llm_tools(RunOutput(requirements=[before_swap]), executors) is True
+            assert json.loads(before_swap.external_execution_result)["ok"] is True
+            assert session.sent == ["old:staging"]
             if commit_replacement:
-                await original.dispose()
+                from arclet.entari.plugin.loader import promote_staged
+
+                await original.dispose(replacing=True)
+                promote_staged(staged.plugin)
             else:
                 await staged.dispose()
+            if commit_replacement:
+                stale = _external_requirement("ownership_probe", {"text": "must-not-run"}, "stale-snapshot")
+                with llm_chat_tool_trace_scope(ToolTraceRecorder()), llm_chat_context_scope(_tool_context(session)):
+                    assert (
+                        await llm_service_module.run_llm_tools(RunOutput(requirements=[stale]), captured_executors)
+                        is True
+                    )
+                stale_result = json.loads(stale.external_execution_result)
+                assert stale_result["ok"] is False
+                assert "no longer available" in stale_result["error"]
+                assert session.sent == ["old:staging"]
             requirement = _external_requirement("ownership_probe", {"text": "live"}, "staged-send")
             with llm_chat_tool_trace_scope(ToolTraceRecorder()), llm_chat_context_scope(_tool_context(session)):
-                exposed = llm_service_module.get_agno_tools()
-                assert available_functions["ownership_probe"][1] in exposed
-                assert await llm_service_module.run_llm_tools(RunOutput(requirements=[requirement])) is True
+                exposed, executors = llm_service_module.get_agno_tools()
+                assert {function.name for function in exposed} == {"ownership_probe"}
+                assert set(executors) == {"ownership_probe"}
+                assert await llm_service_module.run_llm_tools(RunOutput(requirements=[requirement]), executors) is True
             assert json.loads(requirement.external_execution_result)["ok"] is True
-            assert session.sent == ["new:live" if commit_replacement else "old:live"]
+            assert session.sent == ["old:staging", "new:live" if commit_replacement else "old:live"]
+
+
+@pytest.mark.asyncio
+async def test_native_owner_disposal_cancels_entered_executor_before_late_effects() -> None:
+    register = importlib.import_module("plugins.llm_chat.tools._registration").register_tool
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    session = _DeliveryToolSession()
+    trace = ToolTraceRecorder()
+
+    async def delayed_owner_probe(session: Session) -> str:
+        entered.set()
+        await release.wait()
+        await session.send("must not escape the closed owner")
+        return "sent"
+
+    async with _temporary_plugin() as harness:
+        register(harness.dispatcher, delayed_owner_probe)
+        requirement = _external_requirement("delayed_owner_probe", {}, "owner-closed")
+        with llm_chat_tool_trace_scope(trace), llm_chat_context_scope(_tool_context(session)):
+            _, executors = llm_service_module.get_agno_tools()
+            task = asyncio.create_task(
+                llm_service_module.run_llm_tools(RunOutput(requirements=[requirement]), executors)
+            )
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=1)
+                await harness.dispose()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            finally:
+                release.set()
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+    assert session.sent == []
+    assert json.loads(requirement.external_execution_result)["ok"] is False
+    assert requirement.tool_execution.tool_call_error is True
+    assert [event.status for event in trace.events] == ["cancelled"]
 
 
 @pytest.mark.asyncio
@@ -4700,7 +4862,9 @@ async def test_external_delivery_waits_for_reference_edit_and_rejects_internal_r
             media_intent_scope(intent) as requirements,
             llm_chat_delivery_scope(local_modules.delivery.DeliveryState()),
         ):
-            await llm_service_module.run_llm_tools(RunOutput(requirements=[premature]))
+            await llm_service_module.run_llm_tools(
+                RunOutput(requirements=[premature]), llm_service_module.get_agno_tools()[1]
+            )
             assert [str(message) for message in session.sent] == []
             prepared = prepare_media(
                 session,
@@ -4720,7 +4884,9 @@ async def test_external_delivery_waits_for_reference_edit_and_rejects_internal_r
                 [{"type": "media", "media_ref": prepared["media_ref"]}],
             )
             assert requirements.confirmed is True
-            await llm_service_module.run_llm_tools(RunOutput(requirements=[allowed, leaked]))
+            await llm_service_module.run_llm_tools(
+                RunOutput(requirements=[allowed, leaked]), llm_service_module.get_agno_tools()[1]
+            )
     assert len(session.sent) == 2
     assert str(session.sent[-1]) == "after edit"
     assert [json.loads(req.external_execution_result)["ok"] for req in (premature, allowed, leaked)] == [
@@ -4759,7 +4925,9 @@ async def test_external_reference_capture_completes_before_dependent_edit(local_
         register(harness.dispatcher, capture_web_reference)
         register(harness.dispatcher, edit_image)
         with llm_chat_tool_trace_scope(ToolTraceRecorder()), local_modules.agno_compat.agno_delivery_tool_scope():
-            await llm_service_module.run_llm_tools(RunOutput(requirements=requirements))
+            await llm_service_module.run_llm_tools(
+                RunOutput(requirements=requirements), llm_service_module.get_agno_tools()[1]
+            )
     assert effects == ["captured", "edited"]
     assert all(json.loads(req.external_execution_result)["ok"] for req in requirements)
 
@@ -4812,7 +4980,9 @@ async def test_external_tool_failure_redacts_credentials_in_model_result_and_aud
         register = importlib.import_module("plugins.llm_chat.tools._registration").register_tool
         register(harness.dispatcher, read_web_page)
         with llm_chat_tool_trace_scope(recorder):
-            await llm_service_module.run_llm_tools(RunOutput(requirements=[requirement]))
+            await llm_service_module.run_llm_tools(
+                RunOutput(requirements=[requirement]), llm_service_module.get_agno_tools()[1]
+            )
     assert json.loads(requirement.external_execution_result)["ok"] is False
     assert "secret-value" not in requirement.external_execution_result
     assert recorder.events[0].status == "failed"
@@ -4907,7 +5077,7 @@ async def test_legacy_nested_summaries_keep_results_without_advertising_invalid_
         config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
         module_path=_TOOL_RUNTIME_PATH,
     ):
-        validator = Draft202012Validator(available_functions[tool_name][1].parameters)
+        validator = Draft202012Validator(get_agno_tools()[1][tool_name][1].parameters)
         history = _turn_messages(AgentTurn(id=1), rows, inline_chars=256, validators={tool_name: validator})
     assert not any(message.get("tool_calls") or message["role"] == "tool" for message in history)
     result = json.loads(cast(str, history[0]["content"]))["historical_tool_batch"]["results"][0]
@@ -4974,7 +5144,7 @@ async def test_historical_summaries_never_become_executable_tool_arguments(
         config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
         module_path=_TOOL_RUNTIME_PATH,
     ):
-        parameters = {name: function.parameters for name, (_, function) in available_functions.items()}
+        parameters = {name: function.parameters for name, (_, function) in get_agno_tools()[1].items()}
         history = _turn_messages(
             AgentTurn(id=1),
             rows,

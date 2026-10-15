@@ -857,7 +857,12 @@ async def test_tag_image_scope_indexing_privacy_and_background_completion(
             llm_chat_tool_trace_scope(recorder),
             llm_chat_context_scope(context),
         ):
-            assert await llm_service_module.run_llm_tools(RunOutput(requirements=[requirement])) is True
+            assert (
+                await llm_service_module.run_llm_tools(
+                    RunOutput(requirements=[requirement]), llm_service_module.get_agno_tools()[1]
+                )
+                is True
+            )
         pending = json.loads(requirement.external_execution_result)
         assert pending["ok"]
         assert pending["data"]["status"] == "pending"

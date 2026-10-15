@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from collections.abc import Iterator
 
+from agno.tools import Toolkit
 from arclet.entari import Session, plugin
 from agno.run.agent import RunOutput
 from arclet.letoderea import Contexts, Subscriber
@@ -18,7 +19,8 @@ from agno.models.message import Message
 from agno.tools.function import Function
 from arclet.entari.const import ITEM_SESSION
 from agno.run.requirement import RunRequirement
-from entari_plugin_llm.tools import _ToolPropagator, available_functions
+from entari_plugin_llm.tools import RegisteredTool, available_functions
+from entari_plugin_llm.runtime import ToolExecutors
 import entari_plugin_llm.service as llm_service_module
 from entari_plugin_llm.sessions import SessionInfo
 
@@ -224,32 +226,6 @@ def register_llm_chat_tool(subscriber: Subscriber[Any]) -> None:
     previous = subscriber.handle
     if _is_compat_wrapper(previous):
         return
-    name = subscriber.__name__
-    predecessor = available_functions.get(name)
-    if predecessor is not None and predecessor[0] is subscriber:
-        predecessor = None
-    elif predecessor is not None and not _is_compat_wrapper(predecessor[0].handle):
-        raise ValueError(f"LLM tool {name} is already owned by another plugin")
-    if predecessor is not None:
-        # Upstream's publisher skips existing names during Entari staged reload.
-        # Reuse its schema generator, then guard its unconditional disposal pop.
-        _ToolPropagator({"external_execution": True}).validate(subscriber)
-    previous_dispose = subscriber.dispose
-    setattr(subscriber, "__llm_chat_disposed__", False)
-
-    @wraps(previous_dispose)
-    def owned_dispose() -> Any:
-        current = available_functions.get(name)
-        try:
-            return previous_dispose()
-        finally:
-            setattr(subscriber, "__llm_chat_disposed__", True)
-            if current is not None and current[0] is not subscriber:
-                available_functions[name] = current
-            elif predecessor is not None and not getattr(predecessor[0], "__llm_chat_disposed__", False):
-                available_functions[name] = predecessor
-
-    setattr(subscriber, "dispose", owned_dispose)
 
     @wraps(previous)
     async def observed_handle(context: Contexts, inner: bool = False) -> Any:
@@ -274,9 +250,24 @@ def register_llm_chat_tool(subscriber: Subscriber[Any]) -> None:
     plugin.collect_disposes(restore)
 
 
+def _active_tool(name: str) -> RegisteredTool | None:
+    return next(
+        (
+            registered
+            for registered in available_functions.values()
+            if registered.function.name == name and (registered.owner is None or registered.owner.is_available)
+        ),
+        None,
+    )
+
+
 def _authorized(name: str) -> bool:
-    entry = available_functions.get(name)
-    if entry is None or not _is_compat_wrapper(entry[0].handle) or entry[1].external_execution is not True:
+    entry = _active_tool(name)
+    if (
+        entry is None
+        or not _is_compat_wrapper(entry.subscriber.handle)
+        or entry.function.external_execution is not True
+    ):
         return False
     access = current_agent_access()
     if access is not None and access.trigger_kind == "autonomous":
@@ -345,13 +336,14 @@ def _append_stopped_results(response: RunOutput, requirements: list[RunRequireme
 async def _run_local_tools(
     runner: Any,
     response: RunOutput,
+    executors: ToolExecutors,
     llm_session: SessionInfo | None,
     session: Session | None,
     ctx: Contexts | None,
 ) -> bool:
     recorder = current_tool_trace()
     if recorder is None:
-        return await runner(response, llm_session, session, ctx)
+        return await runner(response, executors, llm_session, session, ctx)
     context = copy_llm_chat_context()
     if context is None:
         context = Contexts(ctx.copy()) if ctx is not None else Contexts()
@@ -411,11 +403,15 @@ async def _run_local_tools(
                 if execution is not None:
                     execution.tool_call_error = True
                 raise ValueError(error)
-            if execution is None or not _authorized(name):
+            if execution is None or name not in executors or not _authorized(name):
                 raise ValueError("Tool is not allowed in this llm_chat generation")
             if unsafe[index]:
                 raise ValueError("Invalid internal reference for this tool")
-            subscriber, function = available_functions[name]
+            registered = _active_tool(name)
+            if registered is None:
+                raise ValueError("Tool is not allowed in this llm_chat generation")
+            subscriber = registered.subscriber
+            _, function = executors[name]
             arguments = execution.tool_args or {}
             if any(key not in function.parameters.get("properties", {}) for key in arguments) or any(
                 key not in arguments for key in function.parameters.get("required", [])
@@ -434,7 +430,9 @@ async def _run_local_tools(
             token = _INVOCATION.set(invocation)
             try:
                 with llm_chat_tool_execution_scope(call.execution_ref), model_audit_scope(None):
-                    continued = await runner(cast(RunOutput, _RequirementView((req,))), llm_session, session, context)
+                    continued = await runner(
+                        cast(RunOutput, _RequirementView((req,))), executors, llm_session, session, context
+                    )
             finally:
                 _INVOCATION.reset(token)
             should_continue = should_continue and continued
@@ -640,7 +638,7 @@ def _wrap_litellm_model(previous_model: Any) -> Any:
             if current_tool_trace() is not None:
                 images = extract_native_images(response)
                 if capture_native_images(self, images):
-                    # Agno 2.9 drops nonstream images from RunOutput; keep only the current response buffer.
+                    # Agno drops nonstream images from RunOutput; retain the current response buffer locally.
                     model_response.images = None
                 elif images:
                     model_response.images = list(images)
@@ -660,29 +658,28 @@ def install_agno_tool_bridge() -> None:
     original = {name: getattr(value, "__llm_chat_original__", value) for name, value in previous.items()}
 
     @wraps(original["get_agno_tools"])
-    def authorized_tools() -> list[Function]:
-        functions = original["get_agno_tools"]()
+    def authorized_tools() -> tuple[list[Toolkit | Function], ToolExecutors]:
+        tools, executors = original["get_agno_tools"]()
         if current_tool_trace() is None:
-            return functions
-        return [function for function in functions if _authorized(function.name)]
+            return tools, executors
+        allowed = {name: executor for name, executor in executors.items() if _authorized(name)}
+        return [tool for tool in tools if isinstance(tool, Function) and tool.name in allowed], allowed
 
     @wraps(original["run_llm_tools"])
     async def run_tools(
         response: RunOutput,
+        executors: ToolExecutors,
         llm_session: SessionInfo | None = None,
         session: Session | None = None,
         ctx: Contexts | None = None,
     ) -> bool:
-        return await _run_local_tools(original["run_llm_tools"], response, llm_session, session, ctx)
+        return await _run_local_tools(original["run_llm_tools"], response, executors, llm_session, session, ctx)
 
     @wraps(original["Agent"])
     def local_agent(*args: Any, **kwargs: Any) -> Any:
         if current_tool_trace() is not None:
             budget = _TOOL_BUDGET.get()
             kwargs["tool_call_limit"] = budget.limit if budget is not None else _MIN_TOOL_CALL_LIMIT
-            # Entari continues by run_id; stateless Agents otherwise discard the
-            # paused run. This cache belongs to this one Agent, not shared storage.
-            kwargs["cache_session"] = True
         return original["Agent"](*args, **kwargs)
 
     @wraps(original["get_model_config"])

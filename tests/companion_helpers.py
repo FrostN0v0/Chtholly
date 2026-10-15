@@ -22,10 +22,11 @@ from satori.client import Account, ApiInfo
 import pytest_asyncio
 from arclet.letoderea import Scope
 from arclet.entari.config import EntariConfig
+from arclet.entari.plugin import niche
 from arclet.entari.session import EntariProtocol
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from arclet.entari.event.api import SendResponse
-from arclet.entari.plugin.model import RootlessPlugin, PluginDispatcher, current_plugin
+from arclet.entari.plugin.model import PluginDispatcher, current_plugin
 
 if not hasattr(EntariConfig, "instance"):
     EntariConfig.instance = EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.full.example.yml")
@@ -247,8 +248,9 @@ def tool_call(name, arguments, call_id):
 
 @asynccontextmanager
 async def native_tools():
-    """Use Entari's public rootless plugin lifecycle, with no import/package aliases."""
-    owner = RootlessPlugin(f".companion-native-tests-{uuid4().hex}", lambda _plugin: None, {})
+    """Use Entari's native niche lifecycle, with no import/package aliases."""
+    owner = niche(f"companion-native-tests-{uuid4().hex}", config={})(lambda _plugin: None)
+    owner.exec_apply()
     token = current_plugin.set(owner)
     before = dict(available_functions)
     try:

@@ -1,12 +1,11 @@
 ARG BASE_IMAGE=ghcr.io/astral-sh/uv@sha256:a041b350d5d9483b538d5af07e9553ee8cbc7fc7fa90c2f7d20d93f18ce9bbd1
 FROM ${BASE_IMAGE} AS dependencies
 
-# Git is needed only for the existing locked entari-plugin-llm VCS dependency.
 # Freeze Debian package resolution as well as Python and uv image provenance.
 RUN rm -f /etc/apt/sources.list.d/debian.sources && \
     printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main\n' > /etc/apt/sources.list && \
     apt-get -o Acquire::Check-Valid-Until=false update && \
-    apt-get install --no-install-recommends -y git ca-certificates && \
+    apt-get install --no-install-recommends -y ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/workshop
 ENV UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy UV_NO_PROGRESS=1

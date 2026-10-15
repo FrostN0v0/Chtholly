@@ -26,8 +26,8 @@ from arclet.entari.plugin import load_plugin
 
 EntariConfig.load(Path({str(config_path)!r}))
 plugin = load_plugin("status", config={{}})
-assert plugin is not None
-module = plugin.module
+assert plugin
+module = plugin.plugin.module
 assert isinstance(module.status_alconna, Alconna)
 command = next(item for item in command_manager.get_commands() if item.command == "status")
 assert command is module.status_alconna

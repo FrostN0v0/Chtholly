@@ -666,7 +666,11 @@ async def _select_context(
         system=system,
         current_message=current_message,
         model_name=model_name,
-        tool_parameters={name: function.parameters for name, (_, function) in available_functions.items()},
+        tool_parameters={
+            registered.function.name: registered.function.parameters
+            for registered in available_functions.values()
+            if registered.owner is None or registered.owner.is_available
+        },
         max_input_tokens=max(2048, config.max_input_tokens),
         output_reserve_tokens=max(0, config.output_reserve_tokens),
         rollover_ratio=config.context_rollover_ratio,

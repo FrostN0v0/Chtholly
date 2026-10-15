@@ -26,7 +26,7 @@ from companion_helpers import (
 from arclet.entari.const import ITEM_SESSION
 from agno.models.response import ToolExecution
 from agno.run.requirement import RunRequirement
-from entari_plugin_llm.tools import available_functions
+from entari_plugin_llm.tools import get_agno_tools
 import entari_plugin_llm.service as llm_service
 
 from plugins.llm_chat import agent_turn_setup
@@ -586,7 +586,7 @@ async def test_task_free_native_send_and_finish_pause_continue_returns_actual_re
         register_send_msg(dispatcher, SendMsgToolContext(no_mentions))
         register_finish_turn(dispatcher)
         register_reminder_tools(dispatcher)
-        validator = Draft202012Validator(available_functions["send_msg"][1].parameters)
+        validator = Draft202012Validator(get_agno_tools()[1]["send_msg"][1].parameters)
         assert list(validator.iter_errors({"segments": [{"type": "text", "text": message}]})) == []
         assert list(validator.iter_errors({"message": message}))
         worker = CompanionService(
@@ -667,10 +667,12 @@ async def test_actual_prepared_autonomous_authority_rejects_reminder_and_artifac
                 llm_chat_tool_trace_scope(prepared.lifecycle.tool_trace),
                 llm_chat_context_scope(Contexts({ITEM_SESSION: native_transport.session()})),
             ):
-                advertised = {function.name for function in llm_service.get_agno_tools()}
+                tools, executors = llm_service.get_agno_tools()
+                advertised = {function.name for function in tools}
                 assert {"send_msg", "finish_turn"} <= advertised
                 assert not {"reminder", "publish_web_preview", "revoke_web_preview"} & advertised
-                await llm_service.run_llm_tools(RunOutput(requirements=blocked))
+                assert set(executors) == advertised
+                await llm_service.run_llm_tools(RunOutput(requirements=blocked), executors)
             for item in blocked:
                 outcome = json.loads(item.external_execution_result)
                 assert outcome["ok"] is False
@@ -814,7 +816,7 @@ async def test_normal_reminder_creation_and_scheduled_resolution_keep_native_con
                 llm_chat_tool_trace_scope(normal.lifecycle.tool_trace),
                 llm_chat_context_scope(Contexts({ITEM_SESSION: session})),
             ):
-                await llm_service.run_llm_tools(RunOutput(requirements=[create]))
+                await llm_service.run_llm_tools(RunOutput(requirements=[create]), llm_service.get_agno_tools()[1])
             result = json.loads(create.external_execution_result)
             assert result["ok"] is True, result
             task_ref = json.loads(result["data"])["task_ref"]
@@ -843,7 +845,7 @@ async def test_normal_reminder_creation_and_scheduled_resolution_keep_native_con
                 llm_chat_context_scope(Contexts({ITEM_SESSION: session})),
                 reminder_decision_scope(),
             ):
-                await llm_service.run_llm_tools(RunOutput(requirements=[resolve]))
+                await llm_service.run_llm_tools(RunOutput(requirements=[resolve]), llm_service.get_agno_tools()[1])
                 assert json.loads(resolve.external_execution_result)["ok"] is True
                 assert current_reminder_decision().task_ref == task_ref
                 assert current_reminder_decision().status == "completed"

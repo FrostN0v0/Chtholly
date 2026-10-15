@@ -173,8 +173,8 @@ class Acceptance:
         self.publish_source()
         self.passed("Every Python source compiled without host-side execution")
         self.stage = "import"
-        active = load_plugin(self.module, config=json.loads(json.dumps(self.manifest["configuration"])))
-        if active is None or find_plugin(self.module) is not active:
+        result = load_plugin(self.module, config=json.loads(json.dumps(self.manifest["configuration"])))
+        if not result or find_plugin(self.module) is not result.plugin:
             raise AssertionError("Native import/public plugin lookup failed; inspect the bounded worker log")
         await self.ready_services()
         self.passed("Native Entari load and public plugin lookup succeeded")
@@ -282,9 +282,9 @@ class Acceptance:
 
         app = IsolatedEntari.from_config(EntariConfig.load(config_path))
         self.manager.add_component(app)
-        if load_plugin("entari_plugin_database", config={"name": str(self.root / "acceptance.sqlite3")}) is None:
+        if not load_plugin("entari_plugin_database", config={"name": str(self.root / "acceptance.sqlite3")}):
             raise RuntimeError("Locked SQLite database dependency failed to initialize")
-        if load_plugin("entari_plugin_htmlrender", config=renderer_config(self.package)) is None:
+        if not load_plugin("entari_plugin_htmlrender", config=renderer_config(self.package)):
             raise RuntimeError("Trusted HTMLRender Playwright dependency failed to initialize")
         running = asyncio.create_task(self.manager.launch())
         probe = None
@@ -302,9 +302,10 @@ class Acceptance:
                 Path(__file__).with_name("probe_plugin.py").read_bytes(),
             )
             importlib.invalidate_caches()
-            probe = load_plugin("_workshop_acceptance_probe", config={})
-            if probe is None:
+            result = load_plugin("_workshop_acceptance_probe", config={})
+            if not result:
                 raise RuntimeError("Trusted lifecycle probe did not load")
+            probe = result.plugin
             await asyncio.wait_for(probe.module.service.status.wait_for("blocking"), 5)
             self.transport = CaptureTransport()
             await asyncio.sleep(0.05)
