@@ -47,6 +47,17 @@ def write_config(root: Path, plugins: dict, name: str = "entari.yml") -> Path:
     return path
 
 
+@pytest.mark.parametrize("version", [(3, 10, 20), (3, 11, 0), (3, 11, 15), (3, 12, 0)])
+def test_startup_requires_python_311_only(monkeypatch, version):
+    from utils.startup.validation import python_issues
+
+    monkeypatch.setattr(sys, "version_info", version)
+    if version[:2] == (3, 11):
+        assert python_issues() == []
+    else:
+        assert python_issues() == ["Use Python 3.11: run uv sync --locked --python 3.11."]
+
+
 def test_missing_database_parent_is_checked_without_writes_then_prepared(startup_root):
     source = write_config(startup_root, {"database": {"name": "new/nested/chtholly.db"}})
     original = source.read_bytes()

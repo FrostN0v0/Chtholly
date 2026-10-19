@@ -1,12 +1,9 @@
 """Localized WebUI schema for llm_chat configuration."""
 
-from pydantic import GetJsonSchemaHandler
-from pydantic_core import CoreSchema
-from arclet.entari.config import config_model_schema
-from pydantic.json_schema import JsonSchemaValue
-from arclet.entari.config.models.pyd import BaseModel
+from typing import Any
+from dataclasses import fields
 
-from .config import LLMChatConfig
+from .config import LLMChatConfig, PersonaConfig
 
 _CONFIG_SCHEMA_TEXT = {
     "default_persona": ("默认角色", "未选择角色或已选角色被删除时使用的角色键，必须存在于角色配置中。"),
@@ -261,48 +258,51 @@ _PERSONA_SCHEMA_TEXT = {
 }
 
 
-class LLMChatWebUIConfig(BaseModel):
-    """Localized schema adapter used only by Entari WebUI."""
+def _validate_schema_translations() -> None:
+    missing = {field.name for field in fields(LLMChatConfig)} - _CONFIG_SCHEMA_TEXT.keys()
+    if missing:
+        names = ", ".join(sorted(missing))
+        raise ValueError(f"Missing WebUI translations for llm_chat config fields: {names}")
+    if {field.name for field in fields(PersonaConfig)} != _PERSONA_SCHEMA_TEXT.keys():
+        raise ValueError("PersonaConfig fields must have matching WebUI translations")
 
-    @classmethod
-    def __get_pydantic_json_schema__(
-        cls,
-        core_schema: CoreSchema,
-        handler: GetJsonSchemaHandler,
-    ) -> JsonSchemaValue:
-        del core_schema, handler
-        schema = config_model_schema(LLMChatConfig, ref_root="/")
-        properties = schema.get("properties")
-        if not isinstance(properties, dict):
-            raise TypeError("LLMChatConfig schema properties must be an object")
-        missing = set(properties) - _CONFIG_SCHEMA_TEXT.keys()
-        if missing:
-            names = ", ".join(sorted(missing))
-            raise ValueError(f"Missing WebUI translations for llm_chat config fields: {names}")
-        for name, property_schema in properties.items():
-            if not isinstance(property_schema, dict):
-                raise TypeError(f"Schema for llm_chat config field {name!r} must be an object")
-            title, description = _CONFIG_SCHEMA_TEXT[name]
-            property_schema["title"] = title
-            property_schema["description"] = description
-        properties["companion_daily_contacts"].update(minimum=0, maximum=48)
-        properties["channel_context_messages"].update(minimum=1, maximum=50)
-        definitions = schema.get("$defs", {})
-        persona_schema = definitions.get("PersonaConfig")
-        if not isinstance(persona_schema, dict):
-            raise TypeError("PersonaConfig schema definition must be an object")
-        persona_properties = persona_schema.get("properties", {})
-        if set(persona_properties) != _PERSONA_SCHEMA_TEXT.keys():
-            raise ValueError("PersonaConfig fields must have matching WebUI translations")
-        for name, property_schema in persona_properties.items():
-            title, description = _PERSONA_SCHEMA_TEXT[name]
-            property_schema["title"] = title
-            property_schema["description"] = description
-        persona_schema["title"] = "角色设定"
-        persona_schema["description"] = "一个独立角色的人格、外观与参考图。"
-        # External dataclass refs are not registered in Pydantic's core-schema graph.
-        properties["personas"]["additionalProperties"] = persona_schema
-        schema.pop("$defs", None)
-        schema["title"] = "LLM 聊天配置"
-        schema["description"] = "群聊会话、记忆、网页工具、交付、语音与图片能力配置。"
-        return schema
+
+_validate_schema_translations()
+
+
+def localize_llm_chat_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Localize the runtime model through its owning plugin's native schema fragment."""
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        raise TypeError("LLMChatConfig schema properties must be an object")
+    config_names = {name for name in properties if not name.startswith(("$", "."))}
+    missing = config_names - _CONFIG_SCHEMA_TEXT.keys()
+    if missing:
+        names = ", ".join(sorted(missing))
+        raise ValueError(f"Missing WebUI translations for llm_chat config fields: {names}")
+    for name in config_names:
+        property_schema = properties[name]
+        if not isinstance(property_schema, dict):
+            raise TypeError(f"Schema for llm_chat config field {name!r} must be an object")
+        title, description = _CONFIG_SCHEMA_TEXT[name]
+        property_schema["title"] = title
+        property_schema["description"] = description
+    properties["companion_daily_contacts"].update(minimum=0, maximum=48)
+    properties["channel_context_messages"].update(minimum=1, maximum=50)
+    persona_ref = properties["personas"]["additionalProperties"]["$ref"]
+    persona_name = persona_ref.rsplit("/", 1)[-1].replace("~1", "/").replace("~0", "~")
+    persona_schema = schema.get("$defs", {}).get(persona_name)
+    if not isinstance(persona_schema, dict):
+        raise TypeError("PersonaConfig schema definition must be an object")
+    persona_properties = persona_schema.get("properties", {})
+    if set(persona_properties) != _PERSONA_SCHEMA_TEXT.keys():
+        raise ValueError("PersonaConfig fields must have matching WebUI translations")
+    for name, property_schema in persona_properties.items():
+        title, description = _PERSONA_SCHEMA_TEXT[name]
+        property_schema["title"] = title
+        property_schema["description"] = description
+    persona_schema["title"] = "角色设定"
+    persona_schema["description"] = "一个独立角色的人格、外观与参考图。"
+    schema["title"] = "LLM 聊天配置"
+    schema["description"] = "群聊会话、记忆、网页工具、交付、语音与图片能力配置。"
+    return schema

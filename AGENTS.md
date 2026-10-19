@@ -14,8 +14,8 @@
 
 ## 技术栈与关键依赖
 
-- **Python**: >= 3.10, < 3.11；当前启动器、依赖锁和干净环境验收固定在 Python 3.10，其他版本须完成协议栈及 LLM 兼容性验证后再开放。
-- **Bot 框架**: [arclet-entari](https://pypi.org/project/arclet-entari/)（基于官方 `0.19.0rc2`，当前安装仓库内的 `0.19.0rc2+chtholly.2` 补丁 wheel，完整保留 `arclet-entari[full]`，含 CLI、YAML、文件监听）。补丁修复 staged reload 对象所有权、Scope 冲突、失败模块绑定恢复、子插件/Service 清理与重复替换后的命令残留；失败候选须恢复旧订阅者持有的真实 Alconna 解析器和 formatter 条目。`scripts/build_patched_wheel.py --package entari` 从固定官方 wheel 与仓库补丁重建制品；同一构建器的 `--package webui` 生成 `1.0.3+chtholly.3`，保留认证 Cookie 与每个聊天连接 transport ID 分离、连接独立清理及认证初始化重试，并加入中文管理主题，保留 Entari Logo 原色。不直接修改第三方安装目录。HTMLRender `0.1.0` 的 Entari 上界通过精确 uv override 保留 `full,pydantic`，升级必须验证真实渲染及失败更新、重复替换和最终卸载。
+- **Python**: >= 3.11, < 3.12；启动器、依赖锁、CI 与工坊沙箱统一使用 Python 3.11，移除 3.10 支持。旧沙箱镜像及验收报告必须重建，其他解释器版本须完成协议栈及 LLM 验证后再开放。
+- **Bot 框架**: [arclet-entari](https://pypi.org/project/arclet-entari/) 基于官方 `0.19.0`，安装仓库内的 `0.19.0+chtholly.1`，完整保留 `arclet-entari[full]`。补丁继续修复 staged reload 所有权、Scope 隔离、整棵子树的失败回滚、命令 formatter、Service 清理、import 别名重绑定及 Schema 片段代际归属；移除旧 CPython 3.10 回退。`scripts/build_patched_wheel.py --package entari` 按官方 wheel 与 SHA-256 重建；`--package webui` 生成 `1.0.3+chtholly.5`，保留连接隔离、认证初始化重试和主题，改用原生原子重载与 `Plugin.config_schema`。WebUI 枚举 `$` 根的直接 niche 而非根本身，配置读写映射到原 `.commands`、`.localdata` 等键，切换一个内建插件不得禁用全部兄弟。HTMLRender 上界仍以精确 uv override 保留 `full,pydantic`；不修改第三方安装目录，升级必须验证真实渲染、失败替换、重复重载和卸载。
 - **WebUI 视觉边界**: `patches/webui-theme/native.css` 与 `native.js` 仅调整锁定原生 SPA 的外观、导航辅助和扩展主题同步；构建器从固定官方 wheel 应用既有生命周期补丁，再嵌入内容哈希命名的主题文件，不修改供应商压缩 JS 的业务逻辑。`utils/webui_theme/tokens.css` 是原生与三个扩展页的唯一配色色板，使用现代浏览器的 `light-dark()`；扩展页通过 `themed_assets` 在原有 nonce/CSP 内合并本地资源。父页只向同源已挂载 iframe 发送 light/dark，opaque iframe 必须校验父窗口和精确 origin，独立打开时跟随系统主题；不得放宽 sandbox、认证、CSP 或以匿名资源恢复样式。上游升级须复核 DOM 类名、登录、原生设置、会话/表情/工坊、主题切换和 390px 窄屏，不新增第二套管理 API。
 - **CLI 工具**: [entari-cli](https://pypi.org/project/entari-cli/) —— `entari init / run / new / add / remove / config / gen_main`
 - **首启边界**: `main.py` 通过 `utils/startup` 在加载业务插件前使用 Entari 原生配置解析、聚合缺失前提并建立配置指定的 SQLite 父目录。`--check` 不写入或下载，`--prepare` 仅准备已启用能力的资源，不启动账号或调用模型；凭证化配置禁止 debug/trace 和 rich_error。默认配置只监听回环；接口探测使用原生 `/satori/v1/meta`，无账号时不能把需身份头的业务 API 当健康接口。
@@ -24,12 +24,12 @@
 - **事件总线**: arclet-letoderea（Entari 内建依赖）
 - **命令系统**: arclet-alconna（Entari 内建 `command` 模块）
 - **服务管理**: launart（`Service` 基类用于跨插件依赖注入）
-- **协议适配器**: `satori-python-adapter-onebot11`（默认）；`entari-plugin-server` 使用 `direct_adapter: true` 与 Entari 直连，此模式不得再配置 `basic.network`。官方 QQ 沙箱群聊与单聊事件必须在 `@qq.websocket` 的 `intent.c2c_group_at_messages` 下启用；写在适配器顶层会被配置模型忽略。QQ WebSocket 的 `token` 字段已废弃，不得配置。当前协议栈仍以 Python 3.10 运行，待 Python 3.14 兼容性确认后升级
+- **协议适配器**: `satori-python-adapter-onebot11`（默认）；`entari-plugin-server` 使用 `direct_adapter: true` 与 Entari 直连，此模式不得再配置 `basic.network`。官方 QQ 沙箱群聊与单聊事件必须在 `@qq.websocket` 的 `intent.c2c_group_at_messages` 下启用；写在适配器顶层会被配置模型忽略。QQ WebSocket 的 `token` 字段已废弃，不得配置。当前锁定协议栈使用 Python 3.11，其他解释器版本不随框架升级自动开放。
 - **Satori 服务鉴权**: `server.token` 只校验 Satori 事件 WebSocket 的 Identify token；当前锁定的 Satori Server HTTP action API 不校验该 token，因此共享的 Satori/WebUI 后端必须保持 `127.0.0.1` 监听。公网管理只能通过独立 HTTPS/OIDC 网关与明确的管理路由白名单进入，不得直接反代整个端口；Satori/OneBot 和自动 API 文档不得公开。SSH 隧道保留应急访问。OneBot 适配器的 `access_token` 只保护对应适配器连接，三者不得混用。
 - **配置模型**: `BasicConfModel`（默认，dataclass 风格）/ Pydantic `BaseModel`（`arclet.entari.config.models.pyd`）/ msgspec `Struct`
 - **HTTP 客户端**: httpx；浏览器截图的受控公网出口使用 aiohttp 自定义 resolver 固定已校验公网 IP
 - **JSON 序列化**: orjson（LiteLLM 工具 / MCP 请求路径的显式运行时依赖）
-- **LLM 兼容组合**: `entari-plugin-llm` 固定 Git `1845f1c3c65f9df4493e97f96a4c43938b176320`；Agno 固定在 `<3` 的最新兼容系列，当前为 `2.9.0`，因为上游仍导入 Agno 3 已删除的 schema helper。Python 3.10 的 LiteLLM 限制 `<1.97`，当前为 `1.96.2`；`1.97` 的 response schema 无法完成构建，`1.98+` 另有 `typing.NotRequired` 导入错误。以 `uv.lock` 安装，不修改第三方安装目录。
+- **LLM 兼容组合**: `entari-plugin-llm` 保留 Git `1845f1c3c65f9df4493e97f96a4c43938b176320` 的实现，通过固定源码归档、SHA-256 和构建后端生成 `0.2.2+chtholly.2`。补丁只适配 Letoderea 0.22 的显式 `tools_pub.supplier` 上下文注入与原生加载结果，原 tuple 工具注册表及本地 generation 边界不变。Agno 保留 `<3` 和锁定的 `2.9.0`；移除仅针对 Python 3.10 的 LiteLLM 版本上界，本次仍保留已验证的 `1.96.2`，不顺带升级模型 SDK。以 `uv.lock` 安装，不修改第三方安装目录。
 - **LLM 工具执行**: 上游 `tools.available_functions` 的 `(Subscriber, Function)` 是 schema 与依赖注入的唯一权威；模型暂停后，由本地 generation-local 边界调用上游 `run_llm_tools` 执行真实 `RunRequirement`，随后继续生成。不再维护第二份 Function/schema。仅本地 generation 的 Agent 开启内存 `cache_session`，以支持上游按 `run_id` 继续无数据库的暂停轮次；授权、跨暂停调用上限、模型指定的消息链顺序、只读并发、取消结算、错误脱敏和审计仍由本地边界控制。Entari staged reload 必须保留新工具所有权，失败时恢复仍存活的旧订阅者；旧插件清理不得删除替代工具。pytest 通过 `tests/conftest.py` 将 Letoderea effect 任务绑定到当前测试 loop，禁止通过取消异 loop 清理任务伪装卸载成功。
 - **LLM 工具线上声明**: Agno `Function.to_dict()` 同时用于组件持久化，包含 `external_execution`、`requires_confirmation` 和 `approval_type` 等本地执行标志，不能直接作为供应商工具声明。`agno_compat.py` 的 LiteLLM `_format_tools` 仅在传输边界保留 `name`、`description`、`parameters` 与 `strict`，不修改上游 Function 或停用外部工具执行；验证必须覆盖真实模型请求、工具暂停与携带结果继续生成，不能只验证模型无工具回复或服务健康。
 - `publish_web_preview` 与 `submit_plugin` 的模型源码参数固定使用 `source_files`；禁止用 Agno 媒体保留参数名 `files`，否则上游会将必需业务参数从 schema 移除，形成缺参注入失败与补参校验拒绝。继续以原生 `LLMToolEvent` / `run_llm_tools` 执行和上游 schema 为权威，不补第二套声明或关闭参数检查；网页发布回归必须经过真实工具桥并核对交付 ZIP 的原始字节。
@@ -223,10 +223,11 @@ config = plugin_config(MyConfig)
 - 热重载：启用 `::auto_reload`（`watch_dirs`、`watch_config`）。
 - Entari 会自动清除事件监听器、指令、上游插件导入等副作用；其他手动副作用用 `collect_disposes(lambda: ...)` 注册清理。
 - 任何在运行期会被多次加载/卸载的插件都必须保证幂等清理：全局可变状态要么用 `keeping`，要么在 `collect_disposes` 中还原。
+- `load_plugin`、`reload_plugin` 与 `reload_subplugin` 返回结果对象：先判断真值，成功后读取 `.plugin`，失败后读取 `.error`；不得用 `is None` 或 `is True`，也不得把结果对象当插件实例。`RootlessPlugin` 已移除，隔离注册改用 `plugin.niche`；其返回值是与父插件绑定的 Plugin，按原生阶段执行 `exec_apply`。
 
 ### 服务（Launart）
 
-跨插件能力以 `launart.Service` 子类暴露，通过 `add_service(...)` 注册，其他插件按类型注入。新增服务型能力（浏览器、HTTP 客户端池、模型推理等）优先走 Service 而非全局单例。
+跨插件能力以 `launart.Service` 子类暴露，通过 `add_service(...)` 注册。Entari 0.19 的类型注入等待服务注册并默认等到 `prepared`；确需运行阶段时可用 `Annotated[ConcreteService, on_stage("blocking")]`，不再使用已移除的 `inject` 或 metadata `depend_services`。这不替代 Service 自身的 `required` 与 Launart 阶段顺序，也不得在同步工具入口等待服务。新增服务型能力优先走 Service 而非全局单例。
 
 ### 消息链与自定义元素
 
@@ -238,7 +239,7 @@ config = plugin_config(MyConfig)
 ### 代码风格
 
 - 行长度与格式遵循 `ruff` 与项目已有设置。
-- Python 目标版本：3.10。
+- Python 目标版本：3.11。
 - Ruff lint 规则见 `pyproject.toml` 的 `[tool.ruff.lint]`。
 - Pyright 使用 `typeCheckingMode = "standard"`。
 - 保持现有代码风格：异步函数、配置模型（`BasicConfModel` 优先，跨框架兼容场景用 Pydantic）、短中文注释风格。
@@ -249,7 +250,7 @@ config = plugin_config(MyConfig)
 - 可被测试、复用或被 Pyright 独立分析的纯逻辑，放到 import-safe 包中，例如 `utils/<domain>_core/`。这些 core 包不得导入 `arclet.entari`、`entari_plugin_llm`、`entari_plugin_database`、`launart`，也不得执行插件注册、服务注册或其他运行时副作用。
 - Entari/LLM/数据库/HTTP 等动态边界应与纯算法分离；小插件可以在同一 runtime 模块内组织相关 handler、command、tool 或轻量 IO，但当一个模块同时承载多个变化方向（如事件注册、外部 API、持久化事务、渲染、复杂算法）或文件明显膨胀时，必须按职责拆分。
 - 外部 JSON、LiteLLM response、SQLAlchemy row、插件 `_extra` 等动态对象必须在边界处用 `Mapping[str, object]`、`dataclass`、`TypedDict`、`Protocol`、`TypeGuard` 或局部 `cast(...)` 收窄；核心算法不得把 `Any` 贯穿到底。
-- WebUI 通过 `metadata(..., config=...)` 为插件配置生成 JSON Schema：`BasicConfModel` 字段必须使用 Entari `SchemaGenerator` 可表示的类型，递归 `TypeAlias`（如 `JsonValue`）不得直接作为配置字段注解；配置边界可用 `dict[str, Any]`，核心 provider 仍以 `JsonObject` / Protocol 收窄。使用本地化 Pydantic adapter 时，每次新增运行时配置字段必须同步翻译映射，并由 metadata schema 回归测试覆盖，生产部署也必须同步 `config_schema.py`。
+- WebUI 通过运行时 `metadata(..., config=...)` 生成 JSON Schema；`llm_chat` 本地化使用原生 `Plugin.register_schema`，由 `Plugin.config_schema` 统一处理片段、嵌套定义和引用重定位，不再保留空 Pydantic 适配类。`BasicConfModel` 字段仍须为 Entari SchemaGenerator 可表示的类型，递归 `TypeAlias` 不直接作为配置注解。新增字段须同步翻译映射并验证真实原生 Schema；部署同步 `config_schema.py`。其他尚未迁移的 Pydantic adapter 保留原边界，不混用两套声明。
 - 测试直接导入 import-safe core 包，不通过 `sys.path.insert(...)`、synthetic package alias 或文件级 Pyright suppress 绕过插件副作用；pytest 的 import 根通过 `pyproject.toml` 配置。
 - 新增 provider / client 类必须支持显式依赖注入测试 seam（例如可传入 HTTP client/transport），测试不得改写私有属性。
 - 对会被 `::auto_reload` 重复加载的运行时副作用，注册时同步考虑清理：长任务用 `collect_disposes(...)` 取消，跨卸载状态用 `keeping(...)` 或明确的持久化存储。
@@ -266,7 +267,7 @@ config = plugin_config(MyConfig)
 - `llm_chat` 使用 `default_persona` 和 `personas` 配置多个角色；每个 `PersonaConfig` 包含 `name`、`prompt`、`appearance` 与可选的 `reference_image`。旧顶层 `persona` / `self_reference_image` 已移除，配置迁移必须保留原人格文本、口吻与对应参考图。角色口吻与情景表达由用户填写的 `prompt` 定义，默认人格不得额外拼接剧团式口吻、情景对白或固定说话示例。通用 `SYSTEM_SCAFFOLD` 不得包含固定角色身份、服饰、撒娇口吻或媒体偏好。每轮捕获当前角色的参考图配置，不依赖聊天模型是否支持视觉，也不向聊天消息注入角色像素。角色相关生图或编辑通过 `use_persona_reference=true` 按需加载真实字节并直接交给独立图像模型；无关主体不得附图，指定参考不可用时明确失败，不能悄悄退化为文字生图。输入只在 generation-local 状态中复用，受 `resources/image`、6 MiB 与 JPEG/PNG/WebP/GIF 边界约束，不进入聊天历史或用户图片收藏。
 - 仓库角色配置保留默认 `chtholly`，并提供按 PRTS 档案、语音、模组故事与活动剧情整理的 `pepe`；佩佩的原版初始立绘保存为 `resources/image/persona/Pepe.png`，只在该角色的参考图配置中使用，不加入表情目录。
 - `personality.py` 以独立 ORM 表保存 ChatScope 的角色选择和 ContextSession 的不可变人格快照，角色身份、人格文本、外观及参考图共同进入 baseline 指纹；历史会话不得被当前配置重新标记。`llmchat persona` 列出角色，超管可用 `llmchat persona <key>` 在当前范围原子切换并创建无 handoff 的干净话题；选中相同有效角色不重复建会话。准备阶段与切换共享短作用域锁，释放后各成员的模型生成仍可并行；每轮及其后台 evaluator 使用捕获的人格文本。关系、画像和长期记忆仍保留既有存储语义，不因换角色清空。
-- `llmchat session` 只读查询已有作用域与活动会话，不创建数据库行或调用模型。`session_inspection.py` 区分逐请求实际 Token、旧版整轮统计和上下文估算；未知值为 null，缓存及推理 Token 是子项而非额外总量，真实请求不得与整轮 `model_attempt` 重复累计。列表及用量查询只提取必要 JSON 字段，不为计数加载全部模型输入。嵌套 PersonaConfig 的本地化 schema 必须内联到 Pydantic 适配器，不能直接返回未注册到 Pydantic 图中的外部 `$defs` 引用；当前 Entari 的 `extra="forbid"` 仅体现在生成 schema，不能假设其运行时会拒绝所有未知键。
+- `llmchat session` 只读查询已有作用域与活动会话，不创建数据库行或调用模型。`session_inspection.py` 区分逐请求实际 Token、旧版整轮统计和上下文估算；未知值为 null，缓存及推理 Token 是子项而非额外总量，真实请求不得与整轮 `model_attempt` 重复累计。列表及用量查询只提取必要 JSON 字段，不为计数加载全部模型输入。PersonaConfig 本地化直接修改原生 Schema 中经 `$ref` 定位的定义，保留 `$defs` 并由 Entari 处理嵌入路径；不再以 Pydantic 包装器内联嵌套模型。当前 Entari 的 `extra="forbid"` 仅体现在生成 Schema，不能假设其运行时会拒绝所有未知键。
 - 帮助菜单，当前项目拟参考 [`nonebot-plugin-picmenu-next`](https://github.com/lgc-NB2Dev/nonebot-plugin-picmenu-next) 的菜单功能，结合 entari 基建，实现一个自动生成、界面美观、自定义程度高，开发简单的图片帮助基建插件。
 - 会话互动系统：`plugins/llm_chat` 已基于 LLM 插件实现公开群聊人格对话，用户轮次使用 `speaker` / `content` JSON 区分多人发言，图片继续走独立视觉链路。主聊天只接收按类别筛选的画像值和相关记忆，关系 evaluator 接收 canonical 画像与 aliases；语义分组和去重只构造可逆读取视图，持久化继续使用 exact key 并保留原始数据。表情、预录语音、TTS 与白名单插件命令均通过实际注册工具按需调用。模型使用 `send_msg` 按有序 segments 发送一条原生 MessageChain，自主决定文字、艾特、图片的位置和消息边界；OneBot 合并转发先经 `prepare_merged_forward` 准备，再由 `send_msg` 单独发送。不支持的组合在发送前拒绝，不自动拆条或回退，未知传输错误、超时和取消不得重发。成功消息按真实顺序投影为一个 assistant 历史行，媒体 marker 留在原消息位置，不提前写入或重复持久化；生成、最终发送或取消失败只尽力保存已确认前缀，不启动 evaluator 或关系更新。发送额度、节拍与媒体上限通过独立 generation-local `DeliveryState` 在运行时、system prompt 和工具处理器之间共享同一组规范化限额。网页能力固定通过 Agno `ExaTools` 提供 `web_search` 与 `read_web_page` 两个只读工具：时效问题按需使用 Exa 搜索，公开页面通过 Exa Contents 获取限幅正文；独立的 generation-local `ContextVar` 同时隔离授权域与 effective budget，运行时、system prompt 和 tool schema 必须共享同一组规范化限额。所有目标必须经过公开 URL 与敏感 query 校验，网页摘要和正文始终视为不可信数据，不得扩大工具权限、覆盖系统规则或索取隐私。公开群聊由 priority `900` 主处理器接管，并以 priority `999` claim guard 在原生 priority `1000` 自动对话前硬阻断失败穿透；精确工具循环耗尽仅允许基于已积累 transcript 执行一次无工具 finalizer，且不得复述已成功发送内容或部分回退已确认前缀；其他生成或最终化失败均记录脱敏 warning 后静默 `BLOCK`。
 - `llm_chat` 按 `platform + account_id + channel_id + platform_user_id` 执行 cooperative steering：同一成员后续通过原有寻址入口的消息有序加入当前逻辑 `AgentTurn`，不取消、不重建会话，不设置固定等待窗口。不同成员仍并行；已开启 companion 的私聊沿用原有入口。每任务最多接纳 64 条真实输入，满额或已封口后按 FIFO 等待下一任务，不丢输入。协议消息 ID 只去重同一真实事件；相同文字不同 ID 不合并。priority `999` claim guard 仍阻断原生自动聊天，未寻址群消息不得进入队列。

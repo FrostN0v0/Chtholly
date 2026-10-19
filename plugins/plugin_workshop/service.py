@@ -383,7 +383,7 @@ class PluginWorkshopService(Service):
                 code="framework_mismatch",
                 status=409,
             )
-        if not report.image_id.startswith("sha256:") or not report.python_version.startswith("3.10."):
+        if not report.image_id.startswith("sha256:") or not report.python_version.startswith("3.11."):
             raise WorkshopError(
                 "Acceptance evidence lacks pinned isolation provenance", code="report_mismatch", status=409
             )

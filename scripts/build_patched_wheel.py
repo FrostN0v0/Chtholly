@@ -11,6 +11,7 @@ import stat
 import base64
 import hashlib
 from pathlib import Path, PurePosixPath
+import tarfile
 import zipfile
 import argparse
 import tempfile
@@ -30,6 +31,7 @@ class WheelSpec:
     sha256: str
     patch: str
     directory: str
+    source_archive: bool = False
 
     @property
     def output(self) -> Path:
@@ -39,13 +41,13 @@ class WheelSpec:
 PACKAGES = {
     "entari": WheelSpec(
         "arclet_entari",
-        "0.19.0rc2",
-        "0.19.0rc2+chtholly.2",
-        "https://files.pythonhosted.org/packages/60/9d/"
-        "77b1d45b57f02dc8ac88d025c92c52060e5ad0b7ce8e0db5102cd8455fd0/"
-        "arclet_entari-0.19.0rc2-py3-none-any.whl",
-        "f6c1a568d63034ab32ddf83d8500cb3e8fdadff3f629f15a04aa74f63f7aa7b5",
-        "entari-0.19.0rc2-staged-rollback.patch",
+        "0.19.0",
+        "0.19.0+chtholly.1",
+        "https://files.pythonhosted.org/packages/52/27/"
+        "7a853f955cfec9c8a5205b1b73dc0ab7089150fa0fd1b2783e56769d0f43/"
+        "arclet_entari-0.19.0-py3-none-any.whl",
+        "683320dbb030e074bc638b2fd8f923aad8f264a5e2450b921c3003dab46997a0",
+        "entari-0.19.0-native-reload.patch",
         "entari",
     ),
     "htmlrender": WheelSpec(
@@ -59,10 +61,20 @@ PACKAGES = {
         "htmlrender-0.1.0-browser-cache.patch",
         "htmlrender",
     ),
+    "llm": WheelSpec(
+        "entari_plugin_llm",
+        "0.2.2",
+        "0.2.2+chtholly.2",
+        "https://codeload.github.com/ArcletProject/entari-plugin-llm/tar.gz/1845f1c3c65f9df4493e97f96a4c43938b176320",
+        "0dbcbb9d271fe4b1ca4032b6b4f6c6347f56af595cad48cd097e0185735e5df4",
+        "llm-0.2.2-entari-019.patch",
+        "llm",
+        source_archive=True,
+    ),
     "webui": WheelSpec(
         "entari_plugin_webui",
         "1.0.3",
-        "1.0.3+chtholly.3",
+        "1.0.3+chtholly.5",
         "https://files.pythonhosted.org/packages/17/0c/"
         "c02c08d5f23ee7577f0ce6613aedb78c4e01740cbbad34299b2129c32d1e/"
         "entari_plugin_webui-1.0.3-py3-none-any.whl",
@@ -75,6 +87,7 @@ PACKAGES = {
 MAX_WHEEL_BYTES = 16 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 30
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+BUILD_BACKEND = "pdm-backend==2.5.0"
 
 
 class BuildError(Exception):
@@ -126,6 +139,102 @@ def extract_upstream(data: bytes, destination: Path) -> None:
             if not (destination / name).resolve().is_relative_to(destination):
                 raise BuildError(f"wheel member escapes extraction directory: {name!r}")
         archive.extractall(destination)
+
+
+def extract_source(data: bytes, destination: Path) -> Path:
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+        roots: set[str] = set()
+        seen: set[str] = set()
+        expanded_bytes = 0
+        members = archive.getmembers()
+        links: list[tuple[tarfile.TarInfo, tarfile.TarInfo]] = []
+        for member in members:
+            parts = member.name.rstrip("/").split("/")
+            if (
+                "\\" in member.name
+                or ":" in member.name
+                or PurePosixPath(member.name).is_absolute()
+                or any(part in ("", ".", "..") or part.endswith((".", " ")) for part in parts)
+                or not (member.isdir() or member.isfile() or member.issym())
+            ):
+                raise BuildError(f"unsafe source archive member: {member.name!r}")
+            key = "/".join(parts).casefold()
+            if key in seen:
+                raise BuildError(f"duplicate source archive member: {member.name!r}")
+            seen.add(key)
+            roots.add(parts[0])
+            expanded_bytes += member.size
+            if member.issym():
+                link = PurePosixPath(member.linkname)
+                if (
+                    link.is_absolute()
+                    or any(part == ".." for part in link.parts)
+                    or any(marker in member.linkname for marker in ("\\", ":"))
+                ):
+                    raise BuildError(f"unsafe source link: {member.name!r}")
+                target = archive.getmember(str(PurePosixPath(member.name).parent / link))
+                if not target.isfile():
+                    raise BuildError(f"source link must target a regular archive file: {member.name!r}")
+                expanded_bytes += target.size
+                links.append((member, target))
+            if expanded_bytes > MAX_WHEEL_BYTES:
+                raise BuildError(f"expanded source exceeds the {MAX_WHEEL_BYTES}-byte limit")
+        if len(roots) != 1:
+            raise BuildError("source archive must contain exactly one project root")
+        archive.extractall(destination, members=[member for member in members if not member.issym()])
+        for member, target in links:
+            stream = archive.extractfile(target)
+            if stream is None:
+                raise BuildError(f"source link target is unreadable: {member.name!r}")
+            with stream:
+                (destination / member.name).write_bytes(stream.read())
+    source = destination / roots.pop()
+    if not (source / "pyproject.toml").is_file():
+        raise BuildError("source archive does not contain a Python project")
+    return source
+
+
+def build_source_wheel(spec: WheelSpec, data: bytes, workspace: Path) -> bytes:
+    """Build only hash-verified, commit-pinned sources through a fixed backend."""
+    source = extract_source(data, workspace / "source")
+    constraints = workspace / "build-constraints.txt"
+    constraints.write_text(BUILD_BACKEND + "\n", encoding="utf-8")
+    output = workspace / "dist"
+    command = [
+        "uv",
+        "build",
+        "--no-config",
+        "--no-sources",
+        "--python",
+        "3.11",
+        "--wheel",
+        "--build-constraints",
+        str(constraints),
+        "--out-dir",
+        str(output),
+        str(source),
+    ]
+    result = subprocess.run(
+        command,
+        cwd=workspace,
+        env={**os.environ, "SOURCE_DATE_EPOCH": "315532800"},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+        check=False,
+    )
+    if result.returncode:
+        raise BuildError(f"upstream source build failed: {(result.stderr or result.stdout).strip()}")
+    expected = output / f"{spec.package}-{spec.upstream}-py3-none-any.whl"
+    if list(output.glob("*.whl")) != [expected]:
+        raise BuildError("upstream source build did not produce exactly the pinned wheel")
+    with expected.open("rb") as stream:
+        wheel = stream.read(MAX_WHEEL_BYTES + 1)
+    if len(wheel) > MAX_WHEEL_BYTES:
+        raise BuildError(f"built wheel exceeds the {MAX_WHEEL_BYTES}-byte limit")
+    return wheel
 
 
 def apply_patch(spec: WheelSpec, source: Path) -> None:
@@ -243,12 +352,15 @@ def install_webui_theme(source: Path) -> None:
     entry.write_bytes(document.encode("utf-8"))
 
 
-def build(spec: WheelSpec, wheel: Path | None = None, output: Path | None = None) -> Path:
-    """Verify, patch and atomically publish a pinned wheel without importing it."""
+def build(spec: WheelSpec, upstream: Path | None = None, output: Path | None = None) -> Path:
+    """Verify, build, patch and atomically publish a pinned distribution."""
     output = output or spec.output
-    data = read_upstream(spec, wheel)
+    data = read_upstream(spec, upstream)
     with tempfile.TemporaryDirectory(prefix="chtholly-wheel-") as directory:
-        source = Path(directory).resolve()
+        workspace = Path(directory).resolve()
+        if spec.source_archive:
+            data = build_source_wheel(spec, data, workspace)
+        source = workspace / "wheel"
         extract_upstream(data, source)
         apply_patch(spec, source)
         if spec.directory == "webui":
@@ -261,12 +373,20 @@ def build(spec: WheelSpec, wheel: Path | None = None, output: Path | None = None
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--package", choices=PACKAGES, required=True)
-    parser.add_argument("--wheel", type=Path, help="local official wheel (must match the pinned SHA256)")
+    parser.add_argument("--upstream", type=Path, help="local pinned wheel or source archive (verified by SHA256)")
     parser.add_argument("--output", type=Path, help="override the vendored output wheel")
     args = parser.parse_args(argv)
     try:
-        output = build(PACKAGES[args.package], args.wheel, args.output)
-    except (BuildError, OSError, ValueError, SyntaxError, zipfile.BadZipFile, subprocess.SubprocessError) as exc:
+        output = build(PACKAGES[args.package], args.upstream, args.output)
+    except (
+        BuildError,
+        OSError,
+        ValueError,
+        SyntaxError,
+        zipfile.BadZipFile,
+        tarfile.TarError,
+        subprocess.SubprocessError,
+    ) as exc:
         sys.stderr.write(f"build_patched_wheel: {exc}\n")
         return 1
     sys.stdout.write(f"{output}\n")

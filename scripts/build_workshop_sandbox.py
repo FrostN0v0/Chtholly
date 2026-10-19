@@ -18,7 +18,8 @@ import tempfile
 import subprocess
 from email.parser import BytesParser
 
-DEFAULT_BASE = "ghcr.io/astral-sh/uv@sha256:a041b350d5d9483b538d5af07e9553ee8cbc7fc7fa90c2f7d20d93f18ce9bbd1"
+# uv 0.9.30-python3.11-bookworm-slim, pinned to its official image index.
+DEFAULT_BASE = "ghcr.io/astral-sh/uv@sha256:4f5d923c9dcea037f57bda425dd209f3ec643da2f0b74227f68d09dab0b3bb36"
 WORKER_FILES = (
     "worker.py",
     "worker_harness.py",
@@ -49,7 +50,7 @@ def trusted_bytes(root: Path, relative: str) -> bytes:
 def collect_inputs(root: Path) -> tuple[dict[str, bytes], str, str]:
     pyproject = trusted_bytes(root, "pyproject.toml")
     lock = trusted_bytes(root, "uv.lock")
-    wheels = set(re.findall(r'vendor/entari/arclet_entari-[^"\s/]+\.whl', lock.decode("utf-8")))
+    wheels = set(re.findall(r'vendor/entari/arclet_entari-[^"\\\s/]+\.whl', lock.decode("utf-8")))
     if len(wheels) != 1:
         raise ValueError("The current lock must identify exactly one vendored Entari wheel")
     wheel_path = wheels.pop()
@@ -70,13 +71,21 @@ def collect_inputs(root: Path) -> tuple[dict[str, bytes], str, str]:
         "uv.lock": lock,
         wheel_path: wheel,
     }
-    webui_wheels = set(re.findall(r'vendor/webui/entari_plugin_webui-[^"\s/]+\.whl', lock.decode("utf-8")))
-    if len(webui_wheels) != 1:
-        raise ValueError("The current lock must identify exactly one vendored WebUI wheel")
-    webui_path = webui_wheels.pop()
-    if webui_path.encode() not in pyproject:
-        raise ValueError("Project and lock do not reference the same pinned WebUI wheel")
-    inputs[webui_path] = trusted_bytes(root, webui_path)
+    lock_text = lock.decode("utf-8")
+    for directory, distribution in (
+        ("webui", "entari_plugin_webui"),
+        ("htmlrender", "entari_plugin_htmlrender"),
+        ("llm", "entari_plugin_llm"),
+    ):
+        pattern = rf'vendor/{directory}/{distribution}-[^"\\\s/]+\.whl'
+        wheel_paths = set(re.findall(pattern, lock_text))
+        project_paths = set(re.findall(pattern, pyproject.decode("utf-8")))
+        if len(wheel_paths) != 1:
+            raise ValueError(f"The current lock must identify exactly one vendored {distribution} wheel")
+        if project_paths != wheel_paths:
+            raise ValueError(f"Project and lock do not reference the same pinned {distribution} wheel")
+        path = wheel_paths.pop()
+        inputs[path] = trusted_bytes(root, path)
     for name in WORKER_FILES:
         inputs[f"worker/{name}"] = trusted_bytes(root, f"utils/plugin_workshop_sandbox/{name}")
     return inputs, framework, hashlib.sha256(wheel).hexdigest()
@@ -87,7 +96,7 @@ def resolve_base(executable: str, image: str) -> str:
     subprocess.run([executable, "pull", "--platform", "linux/amd64", image], check=True, timeout=600)
     inspected = docker_json(executable, "image", "inspect", image)[0]
     if inspected.get("Os") != "linux" or inspected.get("Architecture") != "amd64":
-        raise ValueError("Builder requires a Linux amd64 Python 3.10/uv base")
+        raise ValueError("Builder requires a Linux amd64 Python 3.11/uv base")
     digests = inspected.get("RepoDigests") or []
     if "@sha256:" in image:
         if image not in digests:
@@ -105,7 +114,7 @@ def main() -> int:
     parser.add_argument("--tag", default="chtholly-workshop:local")
     parser.add_argument("--docker", default="docker", help="Docker executable")
     parser.add_argument(
-        "--base", default=DEFAULT_BASE, help="Public Python 3.10/uv image; use emitted digest to reproduce"
+        "--base", default=DEFAULT_BASE, help="Public Python 3.11/uv image; use emitted digest to reproduce"
     )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -154,7 +163,7 @@ def main() -> int:
                 "image_id": image["Id"],
                 "base": base,
                 "framework_version": framework,
-                "python_version": "3.10",
+                "python_version": "3.11",
                 "input_sha256": input_hash,
                 "lock_sha256": hashlib.sha256(inputs["uv.lock"]).hexdigest(),
                 "wheel_sha256": wheel_hash,

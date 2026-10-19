@@ -1,23 +1,17 @@
-ARG BASE_IMAGE=ghcr.io/astral-sh/uv@sha256:a041b350d5d9483b538d5af07e9553ee8cbc7fc7fa90c2f7d20d93f18ce9bbd1
+# uv 0.9.30-python3.11-bookworm-slim, pinned to its official image index.
+ARG BASE_IMAGE=ghcr.io/astral-sh/uv@sha256:4f5d923c9dcea037f57bda425dd209f3ec643da2f0b74227f68d09dab0b3bb36
 FROM ${BASE_IMAGE} AS dependencies
 
-# Git is needed only for the existing locked entari-plugin-llm VCS dependency.
-# Freeze Debian package resolution as well as Python and uv image provenance.
-RUN rm -f /etc/apt/sources.list.d/debian.sources && \
-    printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main\n' > /etc/apt/sources.list && \
-    apt-get -o Acquire::Check-Valid-Until=false update && \
-    apt-get install --no-install-recommends -y git ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/workshop
 ENV UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy UV_NO_PROGRESS=1
 COPY pyproject.toml uv.lock ./
 COPY vendor/ vendor/
-RUN uv sync --locked --python 3.10 --no-python-downloads --no-install-project --no-dev --all-extras
+RUN uv sync --locked --python 3.11 --no-python-downloads --no-install-project --no-dev --all-extras
 ARG FRAMEWORK_VERSION
-RUN .venv/bin/python -c "import importlib.metadata, os, sys; assert sys.version_info[:2] == (3, 10); assert importlib.metadata.version('arclet-entari') == os.environ['FRAMEWORK_VERSION']"
+RUN .venv/bin/python -c "import importlib.metadata, os, sys; assert sys.version_info[:2] == (3, 11); assert importlib.metadata.version('arclet-entari') == os.environ['FRAMEWORK_VERSION']"
 # The locked Playwright wheel selects its exact Chromium revision at image build.
-# Pillow is worker-only: pin the CPython 3.10 Linux wheel independently of host deps.
-RUN uv pip install --python .venv/bin/python --no-deps 'https://files.pythonhosted.org/packages/f0/16/1a6bf01fb622fb9cf5c91683823f073f053005c849b1f52ed613afcf8dae/pillow-11.3.0-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl#sha256=4445fa62e15936a028672fd48c4c11a66d641d2c05726c7ec1f8ba6a572036ae'
+# Pillow is worker-only: pin the CPython 3.11 Linux wheel independently of host deps.
+RUN uv pip install --python .venv/bin/python --no-deps 'https://files.pythonhosted.org/packages/f2/2f/d7675ecae6c43e9f12aa8d58b6012683b20b6edfbdac7abcb4e6af7a3784/pillow-11.3.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl#sha256=106064daa23a745510dabce1d84f29137a37224831d88eb4ce94bb187b1d7e5f'
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/workshop/browsers
 RUN .venv/bin/python -m playwright install chromium && chmod -R a-w /opt/workshop/browsers
 
@@ -30,7 +24,7 @@ ARG BASE_IMAGE
 LABEL org.chtholly.workshop.protocol="1" \
       org.chtholly.workshop.rendering="playwright-v1" \
       org.chtholly.workshop.egress="open-meteo-v1" \
-      org.chtholly.workshop.python="3.10" \
+      org.chtholly.workshop.python="3.11" \
       org.chtholly.workshop.framework="${FRAMEWORK_VERSION}" \
       org.chtholly.workshop.lock-sha256="${LOCK_SHA256}" \
       org.chtholly.workshop.wheel-sha256="${WHEEL_SHA256}" \

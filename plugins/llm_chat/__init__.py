@@ -39,7 +39,8 @@ if plug is not None and plug.module.__name__ == __name__:
     plugin.collect_disposes(install_entari_internal_bridge())
     plugin.collect_disposes(install_delivery_audit())
     plugin.collect_disposes(install_group_delivery())
-    from .config_schema import LLMChatWebUIConfig  # entari: package
+    from .config import LLMChatConfig  # entari: package
+    from .config_schema import localize_llm_chat_schema  # entari: package
 
     metadata(
         name="llm_chat",
@@ -47,8 +48,9 @@ if plug is not None and plug.module.__name__ == __name__:
         version="0.1.0",
         description="群聊会话互动：多轴关系引擎 + 媒体互动 + 可选语音回复",
         role=PluginRole.NORMAL,
-        config=LLMChatWebUIConfig,
+        config=LLMChatConfig,
     )
+    plug.register_schema(fragment=localize_llm_chat_schema, replace=True)
     from . import model_state_runtime as model_state_runtime  # entari: package
 
     from . import tool_runtime as tool_runtime  # entari: package
@@ -87,7 +89,7 @@ if plug is not None and plug.module.__name__ == __name__:
     for child_name in ("command", "private_chat"):
         module_name = f"{__name__}.companion.{child_name}"
         plugin.package(module_name)
-        if plugin.load_plugin(module_name, config={"$filter": ""}) is None:
+        if not plugin.load_plugin(module_name, config={"$filter": ""}):
             raise RuntimeError(f"Companion child plugin failed to load: {child_name}")
 
     from . import agent_runtime as agent_runtime  # entari: package

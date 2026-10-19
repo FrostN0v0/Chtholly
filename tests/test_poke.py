@@ -39,9 +39,9 @@ from arclet.entari.config import EntariConfig
 from arclet.entari.plugin import load_plugin
 
 EntariConfig.load(Path({str(config_path)!r}))
-plugin = load_plugin("poke", config={{}})
-assert plugin is not None
-module = plugin.module
+loaded = load_plugin("poke", config={{}})
+assert loaded, loaded
+module = loaded.plugin.module
 module.SOUNDBOARD_DIR = Path({str(soundboard_dir)!r})
 module.MEME_DIR = Path({str(meme_dir)!r})
 module.POKE_AUDIO_DIRS = (

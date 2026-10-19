@@ -27,7 +27,7 @@ _ALLOWED = {
     "geocoding-api.open-meteo.com": "/v1/search",
     "api.open-meteo.com": "/v1/forecast",
 }
-# Keep exclusions stable on Python 3.10, whose IANA special-range table is older.
+# Keep exclusions independent of the interpreter's IANA special-range table.
 _SPECIAL_NETWORKS = tuple(
     ipaddress.ip_network(value)
     for value in (

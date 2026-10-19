@@ -9,7 +9,7 @@
   <a href="https://raw.githubusercontent.com/FrostN0v0/Chtholly/master/LICENSE">
     <img src="https://img.shields.io/github/license/FrostN0v0/Chtholly" alt="license">
   </a>
-    <img src="https://img.shields.io/badge/python-3.10-blue?logo=python&logoColor=edb641" alt="python">
+    <img src="https://img.shields.io/badge/python-3.11-blue?logo=python&logoColor=edb641" alt="python">
 
 </p>
 
@@ -37,7 +37,7 @@
 
 ## 🛠️ 快速开始
 
-当前支持 **Python 3.10**，使用 [uv](https://docs.astral.sh/uv/) 按 `.python-version` 和锁文件安装，不复用其他 Python 版本的虚拟环境。
+当前支持 **Python 3.11**，使用 [uv](https://docs.astral.sh/uv/) 按 `.python-version` 和锁文件安装，不复用其他 Python 版本的虚拟环境。Entari 0.19.0 已移除 Python 3.10 支持，本项目不再保留 3.10 兼容路径。
 
 ```shell
 git clone https://github.com/FrostN0v0/Chtholly.git
@@ -82,19 +82,27 @@ LLM 的价格元数据默认使用随包副本。只有显式设置进程环境 
 
 ```shell
 git pull --ff-only
-uv sync --locked --all-extras
+uv sync --locked --python 3.11 --all-extras
 uv run --locked main.py --check
 ```
 
 检查提示配置迁移时，按对应迁移说明操作；提示缺少资源时运行 `--prepare`，检查通过后再启动。仅 `git pull` 后直接用旧虚拟环境运行，不会自动完成依赖和配置升级。
 
-`uv.lock` 固定兼容组合，包含 Entari、WebUI、HTMLRender 补丁 wheel 与 LLM Git 版本。HTMLRender `0.1.0+chtholly.1` 修复驱动与安装器浏览器缓存不一致；补丁 wheel 随仓库提供，可用 `python scripts/build_patched_wheel.py --package entari`、`--package webui` 或 `--package htmlrender` 重建，不手改 `.venv`。干净环境验证入口为 `uv run --locked python scripts/smoke_startup.py`，CI 在 Windows 与 Linux 上检查新安装及本地配置升级路径。
+`uv.lock` 固定兼容组合：Entari `0.19.0+chtholly.1`、WebUI `1.0.3+chtholly.5`、HTMLRender `0.1.0+chtholly.1` 与基于原 Git 提交的 LLM `0.2.2+chtholly.2`。补丁制品随仓库提供；`python scripts/build_patched_wheel.py --package entari`（或 `webui`、`htmlrender`、`llm`）按固定来源与 SHA-256 重建，不手改 `.venv`。LLM 保留原工具桥，仅适配新的事件上下文与加载结果。干净环境验证入口为 `uv run --locked python scripts/smoke_startup.py --resources`；CI 使用 Python 3.11，分别覆盖 Windows/Linux 首启及 Linux 完整资源路径。
+
+### Entari 0.19.0 迁移边界
+
+- 依据[正式版发布说明](https://github.com/ArcletProject/Entari/releases/tag/v0.19.0)与 [rc2 至正式版源码差异](https://github.com/ArcletProject/Entari/compare/v0.19.0rc2...v0.19.0)迁移。加载与重载统一消费结果对象；临时插件使用 `plugin.niche`，不再引用 `RootlessPlugin`。
+- LLM 配置直接以运行时模型声明 metadata，本地化通过原生 `Plugin.register_schema` 完成，保留嵌套 `$defs`。WebUI 使用原生配置 Schema 和原子重载，并将 `$` 根下的内建插件映射回原 `.commands`、`.localdata` 等配置键；单个内建插件的开关不得影响兄弟插件。
+- 正式版仍需所有权、失败回滚、命令清理、别名重绑定与 Schema 片段隔离补丁。不能仅凭上游已支持热重载就删除本地安全边界；函数热替换、指纹与 API Hook 在原 rc2 中已经存在，并非本次新增能力。
+- 工坊必须用 `scripts/build_workshop_sandbox.py` 重建 Python 3.11 镜像；旧 3.10 镜像和验收报告不再接受。此迁移不更改个人配置、数据库或已发生的消息交付。
+
 
 更多框架用法见 [Entari 文档](https://arclet.top/tutorial/entari/)。
 
 ## WebUI 外观与配置应用
 
-管理页保留 Entari Logo 原色，使用中文、中性色卡片和语义状态色，支持深浅色与窄屏布局。会话页默认展示格式化正文、引用和实际回复；系统指令、工具记录在实色弹窗中阅读，原始数据按需切换。关系前后数值与增减合并为一张五轴图；Token 显示 K/M，并提供精确值与输入/输出占比。轮次默认最新在上，可切换排序。原生主题随 WebUI `1.0.3+chtholly.3` 补丁 wheel 安装；升级需同步源码并运行 `uv sync --locked --all-extras`，扩展页后端、`utils/webui_theme/` 与页面资源必须配套更新。原生主题修改通过 `scripts/build_patched_wheel.py --package webui` 重建，不直接修改第三方安装目录。
+管理页保留 Entari Logo 原色，使用中文、中性色卡片和语义状态色，支持深浅色与窄屏布局。会话页默认展示格式化正文、引用和实际回复；系统指令、工具记录在实色弹窗中阅读，原始数据按需切换。关系前后数值与增减合并为一张五轴图；Token 显示 K/M，并提供精确值与输入/输出占比。轮次默认最新在上，可切换排序。原生主题随 WebUI `1.0.3+chtholly.5` 补丁 wheel 安装；升级需同步源码并运行 `uv sync --locked --all-extras`，扩展页后端、`utils/webui_theme/` 与页面资源必须配套更新。原生主题修改通过 `scripts/build_patched_wheel.py --package webui` 重建，不直接修改第三方安装目录。
 
 启用 `webui_config_apply` 后，已加载 LLM 的模型目录、全局及分模型凭证引用、接口地址、提示词与模型参数可通过原生“保存”直接热生效，不重启 Bot。正在执行的主聊天保持原模型直到本轮纠正与最终化结束，新轮次使用新配置；删除模型时同步修复默认选择，保留会话指针和历史。不显示常驻浮窗或独立重启菜单。
 

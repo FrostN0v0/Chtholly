@@ -92,8 +92,8 @@ class DockerSandbox:
                 raise RuntimeError("Sandbox image protocol does not match this worker")
             if labels.get("org.chtholly.workshop.framework") != self.framework_version:
                 raise RuntimeError("Sandbox image Entari version does not match the host")
-            if labels.get("org.chtholly.workshop.python") != "3.10":
-                raise RuntimeError("Sandbox image must use Python 3.10")
+            if labels.get("org.chtholly.workshop.python") != "3.11":
+                raise RuntimeError("Sandbox image must use Python 3.11")
             if labels.get("org.chtholly.workshop.rendering") != "playwright-v1":
                 raise RuntimeError("Sandbox image lacks the trusted Playwright rendering capability; rebuild it")
             if labels.get("org.chtholly.workshop.egress") != "open-meteo-v1":
@@ -304,7 +304,7 @@ class DockerSandbox:
         if (
             payload.get("framework_version") != self.framework_version
             or not isinstance(python_version, str)
-            or not python_version.startswith("3.10.")
+            or not python_version.startswith("3.11.")
         ):
             raise ValueError("Worker interpreter/framework provenance differs from the approved image contract")
         checks = payload.get("checks")

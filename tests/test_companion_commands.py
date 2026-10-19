@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import sys
 from uuid import uuid4
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import asyncio
+from pathlib import Path
 from datetime import datetime, timezone
-import importlib
 from contextlib import asynccontextmanager
 
 import pytest
@@ -29,12 +28,11 @@ from companion_helpers import (
 from entari_plugin_user import utils as user_utils
 from arclet.entari.const import ITEM_SESSION
 from arclet.entari.config import EntariConfig
-from arclet.entari.plugin import find_plugin, get_plugins
+from arclet.entari.plugin import niche, find_plugin, get_plugins
 from arclet.entari.command import execute
 from arclet.entari.session import EntariProtocol
 from entari_plugin_database import Base
 from entari_plugin_user.models import Bind, User as UnifiedUser
-from arclet.entari.plugin.model import RootlessPlugin, current_plugin
 
 from plugins.llm_chat import agent_turn_setup
 from plugins.llm_chat.models import (
@@ -65,16 +63,25 @@ COMPANION = "\u81ea\u4e3b\u966a\u4f34"
 
 @asynccontextmanager
 async def native_mode_command(environment):
-    """Register the real module on a disposable native owner without reimporting its models."""
-    owner = RootlessPlugin(f".companion-mode-tests-{uuid4().hex}", lambda _owner: None, {})
-    token = current_plugin.set(owner)
+    """Execute the real command source under Entari's native disposable owner."""
+    name = "plugins.llm_chat.companion.command"
+    source_path = Path(__file__).resolve().parents[1] / "plugins" / "llm_chat" / "companion" / "command.py"
+    source = source_path.read_text(encoding="utf-8")
+
+    def apply(owner):
+        module = ModuleType(name)
+        module.__file__ = str(source_path)
+        module.__package__ = name.rpartition(".")[0]
+        module.__plugin__ = owner
+        owner.module = module
+        exec(compile(source, str(source_path), "exec"), module.__dict__)
+
+    owner = niche(f"companion-mode-tests-{uuid4().hex}", config={})(apply)
+    owner.exec_apply()
     try:
-        name = "plugins.llm_chat.companion.command"
-        module = importlib.reload(sys.modules[name]) if name in sys.modules else importlib.import_module(name)
-        environment.configure(module)
-        yield SimpleNamespace(call=environment.call, module=module, resolved=environment.resolved)
+        environment.configure(owner.module)
+        yield SimpleNamespace(call=environment.call, module=owner.module, resolved=environment.resolved)
     finally:
-        current_plugin.reset(token)
         pending = owner.dispose()
         if pending:
             assert all(task.get_loop() is asyncio.get_running_loop() for task in pending)

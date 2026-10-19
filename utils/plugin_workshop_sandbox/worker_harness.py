@@ -173,9 +173,9 @@ class Acceptance:
         self.publish_source()
         self.passed("Every Python source compiled without host-side execution")
         self.stage = "import"
-        active = load_plugin(self.module, config=json.loads(json.dumps(self.manifest["configuration"])))
-        if active is None or find_plugin(self.module) is not active:
-            raise AssertionError("Native import/public plugin lookup failed; inspect the bounded worker log")
+        loaded = load_plugin(self.module, config=json.loads(json.dumps(self.manifest["configuration"])))
+        if not loaded or find_plugin(self.module) is not loaded.plugin:
+            raise AssertionError(f"Native import/public plugin lookup failed: {loaded!r}")
         await self.ready_services()
         self.passed("Native Entari load and public plugin lookup succeeded")
         self.stage = "commands"
@@ -188,10 +188,11 @@ class Acceptance:
         for _ in range(2):
             previous = find_plugin(self.module)
             self.publish_source()
-            if not await reload_plugin(self.module, json.loads(json.dumps(self.manifest["configuration"]))):
-                raise AssertionError("Native same-source replacement failed")
-            if find_plugin(self.module) is previous or find_plugin(self.module) is None:
-                raise AssertionError("Native replacement did not publish a new plugin owner")
+            reloaded = await reload_plugin(self.module, json.loads(json.dumps(self.manifest["configuration"])))
+            if not reloaded:
+                raise AssertionError(f"Native same-source replacement failed: {reloaded!r}")
+            if reloaded.plugin is previous or find_plugin(self.module) is not reloaded.plugin:
+                raise AssertionError("Native replacement did not publish its new plugin owner")
             await self.ready_services()
             self.inventory()
             await self.exercise()
@@ -201,8 +202,11 @@ class Acceptance:
         old_services = dict(self.manager.components)
         self.publish_source(fail=True)
         try:
-            if await reload_plugin(self.module, json.loads(json.dumps(self.manifest["configuration"]))):
-                raise AssertionError("Intentionally broken candidate unexpectedly loaded")
+            rejected = await reload_plugin(self.module, json.loads(json.dumps(self.manifest["configuration"])))
+            if rejected:
+                raise AssertionError(f"Intentionally broken candidate unexpectedly loaded: {rejected!r}")
+            if not isinstance(rejected.error, Exception):
+                raise AssertionError(f"Failed candidate did not report its loading error: {rejected!r}")
             if not (self.root / "failed-candidate-reached").is_file():
                 raise AssertionError("Candidate import failed before the intended failure marker")
             if find_plugin(self.module) is not previous:
@@ -214,8 +218,9 @@ class Acceptance:
             await self.exercise()
         finally:
             self.publish_source()
-        if not await reload_plugin(self.module, json.loads(json.dumps(self.manifest["configuration"]))):
-            raise AssertionError("Restored source could not reload after failed replacement")
+        restored = await reload_plugin(self.module, json.loads(json.dumps(self.manifest["configuration"])))
+        if not restored or find_plugin(self.module) is not restored.plugin:
+            raise AssertionError(f"Restored source could not reload after failed replacement: {restored!r}")
         await self.ready_services()
         self.inventory()
         await self.exercise()
@@ -282,10 +287,12 @@ class Acceptance:
 
         app = IsolatedEntari.from_config(EntariConfig.load(config_path))
         self.manager.add_component(app)
-        if load_plugin("entari_plugin_database", config={"name": str(self.root / "acceptance.sqlite3")}) is None:
-            raise RuntimeError("Locked SQLite database dependency failed to initialize")
-        if load_plugin("entari_plugin_htmlrender", config=renderer_config(self.package)) is None:
-            raise RuntimeError("Trusted HTMLRender Playwright dependency failed to initialize")
+        database = load_plugin("entari_plugin_database", config={"name": str(self.root / "acceptance.sqlite3")})
+        if not database:
+            raise RuntimeError(f"Locked SQLite database dependency failed to initialize: {database!r}")
+        renderer = load_plugin("entari_plugin_htmlrender", config=renderer_config(self.package))
+        if not renderer:
+            raise RuntimeError(f"Trusted HTMLRender Playwright dependency failed to initialize: {renderer!r}")
         running = asyncio.create_task(self.manager.launch())
         probe = None
         try:
@@ -302,9 +309,10 @@ class Acceptance:
                 Path(__file__).with_name("probe_plugin.py").read_bytes(),
             )
             importlib.invalidate_caches()
-            probe = load_plugin("_workshop_acceptance_probe", config={})
-            if probe is None:
-                raise RuntimeError("Trusted lifecycle probe did not load")
+            loaded = load_plugin("_workshop_acceptance_probe", config={})
+            if not loaded:
+                raise RuntimeError(f"Trusted lifecycle probe did not load: {loaded!r}")
+            probe = loaded.plugin
             await asyncio.wait_for(probe.module.service.status.wait_for("blocking"), 5)
             self.transport = CaptureTransport()
             await asyncio.sleep(0.05)

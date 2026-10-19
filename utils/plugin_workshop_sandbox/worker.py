@@ -95,7 +95,7 @@ def main() -> int:
     )
     sys.dont_write_bytecode = True
     payload = read_request()
-    if not python_version.startswith("3.10.") or payload["framework_version"] != framework_version:
+    if not python_version.startswith("3.11.") or payload["framework_version"] != framework_version:
         raise RuntimeError("Worker Python/Entari provenance does not match the host contract")
     # Reserve report output before redirecting all framework/candidate stdout to the
     # bounded log pipe. Malicious native code can still forge this in-process report.

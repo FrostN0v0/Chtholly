@@ -63,14 +63,7 @@ def _sqlite_lock_error(error: Exception) -> bool:
     if not isinstance(error, OperationalError) or not isinstance(error.orig, sqlite3.OperationalError):
         return False
     code = getattr(error.orig, "sqlite_errorcode", None)
-    if isinstance(code, int):
-        return code & 0xFF in (5, 6)
-    # Python 3.10 does not expose SQLite result codes on exceptions.
-    return str(error.orig).split(": ", 1)[0] in (
-        "database is locked",
-        "database table is locked",
-        "database schema is locked",
-    )
+    return isinstance(code, int) and code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
 
 
 def _online(account: Any) -> bool:

@@ -1,0 +1,21 @@
+--- a/entari_plugin_llm/tools.py
++++ b/entari_plugin_llm/tools.py
+@@ -257,6 +257,8 @@
+         if fn.stop_after_tool_call:
+             stops.append(req)
+ 
+-    tool_ctx = await generate_contexts(LLMToolEvent(session=session, llm_session=llm_session), inherit_ctx=ctx)
++    tool_ctx = await generate_contexts(
++        LLMToolEvent(session=session, llm_session=llm_session), supplier=tools_pub.supplier, inherit_ctx=ctx
++    )
+     await asyncio.gather(*(execute_one(req, tool_ctx.copy()) for req in requirements))
+     return not stops
+--- a/entari_plugin_llm/builtins/tools/plugin_manager.py
++++ b/entari_plugin_llm/builtins/tools/plugin_manager.py
+@@ -50,5 +50,5 @@
+     try:
+         plg = plugin.load_plugin(import_path, config)
+-        if plg is None:
++        if not plg:
+             return f"未能加载插件 {import_path}，请检查导入路径是否正确"
+         return f"插件 {import_path} 已成功加载"

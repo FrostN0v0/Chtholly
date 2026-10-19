@@ -42,7 +42,7 @@ class ValidationResult:
 
 
 def python_issues() -> list[str]:
-    return [] if sys.version_info[:2] == (3, 10) else ["Use Python 3.10: run uv sync --locked --python 3.10."]
+    return [] if sys.version_info[:2] == (3, 11) else ["Use Python 3.11: run uv sync --locked --python 3.11."]
 
 
 def _nonempty(value: object) -> TypeGuard[str]:
