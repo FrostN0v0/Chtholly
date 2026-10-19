@@ -76,6 +76,8 @@ def collect_inputs(root: Path) -> tuple[dict[str, bytes], str, str]:
         ("webui", "entari_plugin_webui"),
         ("htmlrender", "entari_plugin_htmlrender"),
         ("llm", "entari_plugin_llm"),
+        ("satori", "satori_python"),
+        ("satori", "satori_python_server"),
     ):
         pattern = rf'vendor/{directory}/{distribution}-[^"\\\s/]+\.whl'
         wheel_paths = set(re.findall(pattern, lock_text))

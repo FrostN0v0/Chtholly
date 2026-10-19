@@ -117,6 +117,8 @@ def build_inputs(root: Path, *, with_llm: bool) -> dict[str, bytes]:
         "entari": f"vendor/entari/arclet_entari-{FRAMEWORK}-py3-none-any.whl",
         "webui": "vendor/webui/entari_plugin_webui-1.0.3+chtholly.5-py3-none-any.whl",
         "htmlrender": "vendor/htmlrender/entari_plugin_htmlrender-0.1.0+chtholly.1-py3-none-any.whl",
+        "satori": "vendor/satori/satori_python-1.3.9.post1+chtholly.1-py3-none-any.whl",
+        "satori-server": "vendor/satori/satori_python_server-1.3.7+chtholly.1-py3-none-any.whl",
     }
     if with_llm:
         wheels["llm"] = "vendor/llm/entari_plugin_llm-0.2.2+chtholly.2-py3-none-any.whl"
@@ -165,4 +167,21 @@ def test_builder_rejects_llm_source_missing_from_lock(tmp_path):
 def test_builder_rejects_missing_vendored_llm(tmp_path):
     build_inputs(tmp_path, with_llm=False)
     with pytest.raises(ValueError, match="exactly one vendored entari_plugin_llm wheel"):
+        collect_inputs(tmp_path)
+
+
+@pytest.mark.parametrize("distribution", ["satori_python", "satori_python_server"])
+@pytest.mark.parametrize("missing_from", ["pyproject.toml", "uv.lock", "wheel"])
+def test_builder_requires_both_patched_satori_wheels(tmp_path, distribution, missing_from):
+    expected = build_inputs(tmp_path, with_llm=True)
+    wheel_path = next(path for path in expected if path.startswith(f"vendor/satori/{distribution}-"))
+    if missing_from == "wheel":
+        (tmp_path / wheel_path).unlink()
+    else:
+        manifest = tmp_path / missing_from
+        manifest.write_text(
+            "\n".join(line for line in manifest.read_text(encoding="utf-8").splitlines() if wheel_path not in line),
+            encoding="utf-8",
+        )
+    with pytest.raises(ValueError, match=distribution):
         collect_inputs(tmp_path)

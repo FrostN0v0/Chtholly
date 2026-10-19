@@ -16,6 +16,7 @@ from .types import CompanionConflict, ReflectionSnapshot
 from .models import CompanionMember
 from ..models import AgentTurn, AgentEvent, ContextSession
 from .claim_store import read_contact_timing
+from .persistence import aware
 from ..relationships.state import load_relationship_snapshot
 from ..scheduled_chat_context import _user_content, _assistant_content
 
@@ -30,6 +31,16 @@ def _age_minutes(moment: object, now: datetime) -> int | None:
     if not isinstance(moment, datetime) or moment.tzinfo is None:
         raise ValueError("Companion policy timestamps must be timezone-aware")
     return max(0, min(90 * 24 * 60, int((now - moment).total_seconds() // 60)))
+
+
+def _episode_time(created_at: datetime | None, now: datetime) -> dict[str, object]:
+    """Native AgentTurn timestamps are UTC; absent legacy values stay unknown."""
+    moment = aware(created_at)
+    return {
+        "created_at": moment.isoformat() if moment is not None else None,
+        "created_at_local": moment.astimezone(SHANGHAI).isoformat() if moment is not None else None,
+        "age_minutes": _age_minutes(moment, now),
+    }
 
 
 async def reflection_input(
@@ -61,14 +72,20 @@ async def reflection_input(
         raise ValueError("Complete companion life state exceeds the configured reflection input budget")
     source_map = snapshot.member_turn_ids
     ids = {turn_id for member in snapshot.members for turn_id in source_map.get(member.member_ref, ())[-6:]}
-    rows: list[tuple[int, str, str, str]] = []
+    rows: list[tuple[int, str, str, str, datetime | None]] = []
     events: list[tuple[int, str, str]] = []
     if ids:
         async with get_session() as db:
             rows = list(
                 (
                     await db.execute(
-                        select(AgentTurn.id, AgentTurn.user_id, AgentTurn.user_name, AgentTurn.status)
+                        select(
+                            AgentTurn.id,
+                            AgentTurn.user_id,
+                            AgentTurn.user_name,
+                            AgentTurn.status,
+                            AgentTurn.created_at,
+                        )
                         .join(ContextSession, ContextSession.id == AgentTurn.session_id)
                         .where(
                             AgentTurn.id.in_(ids),
@@ -159,13 +176,20 @@ async def reflection_input(
     for member, item in zip(snapshot.members, selected):
         allowed = ownership[member.member_ref]
         episodes: list[dict[str, object]] = []
-        for turn_id, owner, speaker, outcome in reversed(rows):
+        for turn_id, owner, speaker, outcome, created_at in reversed(rows):
             if str(owner) not in {member.user_id, member.platform_user_id} or int(turn_id) not in allowed:
                 continue
             text = by_turn.get(int(turn_id), {})
             if "user" not in text:
                 continue
-            episode = {"turn_id": int(turn_id), "speaker": str(speaker), "outcome": str(outcome), **text}
+            episode_time = _episode_time(created_at, now)
+            episode = {
+                "turn_id": int(turn_id),
+                "speaker": str(speaker),
+                "outcome": str(outcome),
+                **episode_time,
+                **text,
+            }
             episodes.append(episode)
             item["episodes"] = episodes
             if _size(payload) > available_chars:

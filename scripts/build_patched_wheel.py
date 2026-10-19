@@ -71,6 +71,29 @@ PACKAGES = {
         "llm",
         source_archive=True,
     ),
+    # Both distributions ship the server module; either installation order must be safe.
+    "satori": WheelSpec(
+        "satori_python",
+        "1.3.9.post1",
+        "1.3.9.post1+chtholly.1",
+        "https://files.pythonhosted.org/packages/13/51/"
+        "ec481725cd23b9ee9b131cf9f2052b30117fa71658ac636ddf245fdeb471/"
+        "satori_python-1.3.9.post1-py3-none-any.whl",
+        "1b6a6f8d504a1f07b1c29c4186a554dd111c2e7541b1e5f624338ac410091af2",
+        "satori-1.3.7-server-lifecycle.patch",
+        "satori",
+    ),
+    "satori-server": WheelSpec(
+        "satori_python_server",
+        "1.3.7",
+        "1.3.7+chtholly.1",
+        "https://files.pythonhosted.org/packages/d0/c7/"
+        "2d0997754e55e278ca4517bf899995d19e50d1f63f8a7c85f02b30bda359/"
+        "satori_python_server-1.3.7-py3-none-any.whl",
+        "a5fc16320c673120cb4d6a985ffaf84ba228a30eff00d221af7ef22af568d6de",
+        "satori-1.3.7-server-lifecycle.patch",
+        "satori",
+    ),
     "webui": WheelSpec(
         "entari_plugin_webui",
         "1.0.3",

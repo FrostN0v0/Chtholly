@@ -1,0 +1,15 @@
+diff --git a/satori/server/__init__.py b/satori/server/__init__.py
+--- a/satori/server/__init__.py
++++ b/satori/server/__init__.py
+@@ -540,10 +540,10 @@ class Server(Service, RouterMixin):
+                     timeout=ClientTimeout(hook.timeout or 300),
+                 ) as resp:
+                     resp.raise_for_status()
++            # One adapter finishing must not unmount the shared HTTP application.
+             await any_completed(
+                 manager.status.wait_for_sigexit(),
+                 *event_tasks,
+-                *(_adapter.status.wait_for("blocking-completed") for _adapter in self._adapters),
+             )
+ 
+         async with self.stage("cleanup"):

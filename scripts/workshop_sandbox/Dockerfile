@@ -5,7 +5,13 @@ FROM ${BASE_IMAGE} AS dependencies
 WORKDIR /opt/workshop
 ENV UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy UV_NO_PROGRESS=1
 COPY pyproject.toml uv.lock ./
-COPY vendor/ vendor/
+# Only the trusted collector's mandatory patched distributions enter this context.
+COPY vendor/entari/ vendor/entari/
+COPY vendor/webui/ vendor/webui/
+COPY vendor/htmlrender/ vendor/htmlrender/
+COPY vendor/llm/ vendor/llm/
+# Both distributions own satori/server; neither may overwrite the lifecycle repair.
+COPY vendor/satori/ vendor/satori/
 RUN uv sync --locked --python 3.11 --no-python-downloads --no-install-project --no-dev --all-extras
 ARG FRAMEWORK_VERSION
 RUN .venv/bin/python -c "import importlib.metadata, os, sys; assert sys.version_info[:2] == (3, 11); assert importlib.metadata.version('arclet-entari') == os.environ['FRAMEWORK_VERSION']"

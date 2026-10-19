@@ -378,7 +378,9 @@ dependencies = [
     { name = "orjson" },
     { name = "psutil" },
     { name = "rich" },
+    { name = "satori-python" },
     { name = "satori-python-adapter-qq" },
+    { name = "satori-python-server" },
     { name = "tzdata" },
 ]
 
@@ -413,8 +415,10 @@ requires-dist = [
     { name = "orjson", specifier = ">=3.11.9" },
     { name = "psutil", specifier = ">=7.0.0" },
     { name = "rich", specifier = ">=13.9.4" },
+    { name = "satori-python", path = "vendor/satori/satori_python-1.3.9.post1+chtholly.1-py3-none-any.whl" },
     { name = "satori-python-adapter-onebot11", marker = "extra == 'adapters'", specifier = ">=0.4.4" },
     { name = "satori-python-adapter-qq", specifier = ">=0.4.2" },
+    { name = "satori-python-server", path = "vendor/satori/satori_python_server-1.3.7+chtholly.1-py3-none-any.whl" },
     { name = "tzdata", specifier = ">=2026.3" },
 ]
 provides-extras = ["adapters"]
@@ -1867,8 +1871,8 @@ wheels = [
 
 [[package]]
 name = "satori-python"
-version = "1.3.9.post1"
-source = { registry = "https://pypi.org/simple" }
+version = "1.3.9.post1+chtholly.1"
+source = { path = "vendor/satori/satori_python-1.3.9.post1+chtholly.1-py3-none-any.whl" }
 dependencies = [
     { name = "aiohttp" },
     { name = "cryptography" },
@@ -1881,10 +1885,25 @@ dependencies = [
     { name = "websockets" },
     { name = "yarl" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8a/51/3f19829ddc4c4b5466fae59e8358720a36b6417fbf11a0d45d7cb5f63561/satori_python-1.3.9.post1.tar.gz", hash = "sha256:4e255d441fda7ef3b21dd8cfe0e2120e5b6d331517c6ca356ee8ac364fb89f79", size = 47399, upload-time = "2026-07-20T03:44:04.595Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/13/51/ec481725cd23b9ee9b131cf9f2052b30117fa71658ac636ddf245fdeb471/satori_python-1.3.9.post1-py3-none-any.whl", hash = "sha256:1b6a6f8d504a1f07b1c29c4186a554dd111c2e7541b1e5f624338ac410091af2", size = 54889, upload-time = "2026-07-20T03:44:03.431Z" },
+    { filename = "satori_python-1.3.9.post1+chtholly.1-py3-none-any.whl", hash = "sha256:eb112e3420daf280b9e39192e0c7119d5685511ab7ef7202b1db072e7549d6b7" },
 ]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", specifier = ">=3.9.3" },
+    { name = "cryptography", specifier = ">=46.0.4" },
+    { name = "graia-amnesia", extras = ["uvicorn"], specifier = ">=0.11.0,<0.12.0" },
+    { name = "launart", specifier = ">=0.8.2" },
+    { name = "loguru", specifier = ">=0.7.2" },
+    { name = "msgspec", marker = "extra == 'msgspec'", specifier = ">=0.19.0" },
+    { name = "python-multipart", specifier = ">=0.0.9" },
+    { name = "starlette", specifier = ">=0.40.0" },
+    { name = "typing-extensions", specifier = ">=4.7.0" },
+    { name = "websockets", specifier = ">=15.0.1" },
+    { name = "yarl", specifier = ">=1.9.4" },
+]
+provides-extras = ["msgspec"]
 
 [[package]]
 name = "satori-python-adapter-onebot11"
@@ -1942,8 +1961,8 @@ wheels = [
 
 [[package]]
 name = "satori-python-server"
-version = "1.3.7"
-source = { registry = "https://pypi.org/simple" }
+version = "1.3.7+chtholly.1"
+source = { path = "vendor/satori/satori_python_server-1.3.7+chtholly.1-py3-none-any.whl" }
 dependencies = [
     { name = "aiohttp" },
     { name = "graia-amnesia", extra = ["uvicorn"] },
@@ -1955,9 +1974,21 @@ dependencies = [
     { name = "websockets" },
     { name = "yarl" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4f/4a/e2791d2aa3f351c48846be9495864a60dfb911fb38d224911a8eb4c8e961/satori_python_server-1.3.7.tar.gz", hash = "sha256:97c1f75a1037a1a5dd2ed33a5a38738015c58d1f133dad1621c4f5c419598182", size = 14983, upload-time = "2026-07-08T14:33:17.337Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d0/c7/2d0997754e55e278ca4517bf899995d19e50d1f63f8a7c85f02b30bda359/satori_python_server-1.3.7-py3-none-any.whl", hash = "sha256:a5fc16320c673120cb4d6a985ffaf84ba228a30eff00d221af7ef22af568d6de", size = 15901, upload-time = "2026-07-08T14:33:16.508Z" },
+    { filename = "satori_python_server-1.3.7+chtholly.1-py3-none-any.whl", hash = "sha256:64cce3a82dab2bd196625092879f8551e5c664ae70d63a7937132d7cd74352e6" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", specifier = ">=3.9.3" },
+    { name = "graia-amnesia", extras = ["uvicorn"], specifier = ">=0.11.0,<0.12.0" },
+    { name = "launart", specifier = ">=0.8.2" },
+    { name = "loguru", specifier = ">=0.7.2" },
+    { name = "python-multipart", specifier = ">=0.0.9" },
+    { name = "satori-python-core", specifier = ">=1.3.6,<1.4.0" },
+    { name = "starlette", specifier = ">=0.40.0" },
+    { name = "websockets", specifier = ">=15.0.1" },
+    { name = "yarl", specifier = ">=1.9.4" },
 ]
 
 [[package]]
