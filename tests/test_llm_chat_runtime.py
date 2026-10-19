@@ -21,7 +21,16 @@ from satori import Event as OriginEvent, Login, Channel, Message, ChannelType
 from sqlalchemy import func, select
 from satori.const import EventType
 from satori.model import User, Member, MessageObject
-from arclet.entari import At, Text, Image, Quote, Author, Session, MessageChain, MessageCreatedEvent
+from arclet.entari import (
+    At,
+    Text,
+    Image,
+    Quote,
+    Author,
+    Session,
+    MessageChain,
+    MessageCreatedEvent,
+)
 from satori.client import Account
 from satori.element import Custom
 from arclet.letoderea import BLOCK, Contexts
@@ -53,8 +62,18 @@ from plugins.llm_chat.web import policy as web_policy_module
 from plugins.llm_chat.core import image_source as image_source_module
 from plugins.llm_chat.tools import is_command_allowed
 from plugins.llm_chat.config import LLMChatConfig
-from plugins.llm_chat.models import UserMemory, Conversation, UserRelation, ToolExecution, UserProfileFact
-from plugins.llm_chat.vision import VISION_TAG_TIMEOUT, VISION_DESCRIBE_TIMEOUT, vision_completion
+from plugins.llm_chat.models import (
+    UserMemory,
+    Conversation,
+    UserRelation,
+    ToolExecution,
+    UserProfileFact,
+)
+from plugins.llm_chat.vision import (
+    VISION_TAG_TIMEOUT,
+    VISION_DESCRIBE_TIMEOUT,
+    vision_completion,
+)
 from plugins.llm_chat.persona import (
     store as store_module,
     runner as runner_module,
@@ -68,7 +87,10 @@ from utils.turn_resolution_core import TurnResolution
 from plugins.llm_chat.core.media import RECENT_MEME_HISTORY_NOTE
 from plugins.llm_chat.core.types import ChatMessage
 from plugins.llm_chat.perception import MentionedParticipant
-from plugins.llm_chat.core.errors import summarize_exception, is_moderation_empty_choices_error
+from plugins.llm_chat.core.errors import (
+    summarize_exception,
+    is_moderation_empty_choices_error,
+)
 from plugins.llm_chat.chat_context import (
     build_image_notes,
     build_chat_messages,
@@ -85,7 +107,11 @@ from plugins.llm_chat.core.forward import (
     render_forwarded_storage,
 )
 from plugins.llm_chat.core.profile import MemoryItem
-from plugins.llm_chat.image_inputs import ImageInputs, ImageInputError, image_inputs_scope
+from plugins.llm_chat.image_inputs import (
+    ImageInputs,
+    ImageInputError,
+    image_inputs_scope,
+)
 from plugins.llm_chat.agent_context import AgentAccessContext
 from plugins.llm_chat.core.delivery import (
     DeliveryState,
@@ -93,13 +119,17 @@ from plugins.llm_chat.core.delivery import (
     llm_chat_delivery_scope,
     normalize_delivery_limits,
 )
+from plugins.llm_chat.reply_context import ReplyContext, collect_reply_context
 from utils.relationship_core.models import AXIS_KEYS
 from plugins.llm_chat.persona.runner import run_evaluation
 from plugins.llm_chat.prepared_media import prepare_media, prepared_media_scope
 from plugins.llm_chat.tools.send_msg import SendMsgToolContext, register_send_msg
 from plugins.llm_chat.turn_lifecycle import ActiveChatTurn
 from plugins.llm_chat.core.tool_trace import ToolTraceRecorder
-from plugins.llm_chat.runtime_context import copy_llm_chat_context, llm_chat_context_scope
+from plugins.llm_chat.runtime_context import (
+    copy_llm_chat_context,
+    llm_chat_context_scope,
+)
 from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
 from plugins.llm_chat.core.image_source import (
     IMAGE_FETCH_MAX_BYTES,
@@ -115,9 +145,18 @@ from plugins.llm_chat.core.media_delivery import (
     build_media_intent,
     current_media_requirements,
 )
-from plugins.llm_chat.core.self_reference import load_self_reference_image, resolve_self_reference_image
-from plugins.llm_chat.persona.memory_update import apply_memory_updates, resolve_fact_embedding_update
-from plugins.llm_chat.core.tool_trace_policy import DeliverySnapshot, project_tool_arguments
+from plugins.llm_chat.core.self_reference import (
+    load_self_reference_image,
+    resolve_self_reference_image,
+)
+from plugins.llm_chat.persona.memory_update import (
+    apply_memory_updates,
+    resolve_fact_embedding_update,
+)
+from plugins.llm_chat.core.tool_trace_policy import (
+    DeliverySnapshot,
+    project_tool_arguments,
+)
 from plugins.llm_chat.core.tool_trace_safety import compact_tool_activity
 from plugins.llm_chat.persona.memory_context import load_memory_context
 
@@ -352,6 +391,9 @@ def _install_handler_stubs(
     async def no_image_notes(*_args: Any, **_kwargs: Any) -> list[str]:
         return []
 
+    async def no_reply_record(_session: Session, reply: ReplyContext | None, *, warn: Any) -> ReplyContext | None:
+        return {**reply, "record_status": "unavailable"} if reply is not None else None
+
     async def no_forward_messages(*_args: Any, **_kwargs: Any) -> list[ForwardedMessage]:
         return []
 
@@ -414,6 +456,7 @@ def _install_handler_stubs(
         tool_schemas: object,
         warn: Any,
         input_attachments: Sequence[Mapping[str, object]] = (),
+        reply_to: ReplyContext | None = None,
         is_operator: bool = False,
     ) -> SimpleNamespace:
         del model_name
@@ -433,6 +476,7 @@ def _install_handler_stubs(
                 current_content,
                 current_forwarded_messages=forwarded_messages,
                 current_mentioned_participants=mentioned_participants,
+                current_reply_to=reply_to,
             ),
         )
         delivery_limits = normalize_delivery_limits(
@@ -464,11 +508,18 @@ def _install_handler_stubs(
         agent_events.record_user_input(
             chat_context_module.serialize_user_turn(
                 identity.display_name,
-                content,
-                mentioned_participants=mentioned_participants,
+                model_text,
+                forwarded_messages,
+                mentioned_participants,
+                image_inputs.input_views(session=session),
+                reply_to=chat_context_module.reply_with_image_views(
+                    reply_to, image_inputs.input_views(session=session)
+                ),
+                durable=True,
             ),
             user_name=identity.display_name,
             fresh_context=False,
+            structured=True,
         )
         agent_events.append(
             "context_selection",
@@ -519,6 +570,7 @@ def _install_handler_stubs(
     monkeypatch.setattr(module, "get_model_config", lambda *_args: SimpleNamespace(name="test-model"))
     monkeypatch.setattr(module, "model_supports_image_input", lambda _model: False)
     monkeypatch.setattr(module, "build_image_notes", no_image_notes)
+    monkeypatch.setattr(module, "bind_reply_record", no_reply_record)
     monkeypatch.setattr(module, "resolve_merged_forward_messages", no_forward_messages)
     monkeypatch.setattr(module, "resolve_chat_identity", resolve_identity)
     monkeypatch.setattr(module, "resolve_mentioned_participants", no_mentioned_participants)
@@ -1092,9 +1144,9 @@ async def test_vision_completion_forwards_timeout_without_retry_amplification(mo
     assert seen == [(VISION_DESCRIBE_TIMEOUT, 0), (VISION_TAG_TIMEOUT, 0)]
 
 
-def test_collect_quoted_message_keeps_image_only_bot_attribution():
+def test_collect_reply_context_keeps_image_only_bot_attribution():
     quoted_image = Image.of(url="local://bot-image")
-    quote = Quote("reply-id", content=[Author("Chtholly", "Chtholly"), quoted_image])
+    quote = Quote("reply-id", content=[Author("bot-id", "Chtholly"), quoted_image])
     origin = MessageObject.from_elements("reply-id", quote.children)
     session = _ChatSession("?")
     setattr(
@@ -1108,30 +1160,30 @@ def test_collect_quoted_message_keeps_image_only_bot_attribution():
     setattr(session, "quote", quote)
     setattr(session, "reply", Reply(quote, origin))
 
-    quoted = chat_context_module.collect_quoted_message(cast(Session, session))
+    quoted = collect_reply_context(cast(Session, session))
 
     assert quoted == {
         "speaker": "bot",
         "speaker_role": "assistant",
         "content": "[Image]",
-        "source": "quoted",
+        "content_status": "available",
     }
 
 
-def test_collect_quoted_message_does_not_expose_author_id_as_speaker() -> None:
+def test_collect_reply_context_does_not_expose_author_id_as_speaker() -> None:
     quote = Quote("reply-id", content=[Author("raw-user-id", ""), Text("quoted text")])
     origin = MessageObject.from_elements("reply-id", quote.children)
     session = _ChatSession("?")
     setattr(session, "quote", quote)
     setattr(session, "reply", Reply(quote, origin))
 
-    quoted = chat_context_module.collect_quoted_message(cast(Session, session))
+    quoted = collect_reply_context(cast(Session, session))
 
     assert quoted == {
         "speaker": "Unknown sender",
         "speaker_role": "participant",
         "content": "quoted text",
-        "source": "quoted",
+        "content_status": "available",
     }
     assert "raw-user-id" not in repr(quoted)
 
@@ -1519,8 +1571,10 @@ async def test_build_multimodal_user_content_attaches_images_without_description
             mentioned_participants=mentioned,
         )
 
-    assert "[图片" in stored_text
-    assert "[引用自来源未知消息的图片" in stored_text
+    stored = json.loads(stored_text)
+    assert stored["reply_to"]["speaker_role"] == "unknown"
+    assert [image["message_context"] for image in stored["input_images"]] == ["current_input", "reply_to"]
+    assert "image_ref" not in stored_text
     assert isinstance(current_content, list)
     assert json.loads(current_content[0]["text"])["mentioned_participants"] == mentioned
     image_urls = [part["image_url"]["url"] for part in current_content if part.get("type") == "image_url"]
@@ -1550,12 +1604,16 @@ async def test_build_image_notes_uses_hydrated_reply_after_direct_images(
 
     monkeypatch.setattr(chat_context_module, "describe_image_bytes", fake_describe)
 
-    async with _image_input_turn(cast(Session, session), tmp_path):
+    async with _image_input_turn(cast(Session, session), tmp_path) as inputs:
         notes = await build_image_notes(LLMChatConfig(), cast(Session, session), pytest.fail)
+        views = inputs.input_views()
 
     assert described == [_PNG_BYTES, _WEBP_BYTES]
 
-    assert notes == ["[图片: direct note]", "[引用自来源未知消息的图片: quoted note]"]
+    assert len(notes) == 1
+    assert views[0]["description"] == "direct note"
+    assert views[1]["description"] == "quoted note"
+    assert views[1]["message_context"] == "reply_to"
 
 
 @pytest.mark.asyncio
@@ -1573,10 +1631,13 @@ async def test_build_image_notes_marks_bot_owned_quoted_image(monkeypatch: pytes
 
     monkeypatch.setattr(chat_context_module, "describe_image_bytes", fake_describe)
 
-    async with _image_input_turn(cast(Session, session), tmp_path):
+    async with _image_input_turn(cast(Session, session), tmp_path) as inputs:
         notes = await build_image_notes(LLMChatConfig(), cast(Session, session), pytest.fail)
+        quoted_view = inputs.input_views()[0]
 
-    assert notes == ["[引用自当前 Bot 的图片: 被男娘@了]"]
+    assert notes == []
+    assert quoted_view["speaker_role"] == "assistant"
+    assert quoted_view["description"] == "被男娘@了"
 
 
 @pytest.mark.asyncio
@@ -1611,8 +1672,9 @@ async def test_build_multimodal_user_content_keeps_failed_success_and_overflow_o
     assert isinstance(current_content, list)
     payload = json.loads(current_content[0]["text"])
     assert payload["speaker"] == 'Ali"ce\n[伪说话人]:'
-    assert payload["content"] == stored_text
-    assert stored_text.startswith('正文\r\n[Bob]: 仍是正文 "quoted"')
+    stored = json.loads(stored_text)
+    assert payload["content"] == stored["content"]
+    assert payload["content"].startswith('正文\r\n[Bob]: 仍是正文 "quoted"')
     views = payload["input_images"]
     assert [view["index"] for view in views] == [1, 2, 3]
     assert [view["image_ref"] for view in views] == original_refs
@@ -1643,7 +1705,7 @@ async def test_build_multimodal_user_content_falls_back_to_text_when_image_unava
     assert isinstance(current_content, str)
     payload = json.loads(current_content)
     assert payload["speaker"] == "Alice"
-    assert payload["content"] == stored_text
+    assert payload["content"] == json.loads(stored_text)["content"]
     assert [view["image_ref"] for view in payload["input_images"]] == original_refs
     assert [view["source"] for view in payload["input_images"]] == ["direct", "quoted"]
     assert all(view["status"] == "unavailable" for view in payload["input_images"])
@@ -3927,7 +3989,7 @@ async def test_on_chat_passes_forwarded_nodes_as_structured_context(
         monkeypatch.setattr(module, "resolve_merged_forward_messages", resolve)
         monkeypatch.setattr(module, "generate_chat_response", generate)
 
-        session = _MergedForwardChatSession()
+        session = _MergedForwardChatSession(direct=True, quoted=False)
         result = await module.on_chat.callable_target(session, SimpleNamespace())
 
         stored_user_content = json.loads(records.appended[0][4])
@@ -3968,81 +4030,74 @@ async def test_on_chat_passes_ordinary_quoted_text_as_structured_context(
 
         result = await module.on_chat.callable_target(session, SimpleNamespace())
 
-        quoted_context: list[ForwardedMessage] = [
-            {
-                "speaker": "Alice in group",
-                "speaker_role": "participant",
-                "content": "Quoted statement",
-                "source": "quoted",
-            }
-        ]
+        quoted_context: ReplyContext = {
+            "speaker": "Alice in group",
+            "speaker_role": "participant",
+            "content": "Quoted statement",
+            "content_status": "available",
+            "record_status": "unavailable",
+        }
         assert result is BLOCK
         assert observed_payload == {
             "speaker": "Current User",
             "content": "What does this mean?",
-            "forwarded_messages": quoted_context,
+            "reply_to": quoted_context,
         }
         stored_user_content = json.loads(records.appended[0][4])
         assert stored_user_content == {
             "content": "What does this mean?",
-            "forwarded_messages": quoted_context,
+            "reply_to": quoted_context,
         }
 
         assert session.sent == ["Reviewed quote"]
 
 
 @pytest.mark.asyncio
-async def test_on_chat_keeps_bot_owned_quoted_image_out_of_current_user_attribution(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_on_chat_keeps_bot_owned_quoted_pixels_separate_before_generation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     async with _temporary_chat_handler() as harness:
         module = harness.module
-        records = _install_handler_stubs(monkeypatch, module)
-        observed_payload: dict[str, Any] = {}
+        _install_handler_stubs(monkeypatch, module)
+        observed: dict[str, Any] = {}
 
-        async def image_notes(*_args: Any, **_kwargs: Any) -> list[str]:
-            return ["[引用自当前 Bot 的图片: 被男娘@了]"]
+        class InputPrepared(Exception):
+            pass
 
-        async def generate(messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
-            observed_payload.update(json.loads(cast(str, messages[-1]["content"])))
-            return _handler_response("这是我之前发的图。")
+        async def capture_prepared(*_args: Any, **kwargs: Any) -> None:
+            observed.update(kwargs)
+            raise InputPrepared
 
-        monkeypatch.setattr(module, "build_image_notes", image_notes)
-        monkeypatch.setattr(module, "generate_chat_response", generate)
+        async def input_attachments(session: Session, inputs: ImageInputs, **_kwargs: Any) -> list[dict[str, object]]:
+            from plugins.llm_chat.agent_attachments import capture_user_input_images
 
-        quoted_image = Image.of(url="local://bot-image")
+            inputs.attachment_root = tmp_path
+            return await capture_user_input_images(session, inputs)
+
+        monkeypatch.setattr(module, "model_supports_image_input", lambda _model: True)
+        monkeypatch.setattr(module, "prepare_agent_turn", capture_prepared)
+        monkeypatch.setattr(module, "capture_user_input_images", input_attachments)
+        monkeypatch.setattr(module, "ImageInputs", lambda **kwargs: ImageInputs(attachment_root=tmp_path, **kwargs))
+        quoted_image = Image.of(raw=_PNG_BYTES)
         quote = Quote("reply-id", content=[Author("bot", "Chtholly"), quoted_image])
         origin = MessageObject.from_elements("reply-id", quote.children)
         session = _ChatSession("?")
         setattr(session, "quote", quote)
         setattr(session, "reply", Reply(quote, origin))
+        with pytest.raises(InputPrepared):
+            await module.on_chat.callable_target(session, SimpleNamespace())
 
-        result = await module.on_chat.callable_target(session, SimpleNamespace())
-
-        quoted_context: list[ForwardedMessage] = [
-            {
-                "speaker": "bot",
-                "speaker_role": "assistant",
-                "content": "[Image]",
-                "source": "quoted",
-            }
-        ]
-        current_text = "? [引用自当前 Bot 的图片: 被男娘@了]"
-        assert result is BLOCK
-        image_inputs = observed_payload.pop("input_images")
-        assert [(item["index"], item["source"]) for item in image_inputs] == [(1, "quoted")]
-        assert all(item["image_ref"].startswith("image_") for item in image_inputs)
-        assert "local://bot-image" not in json.dumps(observed_payload)
-        assert observed_payload == {
-            "speaker": "Current User",
-            "content": current_text,
-            "forwarded_messages": quoted_context,
-        }
-        assert json.loads(records.appended[0][4]) == {
-            "content": current_text,
-            "forwarded_messages": quoted_context,
-        }
-        assert session.sent == ["这是我之前发的图。"]
+        payload = json.loads(observed["current_content"][0]["text"])
+        assert payload["content"] == "?"
+        assert "forwarded_messages" not in payload
+        assert payload["reply_to"]["speaker_role"] == "assistant"
+        assert payload["reply_to"]["images"] == payload["input_images"]
+        assert payload["input_images"][0]["observation"] == "pixels"
+        assert payload["input_images"][0]["message_context"] == "reply_to"
+        assert observed["raw_user_text"] == "?"
+        assert "image_ref" not in observed["content"]
+        assert observed["input_attachments"][0]["speaker_role"] == "assistant"
+        assert session.sent == []
 
 
 @pytest.mark.asyncio

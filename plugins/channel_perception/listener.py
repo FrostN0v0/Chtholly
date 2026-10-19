@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Literal
 from datetime import datetime, timezone
+from dataclasses import replace
 
-from arclet.entari import At, ChannelType, plugin
+from arclet.entari import At, ChannelType, MessageChain, plugin
 from arclet.entari.config import EntariConfig
 from arclet.entari.event.base import (
     MessageCreatedEvent,
@@ -16,7 +17,12 @@ from arclet.entari.event.base import (
 from arclet.entari.event.send import SendResponse
 
 from .core import clean_text, display_name, normalize_message, is_prefixed_command
-from .schemas import MessageMutation, PerceptionScope, MessageObservation, ParticipantObservation
+from .schemas import (
+    MessageMutation,
+    PerceptionScope,
+    MessageObservation,
+    ParticipantObservation,
+)
 from .service import ChannelPerceptionService
 
 
@@ -66,6 +72,8 @@ def _message_observation(
 ) -> MessageObservation:
     observed_at = _timestamp(event.timestamp)
     normalized = normalize_message(event.content, max_chars=service.config.max_content_chars)
+    if event.quote is not None and event.quote.id:
+        normalized = replace(normalized, reply_to_message_id=event.quote.id)
     basic = EntariConfig.instance.basic
     return MessageObservation(
         kind=kind,
@@ -136,7 +144,7 @@ async def observe_message_sent(event: SendResponse, service: ChannelPerceptionSe
         return
     source_event = event.session.event
     source_channel = getattr(source_event, "channel", None)
-    if source_channel is None or source_channel.type is ChannelType.DIRECT:
+    if source_channel is None or source_channel.type is ChannelType.DIRECT or source_channel.id != event.channel:
         return
     observed_at = datetime.utcnow()
     scope = PerceptionScope(
@@ -154,8 +162,11 @@ async def observe_message_sent(event: SendResponse, service: ChannelPerceptionSe
         avatar_url=clean_text(bot.avatar),
         observed_at=observed_at,
     )
-    normalized = normalize_message(event.message, max_chars=service.config.max_content_chars)
     for result in event.result:
+        body = MessageChain(result.message)
+        if not body and len(event.result) == 1:
+            body = event.message
+        normalized = normalize_message(body, max_chars=service.config.max_content_chars)
         service.enqueue(
             MessageObservation(
                 kind="send",

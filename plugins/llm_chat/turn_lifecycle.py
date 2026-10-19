@@ -14,6 +14,7 @@ from .core.media import strip_internal_media_records
 from .core.delivery import (
     DeliveryError,
     DeliveryState,
+    DeliveryRejected,
     render_delivered_text,
     release_unstarted_message,
     reserve_final_text_messages,
@@ -27,6 +28,10 @@ from .tools._rendering import prepare_image_bytes
 from .core.image_source import IMAGE_FETCH_MAX_BYTES
 from .core.native_images import extract_native_images
 from .core.media_delivery import strip_media_unavailable_marker
+from .core.prose_linebreaks import (
+    PROSE_LINEBREAK_GUIDANCE,
+    has_literal_prose_linebreaks,
+)
 from .tools.prepare_external_media import fetch_public_media
 
 HistoryAppender = Callable[[str, str, str, str, str], Awaitable[object]]
@@ -180,6 +185,8 @@ class ActiveChatTurn:
         reply = strip_trailing_end_of_response(reply_without_control)
         if reply != reply_without_control:
             self.warn("stripped trailing end-of-response marker from model reply")
+        if has_literal_prose_linebreaks(reply):
+            raise DeliveryRejected(PROSE_LINEBREAK_GUIDANCE)
         if not reply and self.delivery_state.confirmed_deliveries == 0:
             await self.rollback_if_unstarted()
             self.warn("model reply produced no confirmed delivery")

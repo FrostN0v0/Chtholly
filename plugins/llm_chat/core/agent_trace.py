@@ -131,12 +131,15 @@ class AgentTurnRecorder:
         user_name: str,
         fresh_context: bool,
         attachments: Sequence[Mapping[str, object]] = (),
+        structured: bool = False,
     ) -> None:
         payload: dict[str, object] = {
             "content": content,
             "speaker": user_name,
             "fresh_context": fresh_context,
         }
+        if structured:
+            payload["input_format"] = "structured_user_turn"
         if attachments:
             payload["attachments"] = list(attachments)
         self.append("user_input", role="user", payload=payload)

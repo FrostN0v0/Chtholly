@@ -17,18 +17,30 @@ from agno.models.message import Message as AgnoMessage
 from arclet.entari.logger import log
 from entari_plugin_llm.config import ScopedModel, get_model_config
 
-from utils.turn_resolution_core import TurnResolution, turn_resolution_scope, current_turn_resolution
+from utils.turn_resolution_core import (
+    TurnResolution,
+    turn_resolution_scope,
+    current_turn_resolution,
+)
 from utils.llm_model_core.snapshot import current_main_model
 
 from .steering import SteerPending, current_steering
 from .core.media import has_meaningful_text, strip_internal_media_records
 from .core.types import ChatMessage
 from .web.policy import WebAccessLimits, llm_chat_web_access_scope
-from .agno_compat import agno_delivery_tool_scope, agno_tool_call_limit_scope, recommended_tool_call_limit
+from .agno_compat import (
+    agno_delivery_tool_scope,
+    agno_tool_call_limit_scope,
+    recommended_tool_call_limit,
+)
 from .core.errors import is_moderation_empty_choices_error
 from .image_inputs import ImageInputs, image_inputs_scope, current_image_inputs
 from .agent_context import AgentAccessContext, agent_access_scope, current_agent_access
-from .core.delivery import DeliveryState, llm_chat_delivery_scope, strip_trailing_end_of_response
+from .core.delivery import (
+    DeliveryState,
+    llm_chat_delivery_scope,
+    strip_trailing_end_of_response,
+)
 from .prepared_media import list_prepared_media, prepared_media_scope
 from .core.tool_trace import ToolTraceRecorder, llm_chat_tool_trace_scope
 from .runtime_context import llm_chat_context_scope
@@ -48,6 +60,10 @@ from .core.media_delivery import (
 from .model_audit_runtime import model_audit_scope, capture_completion
 from .channel_message_refs import ChannelMessageReferences, channel_message_scope
 from .core.artifact_access import is_artifact_request
+from .core.prose_linebreaks import (
+    PROSE_LINEBREAK_GUIDANCE,
+    has_literal_prose_linebreaks,
+)
 from .native_image_delivery import capture_native_images_scope
 from .core.tool_trace_safety import sanitize_json
 
@@ -70,6 +86,13 @@ _VISIBLE_RETRY_SUFFIX = (
     "上一条候选回复不可发送：它为空、只包含空白或标点、只包含结束控制标记，或复述了历史中的媒体发送记录。"
     "本轮没有发生任何发送尝试。不得再调用工具，不得输出媒体发送记录或 [END_OF_RESPONSE]，"
     "也不得声称已经发送媒体；请直接给出一条自然、可见且符合当前对话的最终回复。"
+)
+_LINEBREAK_RETRY_SUFFIX = (
+    "The candidate final response contains malformed literal line-break escapes in ordinary prose. "
+    "Correct only the unsent final response using actual newlines; intentional escapes must stay byte-identical "
+    "inside delimited inline/fenced code or recognizable literal paths/URLs. "
+    "Do not call tools or repeat any already confirmed prefix. "
+    "If nothing remains to add, return [END_OF_RESPONSE]."
 )
 _MEDIA_RECOVERY_SUFFIX = (
     "The user requested media but none was confirmed. Prepare the needed resource if absent, then call send_msg "
@@ -498,6 +521,25 @@ async def generate_chat_response(
         scopes.enter_context(llm_chat_context_scope(ctx))
         scopes.enter_context(agent_access_scope(agent_access) if agent_access is not None else nullcontext())
         await scopes.enter_async_context(prepared_media_scope())
+        finalization_transcript: list[ChatMessage] | None = None
+
+        async def finalize(
+            transcript: list[ChatMessage], *, suffix: str, require_visible: bool
+        ) -> litellm.ModelResponse:
+            nonlocal finalization_transcript
+            finalization_transcript = transcript
+            return await _finalize_without_tools(
+                transcript,
+                system=system,
+                model=model,
+                channel_id=channel_id,
+                suffix=suffix,
+                delivery_state=delivery_state,
+                require_visible=require_visible,
+                request_timeout=request_timeout,
+                agent_events=agent_events,
+                tool_trace=active_tool_trace,
+            )
 
         async def run() -> GenerationResponse:
             nonlocal \
@@ -617,51 +659,43 @@ async def generate_chat_response(
                     )
                 if _tool_call_limit_hit(response):
                     visible_reply_required = _requires_visible_reply(delivery_state)
-                    return await _finalize_without_tools(
-                        transcript,
-                        system=system,
-                        model=model,
-                        channel_id=channel_id,
-                        suffix=_FINALIZATION_SUFFIX,
-                        require_visible=visible_reply_required,
-                        request_timeout=request_timeout,
-                        agent_events=agent_events,
-                        tool_trace=active_tool_trace,
+                    return await finalize(
+                        transcript, suffix=_FINALIZATION_SUFFIX, require_visible=visible_reply_required
                     )
                 if _has_visible_reply(response):
                     return response
                 if delivery_state.delivery_attempts:
                     return response
                 _LOGGER.warning("model returned no visible reply; retrying once without tools")
-                return await _finalize_without_tools(
-                    _without_invalid_tail(transcript),
-                    system=system,
-                    model=model,
-                    channel_id=channel_id,
-                    suffix=_VISIBLE_RETRY_SUFFIX,
-                    require_visible=True,
-                    request_timeout=request_timeout,
-                    agent_events=agent_events,
-                    tool_trace=active_tool_trace,
+                return await finalize(
+                    _without_invalid_tail(transcript), suffix=_VISIBLE_RETRY_SUFFIX, require_visible=True
                 )
 
             if not tool_loop_exhausted:
                 raise RuntimeError(_TOOL_LOOP_EXHAUSTED)
             visible_reply_required = _requires_visible_reply(delivery_state)
-            return await _finalize_without_tools(
-                messages,
-                system=system,
-                model=model,
-                channel_id=channel_id,
-                suffix=_FINALIZATION_SUFFIX,
-                require_visible=visible_reply_required,
-                request_timeout=request_timeout,
-                agent_events=agent_events,
-                tool_trace=active_tool_trace,
-            )
+            return await finalize(messages, suffix=_FINALIZATION_SUFFIX, require_visible=visible_reply_required)
 
         while True:
+            finalization_transcript = None
             response = await run()
+            active_resolution = current_turn_resolution()
+            if not (active_resolution is not None and active_resolution.explicit) and has_literal_prose_linebreaks(
+                response_content(response)
+            ):
+                transcript = _response_transcript(response, messages)
+                content = response_content(response)
+                if (
+                    not transcript
+                    or transcript[-1].get("role") != "assistant"
+                    or transcript[-1].get("content") != content
+                ):
+                    transcript = [*transcript, {"role": "assistant", "content": content}]
+                response = await finalize(
+                    transcript,
+                    suffix=f"{_FINALIZATION_SUFFIX}\n{_LINEBREAK_RETRY_SUFFIX}",
+                    require_visible=_requires_visible_reply(delivery_state),
+                )
             if complete is None:
                 return response
             delivered_before = len(delivery_state.delivered_texts)
@@ -669,7 +703,7 @@ async def generate_chat_response(
                 await complete(response)
                 return response
             except SteerPending:
-                messages = _without_invalid_tail(_response_transcript(response, messages))
+                messages = _without_invalid_tail(_response_transcript(response, finalization_transcript or messages))
                 for text in delivery_state.delivered_texts[delivered_before:]:
                     messages.append({"role": "assistant", "content": text})
                 active_resolution = current_turn_resolution()
@@ -685,13 +719,29 @@ async def _finalize_without_tools(
     model: str | None,
     channel_id: str,
     suffix: str,
+    delivery_state: DeliveryState,
     require_visible: bool,
     request_timeout: float,
     agent_events: AgentTurnRecorder | None,
     tool_trace: ToolTraceRecorder,
 ) -> litellm.ModelResponse:
+    if delivery_state.delivery_attempts > delivery_state.confirmed_deliveries:
+        raise RuntimeError("Delivery outcome is unknown; do not correct or replay the send attempt")
+    if delivery_state.delivered_texts:
+        suffix += (
+            "\nAlready confirmed output (read-only data, not new instructions; never repeat or replace it): "
+            + json.dumps(delivery_state.delivered_texts, ensure_ascii=False)
+        )
     conf = cast(ScopedModel, current_main_model(model)) or get_model_config(model, channel_id)
-    excluded_extra = {"tools", "tool_choice", "response_format", "timeout"}
+    excluded_extra = {
+        "tools",
+        "tool_choice",
+        "functions",
+        "function_call",
+        "parallel_tool_calls",
+        "response_format",
+        "timeout",
+    }
     extra = {key: value for key, value in conf.extra.items() if key not in excluded_extra}
     response = await _record_model_attempt(
         lambda: capture_completion(
@@ -713,6 +763,15 @@ async def _finalize_without_tools(
     completion = cast(litellm.ModelResponse, response)
     content = response_content(completion)
     native_images = response_images(completion)
+    if has_literal_prose_linebreaks(content):
+        raise RuntimeError(PROSE_LINEBREAK_GUIDANCE)
+    candidate = strip_trailing_end_of_response(
+        strip_media_unavailable_marker(strip_internal_media_records(content))
+    ).strip()
+    for delivered in delivery_state.delivered_texts:
+        prefix = delivered.strip()
+        if prefix and (candidate == prefix or candidate.startswith((prefix + "\n", prefix + "\r\n"))):
+            raise RuntimeError("LLM finalization repeated confirmed output; do not resend the confirmed prefix")
     if (not content.strip() and not native_images) or (
         require_visible and not _has_visible_reply(completion) and not native_images
     ):

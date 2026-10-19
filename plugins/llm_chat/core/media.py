@@ -171,6 +171,8 @@ def format_image_note(
     *,
     quoted: bool = False,
     quoted_role: ForwardedSpeakerRole | None = None,
+    status: str | None = None,
+    observation: str | None = None,
 ) -> str:
     """Render the inline marker injected into chat content."""
     if not quoted:
@@ -183,6 +185,12 @@ def format_image_note(
         label = "引用自来源未知消息的图片"
     else:
         label = "引用图片"
+    if status == "unavailable":
+        return f"[{label}: unavailable; content unobserved]"
+    if observation == "unobserved":
+        return f"[{label}: content unobserved]"
+    if observation == "pixels":
+        return f"[{label}: pixels provided]"
     return f"[{label}: {description}]" if description else f"[{label}]"
 
 

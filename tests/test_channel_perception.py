@@ -13,10 +13,15 @@ from unittest.mock import AsyncMock
 from importlib.machinery import ModuleSpec
 
 import pytest
+from satori import User, Event, Login, Channel, EventType, ChannelType
 from sqlalchemy import select
+from satori.model import MessageObject
 from arclet.entari import At, Text, Image, Quote, Session, MessageChain
+from satori.client import Account, ApiInfo
 from arclet.entari.config import EntariConfig
+from arclet.entari.session import EntariProtocol
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from arclet.entari.event.base import MessageCreatedEvent
 
 import plugins as plugins_package
 
@@ -732,3 +737,147 @@ async def test_participant_retention_is_bounded(perception_store) -> None:
         )
 
     assert [row.platform_user_id for row in rows] == ["user-1", "user-2"]
+
+
+@pytest.mark.asyncio
+async def test_native_reply_binds_one_record_without_name_or_history_guessing(perception_store) -> None:
+    from plugins.llm_chat.reply_record import bind_reply_record
+    from plugins.llm_chat.reply_context import collect_reply_context
+
+    scope = _scope()
+    config = ChannelPerceptionConfig(retention_days=7, max_messages_per_channel=20)
+    observed_at = datetime.utcnow()
+    for message_id, content, is_bot in (
+        ("first-bubble", "First individual bubble", True),
+        ("second-bubble", "Second individual bubble", True),
+        ("same-name-member", "Another participant's words", False),
+    ):
+        await message_store_module.store_observation(
+            MessageObservation(
+                kind="send" if is_bot else "message",
+                participant=_participant(
+                    scope, card="Bot", user_id="bot-1" if is_bot else "other", observed_at=observed_at
+                ),
+                message_id=message_id,
+                message=_message(content),
+                display_name="Bot",
+                directed_to_bot=False,
+                is_command=False,
+                is_bot=is_bot,
+                observed_at=observed_at,
+            ),
+            config,
+        )
+    service = service_module.ChannelPerceptionService(config)
+    account = Account(Login(platform="onebot", user=User("bot-1", name="Bot")), ApiInfo(), [], EntariProtocol)
+
+    def native_session(target: str, *, text: str = "", channel_type=ChannelType.TEXT) -> Session:
+        chain = MessageChain([Quote(target, content=[Text(text)] if text else []), Text("Current request")])
+        event = MessageCreatedEvent(
+            account,
+            Event(
+                EventType.MESSAGE_CREATED,
+                observed_at,
+                account.self_info,
+                channel=Channel("group-1", channel_type),
+                user=User("current-user", name="Bot"),
+                message=MessageObject("current-message", str(chain)),
+            ),
+        )
+        return Session(account, event)
+
+    warnings: list[str] = []
+    try:
+        incoming = native_session("second-bubble")
+        bound = await bind_reply_record(
+            incoming, collect_reply_context(incoming), warn=warnings.append, get_perception=lambda: service
+        )
+        assert bound == {
+            "speaker": "bot",
+            "speaker_role": "assistant",
+            "content": "Second individual bubble",
+            "content_status": "recorded",
+            "record_status": "matched",
+        }
+        partial = native_session("second-bubble", text="Native quoted excerpt")
+        partial_bound = await bind_reply_record(
+            partial, collect_reply_context(partial), warn=warnings.append, get_perception=lambda: service
+        )
+        assert partial_bound is not None
+        assert partial_bound["content"] == "Native quoted excerpt"
+        assert partial_bound["content_status"] == "available"
+        member = native_session("same-name-member")
+        member_bound = await bind_reply_record(
+            member, collect_reply_context(member), warn=warnings.append, get_perception=lambda: service
+        )
+        assert member_bound is not None
+        assert member_bound["speaker_role"] == "participant"
+        assert member_bound["content"] == "Another participant's words"
+        unknown = native_session("missing-message")
+        unknown_bound = await bind_reply_record(
+            unknown, collect_reply_context(unknown), warn=warnings.append, get_perception=lambda: service
+        )
+        assert unknown_bound is not None
+        assert unknown_bound["record_status"] == "unavailable"
+        assert unknown_bound["content_status"] == "unavailable"
+        private = native_session("second-bubble", channel_type=ChannelType.DIRECT)
+        private_bound = await bind_reply_record(
+            private, collect_reply_context(private), warn=warnings.append, get_perception=lambda: service
+        )
+        assert private_bound is not None
+        assert private_bound["record_status"] == "unavailable"
+        assert warnings == []
+    finally:
+        await account.protocol.session.close()
+
+
+@pytest.mark.asyncio
+async def test_native_reply_record_lookup_respects_scope_and_readability(perception_store) -> None:
+    scope = _scope()
+    stored = ChannelPerceptionConfig(retention_days=30, max_messages_per_channel=50)
+    readable = ChannelPerceptionConfig(retention_days=7, max_messages_per_channel=20)
+    now = datetime.utcnow()
+    cases = [
+        (_scope(account_id="other-bot"), "other-account", now, False),
+        (_scope(channel_id="other-group"), "other-channel", now, False),
+        (PerceptionScope("discord", "bot-1", "group-1", "group-1"), "other-platform", now, False),
+        (scope, "expired", now - timedelta(days=9), False),
+        (scope, "command", now, True),
+        (scope, "deleted", now, False),
+        (scope, "older-record", now - timedelta(minutes=1), False),
+        (scope, "current-record", now, False),
+    ]
+    for record_scope, message_id, timestamp, command in cases:
+        await message_store_module.store_observation(
+            MessageObservation(
+                kind="send",
+                participant=_participant(record_scope, card="Bot", observed_at=timestamp),
+                message_id=message_id,
+                message=_message(message_id),
+                display_name="Bot",
+                directed_to_bot=False,
+                is_command=command,
+                is_bot=True,
+                observed_at=timestamp,
+            ),
+            stored,
+        )
+    await message_store_module.store_observation(
+        MessageMutation(kind="message_delete", scope=scope, message_id="deleted", message=None, observed_at=now),
+        stored,
+    )
+    for message_id in (
+        "",
+        "missing",
+        "other-account",
+        "other-channel",
+        "other-platform",
+        "expired",
+        "command",
+        "deleted",
+    ):
+        assert await queries_module.get_replied_message(scope, message_id, config=readable) is None
+    assert await queries_module.get_replied_message(scope, "current-record", config=readable) is not None
+    limited = ChannelPerceptionConfig(retention_days=7, max_messages_per_channel=1)
+    assert await queries_module.get_replied_message(scope, "older-record", config=limited) is None
+    assert await queries_module.get_replied_message(scope, "current-record", config=limited) is not None

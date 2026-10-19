@@ -18,6 +18,7 @@ from .queries import (
     get_exact_message,
     get_ambient_context,
     get_recent_messages,
+    get_replied_message,
     get_message_image_target,
 )
 from .schemas import (
@@ -205,6 +206,15 @@ class ChannelPerceptionService(Service):
     async def exact_message(self, session: Session, cursor: str) -> MessageView | None:
         await self.flush()
         return await get_exact_message(self._history_scope(session), cursor, config=self.config)
+
+    async def replied_message(self, session: Session) -> MessageView | None:
+        """Bind only the current native quote, never a model-supplied identifier."""
+        scope = self._history_scope(session)
+        quote = session.quote
+        if quote is None or not quote.id:
+            return None
+        await self.flush()
+        return await get_replied_message(scope, quote.id, config=self.config)
 
     async def message_image_sources(self, session: Session, cursor: str) -> list[str]:
         await self.flush()

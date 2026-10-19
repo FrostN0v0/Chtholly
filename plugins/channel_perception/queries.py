@@ -300,6 +300,23 @@ async def get_exact_message(
         return (await _message_views(session, scope, [row], config))[0]
 
 
+async def get_replied_message(
+    scope: PerceptionScope, message_id: str, *, config: ChannelPerceptionConfig | None = None
+) -> MessageView | None:
+    """Resolve an exact native reply target under the existing readable boundary."""
+    if not message_id:
+        return None
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                select(AmbientMessage).where(*_readable_filters(scope, config), AmbientMessage.message_id == message_id)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return (await _message_views(session, scope, [row], config))[0]
+
+
 async def get_ambient_context(
     scope: PerceptionScope,
     *,

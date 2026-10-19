@@ -60,6 +60,10 @@ from ._message_models import (
     MessageSegment,
 )
 from ..core.media_delivery import current_media_requirements
+from ..core.prose_linebreaks import (
+    PROSE_LINEBREAK_GUIDANCE,
+    has_literal_prose_linebreaks,
+)
 
 _ONEBOT_PLATFORMS = frozenset({"onebot", "onebot11"})
 _NATIVE_EMOJI_ID = re.compile(r"(?:0|[1-9][0-9]{0,9})\Z", re.ASCII)
@@ -145,6 +149,18 @@ def _clean_segments(segments: object, platform: str) -> list[MessageSegment]:
     )
     if clean_delivery_fragment(authored, field="segments") != authored:
         raise DeliveryRejected("Reserved control content cannot span message segment boundaries")
+    prose = "".join(
+        ("\ufffc" if segment.text else "")
+        if isinstance(segment, StyleSegment) and segment.style == "code"
+        else segment.text
+        if isinstance(segment, (TextSegment, StyleSegment, LinkSegment))
+        else "\n"
+        if isinstance(segment, BreakSegment)
+        else "\ufffc"
+        for segment in cleaned
+    )
+    if has_literal_prose_linebreaks(prose):
+        raise DeliveryRejected(PROSE_LINEBREAK_GUIDANCE)
     return cleaned
 
 
@@ -279,6 +295,9 @@ def register_send_msg(
         Each call sends one conversational beat, not the whole turn. Call again for the next complete part when
         answer, reason, advice, or a follow-up reaction naturally belong in separate messages. Keep a short answer
         in one call; do not split every sentence or add filler. Newlines inside one call do not create new messages.
+        Use break segments or actual newlines for layout, never literal backslash-n in ordinary prose.
+        Intentional escapes belong in style=code segments or delimited inline/fenced code; recognizable literal
+        filesystem paths and URLs are preserved, never escape-decoded. Invalid prose is rejected before any send.
         Text is literal, never Satori markup. Place mentions exactly where direct address belongs; use current_user
         or an opaque current-channel participant_ref, never a raw ID.
         At most three mention occurrences are allowed, including repeats. Obtain media_ref from a preparation tool

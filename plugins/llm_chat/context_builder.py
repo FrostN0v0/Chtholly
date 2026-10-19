@@ -21,7 +21,7 @@ from .context_reads import payload_digest, public_payload_path, model_readable_p
 from .session_manager import BaselineFingerprint
 from .core.model_audit import ADMIN_ONLY_EVENT_TYPES
 
-SYSTEM_SCAFFOLD_VERSION = "agent-context-v8-participant-steering"
+SYSTEM_SCAFFOLD_VERSION = "agent-context-v9-reply-image-boundaries"
 AGENT_POLICY_VERSION = "agent-events-v3-context-grants"
 _ARCHIVED_CONTEXT_TERMS = (
     "上次",

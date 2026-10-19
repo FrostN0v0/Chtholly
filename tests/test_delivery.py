@@ -591,3 +591,37 @@ def test_non_string_text_reports_only_the_field_name() -> None:
             reserve_final_text(state, 7)
         assert "7" not in str(captured.value)
         assert _state_snapshot(state) == before
+
+
+@pytest.mark.parametrize("text", [r"first\nsecond", r"first\r\nsecond"])
+def test_malformed_final_prose_is_rejected_before_reserving_any_budget(text: str) -> None:
+    state = DeliveryState()
+    with llm_chat_delivery_scope(state):
+        reserve_message("Confirmed prefix")
+        mark_delivery_success(state, ["Confirmed prefix"])
+    before = _state_snapshot(state)
+
+    with pytest.raises(DeliveryError, match="break segments"):
+        reserve_final_text_messages(state, text)
+
+    assert _state_snapshot(state) == before
+    assert state.delivered_texts == ["Confirmed prefix"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "first\nsecond",
+        "first\r\nsecond",
+        r"Use `\r?\n` literally.",
+        "```regex\n\\r?\\n\n```",
+        r"Open C:\new\notes.txt or \\server\share\notes.txt.",
+        r"See https://example.com/new\notes?q=\n next.",
+    ],
+)
+def test_final_text_keeps_actual_newlines_and_intentional_literals_byte_identical(text: str) -> None:
+    state = DeliveryState()
+
+    assert reserve_final_text_messages(state, text) == (text,)
+    assert state.text_messages == 1
+    assert state.text_chars == len(text)

@@ -253,7 +253,7 @@ def forwarded_storage_views(messages: Sequence[ForwardedMessage]) -> list[Forwar
 
 
 def render_forwarded_storage(content: str, forwarded_messages: Sequence[ForwardedMessage]) -> str:
-    """Persist outer text and quoted forwarded data without losing attribution."""
+    """Persist merged-forward context without generation-local image capabilities."""
     if not forwarded_messages:
         return content
     return json.dumps(

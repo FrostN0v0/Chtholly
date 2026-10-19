@@ -22,15 +22,29 @@ from .companion import store as companion_store
 from .core.types import JSONType, ChatMessage
 from .perception import MentionedParticipant
 from .web.policy import WebAccessLimits, normalize_web_access_limits
-from .personality import persona_scope_lock, resolve_scope_persona, remember_session_persona
+from .personality import (
+    persona_scope_lock,
+    resolve_scope_persona,
+    remember_session_persona,
+)
 from .agent_events import persist_agent_events
-from .chat_context import build_chat_messages, serialize_user_turn, requests_recent_channel_context
+from .chat_context import (
+    build_chat_messages,
+    serialize_user_turn,
+    reply_with_image_views,
+    requests_recent_channel_context,
+)
 from .core.compose import energy_at, compose_persona_prompt
 from .core.forward import ForwardedMessage
 from .image_inputs import ImageInputs
-from .agent_context import SCHEDULED_TOOL_CAPABILITIES, AUTONOMOUS_TOOL_CAPABILITIES, AgentAccessContext
+from .agent_context import (
+    SCHEDULED_TOOL_CAPABILITIES,
+    AUTONOMOUS_TOOL_CAPABILITIES,
+    AgentAccessContext,
+)
 from .core.delivery import DeliveryState, normalize_delivery_limits
 from .persona.store import get_mood, append_message, delete_message
+from .reply_context import ReplyContext
 from .turn_lifecycle import ActiveChatTurn
 from .channel_context import read_channel_context
 from .context_builder import (
@@ -55,7 +69,11 @@ from .session_manager import (
 )
 from .core.agent_trace import AgentTurnRecorder
 from .core.personality import ResolvedPersona
-from .companion.context import AUTONOMOUS_CONTACT_CONTRACT, mode_baseline, companion_prompt
+from .companion.context import (
+    AUTONOMOUS_CONTACT_CONTRACT,
+    mode_baseline,
+    companion_prompt,
+)
 from .core.media_delivery import MediaIntent, build_media_intent
 from .relationships.state import load_relationship_snapshot
 from .core.artifact_access import is_artifact_request
@@ -255,6 +273,7 @@ async def prepare_agent_turn(
     warn: WarningSink,
     tool_schemas: Sequence[Mapping[str, object]],
     input_attachments: Sequence[Mapping[str, object]] = (),
+    reply_to: ReplyContext | None = None,
     is_operator: bool = False,
     purpose: str = "chat",
     trigger_kind: str = "message",
@@ -309,6 +328,7 @@ async def prepare_agent_turn(
             current_content,
             current_forwarded_messages=forwarded_messages,
             current_mentioned_participants=mentioned_participants,
+            current_reply_to=reply_to,
         ),
     )
     channel_context = None if host_triggered else await read_channel_context(config, session, warn=warn)
@@ -489,15 +509,21 @@ async def prepare_agent_turn(
             effect="none",
         )
     else:
+        input_views = image_inputs.input_views(session=session)
         agent_events.record_user_input(
             serialize_user_turn(
                 user_name,
-                content,
-                mentioned_participants=mentioned_participants,
+                model_text,
+                forwarded_messages,
+                mentioned_participants,
+                input_views,
+                reply_to=reply_with_image_views(reply_to, input_views),
+                durable=True,
             ),
             user_name=user_name,
             fresh_context=fresh_context,
             attachments=input_attachments,
+            structured=True,
         )
     agent_events.record_persona_state(
         {

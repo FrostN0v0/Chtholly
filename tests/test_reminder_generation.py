@@ -65,8 +65,20 @@ def _baseline() -> BaselineFingerprint:
 
 
 async def _add_completed_chat_turn(
-    store, context_session, *, user: str, assistant: str, speaker: str = "Alice", supplements: tuple[str, ...] = ()
+    store,
+    context_session,
+    *,
+    user: str,
+    assistant: str,
+    speaker: str = "Alice",
+    supplements: tuple[str, ...] = (),
+    input_context_key: str = "forwarded_messages",
 ):
+    quoted_context = {
+        "forwarded_messages": [{"content": "Quoted ambient context"}],
+        "reply_to": {"speaker": "bot", "speaker_role": "assistant", "content": "Quoted ambient context"},
+        "input_images": [{"source": "quoted", "description": "Quoted ambient context"}],
+    }[input_context_key]
     turn = await session_manager.start_turn(
         context_session,
         trigger_message_id="inbound",
@@ -103,7 +115,7 @@ async def _add_completed_chat_turn(
                                         "content": json.dumps(
                                             {
                                                 "content": text,
-                                                "forwarded_messages": [{"content": "Quoted ambient context"}],
+                                                input_context_key: quoted_context,
                                             }
                                         ),
                                     }
@@ -188,7 +200,8 @@ async def test_scheduled_snapshot_drops_old_chat_after_hard_reset_and_caps_text(
 
 
 @pytest.mark.asyncio
-async def test_scheduled_snapshot_excerpts_every_applied_own_input_within_one_turn_budget(store):
+@pytest.mark.parametrize("input_context_key", ["forwarded_messages", "reply_to", "input_images"])
+async def test_scheduled_snapshot_excerpts_every_applied_own_input_within_one_turn_budget(store, input_context_key):
     scope = await session_manager.get_or_create_scope(ScopeIdentity("test", "bot", "guild", "steered", "steered"))
     chat, _ = await session_manager.ensure_active_session(scope, _baseline(), idle_minutes=60, max_turns=20)
     turn = await _add_completed_chat_turn(
@@ -197,6 +210,7 @@ async def test_scheduled_snapshot_excerpts_every_applied_own_input_within_one_tu
         user="Original question " + "x" * 500,
         supplements=("Supplement one " + "y" * 500, "Supplement two " + "z" * 500),
         assistant="A complete answer " + "a" * 500,
+        input_context_key=input_context_key,
     )
     snapshot = await scheduled_chat_context.read_scheduled_chat_snapshot(scope.id, max_chars=512)
     assert snapshot is not None

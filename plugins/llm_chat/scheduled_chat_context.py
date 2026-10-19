@@ -72,12 +72,14 @@ def _own_input_text(payload: Mapping[str, object]) -> str | None:
         message = None
     if isinstance(message, Mapping) and "content" in message:
         content = message.get("content")
-    if isinstance(content, str):
+    if isinstance(content, str) and payload.get("input_format") != "structured_user_turn":
         try:
             stored = json.loads(content)
         except ValueError:
             stored = None
-        if isinstance(stored, Mapping) and "forwarded_messages" in stored:
+        if isinstance(stored, Mapping) and any(
+            key in stored for key in ("forwarded_messages", "reply_to", "input_images")
+        ):
             content = stored.get("content")
     return content if isinstance(content, str) else None
 

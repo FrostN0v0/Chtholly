@@ -11,7 +11,11 @@ from collections.abc import Mapping, Sequence
 from .models import AgentEvent
 from .core.types import JSONType
 from .agent_events import load_event_payload
-from .agent_attachments import MAX_INPUT_AUDIT_ATTACHMENTS, is_agent_attachment, event_attachment_metadata
+from .agent_attachments import (
+    MAX_INPUT_AUDIT_ATTACHMENTS,
+    is_agent_attachment,
+    event_attachment_metadata,
+)
 from .core.tool_trace_safety import project_message_arguments
 
 _INLINE_OBJECT_CHARS = 8000
@@ -309,7 +313,7 @@ def _message_quote(value: object, state: list[bool]) -> dict[str, object] | None
     }
 
 
-def _message_projection(value: object) -> dict[str, object] | None:
+def _message_projection(value: object, *, structured: bool = False) -> dict[str, object] | None:
     """Project serialized user input without exposing platform metadata."""
     state = [False]
     mapping = _decode_message_mapping(value)
@@ -328,8 +332,8 @@ def _message_projection(value: object) -> dict[str, object] | None:
         }
 
     outer = mapping
-    inner = _decode_message_mapping(outer.get("content"))
-    if inner is not None and "content" in inner:
+    inner = None if structured else _decode_message_mapping(outer.get("content"))
+    if not structured and inner is not None and "content" in inner:
         mapping = inner
     raw_content = mapping.get("content")
     content = _clip_message_text(_human_message_value(raw_content, state), _MESSAGE_CONTENT_CHARS, state)
@@ -337,6 +341,9 @@ def _message_projection(value: object) -> dict[str, object] | None:
 
     raw_quotes: list[object] = []
     for source in (outer,) if outer is mapping else (outer, mapping):
+        reply = source.get("reply_to")
+        if isinstance(reply, Mapping):
+            raw_quotes.append(reply)
         candidate = source.get("forwarded_messages")
         if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes, bytearray)):
             raw_quotes.extend(candidate)
@@ -382,9 +389,9 @@ def _message_projection(value: object) -> dict[str, object] | None:
     }
 
 
-def _unwrap_user_turn(value: str) -> str:
+def _unwrap_user_turn(value: str, *, structured: bool = False) -> str:
     """Return readable text and attributed quoted context from one user turn."""
-    projection = _message_projection(value)
+    projection = _message_projection(value, structured=structured)
     if projection is None:
         return value
     content = cast(str, projection["content"])
@@ -445,7 +452,11 @@ def event_preview(event: AgentEvent, payload: Mapping[str, JSONType]) -> str:
     for key in _PREVIEW_KEYS:
         candidate = source.get(key) if isinstance(source, Mapping) else None
         if isinstance(candidate, str) and candidate.strip():
-            text = _unwrap_user_turn(candidate) if event.event_type == "user_input" else candidate
+            text = (
+                _unwrap_user_turn(candidate, structured=payload.get("input_format") == "structured_user_turn")
+                if event.event_type == "user_input" and payload.get("input_format") != "plain_preview"
+                else candidate
+            )
             return _compact(text, _PREVIEW_CHARS)
     result = payload.get("result")
     if isinstance(result, str) and result.strip():
@@ -835,6 +846,9 @@ def event_images(
                 {
                     "name": label,
                     "source": source,
+                    "speaker_role": raw.get("speaker_role", "unknown"),
+                    "message_context": raw.get("message_context"),
+                    "observation": raw.get("observation", "unobserved"),
                     "status": "recorded"
                     if recorded
                     else "unavailable"
@@ -876,7 +890,9 @@ def serialize_event_view(event: AgentEvent, payload: Mapping[str, JSONType]) -> 
         "payload_chars": len(event.payload_json or ""),
     }
     if event.event_type == "user_input":
-        view["message"] = _message_projection(payload.get("content"))
+        view["message"] = _message_projection(
+            payload.get("content"), structured=payload.get("input_format") == "structured_user_turn"
+        )
         sequence = payload.get("steer_sequence")
         if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 2:
             view["title"] = "\u8865\u5145\u8f93\u5165"

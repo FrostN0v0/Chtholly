@@ -44,21 +44,33 @@ from plugins.llm_chat.web.policy import WebAccessLimits, llm_chat_web_access_sco
 from plugins.llm_chat.image_inputs import ImageInputs, image_inputs_scope
 from utils.llm_model_core.snapshot import pin_main_model, main_model_scope
 from plugins.llm_chat.core.delivery import llm_chat_delivery_scope
-from plugins.llm_chat.prepared_media import prepare_media, resolve_media, list_prepared_media, prepared_media_scope
+from plugins.llm_chat.prepared_media import (
+    prepare_media,
+    resolve_media,
+    list_prepared_media,
+    prepared_media_scope,
+)
 from plugins.llm_chat.core.tool_trace import (
     ToolTraceRecorder,
     llm_chat_tool_trace_scope,
     llm_chat_tool_execution_scope,
 )
 from plugins.llm_chat.runtime_context import llm_chat_context_scope
-from plugins.llm_chat.core.media_delivery import MediaIntent, ImageProvenance, media_intent_scope
+from plugins.llm_chat.core.media_delivery import (
+    MediaIntent,
+    ImageProvenance,
+    media_intent_scope,
+)
 from utils.tts_service_core.voice_catalog import (
     TTSVoiceOption,
     TTSVoiceCatalog,
     TTSReferenceOption,
     TTSSynthesisSelection,
 )
-from plugins.llm_chat.channel_message_refs import ChannelMessageReferences, channel_message_scope
+from plugins.llm_chat.channel_message_refs import (
+    ChannelMessageReferences,
+    channel_message_scope,
+)
 from plugins.llm_chat.web.reference_capture import WebReferenceCapture
 from plugins.llm_chat.web.screenshot_models import WebScreenshot
 from plugins.llm_chat.core.tool_trace_policy import DeliverySnapshot
@@ -5970,3 +5982,514 @@ async def test_native_steering_budget_includes_completed_tool_results(local_modu
         and event.payload.get("reason") == "request_input_budget_exceeded"
         for event in recorder.events
     )
+
+
+@pytest.mark.asyncio
+async def test_send_msg_prose_guard_precedes_resolution_media_and_budget_reservation(local_modules, monkeypatch):
+    from satori import Bold, Code
+    from satori.element import Br
+
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        send = _tool_callable(runtime, "send_msg")
+        session = _DeliveryToolSession()
+        state = runtime.DeliveryState()
+
+        async def unexpected_resolver(*_args):
+            raise AssertionError("Malformed prose must be rejected before mention resolution")
+
+        monkeypatch.setattr(runtime.send_msg_context, "resolve_participant", unexpected_resolver)
+        async with _prepared_delivery_scope(state):
+            prepared = prepare_media(
+                session,
+                Image(src="data:image/png;base64," + base64.b64encode(_PNG_BYTES).decode()),
+                byte_count=len(_PNG_BYTES),
+                tool_name="prepare_image",
+                history_marker="[image]",
+            )
+            malformed_parts = [
+                [{"type": "text", "text": r"first\nsecond"}],
+                [{"type": "style", "style": "bold", "text": r"first\r\nsecond"}],
+                [{"type": "link", "url": "https://example.com", "text": r"first\nsecond"}],
+                [{"type": "text", "text": "first\\"}, {"type": "text", "text": "nsecond"}],
+                [{"type": "text", "text": "first\\"}, {"type": "style", "style": "italic", "text": "nsecond"}],
+                [
+                    {"type": "text", "text": "first\\"},
+                    {"type": "style", "style": "code", "text": ""},
+                    {"type": "text", "text": "nsecond"},
+                ],
+                [
+                    {"type": "text", "text": "first"},
+                    {"type": "media", "media_ref": prepared["media_ref"]},
+                    {"type": "style", "style": "bold", "text": r"caption\nnext"},
+                ],
+            ]
+            for parts in malformed_parts:
+                with pytest.raises(runtime.DeliveryError, match="break segments"):
+                    await send(
+                        session,
+                        segments=[
+                            {"type": "mention", "target": "participant_0123abcdef"},
+                            {"type": "media", "media_ref": prepared["media_ref"]},
+                            *parts,
+                        ],
+                    )
+                assert (state.text_messages, state.text_chars, state.media_messages) == (0, 0, 0)
+                assert (state.delivery_attempts, state.confirmed_deliveries, state.delivered_texts) == (0, 0, [])
+                assert session.attempts == []
+                assert len(resolve_media(session, [prepared["media_ref"]])) == 1
+
+            code = r"first\r\nsecond"
+            inline = r"Regex `\r?\n` stays literal."
+            literals = r" C:\new\notes.txt \\server\share\notes.txt https://example.com/new\notes"
+            await send(
+                session,
+                segments=[
+                    {"type": "text", "text": "first\nsecond"},
+                    {"type": "break"},
+                    {"type": "style", "style": "code", "text": code},
+                    {"type": "media", "media_ref": prepared["media_ref"]},
+                    {"type": "style", "style": "bold", "text": inline},
+                    {"type": "text", "text": literals},
+                ],
+            )
+
+        assert len(session.sent) == 1
+        chain = session.sent[0]
+        assert [type(element) for element in chain] == [Text, Br, Code, Image, Bold, Text]
+        assert str(chain[0]) == "first\nsecond"
+        assert str(chain[2].children[0]) == code
+        assert str(chain[4].children[0]) == inline
+        assert str(chain[5]) == literals
+        assert state.delivered_texts == ["first\nsecond\n" + code + "[image]" + inline + literals]
+        assert (state.text_messages, state.confirmed_deliveries, state.confirmed_media_deliveries) == (1, 1, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("malformed", [r"first\nsecond", r"first\r\nsecond"])
+async def test_native_send_msg_pause_continue_corrects_arguments_without_repeating_prefix(
+    local_modules, monkeypatch, malformed
+):
+    session = _DeliveryToolSession()
+    clock = _FakeClock()
+    state = local_modules.delivery.DeliveryState(sleep=clock.sleep, clock=clock.monotonic)
+    trace = ToolTraceRecorder()
+
+    def corrected_call(_payload):
+        assert [str(message) for message in session.sent] == ["Confirmed prefix"]
+        assert (state.text_messages, state.delivery_attempts, state.confirmed_deliveries) == (1, 1, 1)
+        return _model_response(
+            tool_calls=[
+                _tool_call(
+                    "corrected",
+                    "send_msg",
+                    {
+                        "segments": [
+                            {"type": "text", "text": "first"},
+                            {"type": "break"},
+                            {"type": "text", "text": "second"},
+                        ]
+                    },
+                )
+            ]
+        )
+
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(
+                tool_calls=[
+                    _tool_call("prefix", "send_msg", {"segments": [{"type": "text", "text": "Confirmed prefix"}]}),
+                    _tool_call("malformed", "send_msg", {"segments": [{"type": "text", "text": malformed}]}),
+                ]
+            ),
+            corrected_call,
+            _model_response("[END_OF_RESPONSE]"),
+        ],
+    )
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        runner = llm_service_module.run_llm_tools
+        pauses = []
+
+        async def observe_pause(response, *args, **kwargs):
+            assert response.is_paused
+            pauses.append([requirement.tool_execution.tool_call_id for requirement in response.active_requirements])
+            return await runner(response, *args, **kwargs)
+
+        monkeypatch.setattr(llm_service_module, "run_llm_tools", observe_pause)
+        with (
+            llm_chat_context_scope(_tool_context(session)),
+            llm_chat_delivery_scope(state),
+            llm_chat_tool_trace_scope(trace),
+            local_modules.agno_compat.agno_delivery_tool_scope(),
+        ):
+            response = await LLMService().generate("Write two lines after the prefix.", model="test-model")
+
+    assert response.content == "[END_OF_RESPONSE]"
+    assert pauses == [["prefix", "malformed"], ["corrected"]]
+    assert len(payloads) == 3
+    results = {message["tool_call_id"]: json.loads(message["content"]) for message in _tool_messages(payloads[1])}
+    assert results["prefix"]["ok"] is True
+    assert results["malformed"]["ok"] is False
+    assert "break segments" in results["malformed"]["error"]
+    assert "style=code" in results["malformed"]["error"]
+    assert state.delivered_texts == ["Confirmed prefix", "first\nsecond"]
+    assert len(session.attempts) == state.text_messages == state.confirmed_deliveries == 2
+    assert [(event.tool_call_id, event.status, event.effect) for event in trace.events] == [
+        ("prefix", "succeeded", "confirmed"),
+        ("malformed", "rejected", "none"),
+        ("corrected", "succeeded", "confirmed"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", [False, True])
+@pytest.mark.parametrize("second_malformed", [False, True])
+async def test_malformed_native_final_response_gets_only_one_validated_tool_free_correction(
+    local_modules, monkeypatch, prefix, second_malformed
+):
+    script = []
+    if prefix:
+        script.append(
+            _model_response(
+                tool_calls=[
+                    _tool_call("prefix", "send_msg", {"segments": [{"type": "text", "text": "Confirmed prefix"}]})
+                ]
+            )
+        )
+    script.extend(
+        [
+            _model_response(r"first\nsecond"),
+            _model_response(r"still\r\nmalformed" if second_malformed else "first\nsecond"),
+        ]
+    )
+    payloads = _install_completion_script(monkeypatch, script)
+    monkeypatch.setattr(
+        local_modules.generation,
+        "get_model_config",
+        lambda *_args: SimpleNamespace(
+            name="final-model",
+            base_url="https://final.invalid/v1",
+            api_key="final-key",
+            extra={
+                "tools": ["forbidden"],
+                "tool_choice": "required",
+                "functions": ["forbidden"],
+                "function_call": "auto",
+            },
+        ),
+    )
+    session = _DeliveryToolSession()
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ),
+        _native_image_turn(local_modules, session) as turn,
+    ):
+
+        async def complete(response):
+            assert await turn.turn.deliver_model_reply(session, local_modules.generation.response_content(response))
+
+        async def generate():
+            return await local_modules.generation.generate_chat_response(
+                [{"role": "user", "content": "Write two lines."}],
+                system="Preserve confirmed output and correct only unsent prose.",
+                model="test-model",
+                channel_id="12345",
+                ctx=_tool_context(session),
+                web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+                delivery_state=turn.state,
+                tool_trace=turn.turn.tool_trace,
+                agent_events=turn.turn.agent_events,
+                complete=complete,
+            )
+
+        if second_malformed:
+            with pytest.raises(RuntimeError, match="break segments"):
+                await generate()
+        else:
+            response = await generate()
+            assert local_modules.generation.response_content(response) == "first\nsecond"
+        await turn.turn.persist_delivered_text()
+        expected = (["Confirmed prefix"] if prefix else []) + ([] if second_malformed else ["first\nsecond"])
+        assert [str(message) for message in session.sent] == expected
+        assert turn.state.delivered_texts == expected
+        assert turn.state.delivery_attempts == turn.state.confirmed_deliveries == len(expected)
+        assert turn.history == (["\n\n".join(expected)] if expected else [])
+
+    assert len(payloads) == (3 if prefix else 2)
+    final_payload = payloads[-1]
+    assert all(key not in final_payload for key in ("tools", "tool_choice", "functions", "function_call"))
+    assert final_payload["messages"][-1] == {"role": "assistant", "content": r"first\nsecond"}
+    if prefix:
+        result = next(message for message in _tool_messages(final_payload) if message["tool_call_id"] == "prefix")
+        assert json.loads(result["content"])["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_existing_no_tool_fallback_cannot_return_malformed_prose(local_modules, monkeypatch):
+    payloads = _install_completion_script(monkeypatch, [_model_response("   "), _model_response(r"bad\nfinal")])
+    monkeypatch.setattr(
+        local_modules.generation,
+        "get_model_config",
+        lambda *_args: SimpleNamespace(name="final-model", base_url="https://final.invalid", api_key="key", extra={}),
+    )
+    state = local_modules.delivery.DeliveryState()
+    session = _DeliveryToolSession()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        with pytest.raises(RuntimeError, match="break segments"):
+            await local_modules.generation.generate_chat_response(
+                [{"role": "user", "content": "Answer naturally."}],
+                system="system",
+                model="test-model",
+                channel_id="12345",
+                ctx=_tool_context(session),
+                web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+                delivery_state=state,
+            )
+    assert len(payloads) == 2
+    assert "tools" not in payloads[-1]
+    assert (state.text_messages, state.text_chars, state.delivery_attempts) == (0, 0, 0)
+    assert session.attempts == []
+
+
+@pytest.mark.asyncio
+async def test_malformed_final_after_unknown_delivery_preserves_prefix_without_correction(local_modules, monkeypatch):
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(
+                tool_calls=[
+                    _tool_call("prefix", "send_msg", {"segments": [{"type": "text", "text": "Confirmed prefix"}]}),
+                    _tool_call("unknown", "send_msg", {"segments": [{"type": "text", "text": "Unconfirmed"}]}),
+                ]
+            ),
+            _model_response(r"bad\nfinal"),
+        ],
+    )
+    monkeypatch.setattr(
+        local_modules.generation,
+        "get_model_config",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("Unknown delivery forbids corrective model calls")),
+    )
+    session = _DeliveryToolSession(fail_attempts={2})
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ),
+        _native_image_turn(local_modules, session) as turn,
+    ):
+        with pytest.raises(RuntimeError, match="outcome is unknown"):
+            await local_modules.generation.generate_chat_response(
+                [{"role": "user", "content": "Write two parts."}],
+                system="Preserve known output; never replay unknown sends.",
+                model="test-model",
+                channel_id="12345",
+                ctx=_tool_context(session),
+                web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+                delivery_state=turn.state,
+                tool_trace=turn.turn.tool_trace,
+            )
+        await turn.turn.preserve_and_rollback()
+        assert [str(message) for message in session.sent] == ["Confirmed prefix"]
+        assert len(session.attempts) == turn.state.delivery_attempts == 2
+        assert turn.state.confirmed_deliveries == 1
+        assert turn.state.delivered_texts == turn.history == ["Confirmed prefix"]
+    assert len(payloads) == 2
+
+
+@pytest.mark.asyncio
+async def test_final_prose_guard_rejects_direct_lifecycle_bypass_before_budget(local_modules):
+    session = _DeliveryToolSession()
+    async with _native_image_turn(local_modules, session) as turn:
+        local_modules.delivery.mark_delivery_success(turn.state, ["Confirmed prefix"])
+        before = (turn.state.text_messages, turn.state.text_chars, turn.state.delivery_attempts)
+        with pytest.raises(local_modules.delivery.DeliveryError, match="break segments"):
+            await turn.turn.deliver_model_reply(session, r"bad\r\nfinal")
+        assert (turn.state.text_messages, turn.state.text_chars, turn.state.delivery_attempts) == before
+        assert turn.state.delivered_texts == ["Confirmed prefix"]
+        assert session.attempts == []
+
+
+@pytest.mark.asyncio
+async def test_steering_during_corrected_final_send_keeps_confirmed_prefix_and_tool_transcript(
+    local_modules, monkeypatch
+):
+    from plugins.llm_chat.steering import SteeringState, steering_scope
+    from plugins.llm_chat.chat_completion import settle_chat_response
+
+    session, supplement = _DeliveryToolSession(), _DeliveryToolSession()
+    session.event.message = SimpleNamespace(id="root", content="Write two lines.")
+    supplement.event.message = SimpleNamespace(id="supplement", content="Use the revised wording.")
+    steering = SteeringState(session, _tool_context(session))
+
+    async def process(entry):
+        return {"role": "user", "content": entry.session.event.message.content}
+
+    steering.processor = process
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(
+                tool_calls=[
+                    _tool_call("prefix", "send_msg", {"segments": [{"type": "text", "text": "Confirmed prefix"}]})
+                ]
+            ),
+            _model_response(r"old\nwording"),
+            _model_response("old\nwording"),
+            _model_response("revised\nwording"),
+        ],
+    )
+    monkeypatch.setattr(
+        local_modules.generation,
+        "get_model_config",
+        lambda *_args: SimpleNamespace(name="final-model", base_url="https://final.invalid", api_key="key", extra={}),
+    )
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ),
+        _native_image_turn(local_modules, session) as turn,
+    ):
+        received = False
+        clock = _FakeClock()
+
+        async def pacing(seconds):
+            nonlocal received
+            if not received:
+                assert steering.receive(supplement, _tool_context(supplement))
+                received = True
+            await clock.sleep(seconds)
+
+        turn.state.sleep = pacing
+        turn.state.clock = clock.monotonic
+        prepared = SimpleNamespace(lifecycle=turn.turn, delivery_state=turn.state, resolution=turn.resolution)
+
+        async def complete(response):
+            assert await settle_chat_response(session, prepared, response, None) == "completed"
+
+        try:
+            with steering_scope(steering):
+                await local_modules.generation.generate_chat_response(
+                    [{"role": "user", "content": "Write two lines."}],
+                    system="Preserve confirmed prefixes and apply real supplemental input.",
+                    model="test-model",
+                    channel_id="12345",
+                    ctx=_tool_context(session),
+                    web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+                    delivery_state=turn.state,
+                    tool_trace=turn.turn.tool_trace,
+                    agent_events=turn.turn.agent_events,
+                    resolution=turn.resolution,
+                    complete=complete,
+                )
+        finally:
+            await steering.aclose()
+
+        assert received
+        assert [str(message) for message in session.sent] == ["Confirmed prefix", "revised\nwording"]
+        assert turn.state.delivered_texts == ["Confirmed prefix", "revised\nwording"]
+        assert turn.state.text_messages == turn.state.delivery_attempts == turn.state.confirmed_deliveries == 2
+        assert turn.history == ["Confirmed prefix\n\nrevised\nwording"]
+
+    assert len(payloads) == 4
+    assert "tools" not in payloads[2]
+    final_messages = payloads[3]["messages"]
+    assert [message["content"] for message in final_messages if message["role"] == "user"] == [
+        "Write two lines.",
+        "Use the revised wording.",
+    ]
+    results = _tool_messages(payloads[3])
+    assert [message["tool_call_id"] for message in results] == ["prefix"]
+    assert json.loads(results[0]["content"])["ok"] is True
+    assert all(message.get("content") != r"old\nwording" for message in final_messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corrected", ["Confirmed prefix", "Confirmed prefix\nfirst\nsecond"])
+async def test_finalizer_cannot_replay_confirmed_prefix_while_correcting_prose(local_modules, monkeypatch, corrected):
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(
+                tool_calls=[
+                    _tool_call("prefix", "send_msg", {"segments": [{"type": "text", "text": "Confirmed prefix"}]})
+                ]
+            ),
+            _model_response(r"first\nsecond"),
+            _model_response(corrected),
+        ],
+    )
+    monkeypatch.setattr(
+        local_modules.generation,
+        "get_model_config",
+        lambda *_args: SimpleNamespace(name="final-model", base_url="https://final.invalid", api_key="key", extra={}),
+    )
+    session = _DeliveryToolSession()
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ),
+        _native_image_turn(local_modules, session) as turn,
+    ):
+        with pytest.raises(RuntimeError, match="repeated confirmed output"):
+            await local_modules.generation.generate_chat_response(
+                [{"role": "user", "content": "Add two lines."}],
+                system="Correct only the unsent suffix.",
+                model="test-model",
+                channel_id="12345",
+                ctx=_tool_context(session),
+                web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+                delivery_state=turn.state,
+            )
+        await turn.turn.persist_delivered_text()
+        assert [str(message) for message in session.sent] == ["Confirmed prefix"]
+        assert turn.state.delivery_attempts == turn.state.confirmed_deliveries == 1
+        assert turn.state.delivered_texts == turn.history == ["Confirmed prefix"]
+    assert len(payloads) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["silent", "declined", "delivered"])
+async def test_explicit_terminal_outcome_does_not_correct_unused_model_content(local_modules, monkeypatch, outcome):
+    resolution = TurnResolution()
+    state = local_modules.delivery.DeliveryState()
+    if outcome == "delivered":
+        state.delivery_attempts = state.confirmed_deliveries = 1
+        state.delivered_texts.append("Already confirmed")
+
+    async def generate(*_args, **_kwargs):
+        resolution.set(outcome, reply="I cannot do that." if outcome == "declined" else "")
+        return SimpleNamespace(content=r"Unused\ncandidate")
+
+    async def unexpected_correction(*_args, **_kwargs):
+        raise AssertionError("An explicit terminal decision must not start another model request")
+
+    monkeypatch.setattr(local_modules.generation.llm, "generate", generate)
+    monkeypatch.setattr(local_modules.generation.litellm, "acompletion", unexpected_correction)
+    response = await local_modules.generation.generate_chat_response(
+        [{"role": "user", "content": "Make a terminal decision."}],
+        system="system",
+        model="test-model",
+        channel_id="12345",
+        ctx=_tool_context(_DeliveryToolSession()),
+        web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+        delivery_state=state,
+        resolution=resolution,
+    )
+    assert resolution.outcome == outcome
+    assert local_modules.generation.response_content(response) == r"Unused\ncandidate"
+    assert state.delivered_texts == (["Already confirmed"] if outcome == "delivered" else [])

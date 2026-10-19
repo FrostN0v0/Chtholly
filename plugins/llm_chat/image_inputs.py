@@ -15,7 +15,11 @@ from collections.abc import Mapping, Callable, Hashable, Iterator, Awaitable
 
 from arclet.entari import Session
 
-from .agent_attachments import MAX_INPUT_ATTACHMENTS, store_agent_attachment, remove_agent_attachments
+from .agent_attachments import (
+    MAX_INPUT_ATTACHMENTS,
+    store_agent_attachment,
+    remove_agent_attachments,
+)
 from .core.image_source import IMAGE_FETCH_MAX_BYTES, raw_to_image_data_url
 from .core.self_reference import load_self_reference_image
 
@@ -24,6 +28,8 @@ if TYPE_CHECKING:
 
 ImageSource = Literal["direct", "quoted", "forward", "channel", "avatar", "web", "persona"]
 ImagePurpose = Literal["inspect", "send", "edit", "reference", "collect"]
+ImageSpeakerRole = Literal["current_user", "assistant", "participant", "unknown"]
+ImageMessageContext = Literal["current_input", "reply_to", "forward", "channel", "reference"]
 MAX_IMAGE_INPUT_BYTES = 60 * 1024 * 1024
 MAX_IMAGE_INPUT_REFERENCES = 256
 _ALLOWED_MIMES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif"})
@@ -51,6 +57,8 @@ class ImageSnapshot:
     digest: str
     attachment: Mapping[str, object] | None = None
     audit_status: str = "unrecorded"
+    speaker_role: ImageSpeakerRole = "unknown"
+    message_context: ImageMessageContext = "reference"
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +85,10 @@ class _Input:
     owner: tuple[str, ...] = ()
     original_index: int = 0
     steer_sequence: int = 1
+    speaker_role: ImageSpeakerRole = "unknown"
+    message_context: ImageMessageContext = "reference"
+    observation: Literal["unobserved", "pixels", "description"] = "unobserved"
+    description: str = ""
 
 
 def _session_owner(session: Session) -> tuple[str, ...]:
@@ -166,6 +178,8 @@ class ImageInputs:
         key: Hashable,
         load: Callable[[], Awaitable[bytes]],
         index: int = 0,
+        speaker_role: ImageSpeakerRole | None = None,
+        message_context: ImageMessageContext | None = None,
     ) -> str:
         owner = self._check(session)
         if source not in _PERMISSIONS:
@@ -189,7 +203,25 @@ class ImageInputs:
         ref = f"image_{token_hex(16)}"
         sequence = self._admitted.get(owner, (None, 1))[1]
         self._entries[ref] = _Input(
-            source, index, acquisition, owner=owner, original_index=original_index, steer_sequence=sequence
+            source,
+            index,
+            acquisition,
+            owner=owner,
+            original_index=original_index,
+            steer_sequence=sequence,
+            speaker_role=speaker_role or ("current_user" if source == "direct" else "unknown"),
+            message_context=message_context
+            or (
+                "current_input"
+                if source == "direct"
+                else "reply_to"
+                if source == "quoted"
+                else "forward"
+                if source == "forward"
+                else "channel"
+                if source == "channel"
+                else "reference"
+            ),
         )
         self._references[identity] = ref
         if source in {"direct", "quoted"} and index > 0:
@@ -215,14 +247,30 @@ class ImageInputs:
         return pixels
 
     def register_bytes(
-        self, session: Session, *, source: ImageSource, key: Hashable, data: bytes, index: int = 0
+        self,
+        session: Session,
+        *,
+        source: ImageSource,
+        key: Hashable,
+        data: bytes,
+        index: int = 0,
+        speaker_role: ImageSpeakerRole | None = None,
+        message_context: ImageMessageContext | None = None,
     ) -> str:
         self._check(session)
 
         async def supplied() -> bytes:
             return data
 
-        ref = self.register(session, source=source, key=key, load=supplied, index=index)
+        ref = self.register(
+            session,
+            source=source,
+            key=key,
+            load=supplied,
+            index=index,
+            speaker_role=speaker_role,
+            message_context=message_context,
+        )
         acquisition = self._entries[ref].acquisition
         if acquisition.task is None and acquisition.pixels is None and not acquisition.error:
             try:
@@ -297,6 +345,8 @@ class ImageInputs:
                 pixels.digest,
                 attachment,
                 "recorded" if attachment is not None else "unrecorded",
+                entry.speaker_role,
+                entry.message_context,
             )
         return entry.snapshot
 
@@ -329,6 +379,15 @@ class ImageInputs:
             if not self._closed
             else []
         )
+
+    def mark_observed(self, image_ref: str, *, pixels: bool = False, description: str = "") -> None:
+        """Record actual model input separately from successful byte acquisition."""
+        self.view(image_ref)
+        entry = self._entries[image_ref]
+        if entry.snapshot is None or "inspect" not in _PERMISSIONS[entry.source]:
+            raise ImageInputError("Only an inspected original snapshot can be observed")
+        entry.observation = "pixels" if pixels else "description" if description else "unobserved"
+        entry.description = description
 
     def source_count(self, source: ImageSource) -> int:
         return sum(entry.source == source for entry in self._entries.values())
@@ -380,7 +439,12 @@ class ImageInputs:
             "image_ref": image_ref,
             "source": entry.source,
             "status": status,
+            "speaker_role": entry.speaker_role,
+            "message_context": entry.message_context,
+            "observation": entry.observation,
         }
+        if entry.description:
+            view["description"] = entry.description
         if entry.steer_sequence > 1:
             view.update(steer_sequence=entry.steer_sequence, original_index=entry.original_index)
         return view

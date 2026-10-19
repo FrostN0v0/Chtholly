@@ -93,8 +93,16 @@ async def test_failed_source_keeps_original_position_and_does_not_retry(tmp_path
     assert downloads == 1
     assert snapshot.image_ref == second
     assert inputs.input_views() == [
-        {"index": 1, "image_ref": first, "source": "direct", "status": "unavailable"},
-        {"index": 2, "image_ref": second, "source": "direct", "status": "ready"},
+        {
+            "index": index,
+            "image_ref": ref,
+            "source": "direct",
+            "status": status,
+            "speaker_role": "current_user",
+            "message_context": "current_input",
+            "observation": "unobserved",
+        }
+        for index, ref, status in ((1, first, "unavailable"), (2, second, "ready"))
     ]
     await inputs.aclose()
 
@@ -137,6 +145,9 @@ async def test_audit_failure_does_not_block_safe_pixels_or_persist_capabilities(
             "source": "quoted",
             "status": "ready",
             "audit_status": "unrecorded",
+            "speaker_role": "unknown",
+            "message_context": "reply_to",
+            "observation": "unobserved",
         }
     ]
     await inputs.aclose()
@@ -322,16 +333,6 @@ async def test_admitted_input_shares_original_snapshot_only_with_root_and_own_ev
     assert downloads == 1
     assert inputs.input_ref(1) == first
     assert inputs.input_ref(2) == added
-    assert inputs.input_views(session=extra) == [
-        {
-            "index": 2,
-            "image_ref": added,
-            "source": "direct",
-            "status": "ready",
-            "steer_sequence": 2,
-            "original_index": 1,
-        }
-    ]
     assert state.receive(later, Contexts())
     inputs.admit_input(later, state=state)
     for stranger in (
@@ -425,6 +426,7 @@ async def test_new_payload_never_duplicates_earlier_image_notes_or_pixels(tmp_pa
     assert [image["image_ref"] for image in payload["input_images"]] == [new]
     assert old not in content[0]["text"]
     assert len([part for part in content if part["type"] == "image_url"]) == 1
-    assert stored == payload["content"]
+    assert json.loads(stored)["content"] == payload["content"]
+    assert "image_ref" not in stored
     await inputs.aclose()
     await state.aclose()

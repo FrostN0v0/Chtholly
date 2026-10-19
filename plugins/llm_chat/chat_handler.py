@@ -34,28 +34,37 @@ from .generation import generate_chat_response
 from .core.errors import summarize_exception
 from .chat_context import (
     build_image_notes,
+    render_user_storage,
     serialize_user_turn,
     collect_message_images,
-    collect_quoted_message,
+    reply_with_image_views,
     model_supports_image_input,
     build_multimodal_user_content,
     register_message_image_inputs,
 )
-from .core.forward import render_forwarded_storage
 from .image_inputs import ImageInputs, image_inputs_scope, current_image_inputs
+from .reply_record import bind_reply_record
 from .steer_inputs import bind_steer_inputs
 from .tool_runtime import registered_tool_schemas
 from .channel_turns import steer_participant_turn, cancel_active_participant_turns
+from .reply_context import collect_reply_context
 from .delivery_audit import delivery_audit_scope, current_delivery_audit
 from .group_delivery import group_delivery_scope
 from .chat_completion import settle_chat_response
-from .chat_evaluation import cancel_pending_evaluations, schedule_relationship_evaluation
+from .chat_evaluation import (
+    cancel_pending_evaluations,
+    schedule_relationship_evaluation,
+)
 from .forward_context import resolve_merged_forward_messages
 from .tools._delivery import send_with_delivery
 from .agent_turn_setup import PreparedAgentTurn, prepare_agent_turn
 from .agent_attachments import capture_user_input_images
 from .companion.runtime import record_companion_chat, interrupt_companion_for_input
-from .reaction_feedback import MessageReactionFeedback, settle_reaction_update, llm_chat_reaction_scope
+from .reaction_feedback import (
+    MessageReactionFeedback,
+    settle_reaction_update,
+    llm_chat_reaction_scope,
+)
 from .native_image_delivery import native_image_delivery_scope
 
 _LOGGER = log.wrapper("[llm_chat]")
@@ -150,7 +159,8 @@ async def _run_chat(
     inputs = current_image_inputs()
     if inputs is None:
         raise RuntimeError("Chat image inputs were not bound")
-    register_message_image_inputs(session, inputs)
+    reply_to = await bind_reply_record(session, collect_reply_context(session), warn=_LOGGER.warning)
+    register_message_image_inputs(session, inputs, reply_to=reply_to)
 
     try:
         forwarded_messages = await resolve_merged_forward_messages(config, session, _LOGGER.warning)
@@ -158,11 +168,7 @@ async def _run_chat(
         _LOGGER.warning(f"merged forward normalization failed: {type(exc).__name__}")
         forwarded_messages = []
 
-    quoted_message = collect_quoted_message(session)
-    if quoted_message is not None:
-        forwarded_messages.insert(0, quoted_message)
-
-    if not model_text and not message_images and not forwarded_messages:
+    if not model_text and not message_images and not forwarded_messages and reply_to is None:
         await reaction.finish("failed")
         return BLOCK
 
@@ -194,18 +200,22 @@ async def _run_chat(
             _LOGGER.warning,
             forwarded_messages=forwarded_messages,
             mentioned_participants=mentioned_participants,
+            reply_to=reply_to,
         )
     else:
         image_notes = await build_image_notes(config, session, _LOGGER.warning, forwarded_messages)
         if image_notes:
             model_text = " ".join(part for part in [model_text, *image_notes] if part)
-        content = render_forwarded_storage(model_text, forwarded_messages)
+        views = inputs.input_views(session=session)
+        reply_to = reply_with_image_views(reply_to, views)
+        content = render_user_storage(model_text, forwarded_messages, reply_to=reply_to, input_images=views)
         current_content = serialize_user_turn(
             user_name,
             model_text,
             forwarded_messages,
             mentioned_participants,
-            inputs.input_views(),
+            views,
+            reply_to=reply_to,
         )
 
     if not content:
@@ -227,6 +237,7 @@ async def _run_chat(
         current_content=current_content,
         forwarded_messages=forwarded_messages,
         mentioned_participants=mentioned_participants,
+        reply_to=reply_to,
         warn=_LOGGER.warning,
         tool_schemas=registered_tool_schemas,
         input_attachments=input_attachments,

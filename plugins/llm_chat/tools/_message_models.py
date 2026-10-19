@@ -14,7 +14,12 @@ class _Segment(BaseModel):
 
 class TextSegment(_Segment):
     type: Literal["text"]
-    text: str = Field(description="Literal text; spacing and punctuation are preserved, never parsed as markup.")
+    text: str = Field(
+        description=(
+            "Literal text, never parsed as markup. Use break segments or actual newlines for layout, not literal "
+            "backslash-n/backslash-r-backslash-n. Put intentional escapes in style=code or delimited code."
+        )
+    )
 
 
 class MentionSegment(_Segment):
@@ -28,7 +33,7 @@ class MentionSegment(_Segment):
 class LinkSegment(_Segment):
     type: Literal["link"]
     url: str = Field(description="Public HTTP(S) destination, without credentials or private hosts.")
-    text: str = Field(description="Literal visible link label.")
+    text: str = Field(description="Literal visible link label; layout uses break segments or actual newlines.")
 
 
 class EmojiSegment(_Segment):
@@ -51,7 +56,12 @@ class BreakSegment(_Segment):
 class StyleSegment(_Segment):
     type: Literal["style"]
     style: Literal["bold", "italic", "underline", "strike", "spoiler", "code"]
-    text: str = Field(description="Literal styled text, without nested markup.")
+    text: str = Field(
+        description=(
+            "Literal styled text, without nested markup. Only style=code explicitly permits arbitrary literal "
+            "escape sequences; other styles use break segments or actual newlines for layout."
+        )
+    )
 
 
 MessageSegment = Annotated[

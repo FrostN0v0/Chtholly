@@ -20,14 +20,16 @@ from .core.types import ChatMessage
 from .web.policy import update_llm_chat_web_reference_access
 from .chat_context import (
     build_image_notes,
+    render_user_storage,
     serialize_user_turn,
     collect_message_images,
-    collect_quoted_message,
+    reply_with_image_views,
     build_multimodal_user_content,
     register_message_image_inputs,
 )
-from .core.forward import render_forwarded_storage
 from .image_inputs import image_inputs_scope
+from .reply_record import bind_reply_record
+from .reply_context import collect_reply_context
 from .context_builder import (
     estimate_tokens,
     requests_context_pin,
@@ -36,7 +38,11 @@ from .context_builder import (
 )
 from .forward_context import resolve_merged_forward_messages
 from .agent_attachments import capture_user_input_images
-from .core.media_delivery import MediaIntent, build_media_intent, current_media_requirements
+from .core.media_delivery import (
+    MediaIntent,
+    build_media_intent,
+    current_media_requirements,
+)
 from .core.artifact_access import is_artifact_request
 from .core.tool_trace_safety import compact_text
 
@@ -197,21 +203,20 @@ def bind_steer_inputs(
             check_budget({"role": "user", "content": serialize_user_turn("", raw_text)})
             inputs.admit_input(session, state=state)
             with image_inputs_scope(inputs):
-                register_message_image_inputs(session, inputs)
+                reply_to = await bind_reply_record(session, collect_reply_context(session), warn=warn)
+                register_message_image_inputs(session, inputs, reply_to=reply_to)
                 try:
                     forwarded = await resolve_merged_forward_messages(captured, session, warn)
                 except Exception as exc:
                     warn(f"steered merged forward normalization failed: {type(exc).__name__}")
                     forwarded = []
-                quoted = collect_quoted_message(session)
-                if quoted is not None:
-                    forwarded.insert(0, quoted)
-                if not raw_text and not collect_message_images(session) and not forwarded:
+                if not raw_text and not collect_message_images(session) and not forwarded and reply_to is None:
                     raise SteerInputRejected("empty_input")
                 identity = await resolve_chat_identity(session)
                 if identity.user_id != original_access.user_id:
                     raise SteerInputRejected("participant_identity_changed")
                 mentioned = await resolve_mentioned_participants(session)
+                model_text = raw_text
                 if inputs.supports_image_input:
                     current_content, content = await build_multimodal_user_content(
                         captured,
@@ -221,13 +226,16 @@ def bind_steer_inputs(
                         warn,
                         forwarded_messages=forwarded,
                         mentioned_participants=mentioned,
+                        reply_to=reply_to,
                     )
                 else:
                     notes = await build_image_notes(captured, session, warn, forwarded)
                     model_text = " ".join(part for part in [raw_text, *notes] if part)
-                    content = render_forwarded_storage(model_text, forwarded)
+                    views = inputs.input_views(session=session)
+                    reply_to = reply_with_image_views(reply_to, views)
+                    content = render_user_storage(model_text, forwarded, reply_to=reply_to, input_images=views)
                     current_content = serialize_user_turn(
-                        identity.display_name, model_text, forwarded, mentioned, inputs.input_views(session=session)
+                        identity.display_name, model_text, forwarded, mentioned, views, reply_to=reply_to
                     )
                 message: ChatMessage = {"role": "user", "content": current_content}
                 check_budget(message)
@@ -241,8 +249,17 @@ def bind_steer_inputs(
                 "user_input",
                 role="user",
                 payload={
-                    "content": serialize_user_turn(identity.display_name, content, mentioned_participants=mentioned),
+                    "content": serialize_user_turn(
+                        identity.display_name,
+                        model_text,
+                        forwarded,
+                        mentioned,
+                        inputs.input_views(session=session),
+                        reply_to=reply_with_image_views(reply_to, inputs.input_views(session=session)),
+                        durable=True,
+                    ),
                     "speaker": identity.display_name,
+                    "input_format": "structured_user_turn",
                     "fresh_context": False,
                     "attachments": attachments,
                     "steer_sequence": item.sequence,

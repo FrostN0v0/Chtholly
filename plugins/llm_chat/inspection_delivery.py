@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from agno.media import Image
 from agno.models.message import Message
 
@@ -29,6 +31,7 @@ def append_inspected_images(messages: list[Message]) -> None:
     from agno.utils.openai import images_to_message
 
     for image in images:
-        content.append({"type": "text", "text": f"Observed image: {image.image_ref}; source: {image.source}"})
+        inputs.mark_observed(image.image_ref, pixels=True)
+        content.append({"type": "text", "text": json.dumps(inputs.view(image.image_ref), ensure_ascii=False)})
         content.extend(images_to_message([Image(content=image.data, mime_type=image.mime)]))
     messages.append(Message(role="user", content=content))

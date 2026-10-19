@@ -1299,14 +1299,19 @@ def test_event_view_marks_message_truncation() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("nested_text", "expected"),
+    ("nested_text", "expected", "structured"),
     [
-        ("{not-json", "{not-json"),
-        (json.dumps({"padding": "x" * 500, "content": "Readable input"}), "Readable input"),
+        ("{not-json", "{not-json", False),
+        (json.dumps({"padding": "x" * 500, "content": "Readable input"}), "Readable input", False),
+        (
+            json.dumps({"content": "Embedded content", "reply_to": {"content": "Invented quote"}}),
+            json.dumps({"content": "Embedded content", "reply_to": {"content": "Invented quote"}}),
+            True,
+        ),
     ],
 )
 async def test_turn_list_summary_keeps_malformed_nested_user_text(
-    agent_store: SimpleNamespace, nested_text: str, expected: str
+    agent_store: SimpleNamespace, nested_text: str, expected: str, structured: bool
 ) -> None:
     turn = AgentTurn(
         session_id=1,
@@ -1325,7 +1330,10 @@ async def test_turn_list_summary_keeps_malformed_nested_user_text(
                 sequence=1,
                 event_type="user_input",
                 role="user",
-                payload_json=json.dumps({"content": nested_input}, ensure_ascii=False),
+                payload_json=json.dumps(
+                    {"content": nested_input, **({"input_format": "structured_user_turn"} if structured else {})},
+                    ensure_ascii=False,
+                ),
             )
         )
         await db.commit()

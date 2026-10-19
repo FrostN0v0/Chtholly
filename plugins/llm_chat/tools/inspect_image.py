@@ -37,27 +37,38 @@ def register_inspect_image(
         if inputs is None:
             raise ImageInputError("Image inspection requires an active image-input scope")
         snapshot = await inputs.resolve(session, image_ref, purpose="inspect")
-        record_tool_evidence({"attachments": [inputs.audit_view(image_ref)]})
+        provenance: dict[str, JSONType] = {
+            "source": snapshot.source,
+            "speaker_role": snapshot.speaker_role,
+            "message_context": snapshot.message_context,
+        }
         if inputs.supports_image_input:
             inputs.queue_inspection(snapshot)
+            record_tool_evidence({"attachments": [inputs.audit_view(image_ref)]})
             return {
                 "available": True,
                 "image_ref": image_ref,
-                "source": snapshot.source,
+                **provenance,
                 "inspection": "pixels_queued_for_next_model_request",
             }
         try:
             description = await describe_image_bytes(config, snapshot.data)
+            if description:
+                inputs.mark_observed(image_ref, description=description)
         except Exception:
             return {
                 "available": False,
+                **provenance,
                 "image_ref": image_ref,
                 "reason": "visual_description_unavailable",
                 "original_available": True,
             }
+        finally:
+            record_tool_evidence({"attachments": [inputs.audit_view(image_ref)]})
         if not description:
             return {
                 "available": False,
+                **provenance,
                 "image_ref": image_ref,
                 "reason": "visual_description_empty",
                 "original_available": True,
@@ -65,7 +76,7 @@ def register_inspect_image(
         return {
             "available": True,
             "image_ref": image_ref,
-            "source": snapshot.source,
+            **provenance,
             "inspection": "fallback_description",
             "description": description,
         }

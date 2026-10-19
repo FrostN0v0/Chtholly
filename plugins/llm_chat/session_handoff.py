@@ -10,7 +10,7 @@ import litellm
 from entari_plugin_llm.config import get_model_config
 
 from .models import ContextSession
-from .agent_events import load_session_events
+from .agent_events import load_event_payload, load_session_events
 from .context_reads import model_readable_payload
 from .core.model_audit import ADMIN_ONLY_EVENT_TYPES
 from .scheduled_chat_context import _user_content, _join_user_inputs
@@ -40,7 +40,8 @@ def _event_summary(event) -> dict[str, object]:
         item["tool"] = event.tool_name
     if event.event_type in {"user_input", "assistant_output"}:
         if event.event_type == "user_input":
-            _speaker, content = _user_content(payload, "user")
+            own_input = {**payload, "input_format": load_event_payload(event).get("input_format")}
+            _speaker, content = _user_content(own_input, "user")
         else:
             content = payload.get("content")
         if isinstance(content, str):

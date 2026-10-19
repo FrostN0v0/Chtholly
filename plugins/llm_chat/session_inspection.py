@@ -40,8 +40,13 @@ def _preview(value: object, limit: int = 400) -> str:
 def _nested_user_content_expr(payload: ColumnElement[object]) -> ColumnElement[str]:
     """Extract nested serialized user content before applying the SQL preview bound."""
     current = func.json_extract(payload, "$.content")
-    for _ in range(4):
+    for depth in range(4):
         safe = case((func.json_valid(current) == 1, current), else_=literal("{}"))
+        if depth:
+            safe = case(
+                (func.json_extract(payload, "$.input_format") == "structured_user_turn", literal("{}")),
+                else_=safe,
+            )
         extracted = func.json_extract(safe, "$.content")
         current = case(
             (func.json_type(safe, "$.content") == "text", extracted),
@@ -321,6 +326,7 @@ async def turn_list_summaries(turns: Sequence[AgentTurn]) -> dict[int, dict[str,
                         "request_id": request_id,
                         "model": model,
                         "content": content,
+                        "input_format": "plain_preview",
                         "received_at": received_at,
                         "confirmed_at": confirmed_at,
                     },
