@@ -3074,6 +3074,81 @@ async def test_delivery_send_tool_success_survives_exact_loop_exhaustion_without
 
 
 @pytest.mark.asyncio
+async def test_member_turn_must_reply_before_further_lookups(
+    local_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.llm_chat.agent_context import AgentAccessContext
+    from plugins.llm_chat.core.reply_pacing import HARD_LOOKUPS, SOFT_LOOKUPS
+
+    search_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal search_calls
+        search_calls += 1
+        return httpx.Response(
+            200, json={"results": [{"title": "Result", "url": "https://example.com/a", "content": "evidence"}]}
+        )
+
+    factory = _MockClientFactory(local_modules.web_access.ExaWebClient, handler)
+    lookups = HARD_LOOKUPS + 1
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            *[
+                _model_response(tool_calls=[_tool_call(f"search-{index}", "web_search", {"query": f"q{index}"})])
+                for index in range(1, lookups + 1)
+            ],
+            _model_response(
+                tool_calls=[_tool_call("reply", "send_msg", {"segments": [{"type": "text", "text": "Short answer"}]})]
+            ),
+            _model_response(tool_calls=[_tool_call("after", "web_search", {"query": "follow-up"})]),
+            _model_response("[END_OF_RESPONSE]"),
+        ],
+    )
+    session = _DeliveryToolSession()
+    state = local_modules.delivery.DeliveryState()
+    try:
+        async with _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ) as harness:
+            local_modules.web_tools.register_web_access_tools(
+                harness.dispatcher,
+                local_modules.config.LLMChatConfig(
+                    web_search_enabled=True,
+                    exa_api_key="fake-exa-key",
+                    web_search_max_calls_per_generation=16,
+                    web_page_max_calls_per_generation=0,
+                    web_total_max_calls_per_generation=16,
+                ),
+                client_factory=factory,
+            )
+            await local_modules.generation.generate_chat_response(
+                [{"role": "user", "content": "chat"}],
+                system="system",
+                model="test-model",
+                channel_id="12345",
+                ctx=_tool_context(session),
+                web_limits=local_modules.web_access.WebAccessLimits(16, 0, 16),
+                delivery_state=state,
+                agent_access=AgentAccessContext(1, 1, 1, "user"),
+            )
+    finally:
+        await factory.aclose()
+
+    results = {message["tool_call_id"]: json.loads(message["content"]) for message in _tool_messages(payloads[-1])}
+    assert search_calls == HARD_LOOKUPS + 1
+    assert "host_notice" in results[f"search-{SOFT_LOOKUPS}"]
+    assert all("host_notice" not in results[f"search-{index}"] for index in range(1, SOFT_LOOKUPS))
+    assert results[f"search-{lookups}"]["ok"] is False
+    assert "Reply first" in results[f"search-{lookups}"]["error"]
+    assert results["reply"]["ok"] is True
+    assert results["after"]["ok"] is True
+    assert [str(message) for message in session.sent] == ["Short answer"]
+
+
+@pytest.mark.asyncio
 async def test_web_research_keeps_tool_headroom_for_external_image_delivery(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,

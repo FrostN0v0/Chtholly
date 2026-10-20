@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from dataclasses import field, dataclass
 from collections.abc import Sequence
 
+from arclet.entari.logger import log
 from entari_plugin_database import select, get_session
 
 from ..models import UserMemory, UserProfileFact
@@ -21,6 +23,10 @@ from ..core.memory_policy import (
     select_relevant_memories,
     select_chat_profile_facts,
 )
+
+_LOGGER = log.wrapper("[llm_chat]")
+_QUERY_EMBEDDING_TIMEOUT_SECONDS = 3.0
+_query_embedding_timeout_warned = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -67,6 +73,22 @@ def _evaluator_facts(
         )
         for fact in selected
     ]
+
+
+async def _load_query_embedding(config: LLMChatConfigLike, query: str) -> list[float] | None:
+    """Use semantic retrieval when the embedding service responds promptly."""
+    global _query_embedding_timeout_warned
+
+    try:
+        return await asyncio.wait_for(
+            embed_text(config, query),
+            timeout=_QUERY_EMBEDDING_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        if not _query_embedding_timeout_warned:
+            _LOGGER.warning("memory query embedding timed out; continuing without semantic retrieval")
+            _query_embedding_timeout_warned = True
+        return None
 
 
 async def load_evaluator_profile_facts(
@@ -133,7 +155,7 @@ async def load_memory_context(
             .all()
         )
 
-    query_embedding = await embed_text(config, query) if profile_rows or memory_rows else None
+    query_embedding = await _load_query_embedding(config, query) if profile_rows or memory_rows else None
 
     profile_candidates = _profile_candidates(profile_rows)
     grouped_facts = group_profile_facts(

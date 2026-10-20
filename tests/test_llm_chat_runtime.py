@@ -1926,6 +1926,80 @@ async def test_load_memory_context_builds_separate_chat_evaluator_and_memory_vie
 
 
 @pytest.mark.asyncio
+async def test_load_memory_context_times_out_query_embedding_and_keeps_fallback_selection(
+    isolated_memory_store: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    cancelled_queries: list[str] = []
+    warnings: list[str] = []
+
+    async def never_embed(_config: object, query: str) -> list[float] | None:
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled_queries.append(query)
+
+    monkeypatch.setattr(memory_context_module, "_QUERY_EMBEDDING_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(memory_context_module, "_query_embedding_timeout_warned", False)
+    monkeypatch.setattr(memory_context_module._LOGGER, "warning", warnings.append)
+    async with isolated_memory_store.session_factory() as session:
+        session.add(
+            UserProfileFact(
+                user_id="user",
+                channel_id="channel",
+                category="boundary",
+                key="no_spoilers",
+                value="不要剧透",
+                confidence=0.95,
+                evidence_count=2,
+                last_evidence="明确要求",
+                embedding_json="",
+                created_at=datetime(2026, 1, 1),
+                updated_at=datetime(2026, 1, 1),
+            )
+        )
+        session.add(
+            UserMemory(
+                user_id="user",
+                channel_id="channel",
+                text="保留的重要记忆",
+                importance=0.95,
+                embedding_json="",
+                source="conversation",
+                created_at=datetime(2026, 1, 1),
+            )
+        )
+        session.add_all(
+            UserProfileFact(
+                user_id=user_id,
+                channel_id=channel_id,
+                category="boundary",
+                key="unrelated_member",
+                value="OTHER_MEMBER_BOUNDARY",
+                confidence=1.0,
+                evidence_count=10,
+                embedding_json="",
+            )
+            for user_id, channel_id in (("another-user", "channel"), ("user", "another-channel"))
+        )
+        await session.commit()
+
+    config = LLMChatConfig()
+    isolated_memory_store.embeddings["query"] = None
+    fallback = await load_memory_context(config, "user", "channel", "query")
+    monkeypatch.setattr(memory_context_module, "embed_text", never_embed)
+    for _ in range(2):
+        context = await asyncio.wait_for(load_memory_context(config, "user", "channel", "query"), timeout=1)
+        assert context == fallback
+
+    assert context.chat_profile == {"boundary": ["不要剧透"]}
+    assert context.relevant_memories == []
+    assert context.retrieval["query_embedded"] is False
+    assert cancelled_queries == ["query", "query"]
+    assert warnings == ["memory query embedding timed out; continuing without semantic retrieval"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("existing_count", "expected_count", "new_memory_admitted"),
     [(199, 200, True), (200, 200, False), (201, 201, False)],
@@ -2373,6 +2447,115 @@ def test_tool_trace_hashes_full_web_content_and_rejects_string_result_lists() ->
     assert search.outcome["result_count"] == 0
 
 
+class _PausedReactionSession(_ChatSession):
+    def __init__(self, *, emoji_id: str = "125") -> None:
+        super().__init__("slow reactions")
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.completed = asyncio.Event()
+        self.paused_emoji = emoji_id
+
+    async def reaction_create(self, emoji_id: str, message_id: str | None = None) -> None:
+        if emoji_id == self.paused_emoji:
+            self.started.set()
+            try:
+                await self.release.wait()
+            finally:
+                self.completed.set()
+        await super().reaction_create(emoji_id, message_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "emoji_id"),
+    [("success", "124"), ("partial", "27"), ("failed", "123"), ("declined", "284")],
+)
+async def test_reaction_feedback_terminal_supersedes_slow_transients(
+    stage: reaction_feedback_module.TerminalReactionStage,
+    emoji_id: str,
+) -> None:
+    session = _PausedReactionSession()
+    feedback = reaction_feedback_module.MessageReactionFeedback(cast(Session, session), lambda _message: None)
+    tasks_before = asyncio.all_tasks()
+    await asyncio.wait_for(feedback.set_stage("processing"), timeout=0.1)
+    await session.started.wait()
+    await asyncio.wait_for(feedback.set_stage("thinking"), timeout=0.1)
+    await asyncio.wait_for(feedback.tool_started("web_search"), timeout=0.1)
+    await asyncio.wait_for(feedback.tool_started("generate_image"), timeout=0.1)
+    await asyncio.wait_for(feedback.tool_failed(), timeout=0.1)
+    finishing = asyncio.create_task(feedback.finish(stage))
+    await asyncio.sleep(0)
+    await feedback.set_stage("thinking")
+    assert not finishing.done()
+    session.release.set()
+    await finishing
+    await feedback.tool_started("web_search")
+
+    assert feedback.terminal
+    assert session.reactions == [("create", "125"), ("delete", "125"), ("create", emoji_id)]
+    assert asyncio.all_tasks() <= tasks_before
+
+
+@pytest.mark.asyncio
+async def test_reaction_feedback_silent_finish_supersedes_slow_transients() -> None:
+    session = _PausedReactionSession()
+    feedback = reaction_feedback_module.MessageReactionFeedback(cast(Session, session), lambda _message: None)
+    tasks_before = asyncio.all_tasks()
+    await feedback.set_stage("processing")
+    await session.started.wait()
+    await feedback.tool_started("web_search")
+    finishing = asyncio.create_task(feedback.finish_silent())
+    await asyncio.sleep(0)
+    await feedback.set_stage("thinking")
+    assert not finishing.done()
+    session.release.set()
+    await finishing
+    await feedback.tool_failed()
+
+    assert feedback.terminal
+    assert session.reactions == [("create", "125"), ("delete", "125")]
+    assert asyncio.all_tasks() <= tasks_before
+
+
+@pytest.mark.asyncio
+async def test_reaction_feedback_close_cancels_and_awaits_worker() -> None:
+    session = _PausedReactionSession()
+    feedback = reaction_feedback_module.MessageReactionFeedback(cast(Session, session), lambda _message: None)
+    tasks_before = asyncio.all_tasks()
+    await feedback.set_stage("processing")
+    await session.started.wait()
+    await feedback.tool_started("web_search")
+    await feedback.aclose()
+    session.release.set()
+    await feedback.set_stage("thinking")
+
+    assert session.completed.is_set()
+    assert session.reactions == []
+    assert asyncio.all_tasks() <= tasks_before
+
+
+@pytest.mark.asyncio
+async def test_cancelled_terminal_feedback_can_clear_remaining_transient() -> None:
+    session = _PausedReactionSession(emoji_id="314")
+    feedback = reaction_feedback_module.MessageReactionFeedback(cast(Session, session), lambda _message: None)
+    tasks_before = asyncio.all_tasks()
+    await feedback.set_stage("processing")
+    await feedback.set_stage("thinking")
+    await session.started.wait()
+    finishing = asyncio.create_task(feedback.finish("success"))
+    await asyncio.sleep(0)
+    finishing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await finishing
+    await feedback.clear_transient()
+    session.release.set()
+    await feedback.set_stage("thinking")
+
+    assert session.completed.is_set()
+    assert session.reactions == [("create", "125"), ("delete", "125")]
+    assert asyncio.all_tasks() <= tasks_before
+
+
 @pytest.mark.asyncio
 async def test_reaction_feedback_replaces_one_status_and_locks_terminal() -> None:
     session = _ChatSession("status")
@@ -2393,8 +2576,6 @@ async def test_reaction_feedback_replaces_one_status_and_locks_terminal() -> Non
     assert session.reactions == [
         ("create", "125"),
         ("delete", "125"),
-        ("create", "314"),
-        ("delete", "314"),
         ("create", "124"),
     ]
 
@@ -2416,10 +2597,6 @@ async def test_reaction_feedback_maps_tool_stages_and_recoverable_errors() -> No
     assert session.reactions == [
         ("create", "269"),
         ("delete", "269"),
-        ("create", "294"),
-        ("delete", "294"),
-        ("create", "174"),
-        ("delete", "174"),
         ("create", "123"),
     ]
 
@@ -3251,8 +3428,6 @@ async def test_on_chat_generation_failure_sends_notice_and_keeps_turn(
         assert session.reactions == [
             ("create", "125"),
             ("delete", "125"),
-            ("create", "314"),
-            ("delete", "314"),
             ("create", "123"),
         ]
 
@@ -3440,8 +3615,6 @@ async def test_trailing_end_marker_is_not_sent_or_persisted(
         assert session.reactions == [
             ("create", "125"),
             ("delete", "125"),
-            ("create", "314"),
-            ("delete", "314"),
             ("create", "124"),
         ]
 
@@ -3544,8 +3717,6 @@ async def test_delivery_generation_failure_persists_confirmed_prefix_without_eva
         assert session.reactions == [
             ("create", "125"),
             ("delete", "125"),
-            ("create", "314"),
-            ("delete", "314"),
             ("create", "27"),
         ]
 
@@ -4324,32 +4495,19 @@ async def test_on_chat_cancellation_during_post_preparation_reaction_finalizes_t
     async with _temporary_chat_handler() as harness:
         module = harness.module
         records = _install_handler_stubs(monkeypatch, module)
-        entered = asyncio.Event()
-        release = asyncio.Event()
+        generation_started = asyncio.Event()
 
-        class PausedReactionSession(_ChatSession):
-            async def reaction_create(self, emoji_id: str, message_id: str | None = None) -> None:
-                if records.appended:
-                    entered.set()
-                    await release.wait()
-                await super().reaction_create(emoji_id, message_id)
+        async def generation_waits(*_args: Any, **_kwargs: Any) -> None:
+            generation_started.set()
+            await asyncio.Future()
 
-        async def unexpected_generation(*_args: Any, **_kwargs: Any) -> None:
-            raise AssertionError("Cancellation before thinking feedback must not start the provider")
-
-        monkeypatch.setattr(module, "generate_chat_response", unexpected_generation)
-        session = PausedReactionSession("Cancel after preparation.")
+        monkeypatch.setattr(module, "generate_chat_response", generation_waits)
+        session = _ChatSession("Cancel after preparation.")
         task = asyncio.create_task(module.on_chat.callable_target(session, Contexts()))
-        try:
-            await asyncio.wait_for(entered.wait(), timeout=1)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        finally:
-            release.set()
-            if not task.done():
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+        await asyncio.wait_for(generation_started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
         assert records.agent_statuses == ["cancelled"]
         assert records.evaluations == []

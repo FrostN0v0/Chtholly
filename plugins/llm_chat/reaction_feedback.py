@@ -90,7 +90,7 @@ def _tool_stage(tool_name: str) -> ReactionStage:
 
 @dataclass(slots=True)
 class MessageReactionFeedback:
-    """Replace one transient reaction with a bounded terminal status."""
+    """Coalesce transient reactions and apply terminal state synchronously."""
 
     session: Session
     warn: WarningSink
@@ -98,10 +98,21 @@ class MessageReactionFeedback:
     _current_emoji: str | None = field(default=None, init=False)
     _disabled: bool = field(default=False, init=False)
     _terminal: bool = field(default=False, init=False)
+    _terminal_applied: bool = field(default=False, init=False)
+    _closed: bool = field(default=False, init=False)
+    _pending_stage: ReactionStage | None = field(default=None, init=False)
+    _worker: asyncio.Task[None] | None = field(default=None, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _api_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
 
     async def set_stage(self, stage: ReactionStage) -> None:
-        await self._replace(stage, terminal=False)
+        async with self._lock:
+            if self._terminal or self._closed or self._disabled:
+                return
+            self._pending_stage = stage
+            self._ensure_worker_locked()
+        # Let the worker start, but never wait for its network/protocol call.
+        await asyncio.sleep(0)
 
     @property
     def terminal(self) -> bool:
@@ -114,65 +125,146 @@ class MessageReactionFeedback:
         await self.set_stage("recoverable_error")
 
     async def finish(self, stage: TerminalReactionStage) -> None:
-        await self._replace(stage, terminal=True)
+        async with self._lock:
+            if self._terminal:
+                return
+            self._terminal = True
+            self._pending_stage = None
+            worker = self._worker
+        await self._wait_for_worker(worker)
+        await self._apply_stage(stage, terminal=True)
+        self._terminal_applied = True
 
     async def finish_silent(self) -> None:
         """End successfully without replacing transient feedback with another reaction."""
         async with self._lock:
             if self._terminal:
                 return
-            if not self._disabled and self._current_emoji is not None:
-                if await self._call(
-                    self._delete_reaction(self._current_emoji),
-                    action="delete",
-                    stage="silent",
-                ):
-                    self._current_emoji = None
             self._terminal = True
+            self._pending_stage = None
+            worker = self._worker
+        await self._wait_for_worker(worker)
+        await self._clear_current(stage="silent")
+        self._terminal_applied = True
 
     async def clear_transient(self) -> None:
         async with self._lock:
-            if self._disabled or self._terminal or self._current_emoji is None:
+            if self._terminal_applied:
                 return
-            if await self._call(
-                self._delete_reaction(self._current_emoji),
-                action="delete",
-                stage="cancelled",
-            ):
-                self._current_emoji = None
+            self._closed = True
+            self._pending_stage = None
+            worker = self._worker
+        await self._cancel_worker(worker)
+        await self._clear_current(stage="cancelled")
 
-    async def _replace(self, stage: ReactionStage, *, terminal: bool) -> None:
+    async def aclose(self) -> None:
+        """Cancel the feedback worker and clear an unfinished transient reaction."""
+        await self.clear_transient()
+
+    def _ensure_worker_locked(self) -> None:
+        if self._worker is None:
+            self._worker = asyncio.create_task(self._run_worker())
+
+    async def _run_worker(self) -> None:
+        current = asyncio.current_task()
+        try:
+            while True:
+                async with self._lock:
+                    if self._terminal or self._closed or self._pending_stage is None:
+                        return
+                    stage = self._pending_stage
+                    self._pending_stage = None
+                await self._apply_stage(stage, terminal=False)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            async with self._lock:
+                self._disabled = True
+                self._pending_stage = None
+            self.warn(f"message reaction worker failed: {type(exc).__name__}")
+        finally:
+            async with self._lock:
+                if self._worker is current:
+                    self._worker = None
+                    if (
+                        not self._terminal
+                        and not self._closed
+                        and not self._disabled
+                        and self._pending_stage is not None
+                    ):
+                        self._ensure_worker_locked()
+
+    async def _wait_for_worker(self, worker: asyncio.Task[None] | None) -> None:
+        if worker is None or worker is asyncio.current_task():
+            return
+        timeout = max(0.1, float(self.timeout_seconds))
+        try:
+            await asyncio.wait_for(asyncio.shield(worker), timeout=timeout)
+        except TimeoutError:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+        except asyncio.CancelledError:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+            raise
+
+    async def _cancel_worker(self, worker: asyncio.Task[None] | None) -> None:
+        if worker is None or worker is asyncio.current_task():
+            return
+        if not worker.done():
+            worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+    async def _apply_stage(self, stage: ReactionStage, *, terminal: bool) -> None:
         emoji_id = _REACTION_EMOJIS[stage]
-        async with self._lock:
-            if self._terminal:
-                return
-            if self._disabled:
-                if terminal:
-                    self._terminal = True
-                return
-            if self._current_emoji == emoji_id:
-                self._terminal = terminal
-                return
-            if self._current_emoji is not None:
+        async with self._api_lock:
+            async with self._lock:
+                if self._disabled or self._closed or (not terminal and self._terminal):
+                    return
+                current_emoji = self._current_emoji
+                if current_emoji == emoji_id:
+                    return
+
+            if current_emoji is not None:
                 if not await self._call(
-                    self._delete_reaction(self._current_emoji),
+                    self._delete_reaction(current_emoji),
                     action="delete",
                     stage=stage,
                 ):
-                    if terminal:
-                        self._terminal = True
                     return
-                self._current_emoji = None
+                async with self._lock:
+                    if self._current_emoji == current_emoji:
+                        self._current_emoji = None
+                    if self._disabled or self._closed or (not terminal and self._terminal):
+                        return
+                    if not terminal and self._pending_stage is not None:
+                        stage = self._pending_stage
+                        self._pending_stage = None
+                        emoji_id = _REACTION_EMOJIS[stage]
+
             if not await self._call(
                 self._create_reaction(emoji_id),
                 action="create",
                 stage=stage,
             ):
-                if terminal:
-                    self._terminal = True
                 return
-            self._current_emoji = emoji_id
-            self._terminal = terminal
+            async with self._lock:
+                self._current_emoji = emoji_id
+
+    async def _clear_current(self, *, stage: str) -> None:
+        async with self._api_lock:
+            async with self._lock:
+                if self._disabled or self._current_emoji is None:
+                    return
+                current_emoji = self._current_emoji
+            if await self._call(
+                self._delete_reaction(current_emoji),
+                action="delete",
+                stage=stage,
+            ):
+                async with self._lock:
+                    if self._current_emoji == current_emoji:
+                        self._current_emoji = None
 
     async def _create_reaction(self, emoji_id: str) -> None:
         if await self._uses_llonebot_reactions():
@@ -237,7 +329,8 @@ class MessageReactionFeedback:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._disabled = True
+            async with self._lock:
+                self._disabled = True
             self.warn(f"message reaction {action} failed at {stage}: {type(exc).__name__}")
             return False
         return True

@@ -46,6 +46,7 @@ from .core.tool_trace import ToolTraceRecorder, llm_chat_tool_trace_scope
 from .runtime_context import llm_chat_context_scope
 from .core.agent_trace import AgentTurnRecorder
 from .core.model_audit import sanitize_audit_value
+from .core.reply_pacing import ReplyPacing
 from .core.native_images import extract_native_images
 from .core.media_delivery import (
     MediaIntent,
@@ -506,7 +507,11 @@ async def generate_chat_response(
         active_media_requirements = scopes.enter_context(media_intent_scope(intent))
         scopes.enter_context(channel_message_scope(active_message_references))
         scopes.enter_context(turn_resolution_scope(resolution or TurnResolution()))
-        scopes.enter_context(agno_tool_call_limit_scope(tool_call_limit))
+        # Only a waiting member needs a fast first reply; host-triggered work may research before sending.
+        message_turn = agent_access is not None and agent_access.trigger_kind == "message"
+        scopes.enter_context(
+            agno_tool_call_limit_scope(tool_call_limit, pacing=ReplyPacing() if message_turn else None)
+        )
         scopes.enter_context(agno_delivery_tool_scope())
         scopes.enter_context(
             llm_chat_web_access_scope(

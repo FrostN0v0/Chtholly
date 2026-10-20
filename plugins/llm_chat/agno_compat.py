@@ -37,6 +37,7 @@ from .core.delivery import (
 from .core.tool_trace import current_tool_trace, llm_chat_tool_execution_scope
 from .runtime_context import copy_llm_chat_context
 from .core.model_audit import sanitize_audit_value
+from .core.reply_pacing import ReplyPacing
 from .reaction_feedback import current_reaction_feedback
 from .core.native_images import extract_native_images
 from .model_audit_runtime import (
@@ -153,6 +154,7 @@ _DELIVERY_TOOL_LOCK: ContextVar[asyncio.Lock | None] = ContextVar("llm_chat_agno
 class _ToolBudget:
     limit: int
     used: int = 0
+    pacing: ReplyPacing | None = None
 
 
 @dataclass
@@ -194,15 +196,15 @@ def recommended_tool_call_limit(web_calls: int, text_messages: int, media_messag
 
 
 @contextmanager
-def agno_tool_call_limit_scope(limit: int) -> Iterator[None]:
+def agno_tool_call_limit_scope(limit: int, *, pacing: ReplyPacing | None = None) -> Iterator[None]:
     """Count actual external calls across every pause in one generation attempt."""
 
     normalized = min(_MAX_TOOL_CALL_LIMIT, max(_MIN_TOOL_CALL_LIMIT, int(limit)))
     parent = _TOOL_BUDGET.get()
     budget = (
-        _ToolBudget(normalized)
+        _ToolBudget(normalized, pacing=pacing)
         if parent is None
-        else _ToolBudget(min(parent.limit, parent.used + normalized), used=parent.used)
+        else _ToolBudget(min(parent.limit, parent.used + normalized), used=parent.used, pacing=parent.pacing)
     )
     token = _TOOL_BUDGET.set(budget)
     try:
@@ -304,6 +306,11 @@ def _delivery_snapshot() -> DeliverySnapshot:
         confirmed=state.confirmed_deliveries,
         confirmed_media=state.confirmed_media_deliveries,
     )
+
+
+def _has_replied() -> bool:
+    state = current_llm_chat_delivery()
+    return state is not None and state.delivery_attempts > 0
 
 
 async def _flush_tool_events(audit: Any, recorder: Any) -> None:
@@ -426,6 +433,9 @@ async def _run_local_tools(
                     f"Invalid arguments for this tool. Required top-level fields: {required}. "
                     f"Allowed top-level fields: {allowed}. Pass these fields directly, not inside an arguments wrapper."
                 )
+            refusal = budget.pacing.admit(name, replied=_has_replied()) if budget.pacing is not None else None
+            if refusal is not None:
+                raise ValueError(refusal)
             if name in {"send_msg", "list_prepared_media"}:
                 await prepare_pending_native_images()
             if reaction is not None:
@@ -468,6 +478,11 @@ async def _run_local_tools(
                     after=_delivery_snapshot(),
                     audit_snapshot=sanitize_audit_value(payload.get("data")),
                 )
+                notice = budget.pacing.notice(replied=_has_replied()) if budget.pacing is not None else None
+                if notice is not None:
+                    req.external_execution_result = json.dumps({**payload, "host_notice": notice}, ensure_ascii=False)
+                    if execution is not None:
+                        execution.result = req.external_execution_result
             finished.add(index)
         except SteerPending:
             recorder.finish_skipped(call, reason="New user input arrived before the external operation started")
