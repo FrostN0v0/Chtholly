@@ -12,6 +12,7 @@ from entari_plugin_llm.config import get_model_config
 from .models import ChatScope, ContextSession
 from .agent_events import load_event_payload, load_session_events
 from .context_reads import model_readable_payload
+from .core.model_json import load_model_json
 from .core.user_turns import derive_speaker_id
 from .core.model_audit import ADMIN_ONLY_EVENT_TYPES
 from .scheduled_chat_context import _user_content, _join_user_inputs
@@ -178,9 +179,11 @@ def _normalize_handoff(
         str(item) for item in (refs if isinstance(refs, list) else []) if str(item) in allowed_refs
     ][:32]
     result["participants"] = participants
-    result["last_visible_exchange"] = _last_visible_exchange(events, 2000)
-    serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
-    return result if len(serialized) <= max_chars else None
+    for exchange_chars in (2000, 500):
+        result["last_visible_exchange"] = _last_visible_exchange(events, exchange_chars)
+        if len(json.dumps(result, ensure_ascii=False, separators=(",", ":"))) <= max_chars:
+            return result
+    return None
 
 
 def _fallback_handoff(events: Sequence[Mapping[str, object]], max_chars: int) -> dict[str, object]:
@@ -240,7 +243,7 @@ async def generate_session_handoff(
             ),
         )
         content = response.choices[0].message.content
-        parsed = json.loads(content) if isinstance(content, str) else None
+        parsed = load_model_json(content) if isinstance(content, str) else None
         handoff = _normalize_handoff(parsed, events, max(1000, output_max_chars)) or fallback
     except Exception:
         handoff = fallback

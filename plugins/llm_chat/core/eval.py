@@ -16,6 +16,7 @@ from .profile import (
     normalize_memory_item,
     normalize_profile_patch,
 )
+from .model_json import load_model_json
 from .memory_policy import ProfileFactData
 
 
@@ -96,16 +97,6 @@ def build_eval_prompt(
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
-def _json_content(content: str) -> object:
-    text = content.strip()
-    if text.startswith("```"):
-        text = text[3:]
-        if text.lstrip().startswith("json"):
-            text = text.lstrip()[4:]
-        text = text.rsplit("```", 1)[0].strip()
-    return json.loads(text)
-
-
 def parse_eval_response(
     content: str,
     *,
@@ -117,7 +108,7 @@ def parse_eval_response(
     min_profile_confidence: float = 0.65,
 ) -> EvalResult | None:
     try:
-        data = _json_content(content)
+        data = load_model_json(content)
     except (ValueError, TypeError, UnicodeError, json.JSONDecodeError):
         return None
     if not isinstance(data, Mapping):

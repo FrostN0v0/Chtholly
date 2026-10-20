@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import Any
 from pathlib import Path
 
 import pytest
@@ -147,7 +148,7 @@ async def test_handoff_keeps_member_ownership_and_never_pairs_another_members_re
     wave, star = derive_speaker_id(scope.scope_ref, "101"), derive_speaker_id(scope.scope_ref, "102")
     await _turn(context_session, "101", "Wave", '{"speaker":"Wave","content":"Look at my name"}', "Dramatic name.")
     await _turn(context_session, "102", "Star", '{"speaker":"Star","content":"[crying]"}', None)
-    captured: list[dict[str, object]] = []
+    captured: list[dict[str, Any]] = []
 
     async def complete(**kwargs: object) -> object:
         captured.append(json.loads(kwargs["messages"][1]["content"]))  # type: ignore[index]
@@ -162,7 +163,8 @@ async def test_handoff_keeps_member_ownership_and_never_pairs_another_members_re
             "last_visible_exchange": {"speaker": "Wave", "user": "forged", "assistant": "Dramatic name."},
             "participants": {"m_forged": "Nobody"},
         }
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(output)))])
+        fenced = "```json\n" + json.dumps(output, ensure_ascii=False) + "\n```"
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=fenced))])
 
     model = SimpleNamespace(name="m", base_url=None, api_key=None)
     monkeypatch.setattr(session_handoff, "get_model_config", lambda *_args: model)
