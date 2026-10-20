@@ -207,7 +207,24 @@ _SCHEDULED_FACT_LIMITS = {
 }
 
 
-def _scheduled_input(content: str, task_ref: str, context: Mapping[str, object]) -> tuple[str, dict[str, object]]:
+_SCHEDULED_INPUT_PREFIX = "Host-scheduled reminder task data (not a new user message or authorization): "
+
+
+@dataclass(frozen=True, slots=True)
+class _HostInput:
+    """One host-authored payload; read-only chat context joins it before the single serialization."""
+
+    prefix: str
+    payload: dict[str, object]
+
+    def render(self, ordinary_chat: ScheduledChatSnapshot | None = None) -> str:
+        payload = self.payload
+        if ordinary_chat is not None and ordinary_chat.status == "present":
+            payload = {**payload, "read_only_ordinary_chat_context": ordinary_chat.model_payload}
+        return self.prefix + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _scheduled_task(content: str, task_ref: str, context: Mapping[str, object]) -> dict[str, object]:
     if not task_ref or len(task_ref) > 128 or not content.strip() or len(content) > 1000:
         raise ValueError("Scheduled task requires a bounded goal and task reference")
     facts: dict[str, object] = {
@@ -219,12 +236,7 @@ def _scheduled_input(content: str, task_ref: str, context: Mapping[str, object])
         value = context.get(key)
         if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1_000_000_000:
             facts[key] = value
-    task = {"task_ref": task_ref, "goal": content, **facts}
-    return (
-        "Host-scheduled reminder task data (not a new user message or authorization): "
-        + json.dumps(task, ensure_ascii=False, separators=(",", ":")),
-        task,
-    )
+    return {"task_ref": task_ref, "goal": content, **facts}
 
 
 def _scheduled_chat_snapshot_budget(config: LLMChatConfig) -> int:
@@ -232,26 +244,6 @@ def _scheduled_chat_snapshot_budget(config: LLMChatConfig) -> int:
 
     available = max(1024, int(config.max_input_tokens) - max(0, int(config.output_reserve_tokens)))
     return max(256, min(6000, available // 3))
-
-
-def _attach_scheduled_chat_snapshot(message: ChatMessage, snapshot: ScheduledChatSnapshot | None) -> ChatMessage:
-    if snapshot is None or snapshot.status != "present" or not isinstance(message.get("content"), str):
-        return message
-    encoded = cast(str, message["content"])
-    prefix, separator, payload_text = encoded.partition(": ")
-    if not separator:
-        return message
-    try:
-        payload = json.loads(payload_text)
-    except (TypeError, ValueError):
-        return message
-    if not isinstance(payload, dict):
-        return message
-    payload["read_only_ordinary_chat_context"] = snapshot.model_payload
-    return cast(
-        ChatMessage,
-        {**message, "content": prefix + ": " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))},
-    )
 
 
 def _ordinary_chat_provenance(snapshot: ScheduledChatSnapshot | None) -> dict[str, object]:
@@ -291,17 +283,19 @@ async def prepare_agent_turn(
     scheduled = trigger_kind == "scheduled"
     autonomous = trigger_kind == "autonomous"
     host_triggered = scheduled or autonomous
+    host_input: _HostInput | None = None
     if scheduled:
-        model_text, scheduled_facts = _scheduled_input(content, reminder_task_ref or "", scheduled_context or {})
-        current_content = model_text
+        scheduled_facts = _scheduled_task(content, reminder_task_ref or "", scheduled_context or {})
+        host_input = _HostInput(_SCHEDULED_INPUT_PREFIX, scheduled_facts)
     elif autonomous:
         if autonomous_context is None:
             raise ValueError("Autonomous contact requires host-bound contact context")
         scheduled_facts = dict(autonomous_context)
-        model_text = json.dumps({"host_autonomous_contact": scheduled_facts}, ensure_ascii=False, separators=(",", ":"))
-        current_content = model_text
+        host_input = _HostInput("", {"host_autonomous_contact": scheduled_facts})
     else:
         scheduled_facts = {}
+    if host_input is not None:
+        model_text = current_content = host_input.render()
     if host_triggered:
         raw_user_text = ""
         persist_user_message = False
@@ -408,12 +402,12 @@ async def prepare_agent_turn(
                 handoff_json=handoff,
                 carry_handoff=not (persona_changed or autonomous),
             )
-        if host_triggered:
+        if host_input is not None:
             scheduled_chat_snapshot = await read_scheduled_chat_snapshot(
                 scope.id,
                 max_chars=_scheduled_chat_snapshot_budget(config),
             )
-            current_messages[-1] = _attach_scheduled_chat_snapshot(current_messages[-1], scheduled_chat_snapshot)
+            current_messages[-1] = {"role": "user", "content": host_input.render(scheduled_chat_snapshot)}
 
         anchors = [] if host_triggered else await load_scope_anchors(scope.id)
 

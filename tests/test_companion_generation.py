@@ -427,7 +427,15 @@ async def test_reflection_input_preserves_native_episode_times_ownership_and_who
             episodes[turn_id] = episode
     assert set(episodes) == set(expected)
     assert unrelated.last_turn_id not in episodes
-    budget = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))) - 1
+    alice_older = next(
+        episode
+        for item in payload["members"]
+        if item["member_ref"] == alice.member_ref
+        for episode in item["episodes"]
+        if episode["turn_id"] == alice.last_turn_id
+    )
+    older_size = len(json.dumps(alice_older, ensure_ascii=False, separators=(",", ":"))) + 1
+    budget = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))) - older_size
     bounded, bounded_ownership = await reflection_input(
         snapshot,
         scope_id=native_scope.id,
@@ -441,6 +449,8 @@ async def test_reflection_input_preserves_native_episode_times_ownership_and_who
     retained = [episode for item in bounded["members"] for episode in item["episodes"]]
     assert 0 < len(retained) < len(episodes)
     assert all(episode == episodes[episode["turn_id"]] for episode in retained)
+    bounded_members = {item["member_ref"]: item for item in bounded["members"]}
+    assert [item["turn_id"] for item in bounded_members[alice.member_ref]["episodes"]] == [later.id]
 
 
 @pytest.mark.asyncio
@@ -785,6 +795,10 @@ async def test_task_free_native_send_and_finish_pause_continue_returns_actual_re
                 ("finish_turn", "succeeded", "none"),
             ]
             assert captured[0].delivery_state.delivered_texts == [message]
+            host_input = json.loads(captured[0].chat_messages[-1]["content"])
+            assert host_input["host_autonomous_contact"]["topic"] == "Talk about imagined colors"
+            ordinary = json.dumps(host_input["read_only_ordinary_chat_context"], ensure_ascii=False)
+            assert "I am waiting for my exam result" in ordinary
             assert await native_rows(companion_db, RelationshipEvidence) == []
             assert await native_rows(companion_db, ReminderTask) == []
         finally:

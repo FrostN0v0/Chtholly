@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from arclet.entari import Session
 
 from .steering import SteerPending, current_steering, check_steer_boundary
-from .generation import response_content
+from .generation import response_content, has_visible_reply
 from .reaction_feedback import MessageReactionFeedback
 
 if TYPE_CHECKING:
@@ -35,6 +35,7 @@ async def settle_chat_response(
 
     check_steer_boundary()
     outcome = resolution.outcome
+    final_text_discarded = False
     if outcome == "silent":
         status = "silent"
     elif outcome == "declined":
@@ -47,7 +48,14 @@ async def settle_chat_response(
     else:
         if outcome == "delivered" and not state.confirmed_deliveries:
             raise RuntimeError("explicit delivered outcome lacked confirmed output")
-        if not await turn.deliver_model_reply(session, "" if outcome == "delivered" else response_content(response)):
+        # Once send_msg confirmed output, it is the only delivery channel; trailing prose merely narrates it.
+        final_text_discarded = (
+            outcome == "automatic" and bool(state.confirmed_deliveries) and has_visible_reply(response)
+        )
+        if final_text_discarded:
+            turn.warn("discarded final text after confirmed send_msg delivery")
+        final_text = "" if outcome == "delivered" or state.confirmed_deliveries else response_content(response)
+        if not await turn.deliver_model_reply(session, final_text):
             status = "partial" if state.confirmed_deliveries else "failed"
             if reaction is not None:
                 await reaction.finish(status)
@@ -73,6 +81,7 @@ async def settle_chat_response(
                 "media_messages": state.confirmed_media_deliveries,
                 "confirmed_deliveries": state.confirmed_deliveries,
             },
+            "final_text_discarded": final_text_discarded,
         },
     )
     if reaction is not None:

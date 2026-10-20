@@ -310,7 +310,7 @@ async def completed_turn(
 
     recorder = AgentTurnRecorder()
     recorder.record_user_input(json.dumps({"speaker": user, "content": text}), user_name=user, fresh_context=False)
-    recorder.append("assistant_output", role="assistant", payload={"content": "I understand."}, model_visible=True)
+    recorder.record_assistant_output("I understand.")
     await agent_events.persist_agent_events(turn.id, recorder.events)
     await session_manager.finish_turn(turn.id, status="completed", final_text="I understand.")
     async with database.factory() as db, db.begin():

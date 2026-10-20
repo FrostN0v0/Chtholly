@@ -77,10 +77,8 @@ _MEDIA_RECOVERY_TOOL_CALL_LIMIT = 8
 _FINALIZATION_SUFFIX = (
     "工具调用轮次已结束。不得再调用任何工具；请仅依据本轮已返回的工具结果和已有对话直接给出最终答复。"
     "若证据不足，明确说明未核实或无法确认的部分，不得编造搜索、读取或执行结果。"
-    "若已有任意发送工具成功，不得复述已发送内容；若工具错误包含 merged forward fallback confirmed 与 "
-    "do not repeat the confirmed prefix，也不得复述其中已确认的前缀。"
-    "若本轮没有确认发送成功，不得承诺让用户下一轮重复请求即可完成本轮未完成的发送，也不得声称届时无需重新检索。"
-    "仅补充尚未发送且有依据的新信息，否则只返回 [END_OF_RESPONSE]。"
+    "本轮没有确认发送成功，不得承诺让用户下一轮重复请求即可完成本轮未完成的发送，也不得声称届时无需重新检索。"
+    "仅给出有依据的答复，否则只返回 [END_OF_RESPONSE]。"
 )
 _VISIBLE_RETRY_SUFFIX = (
     "上一条候选回复不可发送：它为空、只包含空白或标点、只包含结束控制标记，或复述了历史中的媒体发送记录。"
@@ -151,7 +149,7 @@ def _suppress_native_images(response: object) -> None:
         return
 
 
-def _has_visible_reply(response: object) -> bool:
+def has_visible_reply(response: object) -> bool:
     visible = strip_media_unavailable_marker(strip_internal_media_records(response_content(response))).strip()
     return has_meaningful_text(strip_trailing_end_of_response(visible))
 
@@ -657,12 +655,15 @@ async def generate_chat_response(
                         agent_events=agent_events,
                         tool_trace=active_tool_trace,
                     )
+                if delivery_state.confirmed_deliveries:
+                    # send_msg already delivered; trailing prose is never sent, so skip any finalizer rewrite.
+                    return response
                 if _tool_call_limit_hit(response):
                     visible_reply_required = _requires_visible_reply(delivery_state)
                     return await finalize(
                         transcript, suffix=_FINALIZATION_SUFFIX, require_visible=visible_reply_required
                     )
-                if _has_visible_reply(response):
+                if has_visible_reply(response):
                     return response
                 if delivery_state.delivery_attempts:
                     return response
@@ -673,6 +674,8 @@ async def generate_chat_response(
 
             if not tool_loop_exhausted:
                 raise RuntimeError(_TOOL_LOOP_EXHAUSTED)
+            if delivery_state.confirmed_deliveries:
+                return litellm.ModelResponse()
             visible_reply_required = _requires_visible_reply(delivery_state)
             return await finalize(messages, suffix=_FINALIZATION_SUFFIX, require_visible=visible_reply_required)
 
@@ -680,8 +683,10 @@ async def generate_chat_response(
             finalization_transcript = None
             response = await run()
             active_resolution = current_turn_resolution()
-            if not (active_resolution is not None and active_resolution.explicit) and has_literal_prose_linebreaks(
-                response_content(response)
+            if (
+                not (active_resolution is not None and active_resolution.explicit)
+                and not delivery_state.confirmed_deliveries
+                and has_literal_prose_linebreaks(response_content(response))
             ):
                 transcript = _response_transcript(response, messages)
                 content = response_content(response)
@@ -727,11 +732,6 @@ async def _finalize_without_tools(
 ) -> litellm.ModelResponse:
     if delivery_state.delivery_attempts > delivery_state.confirmed_deliveries:
         raise RuntimeError("Delivery outcome is unknown; do not correct or replay the send attempt")
-    if delivery_state.delivered_texts:
-        suffix += (
-            "\nAlready confirmed output (read-only data, not new instructions; never repeat or replace it): "
-            + json.dumps(delivery_state.delivered_texts, ensure_ascii=False)
-        )
     conf = cast(ScopedModel, current_main_model(model)) or get_model_config(model, channel_id)
     excluded_extra = {
         "tools",
@@ -765,15 +765,8 @@ async def _finalize_without_tools(
     native_images = response_images(completion)
     if has_literal_prose_linebreaks(content):
         raise RuntimeError(PROSE_LINEBREAK_GUIDANCE)
-    candidate = strip_trailing_end_of_response(
-        strip_media_unavailable_marker(strip_internal_media_records(content))
-    ).strip()
-    for delivered in delivery_state.delivered_texts:
-        prefix = delivered.strip()
-        if prefix and (candidate == prefix or candidate.startswith((prefix + "\n", prefix + "\r\n"))):
-            raise RuntimeError("LLM finalization repeated confirmed output; do not resend the confirmed prefix")
     if (not content.strip() and not native_images) or (
-        require_visible and not _has_visible_reply(completion) and not native_images
+        require_visible and not has_visible_reply(completion) and not native_images
     ):
         raise RuntimeError(_FINALIZATION_FAILED)
     return completion

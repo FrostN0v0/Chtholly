@@ -305,7 +305,7 @@ def register_send_msg(
         be reused after a send attempt. On OneBot, audio, video, file, and merged forward must each be the only segment.
         A required source edit or web-reference image must be included before any other message may be sent.
         Links require public HTTP(S) URLs; OneBot emoji IDs must be numeric. Unsupported composites are rejected,
-        never split or retried through another delivery path. After success, do not repeat this content in final text.
+        never split or retried through another delivery path. After success, final text is no longer delivered.
 
         Args:
             segments: Tagged text, mention, link, emoji, media, break, or style segments, in exact visible order.
@@ -377,8 +377,8 @@ def register_send_msg(
             "messages": 1,
             "media_count": len(media),
             "guidance": (
-                "This message is confirmed. Use send_msg again for the next natural reply beat if needed; "
-                "do not repeat this content. End only when all intended parts have been delivered."
+                "This message is confirmed. Final text is no longer shown: use send_msg again for any further "
+                "part, never repeating this content, then end with [END_OF_RESPONSE] or finish_turn(delivered)."
             ),
         }
 

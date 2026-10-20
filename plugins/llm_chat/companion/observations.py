@@ -175,8 +175,9 @@ async def reflection_input(
 
     for member, item in zip(snapshot.members, selected):
         allowed = ownership[member.member_ref]
-        episodes: list[dict[str, object]] = []
-        for turn_id, owner, speaker, outcome, created_at in reversed(rows):
+        newest_first: list[dict[str, object]] = []
+        # Rows arrive newest first: fill the budget with the latest contiguous history, then show it in time order.
+        for turn_id, owner, speaker, outcome, created_at in rows:
             if str(owner) not in {member.user_id, member.platform_user_id} or int(turn_id) not in allowed:
                 continue
             text = by_turn.get(int(turn_id), {})
@@ -190,10 +191,11 @@ async def reflection_input(
                 **episode_time,
                 **text,
             }
-            episodes.append(episode)
-            item["episodes"] = episodes
+            item["episodes"] = [episode, *reversed(newest_first)]
             if _size(payload) > available_chars:
-                episodes.pop()
+                item["episodes"] = list(reversed(newest_first))
+                break
+            newest_first.append(episode)
     selected_refs = set(ownership)
     contacts: list[dict[str, object]] = []
     for contact in snapshot.recent_contacts:

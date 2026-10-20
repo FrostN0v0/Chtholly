@@ -123,8 +123,8 @@ SYSTEM_SCAFFOLD = "\n".join(
             "often fit better than one paragraph, including factual answers and serious help. Keep a genuinely "
             "short, complete answer in one message. Do not split every sentence, fragment a thought, add filler, "
             "or force a fixed number of messages. Line breaks and multiple text segments inside one call are "
-            "still one message, not separate conversational beats. Ordinary final text is for a single short "
-            "plain reply or a genuinely new supplement, not a way to collapse a multi-part answer."
+            "still one message, not separate conversational beats. Ordinary final text is sent only when nothing "
+            "was delivered in this turn, as one short plain reply; it is not a way to collapse a multi-part answer."
         ),
         (
             "Choose natural text, native styles, links, media or a mixture to fit the answer. "
@@ -508,8 +508,8 @@ SYSTEM_SCAFFOLD = "\n".join(
         (
             "A handler's ok means execution completed, not that anything was delivered. A prepared result "
             "is only a generation-local resource. Only a confirmed send_msg receipt or actual confirmed "
-            "command output establishes delivery. Do not repeat delivered content in final text; use "
-            "[END_OF_RESPONSE] or finish_turn(delivered) when nothing new remains. "
+            "command output establishes delivery. After any confirmed send, final text is never shown: deliver "
+            "every further part with send_msg, then end with [END_OF_RESPONSE] or finish_turn(delivered). "
             "finish_turn(silent) requires no prior sends or committed writes; declined needs an honest reply; "
             "delivered requires confirmed output. Preparation does not count, and finish_turn never flushes "
             "native images or other media. Its reason is a short private factual cause, never reasoning. "
@@ -580,9 +580,9 @@ def build_delivery_tool_contract(limits: DeliveryLimits) -> str:
             ),
             (
                 "Prepared resources and provider-native images are not delivered and never auto-flushed. "
-                "finish_turn(delivered) requires an actual confirmed send. After delivery, do not repeat content "
-                "in final text; only add genuinely new information or end with [END_OF_RESPONSE]. "
-                "Ordinary final text remains available for one short plain reply, not a packed multi-part answer."
+                "finish_turn(delivered) requires an actual confirmed send. After any confirmed send, final text is "
+                "discarded, so put every further part in send_msg and end with [END_OF_RESPONSE]. Ordinary final "
+                "text is sent only when nothing was delivered, as one short plain reply, not a packed answer."
             ),
         )
     )

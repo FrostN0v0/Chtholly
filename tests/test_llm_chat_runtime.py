@@ -3469,92 +3469,42 @@ async def test_media_unavailable_marker_is_not_sent_or_persisted(
 
 
 @pytest.mark.asyncio
-async def test_multiline_final_reply_after_media_stays_in_one_message(
+async def test_multiline_final_reply_stays_in_one_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with _temporary_chat_handler() as harness:
         module = harness.module
         records = _install_handler_stubs(monkeypatch, module)
-        clock = _HandlerClock()
         session = _ChatSession("return two visible chat beats")
 
-        async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
-            state = kwargs["delivery_state"]
-            state.sleep = clock.sleep
-            state.clock = clock.monotonic
-            with llm_chat_delivery_scope(state):
-                async with prepared_media_scope():
-                    image = prepare_media(
-                        cast(Session, session),
-                        Image.of(raw=_PNG_BYTES, mime="image/png"),
-                        byte_count=len(_PNG_BYTES),
-                        tool_name="prepare_image",
-                        history_marker="[发送了图片]",
-                    )
-                    await _send_msg(cast(Session, session), [{"type": "media", "media_ref": image["media_ref"]}])
-            clock.now = 2.0
+        async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
             return _handler_response("first beat\nsecond beat")
 
         monkeypatch.setattr(module, "generate_chat_response", generate)
 
         result = await module.on_chat.callable_target(session, SimpleNamespace())
 
-        aggregated = "[发送了图片]\n\nfirst beat\nsecond beat"
         assistant_rows = [row for row in records.appended if row[3] == "assistant"]
         assert result is BLOCK
-        assert len(session.sent) == 2
-        assert session.sent[0].get(Image)
-        assert session.sent[1] == "first beat\nsecond beat"
-        assert clock.sleeps == []
-        assert assistant_rows == [("group-B", "", "bot", "assistant", aggregated)]
+        assert session.sent == ["first beat\nsecond beat"]
+        assert assistant_rows == [("group-B", "", "bot", "assistant", "first beat\nsecond beat")]
 
 
 @pytest.mark.asyncio
-async def test_segmented_delivery_final_supplement_stays_in_one_history_row(
+@pytest.mark.parametrize("final_text", ["first segment, worded slightly differently", "a genuinely new supplement"])
+async def test_final_text_after_confirmed_send_is_never_delivered(
     monkeypatch: pytest.MonkeyPatch,
+    final_text: str,
 ) -> None:
     async with _temporary_chat_handler() as harness:
         module = harness.module
         records = _install_handler_stubs(monkeypatch, module)
         clock = _HandlerClock()
-        session = _ChatSession("add one supplement")
+        session = _ChatSession("ask once")
 
         async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
             await _deliver_tool_texts(kwargs["delivery_state"], session, ("first segment",), clock)
-            return _handler_response("final supplement")
-
-        monkeypatch.setattr(module, "generate_chat_response", generate)
-
-        result = await module.on_chat.callable_target(session, SimpleNamespace())
-
-        aggregated = "first segment\n\nfinal supplement"
-        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
-        assert result is BLOCK
-        assert session.sent == ["first segment", "final supplement"]
-        assert clock.sleeps == [1.2]
-        assert assistant_rows == [("group-B", "", "bot", "assistant", aggregated)]
-
-
-@pytest.mark.asyncio
-async def test_segmented_delivery_suppresses_final_supplement_outside_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async with _temporary_chat_handler(
-        {
-            "delivery_max_text_chars_per_message": 5,
-            "delivery_max_total_text_chars_per_generation": 5,
-        }
-    ) as harness:
-        module = harness.module
-        records = _install_handler_stubs(monkeypatch, module)
-        warnings: list[str] = []
-        monkeypatch.setattr(module, "_LOGGER", SimpleNamespace(warning=warnings.append))
-        clock = _HandlerClock()
-        session = _ChatSession("exhaust supplement budget")
-
-        async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
-            await _deliver_tool_texts(kwargs["delivery_state"], session, ("12345",), clock)
-            return _handler_response("extra")
+            return _handler_response(final_text)
 
         monkeypatch.setattr(module, "generate_chat_response", generate)
 
@@ -3562,8 +3512,9 @@ async def test_segmented_delivery_suppresses_final_supplement_outside_budget(
 
         assistant_rows = [row for row in records.appended if row[3] == "assistant"]
         assert result is BLOCK
-        assert session.sent == ["12345"]
-        assert assistant_rows == [("group-B", "", "bot", "assistant", "12345")]
+        assert session.sent == ["first segment"]
+        assert assistant_rows == [("group-B", "", "bot", "assistant", "first segment")]
+        assert records.agent_statuses == ["completed"]
 
 
 @pytest.mark.asyncio
@@ -3616,31 +3567,6 @@ async def test_delivery_generation_cancellation_persists_prefix_and_propagates(
         monkeypatch.setattr(module, "generate_chat_response", generate)
 
         with pytest.raises(asyncio.CancelledError):
-            await module.on_chat.callable_target(session, SimpleNamespace())
-
-        assistant_rows = [row for row in records.appended if row[3] == "assistant"]
-        assert session.sent == ["confirmed prefix"]
-        assert assistant_rows == [("group-B", "", "bot", "assistant", "confirmed prefix")]
-        assert records.evaluations == []
-
-
-@pytest.mark.asyncio
-async def test_delivery_final_send_failure_persists_only_confirmed_prefix_and_propagates(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async with _temporary_chat_handler() as harness:
-        module = harness.module
-        records = _install_handler_stubs(monkeypatch, module)
-        clock = _HandlerClock()
-        session = _FailingChatSession("final send fails", fail_attempt=2)
-
-        async def generate(*_args: Any, **kwargs: Any) -> SimpleNamespace:
-            await _deliver_tool_texts(kwargs["delivery_state"], session, ("confirmed prefix",), clock)
-            return _handler_response("unsent supplement")
-
-        monkeypatch.setattr(module, "generate_chat_response", generate)
-
-        with pytest.raises(RuntimeError, match="^final send failed$"):
             await module.on_chat.callable_target(session, SimpleNamespace())
 
         assistant_rows = [row for row in records.appended if row[3] == "assistant"]
