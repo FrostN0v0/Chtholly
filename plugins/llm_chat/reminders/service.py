@@ -22,6 +22,7 @@ from arclet.entari.event.base import InternalEvent
 from arclet.letoderea.context import Contexts
 from entari_plugin_llm.config import get_model_config
 
+from utils.sqlite_errors import sqlite_error_label
 from utils.llm_model_core.snapshot import pin_main_model, main_model_scope
 
 from .store import (
@@ -217,7 +218,7 @@ class ReminderService(Service):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                _LOGGER.warning(f"reminder wakeup failed: {type(exc).__name__}")
+                _LOGGER.warning(f"reminder wakeup failed: {sqlite_error_label(exc)}")
 
     async def _reconcile_workers(self) -> None:
         for task_ref, worker in tuple(self._workers.items()):

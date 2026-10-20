@@ -11,6 +11,8 @@ from arclet.entari import Session, ChannelType
 from launart.status import Phase
 from arclet.entari.logger import log
 
+from utils.sqlite_errors import sqlite_error_label
+
 from .core import clean_text, collect_image_sources
 from .config import ChannelPerceptionConfig
 from .queries import (
@@ -133,7 +135,7 @@ class ChannelPerceptionService(Service):
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    _LOGGER.warning(f"observation persistence failed: {type(exc).__name__}")
+                    _LOGGER.warning(f"observation persistence failed: {sqlite_error_label(exc)}")
             finally:
                 self._queue.task_done()
 

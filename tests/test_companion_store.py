@@ -624,6 +624,41 @@ async def test_attention_grounding_and_confirmed_contact_waits_for_real_reply(co
 
 
 @pytest.mark.asyncio
+async def test_reflection_attention_is_a_merge_so_omitted_items_stay_unchanged(companion_db):
+    # The reflection prompt asks for attention changes only; replacing state would erase concerns.
+    member = await enable_member(companion_db)
+    concern = AttentionUpdate(
+        member_ref=member.member_ref,
+        key="exam",
+        kind="concern",
+        summary="Preparing for an exam",
+        status="open",
+        evidence_turn_ids=[member.last_turn_id],
+    )
+    first = await store.claim_review(1, "alice", now=NOW)
+    assert await store.finish_review(
+        first,
+        ReflectionProposal(life=LifeState(), attention=[concern]),
+        now=NOW,
+        next_review_at=NOW + timedelta(minutes=10),
+    )
+    later = NOW + timedelta(minutes=10)
+    second = await store.claim_review(1, "alice", now=later)
+    topic = concern.model_copy(update={"key": "music", "kind": "topic", "summary": "Shares new songs"})
+    assert await store.finish_review(
+        second,
+        ReflectionProposal(life=LifeState(), attention=[topic]),
+        now=later,
+        next_review_at=later + timedelta(minutes=10),
+    )
+
+    attention = {item["key"]: item for item in (await store.read_companion_context(1, "alice", "u1"))["attention"]}
+    assert attention["exam"]["status"] == "open"
+    assert attention["exam"]["summary"] == "Preparing for an exam"
+    assert attention["music"]["kind"] == "topic"
+
+
+@pytest.mark.asyncio
 async def test_corrupt_generated_state_is_explicit_and_failed_write_rolls_back(companion_db):
     member = await enable_member(companion_db)
     async with companion_db.factory() as db, db.begin():

@@ -17,6 +17,7 @@ from launart.status import Phase
 from arclet.entari.logger import log
 from entari_plugin_database import get_session
 
+from utils.sqlite_errors import sqlite_error_label
 from utils.companion_core import ReflectionProposal, next_review_at
 
 from . import store
@@ -340,9 +341,7 @@ class CompanionService(Service):
                     scope.id, mode.persona_key, now=self._clock(), member_idle_days=limits.member_idle_days
                 )
                 if any(
-                    participant_turn_active(
-                        scope.platform, scope.account_id, scope.channel_id, member.platform_user_id
-                    )
+                    participant_turn_active(scope.platform, scope.account_id, scope.channel_id, member.platform_user_id)
                     for member in members
                 ):
                     continue
@@ -592,7 +591,7 @@ class CompanionService(Service):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                _LOGGER.warning(f"companion wakeup failed: {type(exc).__name__}")
+                _LOGGER.warning(f"companion wakeup failed: {sqlite_error_label(exc)}")
 
     async def drain(self) -> None:
         """Wait only for finite work already owned, not the heartbeat loop."""
