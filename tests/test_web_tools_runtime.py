@@ -4920,7 +4920,9 @@ async def test_legacy_nested_summaries_keep_results_without_advertising_invalid_
         module_path=_TOOL_RUNTIME_PATH,
     ):
         validator = Draft202012Validator(available_functions[tool_name][1].parameters)
-        history = _turn_messages(AgentTurn(id=1), rows, inline_chars=256, validators={tool_name: validator})
+        history = _turn_messages(
+            AgentTurn(id=1), rows, speaker_id="m_test", inline_chars=256, validators={tool_name: validator}
+        )
     assert not any(message.get("tool_calls") or message["role"] == "tool" for message in history)
     result = json.loads(cast(str, history[0]["content"]))["historical_tool_batch"]["results"][0]
     assert result["status"] == "failed"
@@ -4990,6 +4992,7 @@ async def test_historical_summaries_never_become_executable_tool_arguments(
         history = _turn_messages(
             AgentTurn(id=1),
             rows,
+            speaker_id="m_test",
             inline_chars=256,
             references=references,
             validators={
@@ -5111,7 +5114,7 @@ async def test_native_finish_stops_queued_effects_with_matched_skipped_results(
         values = asdict(event)
         values["payload_json"] = json.dumps(values.pop("payload"))
         rows.append(AgentEvent(turn_id=1, event_ref=f"event-{event.sequence}", **values))
-    history = _turn_messages(AgentTurn(id=1), rows, inline_chars=10_000, validators={})
+    history = _turn_messages(AgentTurn(id=1), rows, speaker_id="m_test", inline_chars=10_000, validators={})
     history_results = [
         result
         for message in history

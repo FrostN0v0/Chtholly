@@ -18,10 +18,17 @@ from .core.types import JSONType, ChatMessage
 from .agent_events import load_event_payload, load_session_events
 from .agent_context import ContextReadGrant, ContextReadReference
 from .context_reads import payload_digest, public_payload_path, model_readable_payload
+from .core.user_turns import (
+    derive_speaker_id,
+    update_user_payload,
+    attribute_user_payload,
+    describe_previous_turn,
+    attribute_stored_user_content,
+)
 from .session_manager import BaselineFingerprint
 from .core.model_audit import ADMIN_ONLY_EVENT_TYPES
 
-SYSTEM_SCAFFOLD_VERSION = "agent-context-v9-reply-image-boundaries"
+SYSTEM_SCAFFOLD_VERSION = "agent-context-v10-speaker-attribution"
 AGENT_POLICY_VERSION = "agent-events-v3-context-grants"
 _ARCHIVED_CONTEXT_TERMS = (
     "上次",
@@ -200,9 +207,10 @@ def _tool_result_payload(
 
 
 def _turn_messages(
-    _turn: AgentTurn,
+    turn: AgentTurn,
     events: Sequence[AgentEvent],
     *,
+    speaker_id: str,
     inline_chars: int,
     validators: Mapping[str, Draft202012Validator],
     references: list[ContextReadReference] | None = None,
@@ -226,7 +234,14 @@ def _turn_messages(
         if event.event_type == "user_input":
             content = load_event_payload(event).get("content")
             if isinstance(content, str) and content:
-                messages.append({"role": "user", "content": content})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": attribute_stored_user_content(
+                            content, speaker_id=speaker_id, fallback_speaker=turn.user_name
+                        ),
+                    }
+                )
             event_index += 1
             continue
         if event.event_type == "assistant_tool_call":
@@ -336,9 +351,47 @@ def _turn_messages(
     return messages
 
 
+def _previous_speaker(
+    context_session: ContextSession,
+    turns: Sequence[AgentTurn],
+    scope_ref: str,
+) -> tuple[str, str] | None:
+    """Return the last finished member turn, crossing one rollover through its attributed handoff."""
+    for turn in reversed(turns):
+        if turn.trigger_kind == "message":
+            return turn.user_name, derive_speaker_id(scope_ref, turn.user_id)
+    exchange = parse_handoff(context_session.handoff_json).get("last_visible_exchange")
+    if isinstance(exchange, Mapping):
+        speaker, speaker_id = exchange.get("speaker"), exchange.get("speaker_id")
+        if isinstance(speaker, str) and isinstance(speaker_id, str) and speaker_id:
+            return speaker, speaker_id
+    return None
+
+
+def _attribute_current_message(
+    message: ChatMessage,
+    *,
+    scope_ref: str,
+    user_id: str | None,
+    previous: tuple[str, str] | None,
+) -> ChatMessage:
+    if user_id is None:
+        return message
+    speaker_id = derive_speaker_id(scope_ref, user_id)
+    previous_turn = None if previous is None else describe_previous_turn(*previous, speaker_id)
+    return update_user_payload(
+        message,
+        lambda payload: attribute_user_payload(
+            payload, speaker_id=speaker_id, fallback_speaker="", previous_turn=previous_turn
+        ),
+    )
+
+
 async def select_session_context(
     context_session: ContextSession,
     *,
+    scope_ref: str,
+    current_user_id: str | None,
     system: str,
     current_message: ChatMessage,
     model_name: str | None,
@@ -350,9 +403,12 @@ async def select_session_context(
     inline_event_chars: int,
     fresh_context: bool,
 ) -> ContextSelection:
-    base_messages: list[ChatMessage] = [{"role": "system", "content": system}, current_message]
-    base_tokens = estimate_tokens(model_name, base_messages)
+    """Select whole turns; current_user_id is None only for host-triggered input without a speaker."""
     if fresh_context:
+        current_message = _attribute_current_message(
+            current_message, scope_ref=scope_ref, user_id=current_user_id, previous=None
+        )
+        base_tokens = estimate_tokens(model_name, [{"role": "system", "content": system}, current_message])
         return ContextSelection(
             messages=[current_message],
             estimated_tokens=base_tokens,
@@ -363,6 +419,12 @@ async def select_session_context(
         )
 
     turn_rows = await load_session_events(context_session.id, model_visible_only=True)
+    current_message = _attribute_current_message(
+        current_message,
+        scope_ref=scope_ref,
+        user_id=current_user_id,
+        previous=_previous_speaker(context_session, [turn for turn, _events in turn_rows], scope_ref),
+    )
     validators = {
         name: Draft202012Validator({**parameters, "additionalProperties": False})
         for name, parameters in tool_parameters.items()
@@ -374,6 +436,7 @@ async def select_session_context(
             _turn_messages(
                 turn,
                 events,
+                speaker_id=derive_speaker_id(scope_ref, turn.user_id),
                 validators=validators,
                 inline_chars=max(256, inline_event_chars),
                 references=turn_references.setdefault(turn.id, []),

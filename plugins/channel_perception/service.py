@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime
 
 from launart import Launart, Service
+from satori.model import Member, IterablePageResult
 from arclet.entari import Session, ChannelType
 from launart.status import Phase
 from arclet.entari.logger import log
@@ -43,6 +44,17 @@ _LOGGER = log.wrapper("[channel_perception]")
 Observation = MessageObservation | MessageMutation | ParticipantObservation
 MAX_QUEUE_SIZE = 10_000
 MAX_PROTOCOL_MEMBER_SCAN = 5_000
+
+
+def _guild_member_pages(session: Session) -> IterablePageResult[Member]:
+    """Iterate every roster page through the adapter's original paginated API."""
+    guild = getattr(session.event, "guild", None)
+    if guild is None:
+        raise RuntimeError("Member roster requires a guild event")
+    list_members = session.account.protocol.guild_member_list
+    # Entari 0.19.0 instruments every protocol method as a coroutine. Awaiting this
+    # synchronous pager yields only its first page, and `async for` rejects it.
+    return getattr(list_members, "__wrapped__", list_members)(guild.id)
 
 
 def scope_from_session(session: Session) -> PerceptionScope:
@@ -259,7 +271,7 @@ class ChannelPerceptionService(Service):
         matched = 0
         scanned = 0
         match_limit = min(10, max(1, int(limit)))
-        async for member in session.guild_member_list():
+        async for member in _guild_member_pages(session):
             scanned += 1
             if scanned > MAX_PROTOCOL_MEMBER_SCAN:
                 break

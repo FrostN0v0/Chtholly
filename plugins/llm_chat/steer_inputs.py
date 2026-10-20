@@ -36,6 +36,7 @@ from .context_builder import (
     requests_tool_payload,
     requests_archived_context,
 )
+from .core.user_turns import update_user_payload, attribute_user_payload
 from .forward_context import resolve_merged_forward_messages
 from .agent_attachments import capture_user_input_images
 from .core.media_delivery import (
@@ -237,7 +238,12 @@ def bind_steer_inputs(
                     current_content = serialize_user_turn(
                         identity.display_name, model_text, forwarded, mentioned, views, reply_to=reply_to
                     )
-                message: ChatMessage = {"role": "user", "content": current_content}
+                message = update_user_payload(
+                    {"role": "user", "content": current_content},
+                    lambda payload: attribute_user_payload(
+                        payload, speaker_id=prepared.speaker_id, fallback_speaker=identity.display_name
+                    ),
+                )
                 check_budget(message)
                 attachments = await capture_user_input_images(session, inputs, warn=warn)
             message_id = await prepared.lifecycle.append_history(

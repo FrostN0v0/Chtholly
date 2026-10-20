@@ -108,6 +108,8 @@ async def _execution(factory, context_session, *, arguments=None, result=None):
 async def _selection(context_session, *, message="Make the title blue", fresh=False):
     return await context_builder.select_session_context(
         context_session,
+        scope_ref="scope-test",
+        current_user_id=None,
         system="system",
         current_message={"role": "user", "content": message},
         model_name="test-model",
@@ -319,11 +321,9 @@ async def test_handoff_source_excludes_nonvisible_nonadmin_events(grant_store):
         event = await db.get(AgentEvent, call.id)
         event.model_visible = False
         await db.commit()
-    source = await session_handoff._source_events(context_session, 10_000)
+    source = await session_handoff._source_events(context_session, 10_000, scope_ref="scope-test")
     assert all(item["event_ref"] != call.event_ref for item in source)
-    normalized = session_handoff._normalize_handoff(
-        {"relevant_event_refs": [call.event_ref]}, {str(item["event_ref"]) for item in source}, 1000
-    )
+    normalized = session_handoff._normalize_handoff({"relevant_event_refs": [call.event_ref]}, source, 1000)
     assert normalized is not None
     assert normalized["relevant_event_refs"] == []
 
@@ -347,7 +347,8 @@ async def test_private_audit_never_issues_anchor_grants_or_handoff(grant_store, 
     assert access.context_read_grants == ()
     assert not any(message.get("tool_calls") for message in selection.messages)
     assert all(
-        item["event_ref"] != call.event_ref for item in await session_handoff._source_events(context_session, 10_000)
+        item["event_ref"] != call.event_ref
+        for item in await session_handoff._source_events(context_session, 10_000, scope_ref="scope-test")
     )
     with pytest.raises(agent_query.AgentQueryError):
         await agent_query.read_event_payload(access, event_ref=call.event_ref, path="arguments", max_chars=2000)
@@ -365,6 +366,8 @@ async def test_budget_excluded_descriptors_do_not_issue_read_grants(grant_store,
     monkeypatch.setattr(context_builder, "estimate_tokens", lambda _model, messages: len(messages) * 300)
     selection = await context_builder.select_session_context(
         context_session,
+        scope_ref="scope-test",
+        current_user_id=None,
         system="system",
         current_message={"role": "user", "content": "Make the title blue"},
         model_name="test-model",

@@ -16,7 +16,7 @@ from utils.relationship_core.policy import read_emotions, build_relationship_con
 
 from . import session_manager as context_sessions
 from .config import LLMChatConfig
-from .models import UserRelation
+from .models import ChatScope, UserRelation, ContextSession
 from .identity import ChatIdentity
 from .companion import store as companion_store
 from .core.types import JSONType, ChatMessage
@@ -48,6 +48,7 @@ from .reply_context import ReplyContext
 from .turn_lifecycle import ActiveChatTurn
 from .channel_context import read_channel_context
 from .context_builder import (
+    ContextSelection,
     requests_context_pin,
     requests_tool_payload,
     requests_fresh_context,
@@ -57,6 +58,7 @@ from .context_builder import (
     build_baseline_fingerprint,
     collect_context_read_grants,
 )
+from .core.user_turns import derive_speaker_id
 from .session_handoff import generate_session_handoff
 from .session_manager import (
     start_turn,
@@ -103,6 +105,7 @@ class PreparedAgentTurn:
     agent_access: AgentAccessContext
     relationship_snapshot: dict[str, JSONType]
     resolution: TurnResolution
+    speaker_id: str
     conversation_mode: str = "normal"
     companion_revision: int = 0
 
@@ -395,7 +398,7 @@ async def prepare_agent_turn(
         )
         if rollover_reason is not None:
             persona_changed = context_session.persona_hash != baseline.persona_hash
-            handoff = "{}" if persona_changed or autonomous else await _handoff(config, context_session, channel_id)
+            handoff = "{}" if persona_changed or autonomous else await _handoff(config, scope, context_session)
             context_session = await rollover_session(
                 scope,
                 context_session,
@@ -448,12 +451,14 @@ async def prepare_agent_turn(
             config,
             context_session,
             current_messages[-1],
+            scope_ref=scope.scope_ref,
+            current_user_id=None if host_triggered else user_id,
             system=system,
             model_name=model_name,
             fresh_context=fresh_context,
         )
         if selection.rollover_required:
-            handoff = "{}" if autonomous else await _handoff(config, context_session, channel_id)
+            handoff = "{}" if autonomous else await _handoff(config, scope, context_session)
             context_session = await rollover_session(
                 scope,
                 context_session,
@@ -468,6 +473,8 @@ async def prepare_agent_turn(
                 config,
                 context_session,
                 current_messages[-1],
+                scope_ref=scope.scope_ref,
+                current_user_id=None if host_triggered else user_id,
                 system=system,
                 model_name=model_name,
                 fresh_context=fresh_context,
@@ -627,6 +634,7 @@ async def prepare_agent_turn(
         agent_events=agent_events,
         relationship_snapshot=relationship_snapshot,
         resolution=resolution,
+        speaker_id=derive_speaker_id(scope.scope_ref, user_id),
         conversation_mode=conversation_mode,
         companion_revision=companion_revision,
         agent_access=AgentAccessContext(
@@ -667,11 +675,11 @@ async def _flush_started_events(
     recorder.mark_flushed(len(pending))
 
 
-async def _handoff(config: LLMChatConfig, context_session, channel_id: str) -> str:
+async def _handoff(config: LLMChatConfig, scope: ChatScope, context_session: ContextSession) -> str:
     return await generate_session_handoff(
         context_session,
+        scope=scope,
         model_name=config.model,
-        channel_id=channel_id,
         timeout=config.session_handoff_timeout,
         source_max_chars=config.session_handoff_source_max_chars,
         output_max_chars=config.session_handoff_max_chars,
@@ -680,15 +688,19 @@ async def _handoff(config: LLMChatConfig, context_session, channel_id: str) -> s
 
 async def _select_context(
     config: LLMChatConfig,
-    context_session,
+    context_session: ContextSession,
     current_message: ChatMessage,
     *,
+    scope_ref: str,
+    current_user_id: str | None,
     system: str,
     model_name: str | None,
     fresh_context: bool,
-):
+) -> ContextSelection:
     return await select_session_context(
         context_session,
+        scope_ref=scope_ref,
+        current_user_id=current_user_id,
         system=system,
         current_message=current_message,
         model_name=model_name,

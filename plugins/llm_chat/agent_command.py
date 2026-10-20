@@ -106,8 +106,8 @@ async def rollover_session_command(session: Session) -> str:
             return f"当前角色没有可续接的话题，已创建新会话（#{created.sequence}，{persona.name}）。"
     handoff = await generate_session_handoff(
         current,
+        scope=scope,
         model_name=config.model,
-        channel_id=session.channel.id,
         timeout=config.session_handoff_timeout,
         source_max_chars=config.session_handoff_source_max_chars,
         output_max_chars=config.session_handoff_max_chars,

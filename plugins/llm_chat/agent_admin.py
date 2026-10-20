@@ -397,8 +397,8 @@ class AgentAdminService:
                 reason = "webui_rollover"
                 handoff = await generate_session_handoff(
                     context_session,
+                    scope=scope,
                     model_name=self.config.model,
-                    channel_id=scope.channel_id,
                     timeout=self.config.session_handoff_timeout,
                     source_max_chars=self.config.session_handoff_source_max_chars,
                     output_max_chars=self.config.session_handoff_max_chars,

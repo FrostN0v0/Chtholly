@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock
 from importlib.machinery import ModuleSpec
 
 import pytest
-from satori import User, Event, Login, Channel, EventType, ChannelType
+from satori import User, Event, Guild, Login, Channel, EventType, ChannelType
 from sqlalchemy import select
 from satori.model import MessageObject
 from arclet.entari import At, Text, Image, Quote, Session, MessageChain
@@ -343,39 +343,53 @@ async def test_participant_identity_uses_group_card_when_platform_nickname_is_mi
     assert participant.display_name == "Group Card"
 
 
+def _roster_session(account: Account) -> Session:
+    event = MessageCreatedEvent(
+        account,
+        Event(
+            EventType.MESSAGE_CREATED,
+            datetime.utcnow(),
+            account.self_info,
+            channel=Channel("group-1", ChannelType.TEXT),
+            guild=Guild("group-1"),
+            user=User("user-1", name="Requester"),
+            message=MessageObject("roster-request", "Who is Alice?"),
+        ),
+    )
+    return Session(account, event)
+
+
 @pytest.mark.asyncio
-async def test_participant_search_refreshes_matching_protocol_roster(perception_store) -> None:
-    class RosterSession:
-        account = SimpleNamespace(platform="onebot", self_id="bot-1")
-        guild = SimpleNamespace(id="group-1")
-        event = SimpleNamespace(guild=SimpleNamespace(id="group-1"))
-        channel = SimpleNamespace(id="group-1")
+async def test_participant_search_reads_every_roster_page_through_entari_protocol(perception_store) -> None:
+    account = Account(Login(platform="onebot", user=User("bot-1", name="Bot")), ApiInfo(), [], EntariProtocol)
+    pages = {
+        None: {"data": [{"user": {"id": "user-3", "name": "Bob"}, "nick": "Group Bob"}], "next": "page-2"},
+        "page-2": {
+            "data": [
+                {
+                    "user": {"id": "user-2", "name": "Alice", "avatar": "https://example.com/alice.png"},
+                    "nick": "Group Alice",
+                    "avatar": "https://example.com/alice.png",
+                }
+            ],
+            "next": None,
+        },
+    }
+    requested: list[str | None] = []
 
-        def __init__(self) -> None:
-            self.list_calls = 0
+    async def call_api(action: object, params: dict | None = None, *_args: object, **_kwargs: object) -> dict:
+        token = (params or {}).get("next")
+        requested.append(token)
+        return pages[token]
 
-        def guild_member_list(self):
-            self.list_calls += 1
-
-            async def members():
-                yield SimpleNamespace(
-                    user=SimpleNamespace(
-                        id="user-2",
-                        name="Alice",
-                        avatar="https://example.com/alice.png",
-                    ),
-                    nick="Group Alice",
-                    avatar="https://example.com/alice.png",
-                )
-
-            return members()
-
-    session = RosterSession()
+    account.protocol.call_api = call_api  # type: ignore[method-assign]
     service = service_module.ChannelPerceptionService(ChannelPerceptionConfig())
+    try:
+        participants = await service.find_participants(_roster_session(account), "Alice", limit=5)
+    finally:
+        await account.protocol.session.close()
 
-    participants = await service.find_participants(cast(Session, session), "Alice", limit=5)
-
-    assert session.list_calls == 1
+    assert requested == [None, "page-2"]
     assert participants == [
         {
             "participant_ref": participants[0]["participant_ref"],
@@ -429,19 +443,18 @@ async def test_platform_user_resolution_hydrates_and_reuses_current_channel_part
 
 @pytest.mark.asyncio
 async def test_participant_search_does_not_turn_unsupported_roster_into_false_absence(perception_store) -> None:
-    class UnsupportedRosterSession:
-        account = SimpleNamespace(platform="qq", self_id="bot-1")
-        guild = SimpleNamespace(id="group-1")
-        event = SimpleNamespace(guild=SimpleNamespace(id="group-1"))
-        channel = SimpleNamespace(id="group-1")
+    account = Account(Login(platform="qq", user=User("bot-1", name="Bot")), ApiInfo(), [], EntariProtocol)
 
-        def guild_member_list(self):
-            raise RuntimeError("member roster unsupported")
+    async def call_api(*_args: object, **_kwargs: object) -> dict:
+        raise RuntimeError("member roster unsupported")
 
+    account.protocol.call_api = call_api  # type: ignore[method-assign]
     service = service_module.ChannelPerceptionService(ChannelPerceptionConfig())
-
-    with pytest.raises(RuntimeError, match="member roster unsupported"):
-        await service.find_participants(cast(Session, UnsupportedRosterSession()), "Alice", limit=5)
+    try:
+        with pytest.raises(RuntimeError, match="member roster unsupported"):
+            await service.find_participants(_roster_session(account), "Alice", limit=5)
+    finally:
+        await account.protocol.session.close()
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
 
 from .types import ChatMessage
+from .user_turns import update_user_payload
 
 MAX_CHANNEL_CONTEXT_CHARS = 12_000
 _CONTEXT_FIELDS = (
@@ -82,17 +83,4 @@ def unavailable_channel_context(requested_messages: int) -> ChannelContextSnapsh
 
 def attach_channel_context(message: ChatMessage, snapshot: ChannelContextSnapshot) -> ChatMessage:
     """Add quoted data to the structured user text, preserving every media part."""
-    content = message["content"]
-    if isinstance(content, str):
-        encoded = content
-    elif isinstance(content, list) and content and content[0].get("type") == "text":
-        encoded = content[0]["text"]
-    else:
-        raise ValueError("Channel context requires a structured user text part")
-    payload = json.loads(encoded)
-    if not isinstance(payload, dict):
-        raise ValueError("Channel context requires an object user payload")
-    payload["recent_channel_context"] = snapshot.model_payload
-    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    updated = text if isinstance(content, str) else [{**content[0], "text": text}, *content[1:]]
-    return cast(ChatMessage, {**message, "content": updated})
+    return update_user_payload(message, lambda payload: {**payload, "recent_channel_context": snapshot.model_payload})

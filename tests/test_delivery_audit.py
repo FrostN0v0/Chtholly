@@ -158,7 +158,10 @@ async def test_rendered_png_and_text_keep_actual_receipt_time_and_private_bytes(
         values = asdict(event)
         values["payload_json"] = json.dumps(values.pop("payload"))
         rows.append(AgentEvent(turn_id=1, event_ref=f"event-{event.sequence}", **values))
-    assert context_builder._turn_messages(AgentTurn(id=1), rows, inline_chars=4000, validators={}) == []
+    assert (
+        context_builder._turn_messages(AgentTurn(id=1), rows, speaker_id="m_test", inline_chars=4000, validators={})
+        == []
+    )
 
 
 @pytest.mark.asyncio

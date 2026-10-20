@@ -45,6 +45,7 @@ from plugins.llm_chat.agent_context import (
 )
 from plugins.llm_chat.core.delivery import DeliveryState
 from plugins.llm_chat.turn_lifecycle import ActiveChatTurn
+from plugins.llm_chat.core.user_turns import derive_speaker_id
 from plugins.llm_chat.agent_turn_setup import PreparedAgentTurn
 from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
 from plugins.llm_chat.core.media_delivery import build_media_intent, media_intent_scope
@@ -143,6 +144,7 @@ async def _prepared(root: Session, tmp_path: Path, warnings: list[str]) -> Prepa
         agent_access=AgentAccessContext(scope.id, context.id, turn.id, "user", raw_user_text=raw),
         media_intent=build_media_intent(raw),
         media_requested=False,
+        speaker_id=derive_speaker_id(scope.scope_ref, "user"),
     )
     return cast(PreparedAgentTurn, prepared)
 
@@ -174,6 +176,8 @@ async def test_text_then_mentioned_image_is_one_persisted_task_with_root_tool_ow
     assert isinstance(parts, list)
     payload = json.loads(parts[0]["text"])
     assert payload["content"].startswith("Use this source")
+    assert payload["speaker_id"] == prepared.speaker_id
+    assert "previous_turn" not in payload
     assert payload["mentioned_participants"] == [{"display_name": "Bob", "participant_ref": "participant_bob"}]
     image_ref = payload["input_images"][0]["image_ref"]
     snapshot = await prepared.image_inputs.resolve(extra, image_ref, purpose="inspect")

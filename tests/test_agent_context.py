@@ -56,6 +56,7 @@ from plugins.llm_chat.agent_events import load_event_payload
 from plugins.llm_chat.image_inputs import ImageInputs
 from plugins.llm_chat.agent_context import AgentAccessContext
 from plugins.llm_chat.core.tool_trace import ToolTraceRecorder
+from plugins.llm_chat.core.user_turns import derive_speaker_id
 from plugins.llm_chat.session_manager import ScopeIdentity, BaselineFingerprint
 from plugins.llm_chat.agent_event_view import serialize_event_view
 from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
@@ -167,6 +168,8 @@ async def test_agent_event_rebuild_preserves_tool_pair_and_externalizes_large_so
     assert call_event.attempt == result_event.attempt == 2
     selection = await context_builder.select_session_context(
         context_session,
+        scope_ref="scope-test",
+        current_user_id=None,
         system="system",
         current_message={"role": "user", "content": "next"},
         model_name="test-model",
@@ -254,6 +257,8 @@ async def test_agent_event_rebuild_batches_parallel_tool_calls_before_their_resu
     ]
     selection = await context_builder.select_session_context(
         context_session,
+        scope_ref="scope-test",
+        current_user_id=None,
         system="system",
         current_message={"role": "user", "content": "next"},
         model_name="test-model",
@@ -318,6 +323,8 @@ async def test_context_budget_drops_whole_old_turns_without_orphaning_tool_messa
     monkeypatch.setattr(context_builder, "estimate_tokens", count_messages)
     selection = await context_builder.select_session_context(
         context_session,
+        scope_ref="scope-test",
+        current_user_id=None,
         system="system",
         current_message={"role": "user", "content": "current"},
         model_name="test-model",
@@ -574,7 +581,7 @@ async def test_handoff_failure_uses_structured_evidence_linked_fallback(
     agent_store: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _scope, context_session = await _scope_and_session()
+    scope, context_session = await _scope_and_session()
     turn = await session_manager.start_turn(
         context_session,
         trigger_message_id="message",
@@ -597,8 +604,8 @@ async def test_handoff_failure_uses_structured_evidence_linked_fallback(
     monkeypatch.setattr(session_handoff.litellm, "acompletion", fail_completion)
     raw = await session_handoff.generate_session_handoff(
         context_session,
+        scope=scope,
         model_name="test",
-        channel_id="channel",
         timeout=1,
         source_max_chars=12000,
         output_max_chars=6000,
@@ -612,10 +619,13 @@ async def test_handoff_failure_uses_structured_evidence_linked_fallback(
         "open_loops",
         "confirmed_deliveries",
         "relevant_event_refs",
+        "participants",
         "last_visible_exchange",
     }
     assert handoff["topic"] == "Continue the report"
     assert handoff["last_visible_exchange"] == {
+        "speaker": "Alice",
+        "speaker_id": derive_speaker_id(scope.scope_ref, turn.user_id),
         "user": "Continue the report",
         "assistant": "The first draft is ready",
     }
@@ -837,6 +847,8 @@ async def test_interleaved_tool_results_remain_paired_without_operator_snapshots
     await session_manager.finish_turn(turn.id, status="completed", final_text="Three records found")
     selection = await context_builder.select_session_context(
         context_session,
+        scope_ref="scope-test",
+        current_user_id=None,
         system="system",
         current_message={"role": "user", "content": "continue"},
         model_name="test-model",
@@ -854,7 +866,7 @@ async def test_interleaved_tool_results_remain_paired_without_operator_snapshots
     assert [message["tool_call_id"] for message in results] == ["a", "b", "c"]
     assert [json.loads(message["content"])["data"]["found"] for message in results] == ["a", "b", "c"]
     assert "operator-only" not in json.dumps(selection.messages)
-    handoff_source = await session_handoff._source_events(context_session, 20000)
+    handoff_source = await session_handoff._source_events(context_session, 20000, scope_ref="scope-test")
     assert all(
         item["type"] not in {"model_request", "model_response", "context_snapshot", "turn_timing", "message_delivery"}
         for item in handoff_source
@@ -914,6 +926,8 @@ async def test_steering_inputs_follow_complete_tool_batch_once(agent_store: Simp
     await session_manager.finish_turn(turn.id, status="completed", final_text="Complete answer")
     selection = await context_builder.select_session_context(
         context_session,
+        scope_ref="scope-test",
+        current_user_id=None,
         system="system",
         current_message={"role": "user", "content": "next question"},
         model_name="test-model",
@@ -926,7 +940,11 @@ async def test_steering_inputs_follow_complete_tool_batch_once(agent_store: Simp
         tool_parameters=_TOOL_PARAMETERS,
     )
     messages = selection.messages
-    assert [message["content"] for message in messages if message["role"] == "user"] == [
+    assert [
+        json.loads(message["content"])["content"] if message is not messages[-1] else message["content"]
+        for message in messages
+        if message["role"] == "user"
+    ] == [
         "Original question",
         "Supplement one",
         "Supplement two",
@@ -951,7 +969,7 @@ async def test_steering_inputs_follow_complete_tool_batch_once(agent_store: Simp
         assert [call["id"] for call in batch["calls"]] == ["a", "b"]
         assert [result["tool_call_id"] for result in batch["results"]] == ["a", "b"]
     assert "private-" not in json.dumps(messages)
-    handoff = await session_handoff._source_events(context_session, 20_000)
+    handoff = await session_handoff._source_events(context_session, 20_000, scope_ref="scope-test")
     assert all(not item["type"].startswith("steer_") for item in handoff)
 
 
@@ -1556,7 +1574,7 @@ async def test_handoff_keeps_one_turns_own_inputs_in_order_and_never_partial_sou
     recorder.record_assistant_output("Final answer")
     await agent_events.persist_agent_events(turn.id, recorder.events)
     await session_manager.finish_turn(turn.id, status="completed", final_text="Final answer")
-    source = await session_handoff._source_events(context_session, 20_000)
+    source = await session_handoff._source_events(context_session, 20_000, scope_ref="scope-test")
     assert [item["content"] for item in source if item["type"] == "user_input"] == [
         "Original question",
         "More detail",
@@ -1568,6 +1586,8 @@ async def test_handoff_keeps_one_turns_own_inputs_in_order_and_never_partial_sou
     fallback = session_handoff._fallback_handoff(source, 5000)
     assert fallback["topic"] == "Original question\n\nMore detail\n\nMore detail"
     assert fallback["last_visible_exchange"] == {
+        "speaker": "Alice",
+        "speaker_id": derive_speaker_id("scope-test", turn.user_id),
         "user": "Original question\n\nMore detail\n\nMore detail",
         "assistant": "Final answer",
     }
@@ -1576,4 +1596,4 @@ async def test_handoff_keeps_one_turns_own_inputs_in_order_and_never_partial_sou
         for item in source
         if item["type"] == "user_input"
     )
-    assert await session_handoff._source_events(context_session, required + 1) == []
+    assert await session_handoff._source_events(context_session, required + 1, scope_ref="scope-test") == []

@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 from typing import cast
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 import litellm
 from entari_plugin_llm.config import get_model_config
 
-from .models import ContextSession
+from .models import ChatScope, ContextSession
 from .agent_events import load_event_payload, load_session_events
 from .context_reads import model_readable_payload
+from .core.user_turns import derive_speaker_id
 from .core.model_audit import ADMIN_ONLY_EVENT_TYPES
 from .scheduled_chat_context import _user_content, _join_user_inputs
 
@@ -23,11 +24,26 @@ _HANDOFF_KEYS = (
     "open_loops",
     "confirmed_deliveries",
     "relevant_event_refs",
+    "participants",
     "last_visible_exchange",
+)
+_ATTRIBUTED_KEYS = ("goals", "decisions", "constraints", "open_loops")
+_MODEL_KEYS = tuple(key for key in _HANDOFF_KEYS if key not in {"participants", "last_visible_exchange"})
+_GROUP_SUBJECT = "group"
+_UNKNOWN_SUBJECT = "unknown"
+_MAX_PARTICIPANTS = 20
+_HANDOFF_INSTRUCTIONS = (
+    "Summarize one completed group chat context session as strict JSON. Use only supplied events. "
+    "Several members may share the session: participants maps each speaker_id to its display name, and every "
+    "event of one turn_id belongs to the speaker_id on that turn's user_input. Never merge different members or "
+    "describe a member's request, promise, emotion or joke as someone else's. Each item of goals, decisions, "
+    'constraints and open_loops must be an object {"subject": speaker_id or "group", "text": string}; use '
+    '"group" only for genuinely shared context. Never include hidden reasoning, secrets, raw large payloads or '
+    f"unsupported claims. Return exactly these keys: {', '.join(_MODEL_KEYS)}."
 )
 
 
-def _event_summary(event) -> dict[str, object]:
+def _event_summary(event, *, fallback_speaker: str = "user") -> dict[str, object]:
     payload = model_readable_payload(event, compact=event.event_type not in {"user_input", "assistant_output"})
     item: dict[str, object] = {
         "event_ref": event.event_ref,
@@ -41,7 +57,8 @@ def _event_summary(event) -> dict[str, object]:
     if event.event_type in {"user_input", "assistant_output"}:
         if event.event_type == "user_input":
             own_input = {**payload, "input_format": load_event_payload(event).get("input_format")}
-            _speaker, content = _user_content(own_input, "user")
+            speaker, content = _user_content(own_input, fallback_speaker)
+            item["speaker"] = speaker
         else:
             content = payload.get("content")
         if isinstance(content, str):
@@ -53,18 +70,22 @@ def _event_summary(event) -> dict[str, object]:
     return item
 
 
-async def _source_events(context_session: ContextSession, max_chars: int) -> list[dict[str, object]]:
+async def _source_events(context_session: ContextSession, max_chars: int, *, scope_ref: str) -> list[dict[str, object]]:
     if context_session.status == "sealed":
         return []
     rows = await load_session_events(context_session.id, model_visible_only=False, turn_limit=40)
     selected: list[dict[str, object]] = []
     used = 2
-    for _turn, events in reversed(rows):
+    for turn, events in reversed(rows):
+        speaker_id = derive_speaker_id(scope_ref, turn.user_id)
         summaries = [
-            _event_summary(event)
+            _event_summary(event, fallback_speaker=turn.user_name)
             for event in events
             if event.event_type not in ADMIN_ONLY_EVENT_TYPES and event.model_visible
         ]
+        for item in summaries:
+            if item["type"] == "user_input":
+                item["speaker_id"] = speaker_id
         sizes = [len(json.dumps(item, ensure_ascii=False, separators=(",", ":"))) + 1 for item in summaries]
         required = sum(size for item, size in zip(summaries, sizes) if item["type"] == "user_input")
         if used + required > max_chars:
@@ -79,91 +100,131 @@ async def _source_events(context_session: ContextSession, max_chars: int) -> lis
     return selected
 
 
-def _normalize_handoff(value: object, allowed_refs: set[str], max_chars: int) -> dict[str, object] | None:
+def _participants(events: Sequence[Mapping[str, object]]) -> dict[str, str]:
+    """Host-derived names for the latest speakers; model output never defines identities."""
+    names: dict[str, str] = {}
+    for item in reversed(events):
+        speaker_id, speaker = item.get("speaker_id"), item.get("speaker")
+        if item.get("type") != "user_input" or not isinstance(speaker_id, str) or speaker_id in names:
+            continue
+        names[speaker_id] = str(speaker or "")[:120]
+        if len(names) >= _MAX_PARTICIPANTS:
+            break
+    return dict(reversed(names.items()))
+
+
+def _last_visible_exchange(events: Sequence[Mapping[str, object]], max_chars: int) -> dict[str, object]:
+    """Pair the final member input only with the assistant output of that same turn."""
+    visible = [event for event in events if event.get("type") in {"user_input", "assistant_output"}]
+    last_user_event = next((item for item in reversed(visible) if item.get("type") == "user_input"), None)
+    if last_user_event is None:
+        return {"speaker": "", "speaker_id": "", "user": "", "assistant": ""}
+    turn_id = last_user_event.get("turn_id")
+    user_inputs = [
+        str(item.get("content", ""))
+        for item in visible
+        if item.get("type") == "user_input" and item.get("turn_id") == turn_id
+    ]
+    assistant = next(
+        (
+            str(item.get("content", ""))
+            for item in reversed(visible)
+            if item.get("type") == "assistant_output" and item.get("turn_id") == turn_id
+        ),
+        "",
+    )
+    return {
+        "speaker": str(last_user_event.get("speaker", "")),
+        "speaker_id": str(last_user_event.get("speaker_id", "")),
+        "user": _join_user_inputs(user_inputs, max_chars),
+        "assistant": assistant[:max_chars],
+    }
+
+
+def _attributed_items(raw: object, speakers: set[str]) -> list[dict[str, str]]:
+    values = raw if isinstance(raw, list) else []
+    items: list[dict[str, str]] = []
+    for value in values[:20]:
+        if isinstance(value, Mapping):
+            subject, text = str(value.get("subject", "")), str(value.get("text", ""))
+        else:
+            subject, text = _UNKNOWN_SUBJECT, str(value)
+        if not text.strip():
+            continue
+        if subject != _GROUP_SUBJECT and subject not in speakers:
+            subject = _UNKNOWN_SUBJECT
+        items.append({"subject": subject, "text": text[:1000]})
+    return items
+
+
+def _normalize_handoff(
+    value: object,
+    events: Sequence[Mapping[str, object]],
+    max_chars: int,
+) -> dict[str, object] | None:
     if not isinstance(value, Mapping):
         return None
-    result: dict[str, object] = {}
-    for key in _HANDOFF_KEYS:
-        raw = value.get(key)
-        if key == "last_visible_exchange":
-            if isinstance(raw, Mapping):
-                result[key] = {
-                    "user": str(raw.get("user", ""))[:2000],
-                    "assistant": str(raw.get("assistant", ""))[:2000],
-                }
-            else:
-                result[key] = {"user": "", "assistant": ""}
-            continue
-        if key == "topic":
-            result[key] = str(raw or "")[:1000]
-            continue
-        values = raw if isinstance(raw, list) else []
-        if key == "relevant_event_refs":
-            result[key] = [str(item) for item in values if str(item) in allowed_refs][:32]
-        else:
-            result[key] = [str(item)[:1000] for item in values[:20] if str(item).strip()]
+    allowed_refs = {str(item["event_ref"]) for item in events}
+    participants = _participants(events)
+    result: dict[str, object] = {"topic": str(value.get("topic") or "")[:1000]}
+    for key in _ATTRIBUTED_KEYS:
+        result[key] = _attributed_items(value.get(key), set(participants))
+    deliveries = value.get("confirmed_deliveries")
+    result["confirmed_deliveries"] = [
+        str(item)[:1000] for item in (deliveries if isinstance(deliveries, list) else [])[:20] if str(item).strip()
+    ]
+    refs = value.get("relevant_event_refs")
+    result["relevant_event_refs"] = [
+        str(item) for item in (refs if isinstance(refs, list) else []) if str(item) in allowed_refs
+    ][:32]
+    result["participants"] = participants
+    result["last_visible_exchange"] = _last_visible_exchange(events, 2000)
     serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
     return result if len(serialized) <= max_chars else None
 
 
-def _fallback_handoff(events: list[dict[str, object]], max_chars: int) -> dict[str, object]:
-    visible = [event for event in events if event.get("type") in {"user_input", "assistant_output"}]
-    last_user_event = next((item for item in reversed(visible) if item.get("type") == "user_input"), None)
-    user_inputs = [
-        str(item.get("content", ""))
-        for item in visible
-        if item.get("type") == "user_input"
-        and last_user_event is not None
-        and (
-            item.get("turn_id") == last_user_event.get("turn_id")
-            if "turn_id" in last_user_event
-            else item is last_user_event
-        )
-    ]
-    last_user = _join_user_inputs(user_inputs, 2000)
-    last_assistant = next(
-        (str(item.get("content", "")) for item in reversed(visible) if item.get("type") == "assistant_output"),
-        "",
-    )
+def _fallback_handoff(events: Sequence[Mapping[str, object]], max_chars: int) -> dict[str, object]:
+    exchange = _last_visible_exchange(events, 2000)
     confirmed = [
         f"{item.get('tool', 'tool')}:{item['event_ref']}"
         for item in events
         if item.get("type") == "tool_result" and item.get("effect") == "confirmed"
     ][-12:]
-    handoff = {
-        "topic": _join_user_inputs(user_inputs, 1000),
+    handoff: dict[str, object] = {
+        "topic": str(exchange["user"])[:1000],
         "goals": [],
         "decisions": [],
         "constraints": [],
         "open_loops": [],
         "confirmed_deliveries": confirmed,
         "relevant_event_refs": [str(item["event_ref"]) for item in events[-12:]],
-        "last_visible_exchange": {"user": last_user, "assistant": last_assistant[:2000]},
+        "participants": _participants(events),
+        "last_visible_exchange": exchange,
     }
     serialized = json.dumps(handoff, ensure_ascii=False, separators=(",", ":"))
     if len(serialized) <= max_chars:
         return handoff
     handoff["topic"] = ""
-    handoff["last_visible_exchange"] = {"user": _join_user_inputs(user_inputs, 500), "assistant": last_assistant[:500]}
+    handoff["last_visible_exchange"] = _last_visible_exchange(events, 500)
     return handoff
 
 
 async def generate_session_handoff(
     context_session: ContextSession,
     *,
+    scope: ChatScope,
     model_name: str | None,
-    channel_id: str,
     timeout: float,
     source_max_chars: int,
     output_max_chars: int,
 ) -> str:
-    events = await _source_events(context_session, max(1000, source_max_chars))
+    events = await _source_events(context_session, max(1000, source_max_chars), scope_ref=scope.scope_ref)
     if not events:
         return "{}"
-    allowed_refs = {str(item["event_ref"]) for item in events}
     fallback = _fallback_handoff(events, max(1000, output_max_chars))
+    source = {"participants": _participants(events), "events": events}
     try:
-        conf = get_model_config(model_name, channel_id)
+        conf = get_model_config(model_name, scope.channel_id)
         response = cast(
             litellm.ModelResponse,
             await litellm.acompletion(
@@ -173,25 +234,14 @@ async def generate_session_handoff(
                 timeout=max(1.0, timeout),
                 max_retries=0,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Summarize one completed chat context session as strict JSON. Use only supplied events. "
-                            "Never include hidden reasoning, secrets, raw large payloads, or unsupported claims. "
-                            f"Return exactly these keys: {', '.join(_HANDOFF_KEYS)}."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": json.dumps(events, ensure_ascii=False, separators=(",", ":")),
-                    },
+                    {"role": "system", "content": _HANDOFF_INSTRUCTIONS},
+                    {"role": "user", "content": json.dumps(source, ensure_ascii=False, separators=(",", ":"))},
                 ],
             ),
         )
         content = response.choices[0].message.content
         parsed = json.loads(content) if isinstance(content, str) else None
-        normalized = _normalize_handoff(parsed, allowed_refs, max(1000, output_max_chars))
-        handoff = normalized or fallback
+        handoff = _normalize_handoff(parsed, events, max(1000, output_max_chars)) or fallback
     except Exception:
         handoff = fallback
     return json.dumps(handoff, ensure_ascii=False, separators=(",", ":"))
