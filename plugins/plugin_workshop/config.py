@@ -1,4 +1,4 @@
-"""Configuration for isolated acceptance and reviewed native plugin hosting."""
+"""Configuration for isolated acceptance and superuser-managed native plugins."""
 
 from arclet.entari import BasicConfModel
 

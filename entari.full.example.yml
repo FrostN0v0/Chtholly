@@ -109,6 +109,7 @@ plugins:
     sandbox_image: chtholly-workshop:local
   llm_chat:
     $filter: channel.type is public
+    # Superuser-only tools; isolated acceptance and activation remain separate steps.
     plugin_workshop_enabled: true
     default_persona: chtholly
     personas:

@@ -1,4 +1,4 @@
-"""Operator-only native commands sharing the workshop review backend."""
+"""Superuser-only read commands for the native plugin workshop."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from arclet.entari.plugin.model import current_plugin
 from utils.plugin_workshop_core.models import Actor, WorkshopAPI, WorkshopError
 
 _NATIVE_WARNING = "原生插件激活后拥有机器人进程的完整权限；声明权限不是限制。停用或回滚不会撤回外部消息或数据修改。"
-_REVIEW = "请在已登录的 WebUI「插件工坊」审阅完整源码、差异与报告；群聊不展示源码。"
+_REVIEW = "请在已登录的 WebUI「插件工坊」查看完整源码、差异与报告；群聊不展示源码。"
 _owner = Plugin.current()
 
 
@@ -33,7 +33,7 @@ def _register_commands(service: WorkshopAPI) -> None:
 
     async def actor_for(session: Session) -> Actor:
         if await check_operator(session) is STOP:
-            raise WorkshopError("仅配置的超级用户可以管理插件工坊", code="operator_required", status=403)
+            raise WorkshopError("仅配置的超级用户可以查看插件工坊", code="operator_required", status=403)
         identity = json.dumps([session.account.platform, session.account.self_id, session.user.id], ensure_ascii=False)
         return Actor(key="operator:" + hashlib.sha256(identity.encode()).hexdigest(), is_admin=True)
 
@@ -42,7 +42,7 @@ def _register_commands(service: WorkshopAPI) -> None:
             result = await action(await actor_for(session))
         except WorkshopError as exc:
             result = (
-                "权限不足：仅配置的超级用户可以管理插件工坊。"
+                "权限不足：仅配置的超级用户可以查看插件工坊。"
                 if exc.code == "operator_required"
                 else f"操作未完成（{exc.code}）。请在已登录的 WebUI 查看详情。"
             )
@@ -52,13 +52,15 @@ def _register_commands(service: WorkshopAPI) -> None:
 
     @command.on("workshop help")
     async def workshop_help(session: Session) -> MessageChain:
-        """Native plugin management; approval grants full process privileges."""
+        """Read-only workshop commands; lifecycle changes are model tools only."""
 
         async def help_text(actor: Actor) -> str:
             return (
-                "workshop list\nworkshop show <name> <version>\nworkshop approve <name> <version>\n"
-                "workshop activate <name> <version>\nworkshop rollback <name> <version>\nworkshop disable <name>\n"
-                "approve 是对指定不可变版本的人工授权，即明确接受完整原生权限。\n" + _NATIVE_WARNING + "\n" + _REVIEW
+                "workshop help\nworkshop list\nworkshop show <name> <version>\n"
+                "命令与 WebUI 仅供查看；原生生命周期变更由超级用户会话中的模型工具执行。\n"
+                + _NATIVE_WARNING
+                + "\n"
+                + _REVIEW
             )
 
         return await invoke(session, help_text)
@@ -91,7 +93,7 @@ def _register_commands(service: WorkshopAPI) -> None:
             return (
                 f"{record.plugin_name} v{record.version}\nSHA-256: {record.source_hash}\n"
                 f"验收: {record.validation_status}（{sum(check.passed for check in checks)}/{len(checks)}）\n"
-                f"审批: {'已批准' if record.approved_by else '未批准'} · 当前活动: {'是' if record.active else '否'}\n"
+                f"当前活动: {'是' if record.active else '否'}\n"
                 f"声明命令: {', '.join(record.manifest.commands)}\n"
                 f"Permissions: {len(record.manifest.permissions)} · Config: {len(record.manifest.configuration)}\n"
                 + _NATIVE_WARNING
@@ -100,58 +102,3 @@ def _register_commands(service: WorkshopAPI) -> None:
             )
 
         return await invoke(session, show)
-
-    @command.on("workshop approve {name} {version}")
-    async def workshop_approve(session: Session, name: str, version: int) -> MessageChain:
-        """Explicitly approve this immutable version with full native process privileges."""
-
-        async def approve(actor: Actor) -> str:
-            record = await service.detail(name, version, actor)
-            approved = await service.approve(name, version, record.source_hash, actor)
-            return (
-                f"已人工批准 {approved.plugin_name} v{approved.version}\nSHA-256: {approved.source_hash}\n尚未激活。"
-                + _NATIVE_WARNING
-            )
-
-        return await invoke(session, approve)
-
-    @command.on("workshop activate {name} {version}")
-    async def workshop_activate(session: Session, name: str, version: int) -> MessageChain:
-        """Activate an approved immutable version with full native privileges."""
-
-        async def activate(actor: Actor) -> str:
-            record = await service.detail(name, version, actor)
-            state = await service.activate(name, version, record.source_hash, actor)
-            return (
-                f"Activated: {state.plugin_name} v{state.active_version}\nSHA-256: {record.source_hash}\n"
-                + _NATIVE_WARNING
-            )
-
-        return await invoke(session, activate)
-
-    @command.on("workshop rollback {name} {version}")
-    async def workshop_rollback(session: Session, name: str, version: int) -> MessageChain:
-        """Restore a previously active approved version, not its external effects."""
-
-        async def rollback(actor: Actor) -> str:
-            record = await service.detail(name, version, actor)
-            state = await service.rollback(name, version, record.source_hash, actor)
-            return (
-                f"Code restored: {state.plugin_name} v{state.active_version}\nSHA-256: {record.source_hash}\n"
-                + _NATIVE_WARNING
-            )
-
-        return await invoke(session, rollback)
-
-    @command.on("workshop disable {name}")
-    async def workshop_disable(session: Session, name: str) -> MessageChain:
-        """Unload a managed native plugin without deleting history or external data."""
-
-        async def disable(actor: Actor) -> str:
-            state = await service.disable(name, actor)
-            return (
-                f"停用已完成：{state.plugin_name} · {'已启用' if state.enabled else '未启用'}；保留版本与数据。\n"
-                + _NATIVE_WARNING
-            )
-
-        return await invoke(session, disable)

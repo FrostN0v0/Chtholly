@@ -1,4 +1,4 @@
-"""Entari-owned entrypoint for the reviewed native plugin workshop."""
+"""Entari-owned entrypoint for the superuser native plugin workshop."""
 
 from arclet.entari import Ready, Plugin, plugin, metadata, local_data, add_service, plugin_config
 from arclet.entari.plugin import PluginRole
@@ -15,8 +15,8 @@ if _owner is not None and _owner.module.__name__ == __name__:
     metadata(
         name="plugin_workshop",
         author=[{"name": "FrostN0v0"}],
-        version="1.0.0",
-        description="Isolated functional acceptance and operator-approved native plugin lifecycle",
+        version="2.0.0",
+        description="Isolated functional acceptance and superuser model-managed native plugins with read-only WebUI",
         role=PluginRole.UTILITY,
         config=WorkshopConfig,
     )

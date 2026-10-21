@@ -1,6 +1,6 @@
 """Private package publication and genuine Entari lifecycle operations.
 
-Only human-approved native code reaches this driver. Its checks protect ownership
+Only accepted code selected by a superuser reaches this driver. Its checks protect ownership
 and lifecycle integrity; native plugins have the full privileges of the process.
 """
 
@@ -214,7 +214,7 @@ class NativePluginDriver:
         if declared != actual:
             raise WorkshopError("Declared native commands lack owned active handlers", code="command_mismatch")
         if actual != set(record.manifest.commands):
-            raise WorkshopError("Native command inventory differs from the approved manifest", code="command_mismatch")
+            raise WorkshopError("Native command inventory differs from the accepted manifest", code="command_mismatch")
         conflicts = actual.intersection(self.occupied_commands(record.plugin_name))
         if conflicts:
             raise WorkshopError("Native commands conflict: " + ", ".join(sorted(conflicts)), code="command_conflict")
@@ -222,13 +222,12 @@ class NativePluginDriver:
     async def apply(self, record: VersionRecord, files: Mapping[str, str]) -> None:
         report = record.report
         if (
-            not record.approved_by
-            or not record.approved_at
+            record.validation_status != "passed"
             or report is None
             or not report.passed
             or report.source_hash != record.source_hash
         ):
-            raise WorkshopError("Native publication requires exact approved acceptance", code="approval_required")
+            raise WorkshopError("Native publication requires exact successful acceptance", code="acceptance_required")
         name, validated, digest = normalize_submission(record.plugin_name, files, record.manifest)
         if digest != record.source_hash:
             raise WorkshopError("Runtime source digest changed", code="source_mismatch")
@@ -295,7 +294,7 @@ class NativePluginDriver:
                     if old_record is not None and current is not old:
                         restored = await _load_native(old_record, replace=current is not None)
                         if not restored:
-                            raise RuntimeError("Previous approved plugin could not be restored")
+                            raise RuntimeError("Previous accepted plugin could not be restored")
                         self._check_inventory(old_record)
                     elif old_record is None and current is not None:
                         raise RuntimeError("Candidate cleanup left a native owner behind")

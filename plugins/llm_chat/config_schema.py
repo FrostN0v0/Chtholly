@@ -227,7 +227,7 @@ _CONFIG_SCHEMA_TEXT = {
     ),
     "plugin_workshop_enabled": (
         "\u542f\u7528\u63d2\u4ef6\u5de5\u574a\u5de5\u5177",
-        "\u9700\u5148\u52a0\u8f7d\u5de5\u574a\uff1b\u539f\u751f\u6fc0\u6d3b\u9700\u8d85\u7ba1\u6279\u51c6\u3002",
+        "\u9700\u5148\u52a0\u8f7d\u5de5\u574a\uff1b\u4ec5\u5f53\u524d\u8d85\u7ea7\u7528\u6237\u53ef\u4f7f\u7528\u3002\u6a21\u578b\u5206\u6b65\u9a8c\u6536\u548c\u6fc0\u6d3b\uff0c\u65e0\u9700\u4eba\u5de5\u5ba1\u6279\u3002",
     ),
     "tts_enabled": ("启用语音合成", "安装 tts_service 插件时，是否启用语音合成工具。"),
     "tts_max_chars": ("语音合成字符上限", "synthesize_speech 工具单次合成最多保留的字符数，优先在句子边界截断。"),

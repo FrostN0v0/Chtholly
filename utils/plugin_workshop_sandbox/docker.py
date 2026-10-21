@@ -20,7 +20,7 @@ from .process import ProcessIOError, settle, run_process
 PROTOCOL = "1"
 WARNING = (
     "Untrusted functional acceptance, not a security certification. Candidate code shares the worker interpreter "
-    "and can forge its claims. Docker isolates the host; native activation requires human hash-bound approval."
+    "and can forge its claims. Docker isolates the host; native activation is restricted to a current superuser."
 )
 STAGES = frozenset(
     {

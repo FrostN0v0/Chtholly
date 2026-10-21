@@ -8,7 +8,14 @@ from .types import JSONType
 from .tool_trace_safety import sanitize_json, parse_json_object
 
 WORKSHOP_TOOLS = frozenset(
-    {"submit_plugin", "activate_plugin", "rollback_plugin", "list_workshop_plugins", "read_workshop_plugin"}
+    {
+        "submit_plugin",
+        "activate_plugin",
+        "rollback_plugin",
+        "disable_plugin",
+        "list_workshop_plugins",
+        "read_workshop_plugin",
+    }
 )
 _SUMMARY_FIELDS = (
     "plugin_name",
@@ -16,7 +23,6 @@ _SUMMARY_FIELDS = (
     "version",
     "source_hash",
     "validation_status",
-    "approved",
     "active",
     "enabled",
     "active_version",

@@ -20,13 +20,13 @@ def register_list_workshop_plugins(
     dispatcher: PluginDispatcher[JSONType], runtime: WorkshopToolContext
 ) -> Subscriber[JSONType]:
     async def list_workshop_plugins(plugin_name: str = "", limit: int = 10, offset: int = 0) -> str:
-        """Find exact plugin versions for follow-up repairs without executing or approving them.
+        """Find exact plugin versions for the current superuser's task without executing them.
 
-        Ordinary users see their own submissions in this scope; operators see this scope only.
+        Available only in a live ordinary superuser generation and limited to the current scope.
         Supply plugin_name to page that project's versions. Use returned version and source_hash
         with read_workshop_plugin; old immutable versions remain available across chat turns.
         """
-        actor, _ = authorized_workshop_actor()
+        actor = authorized_workshop_actor()
         if type(limit) is not int or not 1 <= limit <= 50 or type(offset) is not int or not 0 <= offset < 2**63 - 50:
             raise DeliveryError("limit must be 1..50 and offset a nonnegative integer")
         if not isinstance(plugin_name, str):

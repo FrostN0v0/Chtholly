@@ -1,4 +1,4 @@
-"""Require actual native WebUI password authentication for privileged review."""
+"""Require native WebUI password authentication for confidential read-only views."""
 
 from arclet.entari import Plugin, Startup
 

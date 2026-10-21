@@ -1,4 +1,4 @@
-"""Framework-independent contracts for reviewed, immutable native plugins."""
+"""Framework-independent contracts for accepted, immutable native plugins."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ class Actor:
     key: str
     scope_id: int | None = None
     is_admin: bool = False
+    is_superuser: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,8 +74,6 @@ class VersionRecord:
     created_at: str
     validation_status: str = "pending"
     report: ValidationReport | None = None
-    approved_by: str | None = None
-    approved_at: str | None = None
     active: bool = False
     ever_active: bool = False
 
@@ -155,8 +154,6 @@ class WorkshopAPI(Protocol):
         self, plugin_name: str, version: int, actor: Actor, *, query_scope: int | None = None
     ) -> dict[str, str]: ...
 
-    async def approve(self, plugin_name: str, version: int, source_hash: str, actor: Actor) -> VersionRecord: ...
-
     async def activate(
         self,
         plugin_name: str,
@@ -177,4 +174,10 @@ class WorkshopAPI(Protocol):
         on_changed: Callable[[ProjectState], None] | None = None,
     ) -> ProjectState: ...
 
-    async def disable(self, plugin_name: str, actor: Actor) -> ProjectState: ...
+    async def disable(
+        self,
+        plugin_name: str,
+        actor: Actor,
+        *,
+        on_changed: Callable[[ProjectState], None] | None = None,
+    ) -> ProjectState: ...

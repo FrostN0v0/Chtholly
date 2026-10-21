@@ -7,6 +7,7 @@ import json
 from typing import Any, cast
 from hashlib import sha256
 from zipfile import ZipFile
+import asyncio
 from collections.abc import Callable, Awaitable
 
 import pytest
@@ -78,8 +79,12 @@ def workshop(tmp_path, monkeypatch):
 def test_scope_is_applied_before_revision_pagination_and_global_admin_is_unchanged(tmp_path):
     store = WorkshopStore(tmp_path)
     store.initialize()
-    own = Actor("alice", 1)
-    for name, actor in (("aaa_foreign", Actor("alice", 2)), ("bbb_other", Actor("bob", 1)), ("ccc_own", own)):
+    own = Actor("alice", 1, is_superuser=True)
+    for name, actor in (
+        ("aaa_foreign", Actor("alice", 2, is_superuser=True)),
+        ("bbb_other", Actor("bob", 1, is_superuser=True)),
+        ("ccc_own", own),
+    ):
         store.create_version(name, {"__init__.py": "VALUE = 1\n"}, declaration(), actor)
     store.create_version("ccc_own", {"__init__.py": "VALUE = 2\n"}, declaration(), own)
     assert [(r.plugin_name, r.version) for r in store.list_revisions(own, query_scope=1, limit=1)] == [("ccc_own", 2)]
@@ -98,8 +103,11 @@ def test_scope_is_applied_before_revision_pagination_and_global_admin_is_unchang
 @pytest.mark.asyncio
 async def test_workshop_next_turn_exact_source_manifest_and_failure_report(workshop):
     store, read, listing = workshop
-    with agent_access_scope(AgentAccessContext(1, 2, 3, "alice")), llm_chat_delivery_scope(DeliveryState()):
-        actor, _ = authorized_workshop_actor()
+    with (
+        agent_access_scope(AgentAccessContext(1, 2, 3, "alice", is_operator=True)),
+        llm_chat_delivery_scope(DeliveryState()),
+    ):
+        actor = authorized_workshop_actor()
         first = store.create_version("repair", {"__init__.py": SOURCE, "unused.py": AUXILIARY}, declaration(), actor)
     log = "acceptance\r\n" + "雪" * 18000
     store.mark_validating("repair", first.version)
@@ -108,7 +116,10 @@ async def test_workshop_next_turn_exact_source_manifest_and_failure_report(works
         first.version,
         ValidationReport("failed", first.source_hash, (CheckResult("output", False, "missing"),), log),
     )
-    with agent_access_scope(AgentAccessContext(1, 20, 30, "alice")), llm_chat_delivery_scope(DeliveryState()):
+    with (
+        agent_access_scope(AgentAccessContext(1, 20, 30, "alice", is_operator=True)),
+        llm_chat_delivery_scope(DeliveryState()),
+    ):
         versions = json.loads(await listing())
         assert versions["plugins"][0]["source_hash"] == first.source_hash
         page = json.loads(await read("repair", 1, mode="file", path="__init__.py", max_chars=100000))
@@ -147,7 +158,7 @@ async def test_workshop_next_turn_exact_source_manifest_and_failure_report(works
         second = store.create_version("repair", {**old_files, "__init__.py": "VALUE = 2\n"}, first.manifest, actor)
         assert store.read_files("repair", second.version, actor)["unused.py"].encode() == AUXILIARY.encode()
         assert json.loads(await read("repair", 1, mode="file", path="unused.py"))["content"] == AUXILIARY
-        assert store.get_version("repair", 1, actor).approved_by is None
+        assert store.get_version("repair", 1, actor).active is False
         assert store.active_versions() == store.pending_operations() == []
         store.mark_validating("repair", 1)
         store.record_report("repair", 1, ValidationReport("failed", first.source_hash, log="new run"))
@@ -158,23 +169,144 @@ async def test_workshop_next_turn_exact_source_manifest_and_failure_report(works
 
 
 @pytest.mark.asyncio
-async def test_workshop_tool_rejects_other_owners_paths_and_tampered_bytes(workshop, tmp_path):
+async def test_workshop_tool_rejects_ordinary_users_other_scopes_paths_and_tampered_bytes(workshop, tmp_path):
     store, read, listing = workshop
-    with agent_access_scope(AgentAccessContext(1, 2, 3, "alice")), llm_chat_delivery_scope(DeliveryState()):
-        actor, _ = authorized_workshop_actor()
+    with (
+        agent_access_scope(AgentAccessContext(1, 2, 3, "alice", is_operator=True)),
+        llm_chat_delivery_scope(DeliveryState()),
+    ):
+        actor = authorized_workshop_actor()
         store.create_version("repair", {"__init__.py": "VALUE = 1\r\n"}, declaration(), actor)
         for path in ("../__init__.py", "/__init__.py", "missing.py"):
             with pytest.raises(DeliveryError):
                 await read("repair", 1, mode="file", path=path)
     with agent_access_scope(AgentAccessContext(1, 2, 4, "bob")), llm_chat_delivery_scope(DeliveryState()):
+        with pytest.raises(DeliveryError):
+            await listing()
+        with pytest.raises(DeliveryError):
+            await read("repair", 1)
+    with (
+        agent_access_scope(AgentAccessContext(1, 2, 4, "bob", is_operator=True)),
+        llm_chat_delivery_scope(DeliveryState()),
+    ):
+        assert json.loads(await listing())["plugins"][0]["plugin_name"] == "repair"
+        assert json.loads(await read("repair", 1))["source_hash"]
+    with (
+        agent_access_scope(AgentAccessContext(2, 2, 4, "alice", is_operator=True)),
+        llm_chat_delivery_scope(DeliveryState()),
+    ):
         assert json.loads(await listing())["plugins"] == []
         with pytest.raises(DeliveryError):
             await read("repair", 1)
     next(tmp_path.rglob("__init__.py")).write_bytes(b"VALUE = 9\r\n")
-    with agent_access_scope(AgentAccessContext(1, 2, 5, "alice")), llm_chat_delivery_scope(DeliveryState()):
+    with (
+        agent_access_scope(AgentAccessContext(1, 2, 5, "alice", is_operator=True)),
+        llm_chat_delivery_scope(DeliveryState()),
+    ):
         for mode in ("metadata", "manifest", "file", "report"):
             with pytest.raises(DeliveryError):
                 await read("repair", 1, mode=mode, path="__init__.py" if mode == "file" else "")
+
+
+@pytest.mark.asyncio
+async def test_workshop_readers_reject_inherited_closed_generation_before_service(monkeypatch):
+    calls = []
+
+    def forbidden_service():
+        calls.append("service")
+        raise AssertionError("Closed generations cannot resolve the workshop service")
+
+    monkeypatch.setattr(workshop_read_module, "register_tool", lambda dispatcher, function: function)
+    monkeypatch.setattr(workshop_list_module, "register_tool", lambda dispatcher, function: function)
+    runtime = WorkshopToolContext(forbidden_service, lambda message: None)
+    read = workshop_read_module.register_read_workshop_plugin(cast(Any, None), runtime)
+    listing = workshop_list_module.register_list_workshop_plugins(cast(Any, None), runtime)
+    resumed = asyncio.Event()
+
+    async def late_reads():
+        await resumed.wait()
+        for operation in (lambda: read("repair", 1), listing):
+            with pytest.raises(DeliveryError):
+                await operation()
+
+    with (
+        agent_access_scope(AgentAccessContext(1, 2, 3, "alice", is_operator=True)),
+        llm_chat_delivery_scope(DeliveryState()),
+    ):
+        late = asyncio.create_task(late_reads())
+    resumed.set()
+    await late
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_workshop_source_read_rechecks_lifetime_after_revision_lookup(monkeypatch):
+    entered = asyncio.Event()
+    resumed = asyncio.Event()
+    source_calls = []
+
+    class LookupService:
+        async def detail(self, *args, **kwargs):
+            entered.set()
+            await resumed.wait()
+            return object()
+
+        async def source(self, *args, **kwargs):
+            source_calls.append("source")
+            raise AssertionError("Expired read cannot cross a second storage boundary")
+
+    service = LookupService()
+    monkeypatch.setattr(workshop_read_module, "register_tool", lambda dispatcher, function: function)
+    read = workshop_read_module.register_read_workshop_plugin(
+        cast(Any, None), WorkshopToolContext(lambda: cast(Any, service), lambda message: None)
+    )
+    with (
+        agent_access_scope(AgentAccessContext(1, 2, 3, "alice", is_operator=True)),
+        llm_chat_delivery_scope(DeliveryState()),
+    ):
+        pending = asyncio.create_task(read("repair", 1))
+        await entered.wait()
+    resumed.set()
+    with pytest.raises(DeliveryError):
+        await pending
+    assert source_calls == []
+
+
+def test_workshop_nested_access_lifetime_restores_outer_scope_without_reopening_children():
+    from contextvars import copy_context
+
+    with llm_chat_delivery_scope(DeliveryState()):
+        with agent_access_scope(AgentAccessContext(1, 2, 3, "alice", is_operator=True)):
+            outer_actor = authorized_workshop_actor()
+            with agent_access_scope(AgentAccessContext(1, 2, 4, "bob", is_operator=True)):
+                assert authorized_workshop_actor() != outer_actor
+                inherited_inner = copy_context()
+            assert authorized_workshop_actor() == outer_actor
+            with pytest.raises(DeliveryError):
+                inherited_inner.run(authorized_workshop_actor)
+            inherited_outer = copy_context()
+        with pytest.raises(DeliveryError):
+            inherited_outer.run(authorized_workshop_actor)
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_workshop_steering_closure_not_input_admission_controls_access(monkeypatch, closed):
+    from types import SimpleNamespace
+
+    from plugins.llm_chat.tools import _workshop
+
+    monkeypatch.setattr(
+        _workshop, "current_steering", lambda: SimpleNamespace(closed=closed, accepting=False, pending=False)
+    )
+    with (
+        agent_access_scope(AgentAccessContext(1, 2, 3, "alice", is_operator=True)),
+        llm_chat_delivery_scope(DeliveryState()),
+    ):
+        if closed:
+            with pytest.raises(DeliveryError):
+                authorized_workshop_actor()
+        else:
+            assert authorized_workshop_actor().is_superuser is True
 
 
 @pytest.mark.asyncio

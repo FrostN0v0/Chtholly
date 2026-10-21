@@ -1,4 +1,4 @@
-"""Transactional catalog and immutable files for reviewed native plugins.
+"""Transactional catalog and immutable files for accepted native plugins.
 
 Each operation owns a SQLite connection. BEGIN IMMEDIATE serializes publication
 and lifecycle transitions across store instances; no candidate is imported here.
@@ -67,8 +67,6 @@ CREATE TABLE IF NOT EXISTS versions (
     created_at TEXT NOT NULL,
     validation_status TEXT NOT NULL DEFAULT 'pending',
     report TEXT,
-    approved_by TEXT,
-    approved_at TEXT,
     ever_active INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(name, version)
 );
@@ -94,7 +92,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _actor(actor: Actor, *, admin: bool = False) -> None:
+def _actor(actor: Actor, *, superuser: bool = False) -> None:
     if (
         not isinstance(actor, Actor)
         or not isinstance(actor.key, str)
@@ -103,10 +101,11 @@ def _actor(actor: Actor, *, admin: bool = False) -> None:
         or any(ord(char) < 32 or ord(char) == 127 for char in actor.key)
         or (actor.scope_id is not None and (type(actor.scope_id) is not int or not -(2**63) <= actor.scope_id < 2**63))
         or type(actor.is_admin) is not bool
+        or type(actor.is_superuser) is not bool
     ):
         raise WorkshopError("A valid workshop actor is required", code="forbidden", status=403)
-    if admin and not actor.is_admin:
-        raise WorkshopError("Only an authenticated operator may manage native plugins", code="forbidden", status=403)
+    if superuser and not actor.is_superuser:
+        raise WorkshopError("Only an authenticated superuser may manage native plugins", code="forbidden", status=403)
 
 
 def _version_number(version: int) -> None:
@@ -250,7 +249,7 @@ class WorkshopStore:
                         "COALESCE((SELECT MAX(version) FROM versions WHERE versions.name=projects.name),0))"
                     )
                     connection.execute(
-                        "UPDATE versions SET validation_status='pending',report=NULL,approved_by=NULL,approved_at=NULL "
+                        "UPDATE versions SET validation_status='pending',report=NULL "
                         "WHERE validation_status='validating'"
                     )
                     connection.commit()
@@ -308,8 +307,6 @@ class WorkshopStore:
             created_at=row["created_at"],
             validation_status=row["validation_status"],
             report=report,
-            approved_by=row["approved_by"],
-            approved_at=row["approved_at"],
             active=bool(project["enabled"] and project["active_version"] == row["version"]),
             ever_active=bool(row["ever_active"]),
         )
@@ -337,7 +334,7 @@ class WorkshopStore:
             )
 
     def create_version(self, name: str, files: Mapping[str, str], manifest: Manifest, actor: Actor) -> VersionRecord:
-        _actor(actor)
+        _actor(actor, superuser=True)
         # Detach the shallowly frozen DTO's mutable configuration before hashing.
         if not isinstance(manifest, Manifest):
             raise WorkshopError("manifest must be a Manifest")
@@ -574,8 +571,7 @@ class WorkshopStore:
                 raise WorkshopError("This version is already being validated", code="validation_pending", status=409)
             self._read_files(row, project)
             connection.execute(
-                "UPDATE versions SET validation_status='validating',report=NULL,approved_by=NULL,approved_at=NULL "
-                "WHERE name=? AND version=?",
+                "UPDATE versions SET validation_status='validating',report=NULL WHERE name=? AND version=?",
                 (name, version),
             )
 
@@ -586,13 +582,11 @@ class WorkshopStore:
             row = self._row(connection, name, version)
             self._no_pending(connection, name)
             _matching_hash(row["source_hash"], report.source_hash)
-            if (
-                row["validation_status"] != "validating"
-                or row["approved_by"] is not None
-                or (project["enabled"] and project["active_version"] == version)
+            if row["validation_status"] != "validating" or (
+                project["enabled"] and project["active_version"] == version
             ):
                 raise WorkshopError(
-                    "Validation report cannot replace an approved, active or nonvalidating record",
+                    "Validation report cannot replace an active or nonvalidating record",
                     code="validation_conflict",
                     status=409,
                 )
@@ -615,25 +609,8 @@ class WorkshopStore:
                 "This exact version needs a passed acceptance report", code="validation_required", status=409
             )
 
-    def approve(self, name: str, version: int, source_hash: str, actor: Actor) -> VersionRecord:
-        _actor(actor, admin=True)
-        with self._transaction() as connection:
-            project = self._project(connection, name, actor)
-            row = self._row(connection, name, version)
-            self._no_pending(connection, name)
-            _matching_hash(row["source_hash"], source_hash)
-            record = self._record(row, project)
-            self._passed(record)
-            self._read_files(row, project)
-            if row["approved_by"] is None:
-                connection.execute(
-                    "UPDATE versions SET approved_by=?,approved_at=? WHERE name=? AND version=?",
-                    (actor.key, _now(), name, version),
-                )
-            return self._record(self._row(connection, name, version), project)
-
     def begin_change(self, name: str, version: int | None, source_hash: str, actor: Actor, *, action: str) -> Operation:
-        _actor(actor, admin=True)
+        _actor(actor, superuser=True)
         if not isinstance(action, str) or action not in {"activate", "rollback", "disable"}:
             raise WorkshopError("Unknown workshop lifecycle action")
         if not isinstance(source_hash, str) or len(source_hash) > 64:
@@ -646,8 +623,8 @@ class WorkshopStore:
             operation = Operation(
                 uuid.uuid4().hex, name, action, version, project["active_version"], bool(project["enabled"])
             )
-            # Persist every well-formed operator attempt on an existing project,
-            # including rejected approval, integrity and concurrent-operation checks.
+            # Persist every well-formed superuser attempt on an existing project,
+            # including rejected acceptance, integrity and concurrent-operation checks.
             connection.execute(
                 "INSERT INTO operations(operation_id,name,action,target_version,source_hash,actor_key,"
                 "previous_version,previous_enabled,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,'checking')",
@@ -675,12 +652,6 @@ class WorkshopStore:
                     _matching_hash(row["source_hash"], source_hash)
                     record = self._record(row, project)
                     self._passed(record)
-                    if not record.approved_by or not record.approved_at:
-                        raise WorkshopError(
-                            "This exact version requires human native-code approval",
-                            code="approval_required",
-                            status=409,
-                        )
                     if action == "rollback" and not record.ever_active:
                         raise WorkshopError(
                             "Rollback target has never been active", code="rollback_unavailable", status=409
@@ -737,10 +708,6 @@ class WorkshopStore:
                     record = self._record(row, project)
                     self._passed(record)
                     _matching_hash(row["source_hash"], operation["source_hash"])
-                    if not record.approved_by or not record.approved_at:
-                        raise WorkshopError(
-                            "Approval disappeared during lifecycle operation", code="approval_required", status=409
-                        )
                     self._read_files(row, project)
                     connection.execute(
                         "UPDATE projects SET active_version=?,enabled=1,last_error='' WHERE name=?",

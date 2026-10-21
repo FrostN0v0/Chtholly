@@ -7,7 +7,6 @@ const state = {
   status: null, projects: [], versions: [], name: "", version: null, detail: null,
   files: {}, baseline: {}, file: "", compare: null, busy: false, healthy: false,
   projectLimit: 50, versionLimit: 10, moreProjects: false, moreVersions: false,
-  draftFiles: {}, draftFile: "", submitting: false,
 };
 const labels = { pending: "等待验收", validating: "验收中", passed: "通过", failed: "失败", unavailable: "隔离环境不可用", cancelled: "已取消" };
 
@@ -51,30 +50,27 @@ window.addEventListener("message", (event) => {
   if (message.error) pending.reject(new Error(String(message.error)));
   else pending.resolve(message.result);
 });
-function bridgeApi(path, options) {
+function bridgeApi(path) {
   const id = crypto.randomUUID();
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => {
       bridgeRequests.delete(id);
-      reject(new Error("WebUI request timed out; refresh to inspect the durable result."));
+      reject(new Error("WebUI 读取超时；请刷新重试。"));
     }, 330000);
     bridgeRequests.set(id, { resolve, reject, timer });
     window.parent.postMessage({ id, method: "api", payload: {
-      url: API + path, method: options.method || "GET", timeout: 320000,
-      headers: { "Content-Type": "application/json" },
-      ...(options.body ? { data: JSON.parse(options.body) } : {}),
+      url: API + path, method: "GET", timeout: 320000,
     } }, bridgeOrigin);
   });
 }
-async function api(path, options = {}) {
+async function api(path) {
   if (window.parent !== window) {
-    const data = await bridgeApi(path, options);
+    const data = await bridgeApi(path);
     if (!data || data.success !== true) throw new Error(data?.message || "Workshop request failed");
     return data;
   }
   const response = await fetch(API + path, {
-    credentials: "same-origin", cache: "no-store", ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    method: "GET", credentials: "same-origin", cache: "no-store",
   });
   const contentType = response.headers.get("content-type") || "";
   if (!contentType.includes("application/json")) throw new Error(`服务器未返回 JSON（HTTP ${response.status}）；请检查 WebUI 登录与路由。`);
@@ -88,40 +84,9 @@ async function api(path, options = {}) {
 function projectPath(name = state.name) { return `/projects/${encodeURIComponent(name)}`; }
 function versionPath(version = state.version, name = state.name) { return `${projectPath(name)}/versions/${version}`; }
 function selectedProject() { return state.projects.find((project) => project.plugin_name === state.name); }
-function reportPassed(record) {
-  const report = record?.report;
-  return record?.validation_status === "passed" && report?.status === "passed"
-    && report.source_hash === record.source_hash && Array.isArray(report.checks)
-    && report.checks.length > 0 && report.checks.every((check) => check.passed === true);
-}
-function actionControls() {
-  const record = state.detail;
-  const ready = state.status?.ready === true && state.healthy;
-  const locked = state.busy || state.submitting;
-  const active = record?.active === true;
-  const approved = !!record?.approved_by && reportPassed(record);
-  const project = selectedProject();
-  const reasons = {
-    validate: !record ? "请先选择版本" : !ready ? "服务尚未就绪或连接失效" : !state.status?.sandbox?.available ? "隔离环境不可用；请先构建或修复 Docker 镜像" : active ? "活动版本不可原位重新验收" : "",
-    approve: !record ? "请先选择版本" : !ready ? "服务尚未就绪或连接失效" : !reportPassed(record) ? "需要与精确哈希匹配且全部通过的验收报告" : record.approved_by ? "此版本已经批准" : !$("acknowledge-native").checked ? "必须明确勾选完整原生权限授权" : "",
-    activate: !record ? "请先选择版本" : !ready ? "服务尚未就绪或连接失效" : !approved ? "需要已批准、验收通过的精确版本" : active && project?.enabled ? "此版本已启用，无需重复加载" : "",
-    rollback: !record ? "请先选择版本" : !ready ? "服务尚未就绪或连接失效" : !approved ? "需要已批准且验收通过" : !record.ever_active ? "只能回滚到曾成功激活的版本" : active && project?.enabled ? "此版本已经启用" : "",
-    disable: !project ? "请先选择项目" : !ready ? "服务尚未就绪或连接失效" : !project.enabled ? "项目当前未启用" : "",
-  };
-  const names = { validate: "重新验收", approve: "批准", activate: "激活", rollback: "回滚", disable: "停用" };
-  const list = [];
-  for (const [id, reason] of Object.entries(reasons)) {
-    $(id).disabled = locked || !!reason;
-    $(id).title = locked ? "操作进行中，请等待真实后端结果" : reason || "操作将使用上方显示的精确版本与哈希";
-    if (reason) list.push(element("li", `${names[id]}：${reason}`));
-  }
-  if (record?.approved_by && !active) list.push(element("li", "重新验收将清除已有审批；内容不变也需重新人工批准。"));
-  $("action-reasons").replaceChildren(...list);
+function readControls() {
+  const locked = state.busy;
   $("refresh").disabled = locked;
-  $("new-candidate").disabled = locked || !ready;
-  $("new-candidate").title = ready ? "保存不可变候选并请求隔离验收；不会自动激活" : "需要已认证、已就绪的工坊服务";
-  $("draft-from-version").disabled = locked || !record;
-  $("acknowledge-native").disabled = locked || !record || !!record.approved_by;
   $("source-file").disabled = locked;
   $("compare-version").disabled = locked;
   for (const node of document.querySelectorAll("#projects button, #versions button, .more")) node.disabled = locked;
@@ -133,7 +98,7 @@ function renderStatus() {
   $("sandbox-status").className = `badge ${status?.sandbox?.available ? "good" : "bad"}`;
   text("sandbox-status", `隔离环境：${status?.sandbox?.available ? "可用" : "不可用"}`);
   text("prerequisites", status?.sandbox?.available
-    ? "容器功能验收可用。审批不会执行源码；激活与回滚仅由人工授权后调用真实 Entari 生命周期。"
+    ? "容器功能验收可用。本页只读；超级用户会话中的模型工具可分别提交验收和激活精确版本。"
     : `不能完成隔离验收：${status?.sandbox?.reason || "服务尚未给出可用的 Docker 隔离状态"}。不会在宿主进程降级执行候选，也不会自动构建镜像。`);
   text("backend-detail", JSON.stringify(status, null, 2));
   text("connection", state.healthy ? "已认证 · 已连接" : "连接失效");
@@ -154,10 +119,10 @@ function renderLists() {
     state.name === project.plugin_name,
     () => selectProject(project.plugin_name),
   )));
-  if (!state.projects.length) $("projects").append(element("p", "暂无项目。可以提交第一个不可变候选。", "empty"));
+  if (!state.projects.length) $("projects").append(element("p", "暂无插件工坊项目。", "empty"));
   $("versions").replaceChildren(...state.versions.map((record) => listButton(
     `v${record.version}${record.active ? " · 活动" : ""}`,
-    `${labels[record.validation_status] || record.validation_status} · ${record.approved_by ? "已批准" : "未批准"}`,
+    labels[record.validation_status] || record.validation_status,
     state.version === record.version,
     () => selectVersion(record.version),
   )));
@@ -191,7 +156,7 @@ function renderReport(record) {
     node.append(element("strong", `${check.passed ? "通过" : "失败"} · ${check.name}`), element("p", check.detail));
     return node;
   }));
-  text("report-environment", report ? JSON.stringify({ source_hash: report.source_hash, image_id: report.image_id, framework_version: report.framework_version, python_version: report.python_version }, null, 2) : "无报告；不能批准。");
+  text("report-environment", report ? JSON.stringify({ source_hash: report.source_hash, image_id: report.image_id, framework_version: report.framework_version, python_version: report.python_version }, null, 2) : "无报告；不能激活。");
   text("report-log", report?.log || "尚无验收日志。");
 }
 function linearDiff(before, after, path) {
@@ -236,7 +201,7 @@ function renderDetail() {
   $("review-content").hidden = !record;
   if (!record) return;
   text("version-title", `${record.plugin_name} / v${record.version} · ${record.manifest.title}`);
-  text("version-meta", `创建于 ${record.created_at} · ${record.approved_by ? `由 ${record.approved_by} 批准于 ${record.approved_at}` : "尚未批准"}${selectedProject()?.last_error ? ` · 运行错误：${selectedProject().last_error}` : ""}`);
+  text("version-meta", `创建于 ${record.created_at} · ${record.active ? "当前活动版本" : record.ever_active ? "曾成功激活" : "尚未激活"}${selectedProject()?.last_error ? ` · 运行错误：${selectedProject().last_error}` : ""}`);
   text("source-hash", record.source_hash);
   renderSummary(record);
   renderReport(record);
@@ -271,20 +236,18 @@ async function loadVersions() {
 async function loadDetail() {
   if (!state.name || !state.version) { state.detail = null; return; }
   const [detail, source] = await Promise.all([api(versionPath()), api(`${versionPath()}/source`)]);
-  const previousHash = state.detail?.source_hash;
   state.detail = detail.item;
   state.files = source.item;
-  if (previousHash !== state.detail.source_hash) $("acknowledge-native").checked = false;
   if (state.compare === null) {
     const active = selectedProject()?.active_version;
     state.compare = active && active !== state.version ? active : state.versions.find((record) => record.version < state.version)?.version || "";
   }
   state.baseline = state.compare ? (await api(`${versionPath(state.compare)}/source`)).item : {};
 }
-async function refresh({ silent = false, message = "" } = {}) {
-  if (state.busy || state.submitting) return;
+async function refresh({ silent = false } = {}) {
+  if (state.busy) return;
   state.busy = true;
-  actionControls();
+  readControls();
   if (!silent) notice("正在读取后端状态与不可变版本…");
   try {
     state.status = (await api("/status")).item;
@@ -293,73 +256,26 @@ async function refresh({ silent = false, message = "" } = {}) {
     await loadDetail();
     state.healthy = true;
     preserveScroll(() => { renderStatus(); renderLists(); renderDetail(); });
-    if (message) notice(message, "success");
-    else if (!silent) notice(`状态已更新 · ${new Date().toLocaleTimeString()}。所有操作都以当前显示的不可变版本与哈希为准。`);
+    if (!silent) notice(`状态已更新 · ${new Date().toLocaleTimeString()}。本页仅供查看不可变版本、源码与验收结果。`);
   } catch (error) {
     state.healthy = false;
     text("connection", "读取失败");
     $("connection").className = "badge bad";
-    notice(`未能完成刷新：${error.message}。旧内容仅供参考，所有管理操作已锁定。`, "error");
+    notice(`未能完成刷新：${error.message}。旧内容仅供参考。`, "error");
   } finally {
     state.busy = false;
-    actionControls();
+    readControls();
   }
 }
 async function selectProject(name) {
-  if (state.busy || state.submitting || name === state.name) return;
+  if (state.busy || name === state.name) return;
   state.name = name; state.version = null; state.compare = null; state.file = ""; state.detail = null; state.versionLimit = 10;
-  $("acknowledge-native").checked = false;
   await refresh();
 }
 async function selectVersion(version) {
-  if (state.busy || state.submitting || version === state.version) return;
+  if (state.busy || version === state.version) return;
   state.version = version; state.compare = null; state.file = "";
-  $("acknowledge-native").checked = false;
   await refresh();
-}
-function confirmOperation(message) {
-  const dialog = $("operation-dialog");
-  if (dialog.open) return Promise.resolve(false);
-  text("operation-summary", message);
-  dialog.returnValue = "cancel";
-  return new Promise((resolve) => {
-    dialog.addEventListener("close", () => resolve(dialog.returnValue === "confirm"), { once: true });
-    dialog.showModal();
-  });
-}
-async function mutate(action) {
-  if (state.busy || state.submitting || $(action).disabled || !state.detail) return;
-  const record = state.detail;
-  const prompts = {
-    validate: "重新验收会清除已有审批（活动版本不可操作）。候选只在真实隔离容器运行。继续？",
-    approve: `批准 ${record.plugin_name} v${record.version}？\nSHA-256: ${record.source_hash}\n这是授予完整原生进程权限的人工信任决定。审批本身不会激活。`,
-    activate: `将 ${record.plugin_name} v${record.version} 加载到机器人进程？\nSHA-256: ${record.source_hash}\n候选将拥有进程完整权限并可能产生不可撤回的数据或外部副作用。`,
-    rollback: `将代码回滚到 ${record.plugin_name} v${record.version}？\nSHA-256: ${record.source_hash}\n数据与外部副作用不会随代码回滚。`,
-    disable: `停用 ${record.plugin_name}？\n保留版本历史与数据；已发生的外部副作用不会撤回。`,
-  };
-  if (!await confirmOperation(prompts[action])) return;
-  state.busy = true;
-  actionControls();
-  notice(`正在执行 ${action} · ${record.plugin_name} v${record.version}。等待后端确认，请勿重复提交。`);
-  let success = "";
-  try {
-    const payload = action === "approve" ? { source_hash: record.source_hash, acknowledge_native: $("acknowledge-native").checked }
-      : ["activate", "rollback"].includes(action) ? { source_hash: record.source_hash } : {};
-    const route = action === "disable" ? `${projectPath(record.plugin_name)}/disable` : `${versionPath(record.version, record.plugin_name)}/${action}`;
-    const result = (await api(route, { method: "POST", body: JSON.stringify(payload) })).item;
-    if (action === "validate") {
-      success = `验收已完成：${labels[result.validation_status] || result.validation_status}。${result.validation_status === "passed" ? "仍需人工审批，尚未自动激活。" : "未取得可批准的通过结果；请查看报告并修订新版本。"}`;
-    } else if (action === "approve") success = `已批准 ${result.plugin_name} v${result.version}，SHA-256 ${result.source_hash}；尚未自动激活。`;
-    else success = `${action} 后端已确认：${result.plugin_name} · ${result.enabled ? "已启用" : "已停用"} · 活动 / 最后活动 v${result.active_version ?? "无"}。`;
-    $("acknowledge-native").checked = false;
-  } catch (error) {
-    state.healthy = false;
-    notice(`操作未确认成功：${error.message}。请刷新核对真实状态后再决定，不要盲目重试。`, "error");
-  } finally {
-    state.busy = false;
-    actionControls();
-  }
-  if (success) await refresh({ message: success });
 }
 function setTab(name, focus = false) {
   for (const node of document.querySelectorAll("[data-tab]")) {
@@ -370,77 +286,10 @@ function setTab(name, focus = false) {
     if (selected && focus) node.focus();
   }
 }
-function saveDraftFile() {
-  if (state.draftFile) state.draftFiles[state.draftFile] = $("candidate-source").value;
-}
-function renderDraftFiles() {
-  const files = Object.keys(state.draftFiles).sort();
-  if (!files.includes(state.draftFile)) state.draftFile = files[0] || "";
-  $("candidate-file").replaceChildren(...files.map((path) => option(path, path)));
-  $("candidate-file").value = state.draftFile;
-  $("candidate-source").value = state.draftFiles[state.draftFile] ?? "";
-  text("editor-label", `文件内容 · ${state.draftFile || "尚无文件"}`);
-  updateDraftSize();
-}
-function updateDraftSize() {
-  const files = Object.values(state.draftFiles);
-  const total = files.reduce((sum, value) => sum + encoder.encode(value).length, 0);
-  text("candidate-size", `${files.length}/32 个文件 · ${total.toLocaleString()} / 262,144 字节`);
-}
-function openCandidate(fromVersion = false) {
-  if (state.busy || state.submitting) return;
-  const manifest = fromVersion ? state.detail.manifest : { title: "", description: "", commands: [], permissions: [], data_description: "", configuration: {}, checks: [] };
-  $("candidate-name").value = fromVersion ? state.name : "";
-  $("candidate-manifest").value = JSON.stringify(manifest, null, 2);
-  state.draftFiles = fromVersion ? { ...state.files } : { "__init__.py": "" };
-  state.draftFile = "__init__.py";
-  $("new-file-path").value = "";
-  text("candidate-error", ""); text("candidate-progress", "");
-  renderDraftFiles();
-  $("candidate-dialog").showModal();
-}
-async function submitCandidate(event) {
-  event.preventDefault();
-  if (state.submitting || state.busy) return;
-  text("candidate-error", "");
-  const name = $("candidate-name").value.trim();
-  let manifest;
-  try {
-    if (!/^[a-z][a-z0-9_]{2,39}$/.test(name)) throw new Error("项目名格式不正确。");
-    manifest = JSON.parse($("candidate-manifest").value);
-    if (!manifest || Array.isArray(manifest) || typeof manifest !== "object") throw new Error("Manifest 必须为 JSON 对象。");
-    const entries = Object.entries(state.draftFiles);
-    if (!Object.hasOwn(state.draftFiles, "__init__.py") || !entries.length || entries.length > 32) throw new Error("需要 __init__.py，文件总数必须在 1–32 之间。");
-    const sizes = entries.map(([, value]) => encoder.encode(value).length);
-    if (sizes.some((size) => size > 65536) || sizes.reduce((sum, size) => sum + size, 0) > 262144) throw new Error("候选文件超过单文件或总大小限制。");
-  } catch (error) { text("candidate-error", `尚未提交：${error.message}`); return; }
-  state.submitting = true;
-  for (const control of $("candidate-form").querySelectorAll("button, input, textarea, select")) control.disabled = true;
-  actionControls();
-  text("candidate-progress", "正在保存不可变版本并等待容器验收。不会自动批准或激活，请勿重复提交…");
-  let created = null;
-  try {
-    created = (await api(`${projectPath(name)}/versions`, { method: "POST", body: JSON.stringify({ files: state.draftFiles, manifest }) })).item;
-    state.name = created.plugin_name; state.version = created.version; state.compare = null; state.file = "";
-    $("candidate-dialog").close();
-  } catch (error) {
-    text("candidate-error", `提交未确认完成：${error.message}。版本可能已持久保存；请关闭后刷新版本列表核对，避免重复提交。草稿已保留。`);
-    text("candidate-progress", "未确认完成；不会报告假成功。");
-  } finally {
-    state.submitting = false;
-    for (const control of $("candidate-form").querySelectorAll("button, input, textarea, select")) control.disabled = false;
-    actionControls();
-  }
-  if (created) await refresh({ message: `已保存不可变候选 ${created.plugin_name} v${created.version} · 验收${labels[created.validation_status] || created.validation_status}。未批准、未激活；请审阅精确哈希和报告。` });
-}
 
 $("refresh").addEventListener("click", () => refresh());
 $("more-projects").addEventListener("click", () => { state.projectLimit += 50; refresh(); });
 $("more-versions").addEventListener("click", () => { state.versionLimit += 10; refresh(); });
-$("acknowledge-native").addEventListener("change", actionControls);
-$("operation-confirm").addEventListener("click", () => $("operation-dialog").close("confirm"));
-$("operation-cancel").addEventListener("click", () => $("operation-dialog").close("cancel"));
-for (const action of ["validate", "approve", "activate", "rollback", "disable"]) $(action).addEventListener("click", () => mutate(action));
 for (const node of document.querySelectorAll("[data-tab]")) {
   node.addEventListener("click", () => setTab(node.dataset.tab));
   node.addEventListener("keydown", (event) => {
@@ -456,25 +305,7 @@ for (const node of document.querySelectorAll("[data-tab]")) {
 }
 $("source-file").addEventListener("change", () => { state.file = $("source-file").value; renderSource(); });
 $("compare-version").addEventListener("change", () => { state.compare = Number($("compare-version").value) || ""; refresh({ silent: true }); });
-$("new-candidate").addEventListener("click", () => openCandidate());
-$("draft-from-version").addEventListener("click", () => openCandidate(true));
-$("close-candidate").addEventListener("click", () => { if (!state.submitting) $("candidate-dialog").close(); });
-$("candidate-dialog").addEventListener("cancel", (event) => { if (state.submitting) event.preventDefault(); });
-$("candidate-form").addEventListener("submit", submitCandidate);
-$("candidate-file").addEventListener("change", () => { state.draftFile = $("candidate-file").value; renderDraftFiles(); });
-$("candidate-source").addEventListener("input", () => { saveDraftFile(); updateDraftSize(); });
-$("add-file").addEventListener("click", () => {
-  const path = $("new-file-path").value.trim();
-  if (!path || path === "__proto__" || path === "constructor" || path === "prototype" || Object.hasOwn(state.draftFiles, path)) { text("candidate-error", "请输入尚不存在的普通相对文件路径。"); return; }
-  if (Object.keys(state.draftFiles).length >= 32) { text("candidate-error", "最多 32 个文件。"); return; }
-  state.draftFiles[path] = ""; state.draftFile = path; $("new-file-path").value = "";
-  text("candidate-error", ""); renderDraftFiles();
-});
-$("remove-file").addEventListener("click", () => {
-  if (state.draftFile === "__init__.py") { text("candidate-error", "__init__.py 是必需文件，不能移除。"); return; }
-  delete state.draftFiles[state.draftFile]; state.draftFile = "__init__.py"; renderDraftFiles();
-});
 refresh();
 window.setInterval(() => {
-  if (!document.hidden && !state.busy && !state.submitting && !$("candidate-dialog").open && !$("operation-dialog").open && !$("acknowledge-native").checked) refresh({ silent: true });
+  if (!document.hidden && !state.busy) refresh({ silent: true });
 }, 20000);

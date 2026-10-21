@@ -72,13 +72,33 @@ _ACTIVE_AGENT_CONTEXT: ContextVar[AgentAccessContext | None] = ContextVar(
 )
 
 
+@dataclass(slots=True)
+class _AgentAccessLifetime:
+    active: bool = True
+
+
+_ACTIVE_AGENT_LIFETIME: ContextVar[_AgentAccessLifetime | None] = ContextVar(
+    "llm_chat_agent_access_lifetime", default=None
+)
+
+
+def current_agent_access_is_live() -> bool:
+    """Reject inherited access after its owning generation scope has exited."""
+    lifetime = _ACTIVE_AGENT_LIFETIME.get()
+    return lifetime is not None and lifetime.active
+
+
 @contextmanager
 def agent_access_scope(context: AgentAccessContext) -> Iterator[None]:
     token = _ACTIVE_AGENT_CONTEXT.set(context)
+    lifetime = _AgentAccessLifetime()
+    lifetime_token = _ACTIVE_AGENT_LIFETIME.set(lifetime)
     try:
         yield
     finally:
         _ACTIVE_AGENT_CONTEXT.reset(token)
+        lifetime.active = False
+        _ACTIVE_AGENT_LIFETIME.reset(lifetime_token)
 
 
 def current_agent_access() -> AgentAccessContext | None:

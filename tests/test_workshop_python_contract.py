@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from zipfile import ZipFile
@@ -83,13 +84,15 @@ async def test_image_label_requires_python_311(tmp_path, monkeypatch, python_ver
 
 
 @pytest.mark.parametrize("python_version", ["3.10.20", "3.11.14", "3.12.0"])
-def test_native_approval_requires_python_311_report(tmp_path, python_version):
+def test_native_activation_requires_python_311_report(tmp_path, python_version):
     from plugins.plugin_workshop.config import WorkshopConfig
     from plugins.plugin_workshop.service import PluginWorkshopService
 
     store = WorkshopStore(tmp_path)
     store.initialize()
-    record = store.create_version("counter", {"__init__.py": "VALUE = 1\n"}, declaration(), Actor("owner", 1))
+    record = store.create_version(
+        "counter", {"__init__.py": "VALUE = 1\n"}, declaration(), Actor("owner", 1, is_superuser=True)
+    )
     service = PluginWorkshopService(WorkshopConfig(), root=tmp_path, store=store)
     store.mark_validating(record.plugin_name, record.version)
     record = store.record_report(
@@ -110,6 +113,41 @@ def test_native_approval_requires_python_311_report(tmp_path, python_version):
         with pytest.raises(WorkshopError) as error:
             service._accepted(record, record.source_hash)
         assert error.value.code == "report_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("changes", "code"),
+    [
+        ({"framework_version": "obsolete-framework"}, "framework_mismatch"),
+        ({"image_id": "local:latest"}, "report_mismatch"),
+        ({"image_id": "sha256:not-an-immutable-image-id"}, "report_mismatch"),
+        ({"source_hash": "f" * 64}, "acceptance_required"),
+        ({"status": "failed"}, "acceptance_required"),
+        ({"checks": ()}, "acceptance_required"),
+    ],
+)
+def test_native_activation_requires_current_framework_exact_hash_and_pinned_report(tmp_path, changes, code):
+    from plugins.plugin_workshop.config import WorkshopConfig
+    from plugins.plugin_workshop.service import PluginWorkshopService
+
+    store = WorkshopStore(tmp_path)
+    store.initialize()
+    record = store.create_version(
+        "counter", {"__init__.py": "VALUE = 1\n"}, declaration(), Actor("owner", 1, is_superuser=True)
+    )
+    service = PluginWorkshopService(WorkshopConfig(), root=tmp_path, store=store)
+    report = ValidationReport(
+        "passed",
+        record.source_hash,
+        (CheckResult("execution", True),),
+        framework_version=service.framework_version,
+        python_version="3.11.15",
+        image_id=IMAGE_ID,
+    )
+    record = replace(record, validation_status="passed", report=replace(report, **changes))
+    with pytest.raises(WorkshopError) as rejected:
+        service._accepted(record, record.source_hash)
+    assert rejected.value.code == code
 
 
 def build_inputs(root: Path, *, with_llm: bool) -> dict[str, bytes]:

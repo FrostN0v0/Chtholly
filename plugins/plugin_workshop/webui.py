@@ -38,19 +38,19 @@ def register_webui(service: WorkshopAPI) -> None:
     page_key = "plugin-workshop"
     extension.menus[:] = [menu for menu in extension.menus if menu.path != menu_path]
     extension.pages[:] = [page for page in extension.pages if page.key != page_key]
-    extension.add_menu("plugin_workshop.name", "mdi:puzzle-edit-outline", menu_path, order=47)
+    extension.add_menu("plugin_workshop.name", "mdi:puzzle-outline", menu_path, order=47)
     extension.add_page(
         page_key,
         "plugin_workshop.name",
-        "mdi:puzzle-edit-outline",
+        "mdi:puzzle-outline",
         "/api/plugin-workshop/page",
-        permission="plugin_workshop.manage",
+        permission="plugin_workshop.view",
     )
     extension.add_i18n("zh-CN", "plugin_workshop.name", "插件工坊")
     extension.add_i18n("en-US", "plugin_workshop.name", "Plugin Workshop")
-    extension.add_i18n("zh-CN", "plugin_workshop.permission.manage", "审核与管理原生插件")
-    extension.add_i18n("en-US", "plugin_workshop.permission.manage", "Review and manage native plugins")
-    extension.add_permission("plugin_workshop.manage", "plugin_workshop.permission.manage")
+    extension.add_i18n("zh-CN", "plugin_workshop.permission.view", "查看原生插件源码与验收结果")
+    extension.add_i18n("en-US", "plugin_workshop.permission.view", "View native plugin source and acceptance results")
+    extension.add_permission("plugin_workshop.view", "plugin_workshop.permission.view")
     menus = tuple(menu for menu in extension.menus if menu.path == menu_path)
     pages = tuple(page for page in extension.pages if page.key == page_key)
 

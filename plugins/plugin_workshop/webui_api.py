@@ -1,13 +1,10 @@
-"""Bounded, authenticated administration of immutable workshop candidates."""
+"""Bounded, authenticated read-only views of immutable workshop candidates."""
 
 from __future__ import annotations
 
-import re
-import json
 from pathlib import Path
 from secrets import token_urlsafe
-from urllib.parse import urlsplit
-from collections.abc import Mapping, Callable
+from collections.abc import Callable
 
 from fastapi import Depends, Request, APIRouter, HTTPException
 from fastapi.routing import APIRoute
@@ -15,7 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
 
 from utils.webui_theme import themed_assets
-from utils.plugin_workshop_core.codec import state_payload, version_payload
+from utils.plugin_workshop_core.codec import version_payload
 from utils.plugin_workshop_core.models import Actor, WorkshopAPI, WorkshopError
 
 API_PREFIX = "/api/plugin-workshop"
@@ -75,66 +72,6 @@ def authenticated_webui_actor(request: Request) -> Actor:
         )
     store.refresh_if_needed(session)
     return Actor(key="authenticated-webui", is_admin=True)
-
-
-def _origin(url: str) -> tuple[str, str, int | None]:
-    parsed = urlsplit(url)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
-        raise ValueError("Invalid origin")
-    return parsed.scheme, parsed.hostname.lower(), parsed.port or (443 if parsed.scheme == "https" else 80)
-
-
-def _same_origin(request: Request) -> None:
-    supplied = request.headers.get("origin")
-    try:
-        if not supplied or _origin(supplied) != _origin(str(request.url)):
-            raise ValueError("Cross-origin request")
-        parsed = urlsplit(supplied)
-        if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
-            raise ValueError("Invalid origin")
-        if request.headers.get("sec-fetch-site", "same-origin") not in ("same-origin", "none"):
-            raise ValueError("Cross-origin request")
-    except ValueError:
-        raise WorkshopError("A same-origin browser request is required", code="origin_rejected", status=403) from None
-
-
-def _reject_nonfinite(value: str) -> None:
-    raise ValueError("Non-finite JSON is not accepted")
-
-
-async def _body(request: Request, *, maximum: int = 8192) -> dict[str, object]:
-    _same_origin(request)
-    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
-        raise WorkshopError("Content-Type must be application/json", code="invalid_content_type", status=415)
-    length = request.headers.get("content-length")
-    if length and (not length.isdigit() or int(length) > maximum):
-        raise WorkshopError("Request body is too large or its length is invalid", code="request_too_large", status=413)
-    body = bytearray()
-    async for chunk in request.stream():
-        if len(body) + len(chunk) > maximum:
-            raise WorkshopError("Request body is too large", code="request_too_large", status=413)
-        body.extend(chunk)
-    try:
-        payload = json.loads(body, parse_constant=_reject_nonfinite)
-    except (ValueError, UnicodeDecodeError, RecursionError):
-        raise WorkshopError("Request body must be valid finite JSON", code="invalid_json") from None
-    if not isinstance(payload, dict):
-        raise WorkshopError("Request body must be a JSON object", code="invalid_json")
-    return payload
-
-
-def _hash(payload: Mapping[str, object], *, approval: bool = False) -> str:
-    keys = {"source_hash", "acknowledge_native"} if approval else {"source_hash"}
-    if set(payload) != keys:
-        raise WorkshopError("Only the required hash and acknowledgement fields are accepted")
-    source_hash = payload.get("source_hash")
-    if not isinstance(source_hash, str) or re.fullmatch(r"[0-9a-f]{64}", source_hash) is None:
-        raise WorkshopError("source_hash must be the exact displayed SHA-256 digest")
-    if approval and payload.get("acknowledge_native") is not True:
-        raise WorkshopError(
-            "Explicit acknowledgement of full native process privileges is required", code="native_ack_required"
-        )
-    return source_hash
 
 
 def _reply(*, item: object = None, items: object = None) -> JSONResponse:
@@ -226,46 +163,5 @@ def create_workshop_router(
     @router.get("/projects/{name}/versions/{version}/source", response_model=None)
     async def source(name: str, version: int, actor: Actor = Depends(admin_actor)):
         return _reply(item=await service.source(name, version, actor))
-
-    @router.post("/projects/{name}/versions", response_model=None)
-    async def submit(name: str, request: Request, actor: Actor = Depends(admin_actor)):
-        payload = await _body(request, maximum=2 * 1024 * 1024)
-        if (
-            set(payload) != {"files", "manifest"}
-            or not isinstance(payload["files"], dict)
-            or not isinstance(payload["manifest"], dict)
-        ):
-            raise WorkshopError("Submission requires only files and manifest objects")
-        files = payload["files"]
-        if not all(isinstance(path, str) and isinstance(text, str) for path, text in files.items()):
-            raise WorkshopError("Files must map relative paths to exact UTF-8 source text")
-        return _reply(item=version_payload(await service.submit(name, files, payload["manifest"], actor)))
-
-    @router.post("/projects/{name}/versions/{version}/validate", response_model=None)
-    async def validate(name: str, version: int, request: Request, actor: Actor = Depends(admin_actor)):
-        if await _body(request):
-            raise WorkshopError("Revalidation accepts an empty JSON object only")
-        return _reply(item=version_payload(await service.validate(name, version, actor)))
-
-    @router.post("/projects/{name}/versions/{version}/approve", response_model=None)
-    async def approve(name: str, version: int, request: Request, actor: Actor = Depends(admin_actor)):
-        digest = _hash(await _body(request), approval=True)
-        return _reply(item=version_payload(await service.approve(name, version, digest, actor)))
-
-    @router.post("/projects/{name}/versions/{version}/activate", response_model=None)
-    async def activate(name: str, version: int, request: Request, actor: Actor = Depends(admin_actor)):
-        digest = _hash(await _body(request))
-        return _reply(item=state_payload(await service.activate(name, version, digest, actor)))
-
-    @router.post("/projects/{name}/versions/{version}/rollback", response_model=None)
-    async def rollback(name: str, version: int, request: Request, actor: Actor = Depends(admin_actor)):
-        digest = _hash(await _body(request))
-        return _reply(item=state_payload(await service.rollback(name, version, digest, actor)))
-
-    @router.post("/projects/{name}/disable", response_model=None)
-    async def disable(name: str, request: Request, actor: Actor = Depends(admin_actor)):
-        if await _body(request):
-            raise WorkshopError("Disable accepts an empty JSON object only")
-        return _reply(item=state_payload(await service.disable(name, actor)))
 
     return router

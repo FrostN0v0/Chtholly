@@ -265,9 +265,9 @@ Bot 与独立预览进程共享项目依赖环境；同步依赖或浏览器后�
 
 ## 插件工坊
 
-启用 `plugin_workshop` 与 `llm_chat.plugin_workshop_enabled` 后，可让模型编写标准 Entari 插件，使用 `submit_plugin` 保存完整源码、命令、配置、权限与数据声明，并在无生产凭证及数据的 Linux Docker 容器中验收。容器没有网络接口出口；仅可经逐次受限的 Unix Socket 代理调用 Open-Meteo 的地名和天气 GET 接口。模型可承接上下文直接提交、修订或重新提交，不要求当前消息再次说“提交”。失败报告返回模型修正，每次修订产生新的不可变版本；提交或验收通过均不会自动激活。
+启用 `plugin_workshop` 与 `llm_chat.plugin_workshop_enabled` 后，只有配置中的 **superuser** 能让模型使用工坊工具。流程分为两步：`submit_plugin` 保存完整源码、命令、配置、权限与数据声明，并在无生产凭证及数据的 Linux Docker 容器中验收；模型读取反馈、修订源码，验收通过后再调用 `activate_plugin` 激活精确版本与 SHA-256。无需通过指令或 WebUI 人工批准，也不要求补充“提交”“批准”“激活”等口令。提交和验收通过本身不会激活插件。
 
-模型可通过 `list_workshop_plugins` 和 `read_workshop_plugin` 找回当前范围内已授权的精确版本，读取完整 manifest、文件清单、源码及失败报告后修订，不从摘要猜文件。聊天管理员的读取同样限当前范围；读取不会批准或激活插件。
+`list_workshop_plugins` 与 `read_workshop_plugin` 同样只对当前 superuser 开放，读取限当前会话范围；模型可找回完整 manifest、文件清单、源码及失败报告后修订，不从摘要猜文件。`rollback_plugin` 只能恢复曾经成功激活且验收有效的精确版本；`disable_plugin` 停用插件并保留版本和数据。普通成员、定时提醒、自主陪伴、过期 generation 与 WebUI 管理会话均不能借用工坊写权限。
 
 验收宿主需 Linux 与可用的 Linux Docker Engine；Windows 可在 WSL2 的 Linux 环境运行宿主。维护者需显式构建与当前锁文件一致的验收镜像：
 
@@ -277,27 +277,23 @@ uv run --locked python scripts/build_workshop_sandbox.py --tag chtholly-workshop
 
 构建只打包固定依赖、vendored wheel 和可信验收器，不发送项目配置、资源或 `.env`；模型提交不会构建或拉取镜像。镜像预装 Chromium、Inter/Noto CJK 字体和图像解码器，先验证可信模板的真实 PNG，再执行候选命令、重载及清理。模板访问限于候选源码目录，单命令 30 秒、总验收默认 180 秒；图片须完整解码并满足大小、像素和动画限制。Docker、镜像或版本前提不满足时明确显示不可用，不回退到宿主验收。
 
-容器验收与激活后的宿主渲染使用各自的 HTMLRender 配置。宿主 `htmlrender.resources.local_access.allowed_paths` 必须同时保留原有模板目录和工坊专用 `runtime` 目录；本仓库默认 `.localdata.app_name: chtholly` 对应 `.chtholly/data/plugin_workshop/runtime`，改变 LocalData 位置时需同步调整。该目录只发布已批准插件，停用时删除对应包；不得授权整个 `.chtholly`、`versions` 或 `staging`。仅批准源码不会自动扩大渲染器文件访问权限，验收需同时覆盖激活后的实际命令出图。
+容器验收与激活后的宿主渲染使用各自的 HTMLRender 配置。宿主 `htmlrender.resources.local_access.allowed_paths` 必须同时保留原有模板目录和工坊专用 `runtime` 目录；本仓库默认 `.localdata.app_name: chtholly` 对应 `.chtholly/data/plugin_workshop/runtime`，改变 LocalData 位置时需同步调整。该目录只发布经 superuser 工具选择、验收通过且哈希匹配的源码，停用时删除对应包；不得授权整个 `.chtholly`、`versions` 或 `staging`。激活不会自动扩大渲染器文件访问权限，验收需同时覆盖激活后的实际命令出图。
 
 生产推荐由 Bot 用户运行 rootless Docker，并通过 `DOCKER_HOST` 指向受限 Unix Socket；不要为方便调用而将 Bot 加入可控制宿主 root 的 Docker 组。rootless daemon 必须支持 cgroup v2 的内存、CPU 与 PID 限制，不能因安装模式改变而放宽验收边界。
 
-在 Entari WebUI「插件工坊」审阅功能、源码差异、不可变配置、数据影响、验收报告与 SHA-256，确认后批准精确版本，再激活。工坊要求预先配置 WebUI 密码，并在回环监听时同样启用真实密码认证；若热加载前已有免密会话，必须完整重启以使旧 Cookie 失效，不把免密 Cookie 升格为管理员会话。管理端口继续保持回环监听及 SSH 隧道。页面复用原生隔离 iframe 的 API 消息桥，不放宽 iframe sandbox、同源写入或会话认证。
+Entari WebUI「插件工坊」仅供查看源码、版本差异、不可变配置、数据声明、验收报告与 SHA-256，不再提供提交、重新验收、批准、激活、回滚或停用入口；旧写 API 不保留兼容路径。工坊仍要求预先配置 WebUI 密码，在回环监听时同样启用真实认证；已有免密会话时需完整重启使旧 Cookie 失效。管理端口保持回环监听及 SSH 隧道。页面复用原生隔离 iframe 的 API 消息桥，不放宽 sandbox 或会话认证。
 
-超管也可使用同一审批契约的原生命令：
+超管只读查询命令保留：
 
 ```text
 workshop help
 workshop list
 workshop show counter_demo 1
-workshop approve counter_demo 1
-workshop activate counter_demo 1
-workshop rollback counter_demo 1
-workshop disable counter_demo
 ```
 
-`activate_plugin` 与 `rollback_plugin` 仅在当前超管明确请求且指定版本已获批准时执行，模型不能自行批准。失败更新保留旧版；重启恢复最后批准且启用的版本，停用状态也会保留。源码与版本存储由 LocalData 管理，配置变更同样需要新版本、重新验收和批准。
+失败更新保留并尽力恢复旧版；重启只恢复已提交且启用的版本，不会自动激活仅通过验收的候选。旧数据库中的历史审批列保留原值，但不再参与授权，也不补造批准记录。源码、版本及操作日志继续由 LocalData 管理；配置或源码变化仍需新版本与重新验收。
 
-**批准原生代码是人工信任决定，不是安全认证。** 激活后插件拥有 Bot 进程的全部权限，权限清单只是声明；验收器与候选同进程，功能报告可能被恶意代码伪造。代码回滚与停用不会撤回消息、外部请求或数据修改。不要批准未经审阅的源码，也不要把 Docker Socket、宿主凭证或生产数据挂入验收容器。
+**superuser 的工具调用是原生执行的信任边界，验收不是安全认证。** 激活后插件拥有 Bot 进程的全部权限，权限清单只是声明；验收器与候选同进程，功能报告可能被恶意代码伪造。代码回滚与停用不会撤回消息、外部请求或数据修改。不要把 Docker Socket、宿主凭证或生产数据挂入验收容器。容器无直接网络出口，仅可经受限 Unix Socket 代理调用 Open-Meteo 的地名和天气 GET 接口。
 
 ## 💖 感谢
 

@@ -14,6 +14,7 @@ from ._workshop import WorkshopToolContext
 from ..core.types import JSONType
 from .submit_plugin import register_submit_plugin
 from ..core.delivery import DeliveryError
+from .disable_plugin import register_disable_plugin
 from .activate_plugin import register_activate_plugin
 from .rollback_plugin import register_rollback_plugin
 from .read_workshop_plugin import register_read_workshop_plugin
@@ -43,4 +44,12 @@ def register_workshop_tools(
     register_submit_plugin(dispatcher, context)
     register_activate_plugin(dispatcher, context)
     register_rollback_plugin(dispatcher, context)
-    return ["list_workshop_plugins", "read_workshop_plugin", "submit_plugin", "activate_plugin", "rollback_plugin"]
+    register_disable_plugin(dispatcher, context)
+    return [
+        "list_workshop_plugins",
+        "read_workshop_plugin",
+        "submit_plugin",
+        "activate_plugin",
+        "rollback_plugin",
+        "disable_plugin",
+    ]

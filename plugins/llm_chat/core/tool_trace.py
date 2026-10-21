@@ -215,7 +215,7 @@ class ToolTraceRecorder:
         if (
             status in {"failed", "cancelled"}
             and call.tool_name in WORKSHOP_TOOLS
-            and evidence.get("workshop_effect") in {"candidate_saved", "activated", "rolled_back"}
+            and evidence.get("workshop_effect") in {"candidate_saved", "activated", "rolled_back", "disabled"}
         ):
             effect = "partial"
         self.events.append(

@@ -49,8 +49,6 @@ def version_payload(record: VersionRecord) -> dict[str, object]:
         "created_at": record.created_at,
         "validation_status": record.validation_status,
         "report": report_payload(record.report) if record.report is not None else None,
-        "approved_by": record.approved_by,
-        "approved_at": record.approved_at,
         "active": record.active,
         "ever_active": record.ever_active,
     }

@@ -1,4 +1,4 @@
-"""Activate only a reviewed, passed, exact native plugin version."""
+"""Activate an exact functionally accepted native plugin version."""
 
 from __future__ import annotations
 
@@ -15,18 +15,19 @@ def register_activate_plugin(
     runtime: WorkshopToolContext,
 ) -> Subscriber[JSONType]:
     async def activate_plugin(plugin_name: str, version: int, source_hash: str) -> str:
-        """Activate the exact accepted and operator-approved version, only on the current operator's request.
+        """Activate an exact accepted version for the current superuser's plugin task.
 
-        Use the name, version and full digest returned by submit_plugin or the authenticated workshop. The
-        operator must have reviewed and approved this immutable version through WebUI or native commands;
-        this tool CANNOT grant approval. A generated plugin runs with every privilege of the Bot process.
-        Failed replacement preserves the last usable version when restoration succeeds. Report the actual
-        outcome; activating code cannot undo old messages, external requests or database mutations.
+        After submit_plugin passes acceptance, inspect its feedback and choose activation autonomously;
+        no human review, approval record or activation phrase is required. Use the exact name, version
+        and full digest returned by submission or workshop reads, never guessed values. A generated
+        plugin runs with every privilege of the Bot process; acceptance is not a security certificate.
+        Failed replacement preserves the last usable version when restoration succeeds. Report the
+        actual outcome; changing code cannot undo old messages, external requests or data mutations.
 
         Args:
             plugin_name (str): Exact stable plugin key, without a path or workshop_ prefix.
-            version (int): Exact immutable approved version number.
-            source_hash (str): Full source-plus-manifest digest for that approved version.
+            version (int): Exact immutable version number with passed acceptance.
+            source_hash (str): Full source-plus-manifest digest for that version.
         Returns:
             str: Confirmed active version or a real refusal/failure.
         """

@@ -1,7 +1,8 @@
-"""Workshop orchestration with durable approval and serialized native changes."""
+"""Workshop orchestration with exact acceptance and serialized native changes."""
 
 from __future__ import annotations
 
+import re
 import asyncio
 from pathlib import Path
 from collections.abc import Mapping, Callable
@@ -28,12 +29,12 @@ from .config import WorkshopConfig  # entari: package
 from .runtime import NativePluginDriver  # entari: package
 
 NATIVE_PERMISSIONS_WARNING = (
-    "Approval permits this exact version to execute with full bot process privileges, including data, "
+    "Activation permits this exact version to execute with full bot process privileges, including data, "
     "credentials, network, and messages. Manifest permissions are declarations, not enforced restrictions. "
     "Container acceptance results are untrusted in-process functional evidence, not a security certification. "
     "Rollback restores plugin code, not external data or messages."
 )
-_SYSTEM = Actor("workshop:recovery", is_admin=True)
+_SYSTEM = Actor("workshop:recovery", is_admin=True, is_superuser=True)
 
 
 async def _settle(task: asyncio.Task):
@@ -128,9 +129,11 @@ class PluginWorkshopService(Service):
             raise WorkshopError("Workshop is not ready or is shutting down", code="workshop_unavailable", status=503)
 
     @staticmethod
-    def _require_admin(actor: Actor) -> None:
-        if not actor.is_admin:
-            raise WorkshopError("Operator approval is required", code="forbidden", status=403)
+    def _require_superuser(actor: Actor) -> None:
+        if not isinstance(actor, Actor) or actor.is_superuser is not True:
+            raise WorkshopError(
+                "Only an authenticated superuser may manage native plugins", code="forbidden", status=403
+            )
 
     async def prepare(self) -> None:
         async with self._prepare_lock:
@@ -160,12 +163,12 @@ class PluginWorkshopService(Service):
                 return
             for record in await asyncio.to_thread(self.store.active_versions):
                 try:
-                    self._approved(record, record.source_hash)
+                    self._accepted(record, record.source_hash)
                     files = await asyncio.to_thread(self.store.read_files, record.plugin_name, record.version, _SYSTEM)
                     await self.driver.apply(record, files)
                     await self._write(self.store.record_runtime_error, record.plugin_name, "")
                 except Exception as error:
-                    detail = f"Committed approved version could not be restored: {error}"
+                    detail = f"Committed accepted version could not be restored: {error}"
                     self._restoration_errors[record.plugin_name] = detail
                     await self._write(self.store.record_runtime_error, record.plugin_name, detail)
             self._ready = True
@@ -206,6 +209,7 @@ class PluginWorkshopService(Service):
         *,
         on_created: Callable[[VersionRecord], None] | None = None,
     ) -> VersionRecord:
+        self._require_superuser(actor)
         parsed = parse_manifest(manifest)
         self._admit()
         created: VersionRecord | None = None
@@ -242,6 +246,7 @@ class PluginWorkshopService(Service):
                 self._admissions_drained.set()
 
     async def validate(self, plugin_name: str, version: int, actor: Actor) -> VersionRecord:
+        self._require_superuser(actor)
         self._admit()
         try:
             return await self._validate_owned(plugin_name, version, actor)
@@ -358,18 +363,11 @@ class PluginWorkshopService(Service):
         self._ensure_running()
         return await asyncio.to_thread(self.store.read_files, plugin_name, version, actor, query_scope=query_scope)
 
-    async def approve(self, plugin_name: str, version: int, source_hash: str, actor: Actor) -> VersionRecord:
-        self._require_admin(actor)
-        async with self._lifecycle_lock:
-            self._ensure_running()
-            record = await asyncio.to_thread(self.store.get_version, plugin_name, version, actor)
-            self._accepted(record, source_hash)
-            return await self._write(self.store.approve, plugin_name, version, source_hash, actor)
-
     def _accepted(self, record: VersionRecord, source_hash: str) -> None:
         report = record.report
         if (
             source_hash != record.source_hash
+            or record.validation_status != "passed"
             or report is None
             or not report.passed
             or report.source_hash != source_hash
@@ -379,20 +377,13 @@ class PluginWorkshopService(Service):
             )
         if report.framework_version != self.framework_version:
             raise WorkshopError(
-                "Approved version requires acceptance against the current framework",
+                "This version requires acceptance against the current framework",
                 code="framework_mismatch",
                 status=409,
             )
-        if not report.image_id.startswith("sha256:") or not report.python_version.startswith("3.11."):
+        if not re.fullmatch(r"sha256:[a-f0-9]{64}", report.image_id) or not report.python_version.startswith("3.11."):
             raise WorkshopError(
                 "Acceptance evidence lacks pinned isolation provenance", code="report_mismatch", status=409
-            )
-
-    def _approved(self, record: VersionRecord, source_hash: str) -> None:
-        self._accepted(record, source_hash)
-        if not record.approved_by or not record.approved_at:
-            raise WorkshopError(
-                "Exact immutable version requires operator approval", code="approval_required", status=409
             )
 
     async def activate(
@@ -417,8 +408,14 @@ class PluginWorkshopService(Service):
     ) -> ProjectState:
         return await self._change("rollback", plugin_name, version, source_hash, actor, on_changed)
 
-    async def disable(self, plugin_name: str, actor: Actor) -> ProjectState:
-        return await self._change("disable", plugin_name, None, "", actor)
+    async def disable(
+        self,
+        plugin_name: str,
+        actor: Actor,
+        *,
+        on_changed: Callable[[ProjectState], None] | None = None,
+    ) -> ProjectState:
+        return await self._change("disable", plugin_name, None, "", actor, on_changed)
 
     async def _change(
         self,
@@ -429,7 +426,7 @@ class PluginWorkshopService(Service):
         actor: Actor,
         on_changed: Callable[[ProjectState], None] | None = None,
     ) -> ProjectState:
-        self._require_admin(actor)
+        self._require_superuser(actor)
         self._ensure_running()
         task = asyncio.create_task(self._run_change(action, name, version, source_hash, actor, on_changed))
         self._changes.add(task)
@@ -467,19 +464,19 @@ class PluginWorkshopService(Service):
                         previous = await asyncio.to_thread(
                             self.store.get_version, name, operation.previous_version, actor
                         )
-                        self._approved(previous, previous.source_hash)
+                        self._accepted(previous, previous.source_hash)
                         previous_files = await asyncio.to_thread(self.store.read_files, name, previous.version, actor)
                     except WorkshopError:
                         if version is not None:
                             raise
-                        # A broken or obsolete approval must never prevent an operator from disabling code.
+                        # Broken or obsolete evidence must not prevent disabling code.
                         previous = None
                 if version is None:
                     changed = True
                     await self.driver.disable(name)
                 else:
                     target = await asyncio.to_thread(self.store.get_version, name, version, actor)
-                    self._approved(target, source_hash)
+                    self._accepted(target, source_hash)
                     files = await asyncio.to_thread(self.store.read_files, name, version, actor)
                     if not (target.active and self.driver.is_loaded(name, version)):
                         await self.driver.apply(target, files)
@@ -499,7 +496,8 @@ class PluginWorkshopService(Service):
                     and version != operation.previous_version
                     and self.driver.is_loaded(name, version)
                 )
-                if changed or candidate_left_running:
+                prior_runtime_missing = previous is not None and not self.driver.is_loaded(name, previous.version)
+                if changed or candidate_left_running or prior_runtime_missing:
                     try:
                         if previous is not None and previous_files is not None:
                             await self.driver.apply(previous, previous_files)

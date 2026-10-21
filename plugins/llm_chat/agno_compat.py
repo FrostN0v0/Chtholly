@@ -53,6 +53,7 @@ from .native_image_delivery import (
     prepare_pending_native_images,
 )
 from .core.tool_trace_policy import DeliverySnapshot
+from .core.workshop_records import WORKSHOP_TOOLS
 
 _MIN_TOOL_CALL_LIMIT = 8
 _MAX_TOOL_CALL_LIMIT = 64
@@ -280,6 +281,15 @@ def _authorized(name: str) -> bool:
     entry = available_functions.get(name)
     if entry is None or not _is_compat_wrapper(entry[0].handle) or entry[1].external_execution is not True:
         return False
+    if name in WORKSHOP_TOOLS:
+        from .tools._workshop import authorized_workshop_actor
+        from .core.delivery import DeliveryError
+
+        try:
+            authorized_workshop_actor()
+        except DeliveryError:
+            return False
+        return True
     access = current_agent_access()
     if access is not None and access.trigger_kind == "autonomous":
         return name in _AUTONOMOUS_ALLOWED_TOOLS and "send_msg" in access.capability_names
