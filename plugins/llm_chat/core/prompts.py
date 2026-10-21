@@ -122,12 +122,15 @@ SYSTEM_SCAFFOLD = "\n".join(
             "tasks can expand as needed without a fixed word count."
         ),
         (
-            "Use another send_msg call only when a person would genuinely send a separate message: a result "
-            "followed by a file, or a long answer. Deliver a long or multi-part answer as a few complete parts, "
-            "each within the per-message character ceiling and split where a part stands alone, never one "
-            "oversized message. Line breaks and multiple segments inside one call are still one message. Ordinary "
-            "final text is sent only when nothing was delivered in this turn, as one short plain reply; it is not "
-            "a way to collapse a multi-part answer."
+            "Use separate send_msg calls for naturally separate conversational beats, such as an emotional "
+            "reaction followed by advice or later plans. Do not pack ordinary prose paragraphs or lines into "
+            "one call: line breaks and multiple text/style segments are layout inside one bubble, never new "
+            "chat bubbles. Packed prose is rejected before sending; correct only unsent content with separate "
+            "calls, without flattening or repeating earlier sends. Keep a short answer together and retain "
+            "deliberate lists, code, tables, quotes and structured explanations byte-for-byte. A genuinely "
+            "single-beat text/image chain is fine, including a trailing break before its image. Deliver longer "
+            "answers as complete natural parts within the character ceilings, not a fixed message count. "
+            "Ordinary final text is available only when nothing was delivered, not as a packed-answer bypass."
         ),
         (
             "Choose natural text, native styles, links, media or a mixture to fit the answer. "
@@ -220,8 +223,9 @@ SYSTEM_SCAFFOLD = "\n".join(
             "Segment types are text{text}, mention{target}, link{url,text}, emoji{id}, media{media_ref}, "
             "break{}, and style{style,text}; each includes its type discriminator. Supported styles are bold, "
             "italic, underline, strike, spoiler and code. Prepare every media resource before referencing it. "
-            "Use break segments for prose line breaks or provide actual newline characters after JSON decoding. "
-            "Literal backslash-n sequences in prose are invalid and must be corrected before sending. "
+            "Use break segments or actual decoded newlines for deliberate structured layout within one beat, "
+            "not to pack conversational paragraphs. Separate bubbles require separate send_msg calls. "
+            "Literal backslash-n sequences in prose are also invalid and must be corrected before sending. "
             "When those characters are intentional code or a literal example, use a code style segment or "
             "explicit code delimiters. Do not decode or rewrite escapes in code, regular expressions or paths. "
             "A rejected unsent message may be corrected; never repeat an earlier confirmed or unknown send. "
@@ -546,8 +550,10 @@ def build_delivery_tool_contract(limits: DeliveryLimits) -> str:
             ),
             (
                 "One send_msg call submits one complete ordered chain with no auto-splitting or silent fallback. "
-                "Choose segment positions and spacing. Use another call only for a genuinely separate message; "
-                "a short reply is usually one message. Mentions stay in their specified positions. "
+                "Choose segment positions and spacing. Ordinary conversational paragraphs or lines need separate "
+                "calls, not break segments or styling; packed prose is rejected without splitting or flattening. "
+                "Keep structured lists, code, tables and quotes intact. A short reply is usually one message. "
+                "Single-beat text/image composites may include a trailing break. Mentions keep their positions. "
                 "Prepare media first, then use its exact current media_ref in a media segment. "
                 "Media may follow earlier text, and supported image/text composites preserve your order. "
                 "On OneBot audio, video, files and merged forwards each require a standalone resource message. "

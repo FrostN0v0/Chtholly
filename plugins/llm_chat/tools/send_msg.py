@@ -61,8 +61,8 @@ from ._message_models import (
 )
 from ..core.media_delivery import current_media_requirements
 from ..core.prose_linebreaks import (
-    PROSE_LINEBREAK_GUIDANCE,
-    has_literal_prose_linebreaks,
+    CODE_LAYOUT_MARKER,
+    prose_layout_error,
 )
 
 _ONEBOT_PLATFORMS = frozenset({"onebot", "onebot11"})
@@ -150,7 +150,7 @@ def _clean_segments(segments: object, platform: str) -> list[MessageSegment]:
     if clean_delivery_fragment(authored, field="segments") != authored:
         raise DeliveryRejected("Reserved control content cannot span message segment boundaries")
     prose = "".join(
-        ("\ufffc" if segment.text else "")
+        (CODE_LAYOUT_MARKER if segment.text else "")
         if isinstance(segment, StyleSegment) and segment.style == "code"
         else segment.text
         if isinstance(segment, (TextSegment, StyleSegment, LinkSegment))
@@ -159,8 +159,8 @@ def _clean_segments(segments: object, platform: str) -> list[MessageSegment]:
         else "\ufffc"
         for segment in cleaned
     )
-    if has_literal_prose_linebreaks(prose):
-        raise DeliveryRejected(PROSE_LINEBREAK_GUIDANCE)
+    if error := prose_layout_error(prose):
+        raise DeliveryRejected(error)
     return cleaned
 
 
@@ -294,8 +294,11 @@ def register_send_msg(
 
         Each call sends one conversational beat, not the whole turn. Call again for the next complete part when
         answer, reason, advice, or a follow-up reaction naturally belong in separate messages. Keep a short answer
-        in one call; do not split every sentence or add filler. Newlines inside one call do not create new messages.
-        Use break segments or actual newlines for layout, never literal backslash-n in ordinary prose.
+        in one call; do not split every sentence or add filler. Newlines do not create new chat bubbles.
+        Multiple ordinary prose paragraphs/lines in one call are rejected, including across text/style/break
+        segments. Use separate calls for separate conversational beats, not newline layout or flattened prose.
+        Deliberate lists, code, tables and quotes stay intact. A trailing break before an image is fine when
+        the text and image form one beat. Use actual newlines or breaks for layout, never literal backslash-n.
         Intentional escapes belong in style=code segments or delimited inline/fenced code; recognizable literal
         filesystem paths and URLs are preserved, never escape-decoded. Invalid prose is rejected before any send.
         Text is literal, never Satori markup. Place mentions exactly where direct address belongs; use current_user
@@ -314,7 +317,9 @@ def register_send_msg(
             A privacy-safe confirmation and guidance, without message content or capability references.
         """
 
-        require_llm_chat_delivery()
+        delivery_state = require_llm_chat_delivery()
+        if delivery_state.delivery_attempts > delivery_state.confirmed_deliveries:
+            raise DeliveryRejected("A previous delivery outcome is unknown; do not send or resend")
         platform = str(session.account.platform).casefold()
         parsed = _clean_segments(segments, platform)
         delay = normalize_delivery_delay(delay_seconds)

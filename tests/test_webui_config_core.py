@@ -149,3 +149,49 @@ def test_optional_lookup_cannot_hide_a_literal_credential_default():
         validate_candidate(json.dumps(candidate).encode(), ENV)
     assert caught.value.code == "literal_secret"
     assert "hidden-credential" not in str(caught.value)
+
+
+@pytest.mark.parametrize("plugin_key", ["llm_chat", "plugins.llm_chat", "?llm_chat"])
+def test_contact_budget_preserves_operator_value_through_prepare_and_reload(plugin_key):
+    source = source_config()
+    candidate = deepcopy(source)
+    candidate["plugins"][plugin_key] = {
+        "companion_daily_contacts": 96,
+        "companion_daily_reflections": 48,
+        "companion_reflection_interval_minutes": 15,
+    }
+    saved = persisted_config(candidate, source)
+    restored = validate_candidate(json.dumps(saved).encode(), ENV)
+    assert restored["plugins"][plugin_key] == candidate["plugins"][plugin_key]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("companion_daily_contacts", -1),
+        ("companion_daily_contacts", True),
+        ("companion_daily_contacts", "96"),
+        ("companion_daily_reflections", 0),
+        ("companion_reflection_interval_minutes", 0),
+        ("companion_request_timeout", float("inf")),
+    ],
+)
+def test_invalid_companion_limits_are_rejected_before_config_is_prepared(field, value):
+    source = source_config()
+    candidate = deepcopy(source)
+    candidate["plugins"]["llm_chat"] = {field: value}
+    with pytest.raises(ConfigValidationError) as caught:
+        prepare_config(candidate, source, ENV)
+    assert caught.value.path == f"config.plugins.llm_chat.{field}"
+    assert source == source_config()
+
+
+def test_companion_limits_accept_yaml_numeric_wrappers_without_boolean_coercion():
+    from ruamel.yaml import YAML
+
+    candidate = YAML().load("plugins:\n  llm_chat:\n    companion_daily_contacts: 096\n")
+    prepared = prepare_config(candidate, {}, {})
+    assert prepared["plugins"]["llm_chat"]["companion_daily_contacts"] == 96
+    candidate["plugins"]["llm_chat"]["companion_daily_contacts"] = True
+    with pytest.raises(ConfigValidationError):
+        prepare_config(candidate, {}, {})

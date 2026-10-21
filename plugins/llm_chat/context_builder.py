@@ -28,7 +28,7 @@ from .core.user_turns import (
 from .session_manager import BaselineFingerprint
 from .core.model_audit import ADMIN_ONLY_EVENT_TYPES
 
-SYSTEM_SCAFFOLD_VERSION = "agent-context-v12-superuser-workshop"
+SYSTEM_SCAFFOLD_VERSION = "agent-context-v13-conversational-bubbles"
 AGENT_POLICY_VERSION = "agent-events-v3-context-grants"
 _ARCHIVED_CONTEXT_TERMS = (
     "上次",

@@ -12,7 +12,7 @@ from uuid import uuid4
 import fcntl
 import hashlib
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from datetime import datetime, timezone
 import subprocess
 from http.cookies import SimpleCookie
@@ -34,6 +34,11 @@ REQUEST_PATH = RUNTIME_DIR / "restart.request"
 LOCK_PATH = RUNTIME_DIR / "apply.lock"
 SERVICE_NAME = "chtholly.service"
 API_URL = "http://127.0.0.1:8120"
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+SYSTEMCTL_TIMEOUT = 45
+SYSTEMCTL_QUERY_TIMEOUT = 5
+MAX_STOP_TIMEOUT = 120
+STOP_WAIT_MARGIN = 15
 LOGGER = logging.getLogger("chtholly-config-apply")
 _WEBUI_SESSION = ""
 
@@ -126,19 +131,101 @@ def take_restart_request() -> str | None:
     return None
 
 
-def run_systemctl(*arguments: str) -> bool:
+def run_systemctl(*arguments: str, timeout: float = SYSTEMCTL_TIMEOUT) -> bool:
     try:
         result = subprocess.run(
             ["/usr/bin/systemctl", *arguments, SERVICE_NAME],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=45,
+            timeout=timeout,
         )
-    except subprocess.TimeoutExpired:
-        LOGGER.error("Service operation timed out: %s", arguments[0])
+    except (OSError, subprocess.TimeoutExpired):
+        LOGGER.error("Service operation failed or timed out: %s", arguments[0])
         return False
     return result.returncode == 0
+
+
+def service_properties() -> dict[str, str] | None:
+    properties = ("ActiveState", "SubState", "MainPID", "ControlPID", "Job", "ControlGroup", "TimeoutStopUSec")
+    try:
+        result = subprocess.run(
+            ["/usr/bin/systemctl", "show", "--all", "--property=" + ",".join(properties), SERVICE_NAME],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=SYSTEMCTL_QUERY_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        LOGGER.error("Service state could not be inspected")
+        return None
+    values = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    if result.returncode != 0 or not all(key in values for key in properties):
+        LOGGER.error("Service state inspection was incomplete")
+        return None
+    return values
+
+
+def stop_wait_timeout(value: str) -> float | None:
+    # systemctl renders TimeoutStopUSec as a timespan, for example "1min 30s".
+    units = {"us": 0.000001, "ms": 0.001, "s": 1, "min": 60, "h": 3600}
+    token = r"([0-9]+(?:\.[0-9]+)?)(us|ms|s|min|h)"
+    if re.fullmatch(r"(?:" + token + r"\s*)+", value) is None:
+        return None
+    seconds = sum(float(number) * units[unit] for number, unit in re.findall(token, value))
+    if not 0 < seconds <= MAX_STOP_TIMEOUT:
+        return None
+    return seconds + STOP_WAIT_MARGIN
+
+
+def service_quiescent(properties: Mapping[str, str]) -> bool:
+    if (
+        (properties["ActiveState"], properties["SubState"]) not in (("inactive", "dead"), ("failed", "failed"))
+        or properties["MainPID"] != "0"
+        or properties["ControlPID"] != "0"
+        or properties["Job"] not in ("", "0")
+    ):
+        return False
+    control_group = properties["ControlGroup"]
+    if not control_group:
+        # systemd has already removed the stopped unit's cgroup.
+        return True
+    group_path = PurePosixPath(control_group)
+    if not group_path.is_absolute() or group_path == PurePosixPath("/") or ".." in group_path.parts:
+        return False
+    group = CGROUP_ROOT / control_group.lstrip("/")
+    try:
+        # Unlike cgroup.procs, populated also accounts for descendant cgroups.
+        events = dict(line.split() for line in (group / "cgroup.events").read_text().splitlines())
+        return events.get("populated") == "0"
+    except FileNotFoundError:
+        try:
+            group.stat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return False
+    except (OSError, ValueError):
+        return False
+
+
+def stop_service() -> bool:
+    properties = service_properties()
+    timeout = stop_wait_timeout(properties["TimeoutStopUSec"]) if properties is not None else None
+    if timeout is None:
+        LOGGER.error("Service stop timeout is unavailable, unbounded, or exceeds the controller limit")
+        return False
+    stopped = run_systemctl("stop", timeout=timeout)
+    properties = service_properties()
+    if properties is None or not service_quiescent(properties):
+        LOGGER.error("Service stop did not establish a quiescent unit")
+        return False
+    if not stopped:
+        # A systemd stop timeout can kill every task yet report a failed stop job.
+        LOGGER.warning("Service stop reported failure, but the unit is fully stopped")
+    return True
 
 
 def _authenticate_webui() -> str:
@@ -191,7 +278,7 @@ def request_json(path: str) -> Mapping[str, object]:
 
 def health_ready(expected: str, required_plugins: set[str], *, require_synced: bool = False) -> bool:
     try:
-        if not run_systemctl("is-active", "--quiet"):
+        if not run_systemctl("is-active", "--quiet", timeout=SYSTEMCTL_QUERY_TIMEOUT):
             return False
         if request_json("/api/health").get("status") != "ok":
             return False
@@ -245,16 +332,15 @@ def plugin_config(data: Mapping[str, object]) -> Mapping[str, object]:
     return plugins if isinstance(plugins, Mapping) else {}
 
 
-def required_plugins(candidate: bytes, last_good: bytes) -> set[str]:
+def required_plugins(candidate: bytes) -> set[str]:
     current = plugin_config(validate_candidate(candidate, os.environ))
-    previous = plugin_config(validate_candidate(last_good, os.environ))
     required = {"llm", "webui_config_apply"}
     for key, value in current.items():
-        if key.startswith(("$", "~", "?")) or previous.get(key) == value:
+        if key.startswith(("$", "~", "?")):
             continue
         if isinstance(value, Mapping) and (value.get("$disable") or value.get("$optional")):
             continue
-        required.add(key)
+        required.add("$" if key.startswith(".") else key)
     return required
 
 
@@ -284,14 +370,14 @@ def restore_last_good(
     save_failed_candidate(failed)
     preserve_newer_candidate(failed, last_good)
     record_status("restarting", failed, request_id, reason=reason)
-    if not run_systemctl("stop"):
+    if not stop_service():
         record_status("rollback_failed", failed, request_id, reason="Bot could not be stopped for recovery")
         return False
     preserve_newer_candidate(failed, last_good)
     write_config(last_good)
     record_status("verifying", failed, request_id, reason=reason)
     started = run_systemctl("start")
-    recovered = started and wait_for_health(digest(last_good), {"llm", "webui_config_apply"})
+    recovered = started and wait_for_health(digest(last_good), required_plugins(last_good))
     if started and CONFIG_PATH.read_bytes() != last_good:
         return True
     if not recovered:
@@ -312,14 +398,14 @@ def apply_candidate(candidate: bytes, last_good: bytes, request_id: str | None, 
     if (
         candidate == last_good
         and not request_id
-        and health_ready(digest(candidate), {"llm", "webui_config_apply"}, require_synced=True)
+        and health_ready(digest(candidate), required_plugins(candidate), require_synced=True)
     ):
         NEXT_PATH.unlink(missing_ok=True)
         # Do not erase the previous failure message on our own rollback trigger.
         return True
     record_status("checking", candidate, request_id)
     try:
-        required = required_plugins(candidate, last_good)
+        required = required_plugins(candidate)
     except ValueError as exc:
         NEXT_PATH.unlink(missing_ok=True)
         return restore_last_good(candidate, last_good, request_id, reason=str(exc), rejected=True)
@@ -331,14 +417,14 @@ def apply_candidate(candidate: bytes, last_good: bytes, request_id: str | None, 
         LOGGER.info("Hot-applied configuration verified at %s", digest(candidate)[:12])
         return True
     record_status("restarting", candidate, request_id)
-    if not run_systemctl("stop"):
+    if not stop_service():
         record_status("rollback_failed", candidate, request_id, reason="Bot could not be stopped")
         return False
     latest = CONFIG_PATH.read_bytes()
     if latest != initial_disk:
         candidate = latest
         try:
-            required = required_plugins(candidate, last_good)
+            required = required_plugins(candidate)
         except ValueError as exc:
             NEXT_PATH.unlink(missing_ok=True)
             return restore_last_good(candidate, last_good, request_id, reason=str(exc), rejected=True)

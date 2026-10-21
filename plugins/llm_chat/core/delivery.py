@@ -14,7 +14,7 @@ from collections.abc import Mapping, Callable, Iterator, Sequence, Awaitable
 
 from .media import has_meaningful_text, strip_internal_media_records
 from .media_delivery import strip_media_unavailable_marker
-from .prose_linebreaks import PROSE_LINEBREAK_GUIDANCE, has_literal_prose_linebreaks
+from .prose_linebreaks import prose_layout_error
 
 DeliveryMode = Literal["segments"]
 _END_OF_RESPONSE = "[END_OF_RESPONSE]"
@@ -237,8 +237,8 @@ def normalize_delivery_text(text: object, *, field: str) -> str:
     normalized = _PREPARED_MEDIA_REF.sub("[media]", normalized)
     if not has_meaningful_text(normalized):
         raise DeliveryRejected("Delivery text is empty, punctuation-only, or reserved for internal control")
-    if has_literal_prose_linebreaks(normalized):
-        raise DeliveryRejected(PROSE_LINEBREAK_GUIDANCE)
+    if error := prose_layout_error(normalized):
+        raise DeliveryRejected(error)
     return normalized
 
 

@@ -5448,7 +5448,7 @@ async def test_native_finish_stops_queued_effects_with_matched_skipped_results(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rejection", ["empty", "partial", "refusal_budget"])
-async def test_native_rejected_finish_allows_corrective_tool_continuation(
+async def test_native_rejected_finish_continues_without_replaying_unknown_delivery(
     local_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
     rejection: str,
@@ -5501,12 +5501,15 @@ async def test_native_rejected_finish_allows_corrective_tool_continuation(
         )
 
     assert resolution.outcome == "automatic"
-    assert [str(message) for message in session.sent] == (["OK"] if rejection == "empty" else ["Prefix", "OK"])
+    expected = ["OK"] if rejection == "empty" else ["Prefix"] if rejection == "partial" else ["Prefix", "OK"]
+    assert [str(message) for message in session.sent] == expected
+    if rejection == "partial":
+        assert len(session.attempts) == state.delivery_attempts == 2
     assert response.content == "[END_OF_RESPONSE]"
     rejected = next(message for message in _tool_messages(payloads[1]) if message["tool_call_id"] == "finish")
     assert json.loads(rejected["content"])["ok"] is False
     corrective = next(message for message in _tool_messages(payloads[2]) if message["tool_call_id"] == "corrective")
-    assert json.loads(corrective["content"])["ok"] is True
+    assert json.loads(corrective["content"])["ok"] is (rejection != "partial")
 
 
 @pytest.mark.asyncio
@@ -6364,13 +6367,13 @@ async def test_send_msg_prose_guard_precedes_resolution_media_and_budget_reserva
                 assert session.attempts == []
                 assert len(resolve_media(session, [prepared["media_ref"]])) == 1
 
-            code = r"first\r\nsecond"
+            code = "first = r'\\r\\n'\n\nsecond = r'\\n'"
             inline = r"Regex `\r?\n` stays literal."
             literals = r" C:\new\notes.txt \\server\share\notes.txt https://example.com/new\notes"
             await send(
                 session,
                 segments=[
-                    {"type": "text", "text": "first\nsecond"},
+                    {"type": "text", "text": "- first\n- second"},
                     {"type": "break"},
                     {"type": "style", "style": "code", "text": code},
                     {"type": "media", "media_ref": prepared["media_ref"]},
@@ -6382,11 +6385,11 @@ async def test_send_msg_prose_guard_precedes_resolution_media_and_budget_reserva
         assert len(session.sent) == 1
         chain = session.sent[0]
         assert [type(element) for element in chain] == [Text, Br, Code, Image, Bold, Text]
-        assert str(chain[0]) == "first\nsecond"
+        assert str(chain[0]) == "- first\n- second"
         assert str(chain[2].children[0]) == code
         assert str(chain[4].children[0]) == inline
         assert str(chain[5]) == literals
-        assert state.delivered_texts == ["first\nsecond\n" + code + "[image]" + inline + literals]
+        assert state.delivered_texts == ["- first\n- second\n" + code + "[image]" + inline + literals]
         assert (state.text_messages, state.confirmed_deliveries, state.confirmed_media_deliveries) == (1, 1, 1)
 
 
@@ -6410,9 +6413,9 @@ async def test_native_send_msg_pause_continue_corrects_arguments_without_repeati
                     "send_msg",
                     {
                         "segments": [
-                            {"type": "text", "text": "first"},
+                            {"type": "text", "text": "- first"},
                             {"type": "break"},
-                            {"type": "text", "text": "second"},
+                            {"type": "text", "text": "- second"},
                         ]
                     },
                 )
@@ -6461,7 +6464,7 @@ async def test_native_send_msg_pause_continue_corrects_arguments_without_repeati
     assert results["malformed"]["ok"] is False
     assert "break segments" in results["malformed"]["error"]
     assert "style=code" in results["malformed"]["error"]
-    assert state.delivered_texts == ["Confirmed prefix", "first\nsecond"]
+    assert state.delivered_texts == ["Confirmed prefix", "- first\n- second"]
     assert len(session.attempts) == state.text_messages == state.confirmed_deliveries == 2
     assert [(event.tool_call_id, event.status, event.effect) for event in trace.events] == [
         ("prefix", "succeeded", "confirmed"),
@@ -6472,29 +6475,14 @@ async def test_native_send_msg_pause_continue_corrects_arguments_without_repeati
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("second_malformed", [False, True])
-async def test_malformed_native_final_response_gets_only_one_validated_tool_free_correction(
+async def test_malformed_native_final_response_gets_only_one_validated_tool_correction(
     local_modules, monkeypatch, second_malformed
 ):
     script = [
         _model_response(r"first\nsecond"),
-        _model_response(r"still\r\nmalformed" if second_malformed else "first\nsecond"),
+        _model_response(r"still\r\nmalformed" if second_malformed else "first and second"),
     ]
     payloads = _install_completion_script(monkeypatch, script)
-    monkeypatch.setattr(
-        local_modules.generation,
-        "get_model_config",
-        lambda *_args: SimpleNamespace(
-            name="final-model",
-            base_url="https://final.invalid/v1",
-            api_key="final-key",
-            extra={
-                "tools": ["forbidden"],
-                "tool_choice": "required",
-                "functions": ["forbidden"],
-                "function_call": "auto",
-            },
-        ),
-    )
     session = _DeliveryToolSession()
     async with (
         _temporary_plugin(
@@ -6526,9 +6514,9 @@ async def test_malformed_native_final_response_gets_only_one_validated_tool_free
                 await generate()
         else:
             response = await generate()
-            assert local_modules.generation.response_content(response) == "first\nsecond"
+            assert local_modules.generation.response_content(response) == "first and second"
         await turn.turn.persist_delivered_text()
-        expected = [] if second_malformed else ["first\nsecond"]
+        expected = [] if second_malformed else ["first and second"]
         assert [str(message) for message in session.sent] == expected
         assert turn.state.delivered_texts == expected
         assert turn.state.delivery_attempts == turn.state.confirmed_deliveries == len(expected)
@@ -6536,13 +6524,18 @@ async def test_malformed_native_final_response_gets_only_one_validated_tool_free
 
     assert len(payloads) == 2
     final_payload = payloads[-1]
-    assert all(key not in final_payload for key in ("tools", "tool_choice", "functions", "function_call"))
+    assert "tools" in final_payload
+    assert final_payload["parallel_tool_calls"] is False
+    assert final_payload["max_retries"] == 0
     assert final_payload["messages"][-1] == {"role": "assistant", "content": r"first\nsecond"}
 
 
 @pytest.mark.asyncio
 async def test_existing_no_tool_fallback_cannot_return_malformed_prose(local_modules, monkeypatch):
-    payloads = _install_completion_script(monkeypatch, [_model_response("   "), _model_response(r"bad\nfinal")])
+    payloads = _install_completion_script(
+        monkeypatch,
+        [_model_response("   "), _model_response(r"bad\nfinal"), _model_response(r"still\nmalformed")],
+    )
     monkeypatch.setattr(
         local_modules.generation,
         "get_model_config",
@@ -6564,8 +6557,9 @@ async def test_existing_no_tool_fallback_cannot_return_malformed_prose(local_mod
                 web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
                 delivery_state=state,
             )
-    assert len(payloads) == 2
-    assert "tools" not in payloads[-1]
+    assert len(payloads) == 3
+    assert "tools" not in payloads[1]
+    assert "tools" in payloads[-1]
     assert (state.text_messages, state.text_chars, state.delivery_attempts) == (0, 0, 0)
     assert session.attempts == []
 
@@ -6620,20 +6614,23 @@ async def test_malformed_final_after_unknown_delivery_preserves_prefix_without_c
 
 
 @pytest.mark.asyncio
-async def test_final_prose_guard_rejects_direct_lifecycle_bypass_before_budget(local_modules):
+@pytest.mark.parametrize("reply", [r"bad\r\nfinal", "First beat.\n\nSecond beat."])
+async def test_final_prose_guard_rejects_direct_lifecycle_bypass_before_budget(local_modules, reply):
     session = _DeliveryToolSession()
     async with _native_image_turn(local_modules, session) as turn:
         local_modules.delivery.mark_delivery_success(turn.state, ["Confirmed prefix"])
         before = (turn.state.text_messages, turn.state.text_chars, turn.state.delivery_attempts)
-        with pytest.raises(local_modules.delivery.DeliveryError, match="break segments"):
-            await turn.turn.deliver_model_reply(session, r"bad\r\nfinal")
+        with pytest.raises(local_modules.delivery.DeliveryError, match="separate send_msg call"):
+            await turn.turn.deliver_model_reply(session, reply)
         assert (turn.state.text_messages, turn.state.text_chars, turn.state.delivery_attempts) == before
         assert turn.state.delivered_texts == ["Confirmed prefix"]
         assert session.attempts == []
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("final_text", [r"first\nsecond", "Confirmed prefix", "A new idea"])
+@pytest.mark.parametrize(
+    "final_text", [r"first\nsecond", "First beat.\n\nAnother beat.", "Confirmed prefix", "A new idea"]
+)
 async def test_final_prose_after_confirmed_send_is_neither_corrected_nor_delivered(
     local_modules, monkeypatch, final_text
 ):
@@ -6720,3 +6717,487 @@ async def test_explicit_terminal_outcome_does_not_correct_unused_model_content(l
     assert resolution.outcome == outcome
     assert local_modules.generation.response_content(response) == r"Unused\ncandidate"
     assert state.delivered_texts == (["Already confirmed"] if outcome == "delivered" else [])
+
+
+@pytest.mark.asyncio
+async def test_packed_send_msg_layout_is_rejected_before_resolvers_and_reservations(local_modules, monkeypatch):
+    send_module = importlib.import_module("plugins.llm_chat.tools.send_msg")
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        runtime = harness.module
+        send = _tool_callable(runtime, "send_msg")
+        session = _DeliveryToolSession()
+        state = runtime.DeliveryState()
+
+        async def unexpected_participant(*_args):
+            raise AssertionError("Packed prose must be rejected before participant resolution")
+
+        def unexpected_media(*_args):
+            raise AssertionError("Packed prose must be rejected before media resolution")
+
+        monkeypatch.setattr(runtime.send_msg_context, "resolve_participant", unexpected_participant)
+        async with _prepared_delivery_scope(state):
+            prepared = prepare_media(
+                session,
+                Image(src="data:image/png;base64," + base64.b64encode(_PNG_BYTES).decode()),
+                byte_count=len(_PNG_BYTES),
+                tool_name="prepare_image",
+                history_marker="[image]",
+            )
+            variants = [
+                [{"type": "text", "text": "That makes me happy.\n\nPlease eat lunch; we can talk later."}],
+                [{"type": "text", "text": "First beat.\n"}, {"type": "text", "text": "Second beat."}],
+                [
+                    {"type": "text", "text": "First beat."},
+                    {"type": "break"},
+                    {"type": "style", "style": "bold", "text": "Second beat."},
+                ],
+                [
+                    {"type": "style", "style": "italic", "text": "First beat.\r"},
+                    {"type": "style", "style": "underline", "text": "\nSecond beat."},
+                ],
+                [
+                    {"type": "text", "text": "First beat.\n"},
+                    {"type": "style", "style": "code", "text": ""},
+                    {"type": "text", "text": "Second beat."},
+                ],
+                [{"type": "link", "url": "https://example.com", "text": "First beat.\nSecond beat."}],
+                [
+                    {"type": "text", "text": "First beat.\n"},
+                    {"type": "media", "media_ref": prepared["media_ref"]},
+                    {"type": "break"},
+                    {"type": "text", "text": "Second beat."},
+                ],
+            ]
+            for parts in variants:
+                with monkeypatch.context() as guard:
+                    guard.setattr(send_module, "resolve_media", unexpected_media)
+                    with pytest.raises(runtime.DeliveryError, match="separate send_msg call"):
+                        await send(
+                            session,
+                            [
+                                {"type": "mention", "target": "participant_0123abcdef"},
+                                *parts,
+                                {"type": "break"},
+                                {"type": "media", "media_ref": prepared["media_ref"]},
+                            ],
+                        )
+                assert resolve_media(session, [prepared["media_ref"]])[0].consumed is False
+                assert state.mode is None
+                assert (state.text_messages, state.text_chars, state.media_messages) == (0, 0, 0)
+                assert (state.delivery_attempts, state.confirmed_deliveries, state.delivered_texts) == (0, 0, [])
+                assert session.sent == session.attempts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Steps:\n- First item.\n  Wrapped item.\n\n- Second item.",
+        "```python\npattern = r'\\n'\n\nprint(pattern)\n```",
+        "Name | Value\n--- | ---\nfirst | 1\nsecond | 2",
+        "> First quoted paragraph.\n>\n> Second quoted paragraph.",
+    ],
+)
+async def test_send_msg_structured_layout_preserves_exact_bytes(local_modules, text):
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ) as harness:
+        session = _DeliveryToolSession()
+        state = harness.module.DeliveryState()
+        async with _prepared_delivery_scope(state):
+            await _tool_callable(harness.module, "send_msg")(session, [{"type": "text", "text": text}])
+        assert len(session.sent) == 1
+        assert session.sent[0].extract_plain_text().encode("utf-8") == text.encode("utf-8")
+        assert state.delivered_texts == [text]
+        assert state.text_chars == len(text)
+        assert state.text_messages == state.delivery_attempts == state.confirmed_deliveries == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry_path", ["tool", "final"])
+@pytest.mark.parametrize("media_layout", ["none", "same_beat", "separate"])
+async def test_native_packed_reply_correction_sends_distinct_bubbles_without_replaying_resources(
+    local_modules, monkeypatch, entry_path, media_layout
+):
+    from plugins.llm_chat.chat_completion import settle_chat_response
+
+    first = "That really made me happy."
+    second = "Please eat lunch; we can talk later."
+    packed_text = first + "\n\n" + second
+    session = _DeliveryToolSession()
+    preparations = []
+    prepared = {}
+    image_src = "data:image/png;base64," + base64.b64encode(_PNG_BYTES).decode()
+
+    async def prepare_reply_resource() -> dict[str, Any]:
+        """Prepare the exact reaction resource once without sending it."""
+        preparations.append(_PNG_BYTES)
+        prepared.update(
+            prepare_media(
+                session,
+                Image(src=image_src),
+                byte_count=len(_PNG_BYTES),
+                tool_name="prepare_reply_resource",
+                history_marker="[image]",
+            )
+        )
+        return prepared
+
+    def initial_reply(_payload):
+        assert preparations == [_PNG_BYTES]
+        if entry_path == "final":
+            return _model_response(packed_text)
+        segments = [{"type": "text", "text": packed_text}]
+        if media_layout != "none":
+            segments.extend([{"type": "break"}, {"type": "media", "media_ref": prepared["media_ref"]}])
+        return _model_response(tool_calls=[_tool_call("packed", "send_msg", {"segments": segments})])
+
+    def corrected_reply(payload):
+        assert "tools" in payload
+        assert session.sent == session.attempts == []
+        assert (turn.state.text_messages, turn.state.media_messages, turn.state.text_chars) == (0, 0, 0)
+        assert resolve_media(session, [prepared["media_ref"]])[0].consumed is False
+        previous_messages = _tool_messages(payload)
+        previous_results = {
+            message["tool_call_id"]: json.loads(message["content"]) for message in previous_messages
+        }
+        assert previous_results["prepare-once"]["ok"] is True
+        assert [message["tool_call_id"] for message in previous_messages].count("prepare-once") == 1
+        if entry_path == "tool":
+            assert previous_results["packed"]["ok"] is False
+            assert "separate send_msg call" in previous_results["packed"]["error"]
+        else:
+            assert payload["parallel_tool_calls"] is False
+            assert payload["max_retries"] == 0
+            assert _native_prepared_resources(payload)[0]["media_ref"] == prepared["media_ref"]
+            assert any(message.get("content") == packed_text for message in payload["messages"])
+        second_segments = [{"type": "text", "text": second}]
+        if media_layout == "same_beat":
+            second_segments.extend([{"type": "break"}, {"type": "media", "media_ref": prepared["media_ref"]}])
+        calls = [
+            _tool_call("first", "send_msg", {"segments": [{"type": "text", "text": first}]}),
+            _tool_call("second", "send_msg", {"segments": second_segments}),
+        ]
+        if media_layout == "separate":
+            calls.append(
+                _tool_call("image", "send_msg", {"segments": [{"type": "media", "media_ref": prepared["media_ref"]}]})
+            )
+        return _model_response(tool_calls=calls)
+
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(tool_calls=[_tool_call("prepare-once", "prepare_reply_resource", {})]),
+            initial_reply,
+            corrected_reply,
+            _model_response(packed_text),
+        ],
+    )
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ) as harness,
+        _native_image_turn(local_modules, session) as turn,
+    ):
+        prepare_reply_resource.__module__ = harness.module.__name__
+        harness.dispatcher(prepare_reply_resource)
+        runner = llm_service_module.run_llm_tools
+        pauses = []
+
+        async def observe_pause(response, *args, **kwargs):
+            assert response.is_paused
+            pauses.append([requirement.tool_execution.tool_call_id for requirement in response.active_requirements])
+            return await runner(response, *args, **kwargs)
+
+        monkeypatch.setattr(llm_service_module, "run_llm_tools", observe_pause)
+        active = SimpleNamespace(lifecycle=turn.turn, delivery_state=turn.state, resolution=turn.resolution)
+
+        async def complete(response):
+            assert await settle_chat_response(session, active, response, None) == "completed"
+
+        await local_modules.generation.generate_chat_response(
+            [{"role": "user", "content": "Reply naturally to this update."}],
+            system="Own conversational bubble boundaries and preserve completed work.",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=turn.state,
+            media_intent=MediaIntent(),
+            resolution=turn.resolution,
+            tool_trace=turn.turn.tool_trace,
+            agent_events=turn.turn.agent_events,
+            complete=complete,
+        )
+        expected = [first, second + ("\n[image]" if media_layout == "same_beat" else "")]
+        if media_layout == "separate":
+            expected.append("[image]")
+        assert turn.state.delivered_texts == expected
+        assert turn.history == ["\n\n".join(expected)]
+        assert len(session.sent) == len(session.attempts) == turn.state.confirmed_deliveries == len(expected)
+        assert turn.state.delivery_attempts == len(expected)
+        assert turn.state.text_messages == turn.state.confirmed_text_deliveries == 2
+        assert turn.state.text_chars == sum(map(len, expected))
+        assert turn.state.media_messages == turn.state.confirmed_media_deliveries == int(media_layout != "none")
+        assert preparations == [_PNG_BYTES]
+        images = [image for chain in session.sent for image in chain.get(Image)]
+        assert [image.src for image in images] == ([] if media_layout == "none" else [image_src])
+        sends = [event for event in turn.turn.tool_trace.events if event.tool_name == "send_msg"]
+        assert [(event.tool_call_id, event.status, event.effect) for event in sends] == (
+            ([("packed", "rejected", "none")] if entry_path == "tool" else [])
+            + [("first", "succeeded", "confirmed"), ("second", "succeeded", "confirmed")]
+            + ([("image", "succeeded", "confirmed")] if media_layout == "separate" else [])
+        )
+        decision = next(event for event in turn.turn.agent_events.events if event.event_type == "response_decision")
+        assert decision.payload["final_text_discarded"] is True
+    expected_pauses = [["prepare-once"]] + ([["packed"]] if entry_path == "tool" else [])
+    expected_pauses.append(["first", "second"] + (["image"] if media_layout == "separate" else []))
+    assert pauses == expected_pauses
+    assert len(payloads) == 4
+    confirmations = [
+        json.loads(message["content"])["data"]
+        for message in _tool_messages(payloads[-1])
+        if message["tool_call_id"] in {"first", "second", "image"}
+    ]
+    assert [confirmation["messages"] for confirmation in confirmations] == [1] * len(expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_reply", ["Still one beat.\n\nStill another beat.", r"Malformed\nprose"])
+async def test_packed_final_reply_has_one_bounded_validated_tool_correction(local_modules, monkeypatch, second_reply):
+    payloads = _install_completion_script(
+        monkeypatch,
+        [_model_response("First beat.\n\nSecond beat."), _model_response(second_reply)],
+    )
+    session = _DeliveryToolSession()
+    state = local_modules.delivery.DeliveryState()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        with pytest.raises(RuntimeError, match="separate send_msg call"):
+            await local_modules.generation.generate_chat_response(
+                [{"role": "user", "content": "Reply naturally."}],
+                system="Use separate calls for conversational beats.",
+                model="test-model",
+                channel_id="12345",
+                ctx=_tool_context(session),
+                web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+                delivery_state=state,
+            )
+    assert len(payloads) == 2
+    assert all("tools" in payload for payload in payloads)
+    assert payloads[-1]["parallel_tool_calls"] is False
+    assert payloads[-1]["max_retries"] == 0
+    assert state.mode is None
+    assert (state.text_messages, state.text_chars, state.delivery_attempts) == (0, 0, 0)
+    assert session.sent == session.attempts == []
+
+
+@pytest.mark.asyncio
+async def test_packed_tool_free_fallback_reenables_native_delivery_correction(local_modules, monkeypatch):
+    from plugins.llm_chat.chat_completion import settle_chat_response
+
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response("   "),
+            _model_response("First beat.\n\nSecond beat."),
+            _model_response(
+                tool_calls=[
+                    _tool_call("first", "send_msg", {"segments": [{"type": "text", "text": "First beat."}]}),
+                    _tool_call("second", "send_msg", {"segments": [{"type": "text", "text": "Second beat."}]}),
+                ]
+            ),
+            _model_response("[END_OF_RESPONSE]"),
+        ],
+    )
+    monkeypatch.setattr(
+        local_modules.generation,
+        "get_model_config",
+        lambda *_args: SimpleNamespace(name="final-model", base_url="https://final.invalid", api_key="key", extra={}),
+    )
+    session = _DeliveryToolSession()
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ),
+        _native_image_turn(local_modules, session) as turn,
+    ):
+        active = SimpleNamespace(lifecycle=turn.turn, delivery_state=turn.state, resolution=turn.resolution)
+
+        async def complete(response):
+            assert await settle_chat_response(session, active, response, None) == "completed"
+
+        await local_modules.generation.generate_chat_response(
+            [{"role": "user", "content": "Reply naturally."}],
+            system="Deliver conversational beats separately.",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=turn.state,
+            resolution=turn.resolution,
+            tool_trace=turn.turn.tool_trace,
+            complete=complete,
+        )
+        assert turn.state.delivered_texts == ["First beat.", "Second beat."]
+        assert turn.state.delivery_attempts == turn.state.confirmed_deliveries == 2
+        assert turn.history == ["First beat.\n\nSecond beat."]
+    assert len(payloads) == 4
+    assert "tools" not in payloads[1]
+    assert "tools" in payloads[2]
+    assert payloads[2]["parallel_tool_calls"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["fail_attempts", "unavailable_attempts"])
+@pytest.mark.parametrize("failed_attempt", [1, 2])
+async def test_layout_correction_never_resends_failed_or_unknown_transport(
+    local_modules, monkeypatch, failure, failed_attempt
+):
+    from plugins.llm_chat.chat_completion import settle_chat_response
+
+    packed = "First beat.\n\nSecond beat."
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(packed),
+            _model_response(
+                tool_calls=[
+                    _tool_call("first", "send_msg", {"segments": [{"type": "text", "text": "First beat."}]}),
+                    _tool_call("second", "send_msg", {"segments": [{"type": "text", "text": "Second beat."}]}),
+                    _tool_call("retry", "send_msg", {"segments": [{"type": "text", "text": "Second beat."}]}),
+                ]
+            ),
+            _model_response(packed),
+        ],
+    )
+    session = _DeliveryToolSession(**{failure: {failed_attempt}})
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ),
+        _native_image_turn(local_modules, session) as turn,
+    ):
+        active = SimpleNamespace(lifecycle=turn.turn, delivery_state=turn.state, resolution=turn.resolution)
+
+        async def complete(response):
+            expected_status = "partial" if failed_attempt == 2 else "failed"
+            assert await settle_chat_response(session, active, response, None) == expected_status
+
+        await local_modules.generation.generate_chat_response(
+            [{"role": "user", "content": "Reply naturally."}],
+            system="Never replay uncertain sends.",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=turn.state,
+            resolution=turn.resolution,
+            tool_trace=turn.turn.tool_trace,
+            complete=complete,
+        )
+        expected = ["First beat."] if failed_attempt == 2 else []
+        assert [str(chain) for chain in session.sent] == turn.state.delivered_texts == expected
+        assert turn.history == expected
+        assert len(session.attempts) == turn.state.text_messages == turn.state.delivery_attempts == failed_attempt
+        assert turn.state.confirmed_deliveries == len(expected)
+        events = turn.turn.tool_trace.events
+        assert [(event.status, event.effect) for event in events] == (
+            ([("succeeded", "confirmed")] if failed_attempt == 2 else [])
+            + [("failed", "unknown")]
+            + [("rejected", "none")] * (3 - failed_attempt)
+        )
+    assert len(payloads) == 3
+    results = {message["tool_call_id"]: json.loads(message["content"]) for message in _tool_messages(payloads[-1])}
+    assert results["retry"]["ok"] is False
+    assert "unknown" in results["retry"]["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Steps:\n- Keep the original bytes.\n  Continue the same item.\n\n- Send one structured answer.",
+        "Use this code:\n```python\npattern = r'\\n'\n\nprint(pattern)\n```\nIt prints the literal pattern.",
+        "Result | Meaning\n--- | ---\nconfirmed | sent\nprepared | not sent",
+        "> First quoted paragraph.\n>\n> Second quoted paragraph.\nThat is the quoted passage.",
+    ],
+)
+async def test_native_structured_final_reply_needs_no_layout_correction(local_modules, monkeypatch, text):
+    from plugins.llm_chat.chat_completion import settle_chat_response
+
+    payloads = _install_completion_script(monkeypatch, [_model_response(text)])
+    session = _DeliveryToolSession()
+    async with (
+        _temporary_plugin(
+            config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+            module_path=_TOOL_RUNTIME_PATH,
+        ),
+        _native_image_turn(local_modules, session) as turn,
+    ):
+        active = SimpleNamespace(lifecycle=turn.turn, delivery_state=turn.state, resolution=turn.resolution)
+
+        async def complete(response):
+            assert await settle_chat_response(session, active, response, None) == "completed"
+
+        await local_modules.generation.generate_chat_response(
+            [{"role": "user", "content": "Give a structured answer."}],
+            system="Keep deliberate structured layout intact.",
+            model="test-model",
+            channel_id="12345",
+            ctx=_tool_context(session),
+            web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+            delivery_state=turn.state,
+            resolution=turn.resolution,
+            tool_trace=turn.turn.tool_trace,
+            complete=complete,
+        )
+        assert [str(message).encode("utf-8") for message in session.sent] == [text.encode("utf-8")]
+        assert turn.state.delivered_texts == turn.history == [text]
+        assert turn.state.text_chars == len(text)
+        assert turn.state.text_messages == turn.state.delivery_attempts == turn.state.confirmed_deliveries == 1
+    assert len(payloads) == 1
+
+
+@pytest.mark.asyncio
+async def test_packed_final_after_unknown_send_never_starts_layout_recovery(local_modules, monkeypatch):
+    payloads = _install_completion_script(
+        monkeypatch,
+        [
+            _model_response(
+                tool_calls=[
+                    _tool_call("unknown", "send_msg", {"segments": [{"type": "text", "text": "Unconfirmed."}]})
+                ]
+            ),
+            _model_response("First beat.\n\nSecond beat."),
+        ],
+    )
+    session = _DeliveryToolSession(fail_attempts={1})
+    state = local_modules.delivery.DeliveryState()
+    async with _temporary_plugin(
+        config={"tts_enabled": False, "allowed_commands": [], "web_search_enabled": False},
+        module_path=_TOOL_RUNTIME_PATH,
+    ):
+        with pytest.raises(RuntimeError, match="Delivery outcome is unknown"):
+            await local_modules.generation.generate_chat_response(
+                [{"role": "user", "content": "Reply naturally."}],
+                system="Never correct an unknown send.",
+                model="test-model",
+                channel_id="12345",
+                ctx=_tool_context(session),
+                web_limits=local_modules.web_access.DEFAULT_WEB_ACCESS_LIMITS,
+                delivery_state=state,
+            )
+    assert len(payloads) == 2
+    assert len(session.attempts) == state.delivery_attempts == state.text_messages == 1
+    assert state.confirmed_deliveries == 0
+    assert state.delivered_texts == session.sent == []

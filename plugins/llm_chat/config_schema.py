@@ -41,7 +41,8 @@ _CONFIG_SCHEMA_TEXT = {
         "\u6bcf\u65e5\u81ea\u4e3b\u8054\u7cfb\u4e0a\u9650",
         (
             "\u9632\u5931\u63a7\u515c\u5e95\u4e0a\u9650\uff0c\u9ed8\u8ba4\u6bcf\u6210\u5458\u6bcf\u8303\u56f4"
-            "\u6bcf\u65e5 24 \u6b21\uff0c\u4e0d\u662f\u53d1\u9001\u76ee\u6807\uff1b\u652f\u6301 0\u201348\uff0c"
+            "\u6bcf\u65e5 24 \u6b21\uff0c\u4e0d\u662f\u53d1\u9001\u76ee\u6807\uff1b"
+            "\u53ef\u8bbe\u4e3a\u4efb\u610f\u975e\u8d1f\u6574\u6570\uff0c"
             "\u5305\u542b\u7ed3\u679c\u672a\u77e5\u7684\u53d1\u9001\uff1b"
             "0 \u4ec5\u5173\u95ed\u4e3b\u52a8\u8054\u7cfb\u3002"
         ),
@@ -287,7 +288,7 @@ def localize_llm_chat_schema(schema: dict[str, Any]) -> dict[str, Any]:
         title, description = _CONFIG_SCHEMA_TEXT[name]
         property_schema["title"] = title
         property_schema["description"] = description
-    properties["companion_daily_contacts"].update(minimum=0, maximum=48)
+    properties["companion_daily_contacts"].update(minimum=0)
     properties["channel_context_messages"].update(minimum=1, maximum=50)
     persona_ref = properties["personas"]["additionalProperties"]["$ref"]
     persona_name = persona_ref.rsplit("/", 1)[-1].replace("~1", "/").replace("~0", "~")

@@ -1,4 +1,4 @@
-"""Chat generation orchestration with bounded tool-free recovery."""
+"""Chat generation orchestration with bounded final-response recovery."""
 
 from __future__ import annotations
 
@@ -61,10 +61,7 @@ from .core.media_delivery import (
 from .model_audit_runtime import model_audit_scope, capture_completion
 from .channel_message_refs import ChannelMessageReferences, channel_message_scope
 from .core.artifact_access import is_artifact_request
-from .core.prose_linebreaks import (
-    PROSE_LINEBREAK_GUIDANCE,
-    has_literal_prose_linebreaks,
-)
+from .core.prose_linebreaks import prose_layout_error
 from .native_image_delivery import capture_native_images_scope
 from .core.tool_trace_safety import sanitize_json
 
@@ -86,12 +83,14 @@ _VISIBLE_RETRY_SUFFIX = (
     "本轮没有发生任何发送尝试。不得再调用工具，不得输出媒体发送记录或 [END_OF_RESPONSE]，"
     "也不得声称已经发送媒体；请直接给出一条自然、可见且符合当前对话的最终回复。"
 )
-_LINEBREAK_RETRY_SUFFIX = (
-    "The candidate final response contains malformed literal line-break escapes in ordinary prose. "
-    "Correct only the unsent final response using actual newlines; intentional escapes must stay byte-identical "
-    "inside delimited inline/fenced code or recognizable literal paths/URLs. "
-    "Do not call tools or repeat any already confirmed prefix. "
-    "If nothing remains to add, return [END_OF_RESPONSE]."
+_LAYOUT_RETRY_SUFFIX = (
+    "The candidate final response was not sent because its decoded prose layout is invalid. "
+    "Correct only this unsent reply. Use send_msg separately for each natural beat, retaining deliberate "
+    "structured formatting and any single-beat text/image chain. Do not flatten paragraphs to evade validation. "
+    "All tools remain available, but continue from completed results: never replay earlier tools, writes, "
+    "confirmed sends or unknown delivery attempts. Reuse prepared media; never regenerate it for this correction. "
+    "After confirmed send_msg output, finish with [END_OF_RESPONSE] or finish_turn(delivered), not duplicate final "
+    "text. If only one short beat is needed, one valid final reply is allowed."
 )
 _MEDIA_RECOVERY_SUFFIX = (
     "The user requested media but none was confirmed. Prepare the needed resource if absent, then call send_msg "
@@ -150,9 +149,13 @@ def _suppress_native_images(response: object) -> None:
         return
 
 
-def has_visible_reply(response: object) -> bool:
+def _final_reply_text(response: object) -> str:
     visible = strip_media_unavailable_marker(strip_internal_media_records(response_content(response))).strip()
-    return has_meaningful_text(strip_trailing_end_of_response(visible))
+    return strip_trailing_end_of_response(visible)
+
+
+def has_visible_reply(response: object) -> bool:
+    return has_meaningful_text(_final_reply_text(response))
 
 
 def _requires_visible_reply(delivery_state: DeliveryState) -> bool:
@@ -453,6 +456,56 @@ async def _recover_requested_media(
     raise RuntimeError(_MEDIA_RECOVERY_FAILED)
 
 
+async def _recover_reply_layout(
+    messages: list[ChatMessage],
+    *,
+    system: str,
+    model: str | None,
+    delivery_state: DeliveryState,
+    guidance: str,
+    request_timeout: float,
+    agent_events: AgentTurnRecorder | None,
+    tool_trace: ToolTraceRecorder,
+) -> GenericResponse[None]:
+    """Continue an unsent invalid reply once, preserving real tool results and resources."""
+
+    if delivery_state.delivery_attempts > delivery_state.confirmed_deliveries:
+        raise RuntimeError("Delivery outcome is unknown; do not correct or replay the send attempt")
+    suffix = f"{guidance}\n{_LAYOUT_RETRY_SUFFIX}"
+    prepared = list_prepared_media()
+    if prepared:
+        suffix += "\nPrepared resources (not sent): " + json.dumps(prepared, ensure_ascii=False)
+    _LOGGER.warning("unsent final response has invalid prose layout; correcting once with tools")
+    with agno_tool_call_limit_scope(_MEDIA_RECOVERY_TOOL_CALL_LIMIT):
+        response = cast(
+            GenericResponse[None],
+            await _record_model_attempt(
+                lambda: _generate_with_tools(
+                    messages,
+                    system=f"{system}\n\n{suffix}",
+                    model=model,
+                    request_timeout=request_timeout,
+                    max_retries=0,
+                    parallel_tool_calls=False,
+                ),
+                recorder=agent_events,
+                tool_trace=tool_trace,
+                model_name=model or "default",
+            ),
+        )
+    resolution = current_turn_resolution()
+    if resolution is not None and resolution.explicit:
+        _suppress_native_images(response)
+        return response
+    if delivery_state.confirmed_deliveries or delivery_state.delivery_attempts:
+        return response
+    if error := prose_layout_error(_final_reply_text(response)):
+        raise RuntimeError(error)
+    if not has_visible_reply(response):
+        raise RuntimeError(_FINALIZATION_FAILED)
+    return response
+
+
 async def generate_chat_response(
     messages: list[ChatMessage],
     *,
@@ -691,9 +744,9 @@ async def generate_chat_response(
             if (
                 not (active_resolution is not None and active_resolution.explicit)
                 and not delivery_state.confirmed_deliveries
-                and has_literal_prose_linebreaks(response_content(response))
+                and (guidance := prose_layout_error(_final_reply_text(response)))
             ):
-                transcript = _response_transcript(response, messages)
+                transcript = _response_transcript(response, finalization_transcript or messages)
                 content = response_content(response)
                 if (
                     not transcript
@@ -701,10 +754,16 @@ async def generate_chat_response(
                     or transcript[-1].get("content") != content
                 ):
                     transcript = [*transcript, {"role": "assistant", "content": content}]
-                response = await finalize(
+                finalization_transcript = transcript
+                response = await _recover_reply_layout(
                     transcript,
-                    suffix=f"{_FINALIZATION_SUFFIX}\n{_LINEBREAK_RETRY_SUFFIX}",
-                    require_visible=_requires_visible_reply(delivery_state),
+                    system=system,
+                    model=model,
+                    delivery_state=delivery_state,
+                    guidance=guidance,
+                    request_timeout=generation_timeout,
+                    agent_events=agent_events,
+                    tool_trace=active_tool_trace,
                 )
             if complete is None:
                 return response
@@ -768,8 +827,6 @@ async def _finalize_without_tools(
     completion = cast(litellm.ModelResponse, response)
     content = response_content(completion)
     native_images = response_images(completion)
-    if has_literal_prose_linebreaks(content):
-        raise RuntimeError(PROSE_LINEBREAK_GUIDANCE)
     if (not content.strip() and not native_images) or (
         require_visible and not has_visible_reply(completion) and not native_images
     ):

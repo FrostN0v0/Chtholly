@@ -31,6 +31,10 @@ def controller(tmp_path, monkeypatch):
         monkeypatch.setattr(module, name, tmp_path / filename)
     monkeypatch.setattr(module, "STATE_DIR", tmp_path)
     monkeypatch.setattr(module, "grp", SimpleNamespace(getgrnam=lambda name: SimpleNamespace(gr_gid=0)))
+    monkeypatch.setattr(module, "CGROUP_ROOT", tmp_path / "cgroups")
+    cgroup = module.CGROUP_ROOT / "controller-test.service"
+    cgroup.mkdir(parents=True)
+    (cgroup / "cgroup.events").write_text("populated 1\nfrozen 0\n")
 
     def config(model):
         return json.dumps({"plugins": {"llm": {"models": [{"name": model}]}, "webui_config_apply": {}}}).encode()
@@ -51,6 +55,26 @@ def controller(tmp_path, monkeypatch):
         sleeps=[],
         promotions=[],
         status_filter=None,
+        now=0.0,
+        cgroup=cgroup,
+        unit={
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "100",
+            "ControlPID": "0",
+            "Job": "",
+            "ControlGroup": "/controller-test.service",
+            "TimeoutStopUSec": "1min 30s",
+        },
+        stop_duration=0,
+        stop_returncode=0,
+        stop_overrides={},
+        stop_populated=False,
+        after_stop=None,
+        start_results=[],
+        config_writes=[],
+        show_returncode=0,
+        show_timeout=False,
     )
 
     def atomic_write(path, data, **kwargs):
@@ -58,17 +82,60 @@ def controller(tmp_path, monkeypatch):
             state.promotions.append(data)
         path.write_bytes(data)
 
-    def systemctl(operation, *arguments):
+    def systemctl(command, *, timeout, **kwargs):
+        assert command[0] == "/usr/bin/systemctl"
+        assert command[-1] == module.SERVICE_NAME
+        operation = command[1]
+        if operation == "show":
+            if state.show_timeout:
+                state.now += timeout
+                raise module.subprocess.TimeoutExpired(command, timeout)
+            return module.subprocess.CompletedProcess(
+                command,
+                state.show_returncode,
+                stdout="\n".join(f"{key}={value}" for key, value in state.unit.items()),
+            )
         state.operations.append(operation)
         if operation == "is-active":
-            return state.active
+            return module.subprocess.CompletedProcess(command, 0 if state.active else 3)
         if operation == "stop":
+            state.unit.update(ActiveState="deactivating", SubState="stop-sigterm", Job="17")
+            if state.stop_duration > timeout:
+                state.now += timeout
+                raise module.subprocess.TimeoutExpired(command, timeout)
+            state.now += state.stop_duration
             state.active = False
-        elif operation == "start":
+            state.unit.update(ActiveState="inactive", SubState="dead", MainPID="0", ControlPID="0", Job="")
+            state.unit.update(state.stop_overrides)
+            (state.cgroup / "cgroup.events").write_text(
+                f"populated {int(state.stop_populated)}\nfrozen 0\n"
+            )
+            if state.after_stop is not None:
+                state.after_stop()
+            return module.subprocess.CompletedProcess(command, state.stop_returncode)
+        assert operation == "start"
+        # A start must never race the old stop job or surviving descendant tasks.
+        assert module.service_quiescent(state.unit)
+        started = state.start_results.pop(0) if state.start_results else True
+        if started:
             state.active = True
             state.health = "ok"
             state.running = module.digest(module.CONFIG_PATH.read_bytes())
-        return True
+            state.unit.update(ActiveState="active", SubState="running", MainPID="101")
+            state.cgroup.mkdir(parents=True, exist_ok=True)
+            (state.cgroup / "cgroup.events").write_text("populated 1\nfrozen 0\n")
+        return module.subprocess.CompletedProcess(command, 0 if started else 1)
+
+    def sleep(seconds):
+        state.sleeps.append(seconds)
+        state.now += seconds
+
+    write_config = module.write_config
+
+    def checked_write_config(data):
+        assert module.service_quiescent(state.unit)
+        state.config_writes.append(data)
+        write_config(data)
 
     def request_json(path):
         if path == "/api/health":
@@ -89,10 +156,331 @@ def controller(tmp_path, monkeypatch):
 
     monkeypatch.setattr(module, "atomic_write", atomic_write)
     state.real_request_json = module.request_json
-    monkeypatch.setattr(module, "run_systemctl", systemctl)
+    monkeypatch.setattr(module.subprocess, "run", systemctl)
+    monkeypatch.setattr(module, "write_config", checked_write_config)
     monkeypatch.setattr(module, "request_json", request_json)
-    monkeypatch.setattr(module.time, "sleep", state.sleeps.append)
+    monkeypatch.setattr(module.time, "sleep", sleep)
+    monkeypatch.setattr(module.time, "monotonic", lambda: state.now)
     return state
+
+
+@pytest.mark.parametrize("duration", [70, 90])
+def test_long_graceful_stop_finishes_before_staged_config_is_written(controller, duration):
+    state = controller
+    module = state.module
+    module.CONFIG_PATH.write_bytes(state.old)
+    state.running = module.digest(state.old)
+    state.stop_duration = duration
+
+    assert module.apply_candidate(state.candidate, state.old, "d" * 32, staged=True)
+
+    assert state.now == duration + 4
+    assert state.operations[:2] == ["stop", "start"]
+    assert state.config_writes == [state.candidate]
+    assert state.running == module.digest(state.candidate)
+    assert module.CONFIG_PATH.read_bytes() == state.candidate
+    assert module.LAST_GOOD_PATH.read_bytes() == state.candidate
+    assert json.loads(module.STATUS_PATH.read_bytes())["result"] == "applied"
+
+
+def test_systemd_timeout_kill_can_start_only_after_failed_unit_is_empty(controller):
+    state = controller
+    module = state.module
+    state.stop_duration = 90
+    state.stop_returncode = 1
+    state.stop_overrides = {"ActiveState": "failed", "SubState": "failed"}
+
+    assert module.apply_candidate(state.candidate, state.old, "e" * 32, staged=False)
+
+    assert state.now == 94
+    assert state.operations[:2] == ["stop", "start"]
+    assert state.running == module.digest(state.candidate)
+    assert module.LAST_GOOD_PATH.read_bytes() == state.candidate
+    assert json.loads(module.STATUS_PATH.read_bytes())["result"] == "applied"
+
+
+def test_unfinished_stop_fails_closed_without_replacing_config_or_starting(controller):
+    state = controller
+    module = state.module
+    module.CONFIG_PATH.write_bytes(state.old)
+    state.stop_duration = 150
+
+    assert not module.apply_candidate(state.candidate, state.old, "f" * 32, staged=True)
+
+    assert state.now == 105
+    assert state.unit["ActiveState"] == "deactivating"
+    assert state.unit["MainPID"] == "100"
+    assert state.unit["Job"] == "17"
+    assert (state.cgroup / "cgroup.events").read_text().startswith("populated 1\n")
+    assert state.operations == ["stop"]
+    assert state.config_writes == []
+    assert module.CONFIG_PATH.read_bytes() == state.old
+    assert module.LAST_GOOD_PATH.read_bytes() == state.old
+    assert not (module.STATE_DIR / "pending.yml").exists()
+    assert json.loads(module.STATUS_PATH.read_bytes())["result"] == "rollback_failed"
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+@pytest.mark.parametrize(
+    ("overrides", "populated"),
+    [
+        ({"ActiveState": "deactivating", "SubState": "stop-sigterm"}, False),
+        ({"ActiveState": "active", "SubState": "running"}, False),
+        ({"MainPID": "100"}, False),
+        ({"ControlPID": "101"}, False),
+        ({"Job": "18"}, False),
+        ({}, True),
+    ],
+)
+def test_stop_command_result_never_substitutes_for_quiescence(controller, returncode, overrides, populated):
+    state = controller
+    module = state.module
+    module.CONFIG_PATH.write_bytes(state.old)
+    state.stop_returncode = returncode
+    state.stop_overrides = overrides
+    state.stop_populated = populated
+
+    assert not module.apply_candidate(state.candidate, state.old, "1" * 32, staged=True)
+
+    assert state.operations == ["stop"]
+    assert state.config_writes == []
+    assert module.CONFIG_PATH.read_bytes() == state.old
+    assert module.LAST_GOOD_PATH.read_bytes() == state.old
+    assert state.promotions == []
+    assert json.loads(module.STATUS_PATH.read_bytes())["result"] == "rollback_failed"
+
+
+def test_recovery_cannot_replace_config_while_a_descendant_survives(controller):
+    state = controller
+    module = state.module
+    state.stop_returncode = 1
+    state.stop_overrides = {"ActiveState": "failed", "SubState": "failed"}
+    state.stop_populated = True
+
+    assert not module.restore_last_good(
+        state.candidate, state.old, None, reason="Rejected candidate", rejected=True
+    )
+
+    assert state.operations == ["stop"]
+    assert state.config_writes == []
+    assert module.CONFIG_PATH.read_bytes() == state.candidate
+    assert module.LAST_GOOD_PATH.read_bytes() == state.old
+    assert json.loads(module.STATUS_PATH.read_bytes())["result"] == "rollback_failed"
+
+
+@pytest.mark.parametrize("removed", [False, True])
+def test_missing_cgroup_events_is_safe_only_when_the_entire_group_is_gone(controller, removed):
+    state = controller
+    module = state.module
+
+    def remove_events():
+        (state.cgroup / "cgroup.events").unlink()
+        if removed:
+            state.cgroup.rmdir()
+
+    state.after_stop = remove_events
+    assert module.apply_candidate(state.candidate, state.old, "2" * 32, staged=False) is removed
+    assert ("start" in state.operations) is removed
+    assert module.LAST_GOOD_PATH.read_bytes() == (state.candidate if removed else state.old)
+
+
+@pytest.mark.parametrize("defect", ["failed_probe", "timed_out_probe", "missing_property", "final_probe"])
+def test_uninspectable_unit_fails_closed(controller, defect):
+    state = controller
+    module = state.module
+    module.CONFIG_PATH.write_bytes(state.old)
+    if defect == "failed_probe":
+        state.show_returncode = 1
+    elif defect == "timed_out_probe":
+        state.show_timeout = True
+    elif defect == "missing_property":
+        state.unit.pop("ControlPID")
+    else:
+        state.after_stop = lambda: setattr(state, "show_returncode", 1)
+
+    assert not module.apply_candidate(state.candidate, state.old, "3" * 32, staged=True)
+
+    assert "start" not in state.operations
+    assert state.config_writes == []
+    assert module.CONFIG_PATH.read_bytes() == state.old
+    assert module.LAST_GOOD_PATH.read_bytes() == state.old
+
+
+@pytest.mark.parametrize("timeout", ["infinity", "0", "0s", "121s", "3min", "invalid"])
+def test_unbounded_or_unsupported_stop_timeout_does_not_begin_restart(controller, timeout):
+    state = controller
+    module = state.module
+    state.unit["TimeoutStopUSec"] = timeout
+
+    assert not module.apply_candidate(state.candidate, state.old, "4" * 32, staged=False)
+
+    assert state.operations == []
+    assert state.config_writes == []
+    assert module.CONFIG_PATH.read_bytes() == state.candidate
+    assert module.LAST_GOOD_PATH.read_bytes() == state.old
+
+
+def test_failed_candidate_and_recovery_starts_remain_failure(controller):
+    state = controller
+    module = state.module
+    state.start_results = [False, False]
+
+    assert not module.apply_candidate(state.candidate, state.old, "5" * 32, staged=False)
+
+    assert state.operations == ["stop", "start", "stop", "start"]
+    assert not state.active
+    assert state.config_writes == [state.old]
+    assert module.CONFIG_PATH.read_bytes() == state.old
+    assert module.LAST_GOOD_PATH.read_bytes() == state.old
+    assert state.promotions == []
+    assert json.loads(module.STATUS_PATH.read_bytes())["result"] == "rollback_failed"
+
+
+def test_runtime_failure_after_long_stop_still_restores_and_verifies_last_good(controller):
+    state = controller
+    module = state.module
+    state.stop_duration = 90
+
+    def missing_plugin(status):
+        if state.running == module.digest(state.candidate):
+            status["loaded_config_keys"] = ["llm"]
+
+    state.status_filter = missing_plugin
+    assert module.apply_candidate(state.candidate, state.old, "6" * 32, staged=False)
+
+    assert state.now == 274
+    assert state.operations.count("stop") == 2
+    assert state.operations.count("start") == 2
+    assert state.config_writes == [state.old]
+    assert state.running == module.digest(state.old)
+    assert module.CONFIG_PATH.read_bytes() == state.old
+    assert module.LAST_GOOD_PATH.read_bytes() == state.old
+    assert json.loads(module.STATUS_PATH.read_bytes())["result"] == "rolled_back"
+
+
+def test_save_during_stop_replaces_the_superseded_candidate(controller):
+    state = controller
+    module = state.module
+    state.after_stop = lambda: module.CONFIG_PATH.write_bytes(state.newer)
+
+    assert module.apply_candidate(state.candidate, state.old, "7" * 32, staged=False)
+
+    assert state.running == module.digest(state.newer)
+    assert state.config_writes == []
+    assert module.CONFIG_PATH.read_bytes() == state.newer
+    assert module.LAST_GOOD_PATH.read_bytes() == state.newer
+    assert json.loads(module.STATUS_PATH.read_bytes())["candidate_sha256"] == module.digest(state.newer)
+
+
+def test_recovery_preserves_a_newer_save_that_arrives_during_stop(controller):
+    state = controller
+    module = state.module
+    state.start_results = [False, True]
+
+    def save_during_recovery():
+        if state.operations.count("stop") == 2:
+            module.CONFIG_PATH.write_bytes(state.newer)
+
+    state.after_stop = save_during_recovery
+    assert module.apply_candidate(state.candidate, state.old, "8" * 32, staged=False)
+
+    assert module.NEXT_PATH.read_bytes() == state.newer
+    assert module.CONFIG_PATH.read_bytes() == state.old
+    assert module.LAST_GOOD_PATH.read_bytes() == state.old
+    assert state.running == module.digest(state.old)
+    assert json.loads(module.STATUS_PATH.read_bytes())["result"] == "rolled_back"
+
+
+def test_healthy_last_good_without_explicit_request_does_not_restart(controller):
+    state = controller
+    module = state.module
+    module.LAST_GOOD_PATH.write_bytes(state.candidate)
+
+    assert module.apply_candidate(state.candidate, state.candidate, None, staged=False)
+
+    assert state.operations == ["is-active"]
+    assert state.config_writes == []
+    assert state.promotions == []
+    assert not module.STATUS_PATH.exists()
+
+
+def test_native_builtin_group_uses_runtime_owner_for_readiness(controller):
+    state = controller
+    module = state.module
+    source = json.loads(state.candidate)
+    source["plugins"][".localdata"] = {"app_name": "controller-test"}
+    source["plugins"][".scheduler"] = {}
+    state.candidate = json.dumps(source).encode()
+    module.CONFIG_PATH.write_bytes(state.candidate)
+    module.LAST_GOOD_PATH.write_bytes(state.candidate)
+    state.running = module.digest(state.candidate)
+
+    def loaded_builtin_owner(status):
+        status["loaded_config_keys"].append("$")
+
+    state.status_filter = loaded_builtin_owner
+    assert module.apply_candidate(state.candidate, state.candidate, None, staged=False)
+    assert "stop" not in state.operations
+    assert module.CONFIG_PATH.read_bytes() == state.candidate
+
+
+def test_unchanged_required_plugin_missing_after_restart_is_not_accepted(controller):
+    state = controller
+    module = state.module
+    old = json.loads(state.old)
+    candidate = json.loads(state.candidate)
+    old["plugins"]["llm_chat"] = {"companion_daily_contacts": 96}
+    candidate["plugins"]["llm_chat"] = {"companion_daily_contacts": 96}
+    state.old = json.dumps(old).encode()
+    state.candidate = json.dumps(candidate).encode()
+    module.CONFIG_PATH.write_bytes(state.candidate)
+    module.LAST_GOOD_PATH.write_bytes(state.old)
+
+    def plugin_startup(status):
+        if state.running == module.digest(state.old):
+            status["loaded_config_keys"].append("llm_chat")
+
+    state.status_filter = plugin_startup
+    assert module.apply_candidate(state.candidate, state.old, "a" * 32, staged=False)
+    assert state.promotions == []
+    assert state.operations.count("start") == 2
+    assert module.CONFIG_PATH.read_bytes() == state.old
+    assert json.loads(module.STATUS_PATH.read_bytes())["result"] == "rolled_back"
+
+
+def test_same_config_still_requires_chat_plugin_before_skipping_restart(controller):
+    state = controller
+    module = state.module
+    candidate = json.loads(state.candidate)
+    candidate["plugins"]["llm_chat"] = {"companion_daily_contacts": 96}
+    state.candidate = json.dumps(candidate).encode()
+    module.CONFIG_PATH.write_bytes(state.candidate)
+    module.LAST_GOOD_PATH.write_bytes(state.candidate)
+    state.running = module.digest(state.candidate)
+
+    def plugin_recovered(status):
+        if "start" in state.operations:
+            status["loaded_config_keys"].append("llm_chat")
+
+    state.status_filter = plugin_recovered
+    assert module.apply_candidate(state.candidate, state.candidate, None, staged=False)
+    assert state.operations.count("start") == 1
+    assert json.loads(module.STATUS_PATH.read_bytes())["result"] == "applied"
+
+
+def test_newer_live_save_takes_precedence_over_staged_recovery_candidate(controller):
+    state = controller
+    module = state.module
+    module.CONFIG_PATH.write_bytes(state.newer)
+    module.NEXT_PATH.write_bytes(state.candidate)
+
+    assert module.apply_candidate(state.candidate, state.old, "9" * 32, staged=True)
+
+    assert state.running == module.digest(state.newer)
+    assert state.config_writes == []
+    assert module.CONFIG_PATH.read_bytes() == state.newer
+    assert module.LAST_GOOD_PATH.read_bytes() == state.newer
+    assert not module.NEXT_PATH.exists()
 
 
 def test_hot_save_requires_five_checks_and_promotes_without_restart(controller):

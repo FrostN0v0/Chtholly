@@ -523,7 +523,6 @@ def test_limits_have_safe_defaults_exact_names_and_immutable_values() -> None:
         {"daily_contacts": 3.0},
         {"daily_contacts": "3"},
         {"daily_contacts": -1},
-        {"daily_contacts": 49},
         {"daily_reflections": 0},
         {"daily_reflections": 49},
         {"reflection_interval_minutes": 9},

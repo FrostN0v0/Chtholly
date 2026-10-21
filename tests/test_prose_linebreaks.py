@@ -6,7 +6,12 @@ import json
 
 import pytest
 
-from plugins.llm_chat.core.prose_linebreaks import has_literal_prose_linebreaks
+from plugins.llm_chat.core.prose_linebreaks import (
+    PACKED_PROSE_GUIDANCE,
+    has_packed_prose,
+    prose_layout_error,
+    has_literal_prose_linebreaks,
+)
 
 
 @pytest.mark.parametrize(
@@ -74,3 +79,55 @@ def test_json_decoding_not_json_source_spelling_defines_the_boundary() -> None:
     assert not has_literal_prose_linebreaks(actual)
     assert has_literal_prose_linebreaks(literal)
     assert has_literal_prose_linebreaks(crlf_literal)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "That makes me happy.\n\nPlease eat lunch; we can talk later.",
+        "First beat.\nSecond beat.",
+        "First beat.\r\n\r\nSecond beat.",
+        "First beat.\u2028Second beat.",
+        "First beat.\n\ufffc\nSecond beat.",
+        "```text\nA code block.\n```\nFirst beat.\n\nSecond beat.",
+        "- A list item.\nFirst beat.\n\nSecond beat.",
+        "Name | Value\n--- | ---\na | b\n\nFirst beat.\nSecond beat.",
+        "I like this | that.\nPlease eat lunch.",
+    ],
+)
+def test_ordinary_prose_beats_require_separate_bubbles(text: str) -> None:
+    assert has_packed_prose(text)
+    assert prose_layout_error(text) == PACKED_PROSE_GUIDANCE
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "A short answer. Another sentence in the same beat.",
+        "One detailed explanation stays in one line. " * 40,
+        "A caption.\n\n\ufffc",
+        "Here is the code:\n```python\nfirst()\n\nsecond()\n```\nIt uses the existing API.",
+        "~~~text\nFirst paragraph in code.\n\nSecond paragraph in code.\n~~~",
+        "The value is `first\nsecond` literally.",
+        "Steps:\n- First item.\n  Wrapped continuation.\n\n- Second item.\nDone.",
+        "1. First item.\n2. Second item.",
+        "# Summary\nA complete explanation.\n## Details\nA second section.",
+        (
+            "# Report\nA first section paragraph.\n\nAnother paragraph explaining the same section."
+            "\n## Details\nMore evidence."
+        ),
+        "Report\n======\nA first section paragraph.\n\nAnother section paragraph.",
+        "Name | Value\n--- | :---:\na | b\nc | d",
+        "| Name | Value |\n| --- | --- |\n| a | b |",
+        "| Name | Value |\n| a | b |\n| c | d |",
+        "+----+-----+\n| A  | B   |\n+----+-----+\n| 1  | 2   |\n+----+-----+",
+        "┌───┬───┐\n│ A │ B │\n├───┼───┤\n│ 1 │ 2 │\n└───┴───┘",
+        "> First quoted paragraph.\n>\n> Second quoted paragraph.\nMy response.",
+        "    first()\n\n    second()",
+    ],
+)
+def test_single_beats_and_deliberate_structured_layout_are_preserved(text: str) -> None:
+    original = text.encode("utf-8")
+    assert not has_packed_prose(text)
+    assert prose_layout_error(text) is None
+    assert text.encode("utf-8") == original

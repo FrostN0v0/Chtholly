@@ -15,7 +15,7 @@ import pytest
 from arclet.entari import BasicConfModel
 from arclet.entari.config import EntariConfig, config_model_validate
 
-from utils.webui_config_core import ConfigValidationError
+from utils.webui_config_core import ConfigValidationError, validate_candidate
 from plugins.webui_config_apply import saving
 from plugins.webui_config_apply.model_reload import ModelReloadBindings, prepare_model_reload
 
@@ -47,6 +47,7 @@ def yaml_save(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setattr(EntariConfig, "instance", getattr(EntariConfig, "instance", None), raising=False)
+    monkeypatch.setattr(EntariConfig, "_inited", False)
     config = EntariConfig(path, env_vars={})
     runtime = config_model_validate(Config, {"models": [{"name": "old-model"}]})
     plug = SimpleNamespace(config=config.plugin["llm"], _is_disposed=False)
@@ -112,3 +113,31 @@ def test_file_close_failure_cannot_publish_new_model_state(yaml_save, monkeypatc
     assert env.path.read_bytes() == original
     assert env.state_path.read_bytes() == state
     assert env.runtime.models[0].name == "old-model"
+
+
+@pytest.mark.parametrize("value", [-1, True, "96"])
+def test_invalid_companion_budget_does_not_change_saved_or_running_config(yaml_save, value):
+    env = yaml_save
+    original = env.path.read_bytes()
+    inode = env.path.stat().st_ino
+    running = env.saver.running_sha256
+    with pytest.raises(ConfigValidationError) as caught:
+        env.saver.save_section("plugins:llm_chat", {"companion_daily_contacts": value})
+    assert caught.value.path == "config.plugins.llm_chat.companion_daily_contacts"
+    assert env.path.read_bytes() == original
+    assert env.path.stat().st_ino == inode
+    assert env.saver.running_sha256 == running
+    assert "llm_chat" not in EntariConfig.instance.plugin
+
+
+def test_operator_contact_budget_is_saved_without_clamping(yaml_save):
+    env = yaml_save
+    env.saver.restart_available = lambda: True
+    chosen = {
+        "companion_daily_contacts": 96,
+        "companion_daily_reflections": 48,
+        "companion_reflection_interval_minutes": 15,
+    }
+    result = env.saver.save_section("plugins:llm_chat", chosen)
+    assert result["restart_required"] is True
+    assert validate_candidate(env.path.read_bytes(), {})["plugins"]["llm_chat"] == chosen

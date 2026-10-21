@@ -3642,16 +3642,16 @@ async def test_media_unavailable_marker_is_not_sent_or_persisted(
 
 
 @pytest.mark.asyncio
-async def test_multiline_final_reply_stays_in_one_message(
+async def test_structured_multiline_final_reply_stays_in_one_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with _temporary_chat_handler() as harness:
         module = harness.module
         records = _install_handler_stubs(monkeypatch, module)
-        session = _ChatSession("return two visible chat beats")
+        session = _ChatSession("return one structured chat beat")
 
         async def generate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
-            return _handler_response("first beat\nsecond beat")
+            return _handler_response("- first item\n- second item")
 
         monkeypatch.setattr(module, "generate_chat_response", generate)
 
@@ -3659,8 +3659,8 @@ async def test_multiline_final_reply_stays_in_one_message(
 
         assistant_rows = [row for row in records.appended if row[3] == "assistant"]
         assert result is BLOCK
-        assert session.sent == ["first beat\nsecond beat"]
-        assert assistant_rows == [("group-B", "", "bot", "assistant", "first beat\nsecond beat")]
+        assert session.sent == ["- first item\n- second item"]
+        assert assistant_rows == [("group-B", "", "bot", "assistant", "- first item\n- second item")]
 
 
 @pytest.mark.asyncio

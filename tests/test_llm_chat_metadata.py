@@ -77,7 +77,7 @@ def test_unresolvable_persona_configuration_is_rejected(invalid: dict[str, objec
         config_model_validate(LLMChatConfig, invalid)
 
 
-@pytest.mark.parametrize("cap", [0, 24, 48])
+@pytest.mark.parametrize("cap", [0, 24, 48, 49, 96, 1000])
 def test_contact_caps_are_accepted_by_native_schema_and_runtime(cap: int, schema_owner) -> None:
     schema = schema_owner.config_schema()
     validator = Draft202012Validator(schema["properties"]["companion_daily_contacts"])
@@ -93,7 +93,7 @@ def test_contact_caps_are_accepted_by_native_schema_and_runtime(cap: int, schema
     assert not contact_ready(now, contacts_today=cap, **facts)
 
 
-@pytest.mark.parametrize("cap", [-1, 49, True])
+@pytest.mark.parametrize("cap", [-1, True, 1.5, "96"])
 def test_unsupported_contact_caps_are_rejected_by_native_schema_and_runtime(cap: object, schema_owner) -> None:
     schema = schema_owner.config_schema()
     validator = Draft202012Validator(schema["properties"]["companion_daily_contacts"])

@@ -16,8 +16,10 @@ class TextSegment(_Segment):
     type: Literal["text"]
     text: str = Field(
         description=(
-            "Literal text, never parsed as markup. Use break segments or actual newlines for layout, not literal "
-            "backslash-n/backslash-r-backslash-n. Put intentional escapes in style=code or delimited code."
+            "Literal text, never parsed as markup. Separate conversational beats require separate send_msg calls; "
+            "multiple ordinary prose lines/paragraphs in one call are rejected. Actual newlines or break segments "
+            "are only for deliberate structured layout, never literal backslash-n/backslash-r-backslash-n. "
+            "Put intentional escapes in style=code or delimited code."
         )
     )
 
@@ -33,7 +35,7 @@ class MentionSegment(_Segment):
 class LinkSegment(_Segment):
     type: Literal["link"]
     url: str = Field(description="Public HTTP(S) destination, without credentials or private hosts.")
-    text: str = Field(description="Literal visible link label; layout uses break segments or actual newlines.")
+    text: str = Field(description="Literal visible link label; line breaks are layout, not separate chat bubbles.")
 
 
 class EmojiSegment(_Segment):
@@ -50,6 +52,8 @@ class MediaSegment(_Segment):
 
 
 class BreakSegment(_Segment):
+    """A layout line break inside one bubble, never a separate conversational message."""
+
     type: Literal["break"]
 
 
@@ -58,8 +62,8 @@ class StyleSegment(_Segment):
     style: Literal["bold", "italic", "underline", "strike", "spoiler", "code"]
     text: str = Field(
         description=(
-            "Literal styled text, without nested markup. Only style=code explicitly permits arbitrary literal "
-            "escape sequences; other styles use break segments or actual newlines for layout."
+            "Literal styled text, without nested markup. Non-code styles cannot pack separate prose paragraphs "
+            "or lines into one bubble. Only style=code explicitly permits arbitrary literal escape sequences."
         )
     )
 

@@ -17,7 +17,7 @@ _LIMIT_RANGES = {
     "request_timeout": (5.0, 180.0),
     "reflection_interval_minutes": (10, 1440),
     "daily_reflections": (1, 48),
-    "daily_contacts": (0, 48),
+    "daily_contacts": (0, None),
     "contact_interval_minutes": (5, 10080),
     "member_idle_days": (1, 90),
     "input_chars": (1000, 64000),
@@ -44,8 +44,9 @@ def _limit_value(name: str, value: object) -> int | float:
         if type(value) is not int:
             raise CompanionPolicyError(f"{name} must be an integer, not a boolean or numeric string")
         normalized = value
-    if not minimum <= normalized <= maximum:
-        raise CompanionPolicyError(f"{name} must be between {minimum} and {maximum}")
+    if normalized < minimum or (maximum is not None and normalized > maximum):
+        bound = f"at least {minimum}" if maximum is None else f"between {minimum} and {maximum}"
+        raise CompanionPolicyError(f"{name} must be {bound}")
     return normalized
 
 

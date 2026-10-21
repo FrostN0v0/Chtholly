@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+from dataclasses import fields
 from collections.abc import Mapping
+
+from utils.companion_core import CompanionLimits, CompanionPolicyError, normalize_limits
 
 from .templates import TEMPLATE, environment_reference, expand_environment_template, restore_environment_templates
 
@@ -111,6 +114,23 @@ def _validate_models(plugin: Mapping[str, object], path: str, env: Mapping[str, 
             raise ConfigValidationError("Model extra must be an object", path=f"{location}.extra")
 
 
+def _validate_companion_limits(plugin: Mapping[str, object], path: str) -> None:
+    for field in fields(CompanionLimits):
+        key = f"companion_{field.name}"
+        if key not in plugin:
+            continue
+        value = plugin[key]
+        # Round-trip YAML scalar wrappers must retain numeric, not boolean, semantics.
+        if isinstance(value, int) and not isinstance(value, bool):
+            value = int(value)
+        elif isinstance(value, float):
+            value = float(value)
+        try:
+            normalize_limits({field.name: value})
+        except CompanionPolicyError as exc:
+            raise ConfigValidationError(str(exc), path=f"{path}.{key}") from None
+
+
 def _validate_values(value: object, env: Mapping[str, str], path: str, active: set[int]) -> None:
     container = isinstance(value, (Mapping, list))
     if container:
@@ -189,6 +209,8 @@ def validate_config(config: Mapping[str, object], env: Mapping[str, str]) -> Map
             raise ConfigValidationError("Plugin configuration must be an object", path=location)
         if _is_llm(key):
             _validate_models(plugin, location, env)
+        elif isinstance(key, str) and key.lstrip("~?").split(".")[-1] == "llm_chat":
+            _validate_companion_limits(plugin, location)
     _validate_values(config, env, "config", set())
     return config
 

@@ -453,8 +453,8 @@ def test_final_supplement_uses_remaining_total_budget() -> None:
     assert _state_snapshot(ordinary) == before
 
 
-@pytest.mark.parametrize("text", ["first beat\nsecond beat", "Steps:\n- first\n- second"])
-def test_multiline_final_text_reserves_one_message_without_splitting(text: str) -> None:
+@pytest.mark.parametrize("text", ["Steps:\n- first\n- second", "```text\nfirst beat\nsecond beat\n```"])
+def test_structured_final_text_reserves_one_message_without_splitting(text: str) -> None:
     state = DeliveryState(limits=_limits(max_text_messages=1, max_text_chars_per_message=40, max_total_text_chars=40))
 
     assert reserve_final_text_messages(state, text) == (text,)
@@ -463,6 +463,15 @@ def test_multiline_final_text_reserves_one_message_without_splitting(text: str) 
     before = _state_snapshot(state)
     with pytest.raises(DeliveryError):
         reserve_final_text_messages(state, "another message")
+    assert _state_snapshot(state) == before
+
+
+@pytest.mark.parametrize("text", ["first beat\nsecond beat", "first\r\nsecond", "first\n\nsecond"])
+def test_packed_final_prose_rejection_preserves_all_delivery_budget(text: str) -> None:
+    state = DeliveryState()
+    before = _state_snapshot(state)
+    with pytest.raises(DeliveryError):
+        reserve_final_text_messages(state, text)
     assert _state_snapshot(state) == before
 
 
@@ -611,15 +620,15 @@ def test_malformed_final_prose_is_rejected_before_reserving_any_budget(text: str
 @pytest.mark.parametrize(
     "text",
     [
-        "first\nsecond",
-        "first\r\nsecond",
+        "- first\n- second",
+        "- first\r\n- second",
         r"Use `\r?\n` literally.",
         "```regex\n\\r?\\n\n```",
         r"Open C:\new\notes.txt or \\server\share\notes.txt.",
         r"See https://example.com/new\notes?q=\n next.",
     ],
 )
-def test_final_text_keeps_actual_newlines_and_intentional_literals_byte_identical(text: str) -> None:
+def test_final_text_keeps_structured_newlines_and_intentional_literals_byte_identical(text: str) -> None:
     state = DeliveryState()
 
     assert reserve_final_text_messages(state, text) == (text,)
