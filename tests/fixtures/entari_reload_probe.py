@@ -30,6 +30,8 @@ SCENARIOS = (
     "bindings",
     "niche",
     "watcher",
+    "readiness",
+    "schema",
 )
 
 
@@ -458,13 +460,29 @@ async def subtree_reload() -> None:
             assert find_plugin(name) is plugin, name
         assert find_plugin("tree.child.candidate") is None
 
+    names.append("tree.child.added")
     for version in ("v2", "v3"):
-        write_plugin("tree/child/__init__.py", package_source("tree.child", ("grandchild",), version))
+        write_plugin("tree/child/__init__.py", package_source("tree.child", ("grandchild", "added"), version))
         write_plugin("tree/child/grandchild.py", handlers("grandchild", version))
+        write_plugin("tree/child/added.py", handlers("added", version))
         assert await reload_subplugin("tree.child")
         assert find_plugin("tree") is active["tree"]
         assert find_plugin("tree.sibling") is active["tree.sibling"]
-        await assert_behavior(expected | {"child": version, "grandchild": version})
+        expected |= {"child": version, "grandchild": version, "added": version}
+        await assert_behavior(expected)
+        promoted = {key: find_plugin(key) for key in names}
+        for child in ("grandchild", "added", "candidate"):
+            write_plugin(f"tree/child/{child}.py", handlers(child, "bad"))
+        label = f"subtree-promoted-{version}"
+        write_plugin(
+            "tree/child/__init__.py",
+            package_source("tree.child", ("grandchild", "added", "candidate"), "bad") + failure(label),
+        )
+        await reject_candidate("tree.child", label, subplugin=True)
+        await assert_behavior(expected)
+        for key, owner in promoted.items():
+            assert find_plugin(key) is owner, key
+        assert find_plugin("tree.child.candidate") is None
     await unload_tree("tree", [*names, "tree.child.candidate"], list(expected))
 
 
@@ -587,6 +605,10 @@ def niche_source(version: str) -> str:
         + "@get_plugin().niche('child')\ndef child(plugin):\n"
         + indent(child, "    ")
         + "\nchild.exec_apply()\n"
+        + "\ndef add_late_niche():\n"
+        + "    @get_plugin().niche('late')\n    def late(plugin):\n"
+        + indent(handlers("niche_late", version), "        ")
+        + "\n    late.exec_apply()\n"
     )
 
 
@@ -605,14 +627,19 @@ async def niche_reload() -> None:
         active = {key: find_plugin(key) for key in names}
         assert all(owner is not None for owner in active.values())
         await assert_behavior(dict.fromkeys(commands, version))
+        active[name].module.add_late_niche()
+        active[f"{name}.late"] = find_plugin(f"{name}.late")
+        assert active[f"{name}.late"] is not None
+        expected = dict.fromkeys([*commands, "niche_late"], version)
+        await assert_behavior(expected)
         for attempt in (1, 2):
             label = f"niche-{version}-{attempt}"
             write_plugin(f"{name}.py", niche_source("bad") + failure(label))
             await reject_candidate(name, label)
             for key, owner in active.items():
                 assert find_plugin(key) is owner, key
-            await assert_behavior(dict.fromkeys(commands, version))
-    await unload_tree(name, names, commands)
+            await assert_behavior(expected)
+    await unload_tree(name, [*names, f"{name}.late"], [*commands, "niche_late"])
 
 
 async def watcher_reload(app) -> None:
@@ -688,6 +715,117 @@ async def watcher_reload(app) -> None:
         await stop_manager(manager, running)
 
 
+async def readiness(app) -> None:
+    from creart import it
+    from launart import Launart
+    from arclet.entari.plugin import load_plugin, unload_plugin_async
+    from arclet.entari.plugin.service import plugin_service
+
+    source = """from typing import Annotated
+import asyncio
+from sqlalchemy import text
+from arclet.entari import Ready, plugin, add_service
+from arclet.entari.core import on_stage
+from graia.amnesia.builtins.sqla import SqlalchemyService
+
+entered = asyncio.Event()
+initializing = asyncio.Event()
+release = asyncio.Event()
+finished = asyncio.Event()
+observations = []
+
+class DelayedDatabase(SqlalchemyService):
+    async def initialize(self):
+        initializing.set()
+        await release.wait()
+        binds = await super().initialize()
+        async with self.engines[""].begin() as connection:
+            await connection.execute(text("CREATE TABLE readiness (value INTEGER)"))
+            await connection.execute(text("INSERT INTO readiness VALUES (7)"))
+        return binds
+
+def attach_database():
+    return add_service(DelayedDatabase("sqlite+aiosqlite:///readiness.sqlite3", {"echo": False}))
+
+@plugin.listen(Ready, priority=-110)
+async def before():
+    entered.set()
+
+@plugin.listen(Ready, priority=-100)
+async def migrate(database: Annotated[SqlalchemyService, on_stage("blocking")]):
+    result = await database.execute(text("SELECT value FROM readiness"))
+    observations.append(("database", database.status.blocking, result.scalar_one()))
+
+@plugin.listen(Ready, priority=-90)
+async def following():
+    observations.append(("following",))
+    finished.set()
+"""
+    manager = it(Launart)
+    manager.add_component(app)
+    running = asyncio.create_task(manager.launch())
+    try:
+        await asyncio.wait_for(plugin_service.status.wait_for("blocking"), 10)
+        write_plugin("readiness_probe.py", source)
+        result = load_plugin("readiness_probe", config={})
+        assert result, result
+        module = result.plugin.module
+        await asyncio.wait_for(module.entered.wait(), 5)
+        assert module.observations == []
+        database = module.attach_database()
+        await asyncio.wait_for(module.initializing.wait(), 5)
+        assert module.observations == []
+        module.release.set()
+        await asyncio.wait_for(module.finished.wait(), 5)
+        assert module.observations == [("database", True, 7), ("following",)]
+        assert await unload_plugin_async("readiness_probe")
+        try:
+            manager.get_component(database.id)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Unloaded database remains available for injection")
+    finally:
+        await stop_manager(manager, running)
+
+
+async def generated_schema() -> None:
+    from jsonschema import ValidationError, Draft202012Validator
+    from arclet.entari.config import EntariConfig
+    from arclet.entari.plugin import load_plugin, unload_plugin_async
+
+    source = """from arclet.entari import BasicConfModel, metadata
+
+class Profile(BasicConfModel):
+    name: str
+    prompt: str
+
+class Config(BasicConfModel):
+    profiles: dict[str, Profile]
+
+metadata(name="Nested configuration", config=Config)
+"""
+    write_plugin("schema_probe.py", source)
+    result = load_plugin("schema_probe", config={})
+    assert result, result
+    try:
+        EntariConfig.instance.generate_schema([result.plugin])
+        schema = json.loads(Path("entari.schema.json").read_text(encoding="utf-8"))
+        validator = Draft202012Validator(schema)
+        validator.validate(
+            {"basic": {}, "plugins": {"schema_probe": {"profiles": {"main": {"name": "Main", "prompt": "Valid"}}}}}
+        )
+        for invalid in ({"name": "Main"}, {"name": 42, "prompt": "Invalid"}):
+            try:
+                validator.validate({"basic": {}, "plugins": {"schema_probe": {"profiles": {"main": invalid}}}})
+            except ValidationError:
+                pass
+            else:
+                raise AssertionError("Generated full-file schema accepted an invalid nested profile")
+    finally:
+        assert await unload_plugin_async("schema_probe")
+
+
 async def run(scenario: str, config_path: Path) -> None:
     from launart import Service
     from arclet.entari import Entari, AiohttpClientService
@@ -730,6 +868,10 @@ async def run(scenario: str, config_path: Path) -> None:
         await niche_reload()
     elif scenario == "watcher":
         await watcher_reload(app)
+    elif scenario == "readiness":
+        await readiness(app)
+    elif scenario == "schema":
+        await generated_schema()
 
 
 def main() -> int:

@@ -15,7 +15,7 @@
 ## 技术栈与关键依赖
 
 - **Python**: >= 3.11, < 3.12；启动器、依赖锁、CI 与工坊沙箱统一使用 Python 3.11，移除 3.10 支持。旧沙箱镜像及验收报告必须重建，其他解释器版本须完成协议栈及 LLM 验证后再开放。
-- **Bot 框架**: [arclet-entari](https://pypi.org/project/arclet-entari/) 基于官方 `0.19.0`，安装仓库内的 `0.19.0+chtholly.1`，完整保留 `arclet-entari[full]`。补丁继续修复 staged reload 所有权、Scope 隔离、整棵子树的失败回滚、命令 formatter、Service 清理、import 别名重绑定及 Schema 片段代际归属；移除旧 CPython 3.10 回退。`scripts/build_patched_wheel.py --package entari` 按官方 wheel 与 SHA-256 重建；`--package webui` 生成 `1.0.3+chtholly.5`，保留连接隔离、认证初始化重试和主题，改用原生原子重载与 `Plugin.config_schema`。WebUI 枚举 `$` 根的直接 niche 而非根本身，配置读写映射到原 `.commands`、`.localdata` 等键，切换一个内建插件不得禁用全部兄弟。HTMLRender 上界仍以精确 uv override 保留 `full,pydantic`；不修改第三方安装目录，升级必须验证真实渲染、失败替换、重复重载和卸载。
+- **Bot 框架**: [arclet-entari](https://pypi.org/project/arclet-entari/) 基于官方 `0.19.1`，安装仓库内的 `0.19.1+chtholly.1`，完整保留 `arclet-entari[full]`。采用上游 staged 事务、导入绑定隔离/回滚、子插件平级挂载和完整配置 Schema 引用修复；剩余补丁只保护 Scope 隔离、子树替换及失败回滚、命令 formatter、Service 对象清理、import 别名重绑定与 Schema 片段代际归属，不恢复旧的嵌套父插件所有权模型。`scripts/build_patched_wheel.py --package entari` 按官方 wheel 与 SHA-256 重建；`--package webui` 生成 `1.0.3+chtholly.5`，保留连接隔离、认证初始化重试和主题，使用原生原子重载与 `Plugin.config_schema`。WebUI 枚举 `$` 根的直接 niche 而非根本身，配置读写映射到原 `.commands`、`.localdata` 等键，切换一个内建插件不得禁用全部兄弟。HTMLRender 上界仍以精确 uv override 保留 `full,pydantic`；不修改第三方安装目录，升级必须验证真实渲染、失败替换、重复重载和卸载。
 - **WebUI 视觉边界**: `patches/webui-theme/native.css` 与 `native.js` 仅调整锁定原生 SPA 的外观、导航辅助和扩展主题同步；构建器从固定官方 wheel 应用既有生命周期补丁，再嵌入内容哈希命名的主题文件，不修改供应商压缩 JS 的业务逻辑。`utils/webui_theme/tokens.css` 是原生与三个扩展页的唯一配色色板，使用现代浏览器的 `light-dark()`；扩展页通过 `themed_assets` 在原有 nonce/CSP 内合并本地资源。父页只向同源已挂载 iframe 发送 light/dark，opaque iframe 必须校验父窗口和精确 origin，独立打开时跟随系统主题；不得放宽 sandbox、认证、CSP 或以匿名资源恢复样式。上游升级须复核 DOM 类名、登录、原生设置、会话/表情/工坊、主题切换和 390px 窄屏，不新增第二套管理 API。
 - **CLI 工具**: [entari-cli](https://pypi.org/project/entari-cli/) —— `entari init / run / new / add / remove / config / gen_main`
 - **首启边界**: `main.py` 通过 `utils/startup` 在加载业务插件前使用 Entari 原生配置解析、聚合缺失前提并建立配置指定的 SQLite 父目录。`--check` 不写入或下载，`--prepare` 仅准备已启用能力的资源，不启动账号或调用模型；凭证化配置禁止 debug/trace 和 rich_error。默认配置只监听回环；接口探测使用原生 `/satori/v1/meta`，无账号时不能把需身份头的业务 API 当健康接口。
@@ -224,6 +224,7 @@ config = plugin_config(MyConfig)
 - 热重载：启用 `::auto_reload`（`watch_dirs`、`watch_config`）。
 - Entari 会自动清除事件监听器、指令、上游插件导入等副作用；其他手动副作用用 `collect_disposes(lambda: ...)` 注册清理。
 - 任何在运行期会被多次加载/卸载的插件都必须保证幂等清理：全局可变状态要么用 `keeping`，要么在 `collect_disposes` 中还原。
+- `channel_perception` 与 `llm_chat.agent_runtime` 的数据库 Ready 处理器通过 `Annotated[SqlalchemyService, on_stage("blocking")]` 等待原生服务，`on_stage` 从 `arclet.entari.core` 导入；保持 `-100` / `-90` 优先级、迁移锁和重载时的非阻塞就绪检查。默认注入阶段 `prepared` 不能替代建表后的 `blocking` 边界。生命周期验收覆盖服务迟注册及延迟准备时不抢跑、子树新增后代及失败回滚、提升后动态 niche 的执行和清理，以及真实 `EntariConfig.generate_schema` 产物的嵌套字段校验。
 - `load_plugin`、`reload_plugin` 与 `reload_subplugin` 返回结果对象：先判断真值，成功后读取 `.plugin`，失败后读取 `.error`；不得用 `is None` 或 `is True`，也不得把结果对象当插件实例。`RootlessPlugin` 已移除，隔离注册改用 `plugin.niche`；其返回值是与父插件绑定的 Plugin，按原生阶段执行 `exec_apply`。
 
 ### 服务（Launart）

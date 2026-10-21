@@ -1,0 +1,594 @@
+diff --git a/arclet/entari/command/__init__.py b/arclet/entari/command/__init__.py
+--- a/arclet/entari/command/__init__.py
++++ b/arclet/entari/command/__init__.py
+@@ -148,6 +148,8 @@
+                         _command.formatter.add(_command)
+                 except ValueError:
+                     pass
++                # Equal parsers may share a formatter emptied by a rejected owner.
++                _command.formatter.add(_command)
+                 key = _command.name + "".join(
+                     f" {arg.value.target}" for arg in _command.args if isinstance(arg.value, DirectPattern)
+                 )
+@@ -186,6 +188,7 @@
+             _command = cast(Alconna, cmd)
+             if not isinstance(cmd.command, str):
+                 raise TypeError("Command name must be a string.")
++            _command.formatter.add(_command)
+             keys = []
+             if not _command.prefixes:
+                 keys.append(_command.command)
+diff --git a/arclet/entari/command/plugin.py b/arclet/entari/command/plugin.py
+--- a/arclet/entari/command/plugin.py
++++ b/arclet/entari/command/plugin.py
+@@ -57,6 +57,7 @@
+     def __init__(self, plugin: Plugin, command: Alconna, need_reply_me: bool = False, need_notice_me: bool = False, use_config_prefix: bool = True, block: bool = True, skip_for_unmatch: bool = True):  # noqa: E501
+         plugin._extra.setdefault("commands", []).append((command.prefixes, command.command))
+         self.cache: "LRU[str, asyncio.Future]" = LRU(10)  # noqa: UP037
++        command.formatter.add(command)
+         self.supplier = AlconnaSuppiler(command, self.cache, block, skip_for_unmatch)
+         super().__init__(plugin, MessageCreatedEvent, command.path)
+         plugin.collect(
+diff --git a/arclet/entari/config/schema/registry.py b/arclet/entari/config/schema/registry.py
+--- a/arclet/entari/config/schema/registry.py
++++ b/arclet/entari/config/schema/registry.py
+@@ -19,6 +19,8 @@
+     """True 时目标节点整体替换（跳过深合并）"""
+     origin: str | None
+     """注册来源插件 id；None = 无插件上下文（仅 dispose 清除会用它）"""
++    owner: object | None
++    """Generation identity separating staged replacements with the same plugin id."""
+ 
+ 
+ _schema_fragments: dict[str, list[_FragmentRecord]] = {}
+@@ -52,6 +54,8 @@
+     fragment: dict | type | Callable[[Any], Any] | None = None,
+     replace: bool = False,
+     origin: str | None = None,
++    *,
++    owner: object | None = None,
+ ) -> None:
+     """注册一个配置 schema 片段。
+ 
+@@ -63,6 +67,7 @@
+             或 callable（接收目标节点当前值，返回 dict 深合并 / 非 dict 整体替换）。
+         replace (bool, optional): 目标节点是否整体替换为片段，不做深合并。默认 False。
+         origin (str, optional): 注册来源插件 id；空表示无插件上下文（仅 purge 清除会用它）。默认 None。
++        owner (object, optional): Registration generation identity, compared by object identity.
+     Raises:
+         TypeError: fragment 类型不合法
+     """
+@@ -76,18 +81,23 @@
+     for record in records:
+         if (
+             record.origin == origin
++            and record.owner is owner
+             and record.path == parts
+             and record.fragment is fragment
+             and record.replace == replace
+         ):
+             return
+-    records.append(_FragmentRecord(parts, fragment, replace, origin))
++    records.append(_FragmentRecord(parts, fragment, replace, origin, owner))
+ 
+ 
+-def purge_schema_fragments(plugin_id: str) -> None:
+-    """清除某插件注册的全部 schema 片段"""
+-    for key in [k for k, v in _schema_fragments.items() if any(r.origin == plugin_id for r in v)]:
+-        remained = [r for r in _schema_fragments[key] if r.origin != plugin_id]
++def purge_schema_fragments(plugin_id: str, *, owner: object | None = None) -> None:
++    """Remove one generation's fragments, or all fragments for an id when owner is omitted."""
++    for key, records in list(_schema_fragments.items()):
++        remained = [
++            record
++            for record in records
++            if not (record.origin == plugin_id and (owner is None or record.owner is owner))
++        ]
+         if remained:
+             _schema_fragments[key] = remained
+         else:
+diff --git a/arclet/entari/plugin/service.py b/arclet/entari/plugin/service.py
+--- a/arclet/entari/plugin/service.py
++++ b/arclet/entari/plugin/service.py
+@@ -24,6 +24,8 @@
+     attr: str | None
+     last: bool
+     """是否为该名字的最后一次绑定（即当前在模块中生效的绑定）"""
++    module_root: bool = False
++    """Unaliased imports bind their top-level module rather than the dotted target."""
+ 
+ 
+ class ServiceWaiters:
+@@ -120,7 +122,8 @@
+         for plug_id, edges in self.bindings.items():
+             if plug_id == path or plug_id.startswith(path + "."):
+                 continue
+-            for name, target, attr, _ in edges:
++            for binding in edges:
++                name, target, attr = binding.name, binding.target, binding.attr
+                 if target == path or target.startswith(path + "."):
+                     result.append(plug_id)
+                     break
+diff --git a/arclet/entari/plugin/module.py b/arclet/entari/plugin/module.py
+--- a/arclet/entari/plugin/module.py
++++ b/arclet/entari/plugin/module.py
+@@ -89,7 +89,7 @@
+     return ".".join(base) if base else None
+ 
+ 
+-def _record_binding(pid: str, name: str, target: str, attr: str | None):
++def _record_binding(pid: str, name: str, target: str, attr: str | None, *, module_root: bool = False):
+     """记录名字级 import 绑定（name → (target, attr)），供重载侧查询与改写
+ 
+     暂存插件与同 id 的存活插件必须分开记录；promote 时再整体替换，避免旧版本独有的 import 残留
+@@ -102,9 +102,9 @@
+     entries = [
+         b._replace(last=False) if b.name == name else b
+         for b in table.get(pid, [])
+-        if not (b.name == name and b.target == target and b.attr == attr)
++        if not (b.name == name and b.target == target and b.attr == attr and b.module_root == module_root)
+     ]
+-    entries.append(Binding(name, target, attr, True))
++    entries.append(Binding(name, target, attr, True, module_root))
+     table[pid] = entries
+ 
+ 
+@@ -130,7 +130,9 @@
+         if self._in_type_checking():
+             return
+         for alias in node.names:
+-            _record_binding(self.pid, alias.asname or alias.name.split(".")[0], alias.name, None)
++            _record_binding(
++                self.pid, alias.asname or alias.name.split(".")[0], alias.name, None, module_root=alias.asname is None
++            )
+         if node.lineno in self.signed_plugin_lineno or all(x.name in _ENSURE_IS_PLUGIN for x in node.names):
+             _ensure_plugin([alias.name for alias in node.names], False, self.pid, self.pname)
+         elif node.lineno in self.signed_subplugin_lineno or all(x.name in _SUBMODULE_WAITLIST.get(self.pname, ()) for x in node.names):  # noqa: E501
+@@ -312,7 +314,7 @@
+         if plugin:
+             if self.plugin_id not in plugin.subplugins:
+                 plugin.subplugins.append(self.plugin_id)
+-            plugin_service._subplugined[self.plugin_id] = plugin.id
++            plugin_service._subplugined[self.plugin_id] = plugin_service._subplugined.get(plugin.id, plugin.id)
+             is_sub = True
+             if config is None or not {k: v for k, v in config.items() if k not in ("$path", "$static")}:
+                 config = plugin.config.copy()
+@@ -527,22 +529,21 @@
+         if plug := current_plugin.get(None):
+             # only record outside import, as inside import are already recorded by the plugin's loader.
+             if module_spec.name != plug.module.__name__ and not module_spec.name.startswith(plug.module.__name__ + "."):
+-                _record_binding(plug.id, module_spec.name.split(".")[0], module_spec.name, None)
++                _record_binding(plug.id, module_spec.name.split(".")[0], module_spec.name, None, module_root=True)
+             # if the module being imported is the same as the plugin's module,
+             # return the plugin's module spec directly to avoid infinite recursion.
+             if plug.module.__spec__ and plug.module.__spec__.origin == module_origin:
+                 return plug.module.__spec__
+-            # get the top-level plugin id (the parent) of the current plugin
+-            parent_id = plug.id
+-            while parent_id in plugin_service._subplugined:
+-                parent_id = plugin_service._subplugined[parent_id]
++            # A subtree reload owns its candidates without changing the flat live tree.
++            root = plug._subplugin_root()
++            parent_id = root.id
+             # if the module being imported is a submodule of the top-level plugin,
+             # or if the module being imported is in the waitlist of the top-level plugin,
+             # it means it is marked as a submodule by the plugin author.
+-            if module_spec.name.startswith(
+-                plugin_service.plugins[parent_id].module.__name__ + "."
+-            ) or module_spec.name in _SUBMODULE_WAITLIST.get(  # noqa: E501
+-                parent_id, ()
++            if (
++                module_spec.name.startswith(root.module.__name__ + ".")
++                or module_spec.name in _SUBMODULE_WAITLIST.get(parent_id, ())
++                or module_spec.name in _SUBMODULE_WAITLIST.get(plug.id, ())
+             ):
+                 return _as_submodule(
+                     module_spec,
+@@ -684,7 +685,10 @@
+         parent: ModuleType
+         parts = parent_name.split(".")
+         _current = parts[0]
+-        if _current in plugin_service.plugins:
++        if staged and _current in plugin_service._staged:
++            parent = plugin_service._staged[_current].module
++            enter_plugin = True
++        elif _current in plugin_service.plugins:
+             parent = plugin_service.plugins[_current].module
+             enter_plugin = True
+         elif _current in sys.modules:
+@@ -696,7 +700,10 @@
+         _current += "."
+         for part in parts[1:]:
+             _current += part
+-            if _current in plugin_service.plugins:
++            if staged and _current in plugin_service._staged:
++                parent = plugin_service._staged[_current].module
++                enter_plugin = True
++            elif _current in plugin_service.plugins:
+                 parent = plugin_service.plugins[_current].module
+                 enter_plugin = True
+             elif _current in sys.modules:
+diff --git a/arclet/entari/plugin/model.py b/arclet/entari/plugin/model.py
+--- a/arclet/entari/plugin/model.py
++++ b/arclet/entari/plugin/model.py
+@@ -194,6 +194,7 @@
+     _apply: Callable[[Plugin], Any] | None = field(default=None, init=False, repr=False)
+     _sys_entry: Any = field(default=None, init=False, repr=False)
+     """本插件在 sys.modules 中登记的条目（代理对象），用于卸载时仅移除自身登记"""
++    _schema_owner: object = field(default_factory=object, init=False, repr=False)
+     staged: bool = field(default=False, repr=False, kw_only=True)
+     """由加载器标记的暂存事务成员，不能从 current_plugin 推断"""
+ 
+@@ -240,7 +241,7 @@
+         is_staged = self.staged or (self.id in plugin_service.plugins and not self.id.startswith("$"))
+         if is_staged:
+             # 原子重载暂存：暂存期间新建的插件全部先入 _staged，promote 时再整体切换
+-            self._scope = _make_scope(self).of(f"{self.id}@staging")
++            self._scope = _make_scope(self).of()
+             self._scope.disable()
+             plugin_service._staged[self.id] = self  # type: ignore
+             # 暂存插件与同 id 的存活插件必须分开记录绑定，promote 时整体替换
+@@ -268,7 +269,8 @@
+             plugin_service.referents[self.path] = set()
+         if self.path not in plugin_service.references:
+             plugin_service.references[self.path] = set()
+-        plugin_service._unloaded.discard(self.id)
++        if not is_staged:
++            plugin_service._unloaded.discard(self.id)
+         finalize(self, self.dispose, is_cleanup=True)
+ 
+     def register_schema(
+@@ -279,7 +281,7 @@
+         replace: bool = False,
+     ) -> None:
+         """注册作用于本插件配置的 schema 片段"""
+-        add_schema_fragment(self._config_key, path, fragment, replace, self.id)
++        add_schema_fragment(self._config_key, path, fragment, replace, self.id, owner=self._schema_owner)
+ 
+     def config_schema(self, config_key: str | None = None, ref_root: str = "/") -> dict[str, Any]:
+         """获取插件配置模型的 JSON Schema
+@@ -423,12 +425,17 @@
+                     yield from _gen(serv)
+             yield service
+ 
+-        _services = [s for serv in self._services.values() for s in _gen(serv)]
++        _services = [
++            item
++            for service in self._services.values()
++            if manager.components.get(service.id) is service
++            for item in _gen(service)
++        ]
+         if not _services:
+             return
+ 
+         async def _clean_one(service: Service):
+-            if not manager.task_group:
++            if not manager.task_group or manager.components.get(service.id) is not service:
+                 return
+             plugin_service.service_waiter.clear(service.id)
+             if service.id not in manager.task_group.sideload_trackers:
+@@ -455,6 +462,8 @@
+         if not is_cleanup and self.is_static:
+             # static plugin can only be disposed in cleanup phase
+             return
++        if self._is_disposed:
++            return
+         # staged plugin shares position with same-id live plugin, must check identity:
+         # during reload, the new plugin with same id is already in _staged,
+         # if check by id it will mistakenly treat the old plugin as staged
+@@ -462,11 +471,9 @@
+         # 暂存树中止时 subplugins 会在下面被清空，先记下本事务的子插件 id
+         _staged_sids = [self.id, *self.subplugins] if _was_staged else []
+         # do not change the unloaded flag of live plugin
+-        if not _was_staged:
++        if not _was_staged and not replacing:
+             plugin_service._unloaded.add(self.id)
+-        if self._is_disposed:
+-            return
+-        purge_schema_fragments(self.id)
++        purge_schema_fragments(self.id, owner=self._schema_owner)
+         if not self.id.startswith("$") and self.id not in plugin_service._subplugined:
+             log.plugin.debug(f"disposing plugin <y>{self.id}</y>")
+         self._is_disposed = True
+@@ -477,9 +484,10 @@
+         self._services.clear()
+         # only remove if entry in sys.modules is self._sys_entry
+         _entry = sys.modules.get(self.module.__name__)
+-        if self._sys_entry is None or _entry is self._sys_entry:
++        if self._sys_entry is not None and _entry is self._sys_entry:
+             sys.modules.pop(self.module.__name__, None)
+-        delattr(self.module, "__plugin__")
++        if getattr(self.module, "__plugin__", None) is self:
++            delattr(self.module, "__plugin__")
+         if self.subplugins:
+             subplugs = [i.removeprefix(self.id)[1:] for i in self.subplugins]
+             subplugs = (subplugs[:3] + ["..."]) if len(subplugs) > 3 else subplugs
+@@ -510,7 +518,7 @@
+                     log.plugin.error(f"failed to dispose sub-plugin <r>{subplug}</r> caused by {e!r}")
+                     plugin_service.plugins.pop(subplug, None)
+             self.subplugins.clear()
+-        if not is_cleanup and not _was_staged:
++        if not is_cleanup and not _was_staged and not replacing:
+             publish(PluginUnloaded(self.id))
+         if not is_cleanup and not _was_staged and not replacing:
+             for ref in plugin_service.references.pop(self.path):
+@@ -559,10 +567,10 @@
+             # 仅移除本事务新建子插件的归属；同 id 的旧子插件仍在运行，映射必须保留
+             if self.id not in plugin_service.plugins:
+                 plugin_service._subplugined.pop(self.id, None)
+-        elif self.id in plugin_service.plugins:
+-            del plugin_service.plugins[self.id]
+-        else:
+-            plugin_service._staged.pop(self.id, None)
++        elif plugin_service.plugins.get(self.id) is self:
++            plugin_service.plugins.pop(self.id)
++        if self.id not in plugin_service.plugins and self.id not in plugin_service._staged:
++            plugin_service._subplugined.pop(self.id, None)
+         del self.module
+         del self._inspect
+         return tasks
+@@ -600,6 +608,8 @@
+         if func.__module__ != self.module.__name__:
+             if func.__module__.startswith("arclet.entari"):
+                 return
++            if self._apply and func.__module__ == self._apply.__module__:
++                return
+             if "__plugin__" in func.__globals__ and func.__globals__["__plugin__"] is self:
+                 return
+             raise RegisterNotInPluginError(func, self.module, self.id)
+@@ -627,36 +637,44 @@
+             if kept.module_attr:
+                 self.module.__dict__[kept.module_attr] = kept.obj
+ 
++    def _subplugin_root(self) -> Plugin:
++        if plugin_service._staged.get(self.id) is self:
++            # Candidates stay flat within their transaction, not in the live parent.
++            return next(
++                candidate
++                for candidate in plugin_service._staged.values()
++                if candidate is self or self.id in candidate.subplugins
++            )
++        parent = self
++        while parent.id in plugin_service._subplugined:
++            parent = plugin_service.plugins[plugin_service._subplugined[parent.id]]
++        return parent
++
+     def niche(self, label: str, config: dict[str, Any] | None = None):
+         """创建一个隔离的子插件，子插件的生命周期与父插件绑定
+ 
+         子插件统一平级挂载在顶层插件下；在子插件上调用时回溯到顶层父插件。
+         """
+         sub_id = f"{self.id}.{label}"
+-        if sub_id in plugin_service.plugins or sub_id in plugin_service._staged:
++        staged = plugin_service._staged.get(self.id) is self
++        if sub_id in plugin_service._staged or (sub_id in plugin_service.plugins and not staged):
+             raise ValueError(f"sub-plugin {sub_id} already exists")
+ 
+-        parent = self
+-        while parent.id in plugin_service._subplugined:
+-            parent_id = plugin_service._subplugined[parent.id]
+-            next_parent = plugin_service._staged.get(parent_id) or plugin_service.plugins.get(parent_id)
+-            if next_parent is None or next_parent is parent:
+-                break
+-            parent = next_parent
++        parent = self._subplugin_root()
+ 
+         def wrapper(func: Callable[[Plugin], Any], /):
+             subplug = Plugin(
+                 sub_id,
+                 ModuleType(sub_id),
+                 config=self.config.copy() if config is None else config,
+-                staged=self.staged,
++                staged=staged,
+             )
+             setattr(subplug.module, "__plugin__", subplug)
+             setattr(func, "__plugin__", subplug)
+             setattr(subplug.module, "__file__", func.__code__.co_filename)
+             subplug._apply = func
+             parent.subplugins.append(sub_id)
+-            plugin_service._subplugined[sub_id] = parent.id
++            plugin_service._subplugined[sub_id] = plugin_service._subplugined.get(parent.id, parent.id)
+             return subplug
+ 
+         return wrapper
+diff --git a/arclet/entari/plugin/model.pyi b/arclet/entari/plugin/model.pyi
+--- a/arclet/entari/plugin/model.pyi
++++ b/arclet/entari/plugin/model.pyi
+@@ -209,6 +209,7 @@
+     _extra: dict[str, Any] = field(default_factory=dict, init=False)  # extra metadata for inspection
+     _apply: Callable[[Plugin], Any] | None = field(default=None, init=False)
+     _sys_entry: Any = field(default=None, init=False, repr=False)
++    _schema_owner: object = field(default_factory=object, init=False, repr=False)
+     staged: bool = ...
+ 
+     @property
+@@ -352,6 +353,7 @@
+     def subproxy(self, sub_id: str) -> ModuleType: ...
+     def service(self, serv: TS | type[TS]) -> TS: ...
+     def restore_kept_state(self) -> None: ...
++    def _subplugin_root(self) -> Plugin: ...
+     def niche(
+         self, label: str, config: dict[str, Any] | None = None
+     ) -> Callable[[Callable[[Plugin], Any]], Plugin]: ...
+diff --git a/arclet/entari/plugin/loader.py b/arclet/entari/plugin/loader.py
+--- a/arclet/entari/plugin/loader.py
++++ b/arclet/entari/plugin/loader.py
+@@ -87,22 +87,27 @@
+ def _rebind_imports(plugin: Plugin, path: str) -> bool:
+     """将插件对 path（或其子树）的 import 绑定改写为新对象；False 表示有绑定无法满足（升级全量）
+ 
+-    模块绑定（attr 为 None）仅在名字等同于目标模块或其末组件时写回：`import a.b` 风格的名字是顶层包，
+-    其子模块链由 promote 的父属性写回维护，不在此处理。
++    Module aliases bind the target module; unaliased dotted imports bind its top-level module.
++    Binding records distinguish these cases without guessing from the local name.
+     绑定目标为 path 的父包、且父包绑定记录将该名字解析到 path 时，
+     经父模块 getattr 取新值（父包在 sorted 依赖序中先于其子模块处理，故已重绑完成）。
+     """
+     module = plugin.module
+     parent_pkg = path.rpartition(".")[0]
+-    for name, (target, attr) in plugin_service.last_bindings(plugin.id).items():
++    for binding in plugin_service.bindings.get(plugin.id, ()):
++        if not binding.last:
++            continue
++        name, target, attr = binding.name, binding.target, binding.attr
+         if target == path or target.startswith(path + "."):
+             if target not in plugin_service.plugins:
+                 continue
+             new_module = plugin_service.plugins[target].module
+             if attr is None:
+-                if name != target and name != target.rpartition(".")[-1]:
+-                    continue
+-                value: Any = new_module
++                module_name = target.partition(".")[0] if binding.module_root else target
++                owner = plugin_service.plugins.get(module_name)
++                value: Any = owner.module if owner is not None else sys.modules.get(module_name, _MISSING)
++                if value is _MISSING:
++                    return False
+             else:
+                 value = getattr(new_module, attr, _MISSING)
+                 if value is _MISSING:
+@@ -423,7 +428,9 @@
+     子插件按设计全部平级挂载在顶层插件下，``_subplugined`` 一律指向顶层插件 id；
+     父属性写回（插件导入链）使模块中的属性指向新模块对象。
+     """
+-    for sid in [plugin.id, *plugin.subplugins]:
++    parent_id = plugin_service._subplugined.get(plugin.id)
++    promoted_ids = [plugin.id, *plugin.subplugins]
++    for sid in promoted_ids:
+         # replace instead of merge: deleted imports in the new version should not remain in the binding index
+         if sid in plugin_service._staged_bindings:
+             staged_bindings = plugin_service._staged_bindings.pop(sid)
+@@ -436,20 +443,26 @@
+             # 提升后不再属于暂存事务，后续 niche 等动态创建应直接进入 plugins
+             staged.staged = False
+             if sid != plugin.id:
+-                plugin_service._subplugined[sid] = plugin.id
++                plugin_service._subplugined[sid] = parent_id or plugin.id
++            plugin_service._unloaded.discard(sid)
+             staged.check_disable()
+             if plugin_service.status.blocking:
+                 publish(Ready(), staged._scope)
+-    plugin_service._unloaded.discard(plugin.id)
+-    for sid in plugin.subplugins:
+-        if sid not in plugin_service.plugins or sid not in plugin_service._subplugined:
+-            continue
+-        parent = plugin_service.plugins.get(plugin_service._subplugined[sid])
+-        if parent is None:
+-            continue
+-        if sid not in parent.subplugins:
+-            parent.subplugins.append(sid)
+-        parent.module.__dict__[sid.rpartition(".")[-1]] = plugin_service.plugins[sid].module
++    for sid in promoted_ids:
++        candidate = plugin_service.plugins.get(sid)
++        if candidate is None:
++            continue
++        if owner := plugin_service.plugins.get(plugin_service._subplugined.get(sid, "")):
++            if sid not in owner.subplugins:
++                owner.subplugins.append(sid)
++        module_parent, _, name = candidate.module.__name__.rpartition(".")
++        parent = plugin_service.plugins.get(module_parent)
++        parent_module = parent.module if parent is not None else sys.modules.get(module_parent)
++        if parent_module is not None:
++            parent_module.__dict__[name] = candidate.module
++    if parent_id is not None:
++        # Only top-level live plugins own the flat child list after promotion.
++        plugin.subplugins.clear()
+ 
+ 
+ def _collect_subtree(plugin: Plugin) -> list[str]:
+@@ -467,7 +480,40 @@
+                 walk(sub)
+ 
+     walk(plugin)
++    if root := plugin_service.plugins.get(plugin_service._subplugined.get(plugin.id, "")):
++        # The live registry is flat; package descendants still form a reload subtree.
++        for sid in root.subplugins:
++            if sid.startswith(plugin.id + ".") and sid not in seen:
++                seen.add(sid)
++                ids.append(sid)
++                if sub := plugin_service.plugins.get(sid):
++                    walk(sub)
+     return ids
++
++
++def _snapshot_commands(plugin: Plugin) -> list[Any]:
++    from ..command.provider import AlconnaSuppiler
++
++    owners = [plugin, *(plugin_service.plugins[sid] for sid in _collect_subtree(plugin))]
++    if parent := plugin_service.plugins.get(plugin_service._subplugined.get(plugin.id, "")):
++        owners.append(parent)
++    commands = {}
++    for owner in owners:
++        for slot in owner._scope.subscribers:
++            try:
++                cmd = slot.subscriber.get_propagator(AlconnaSuppiler).cmd
++            except ValueError:
++                continue
++            commands[id(cmd)] = cmd
++    return list(commands.values())
++
++
++def _restore_commands(commands: list[Any]) -> None:
++    from arclet.alconna import command_manager
++
++    for cmd in commands:
++        command_manager.register(cmd)
++        cmd.formatter.add(cmd)
+ 
+ 
+ async def reload_plugin(path: str, conf: dict | None = None) -> _LoadResult:
+@@ -481,6 +527,7 @@
+         return _LoadResult(error=RuntimeError(f"plugin {path!r} is static and cannot be reloaded"))
+     _conf = conf if conf is not None else plugin.config.copy()
+     old_subplugins = _collect_subtree(plugin)
++    old_commands = _snapshot_commands(plugin)
+     old_sys_entries = _snapshot_sys_entries(path)
+     for name in old_subplugins:
+         sys.modules.pop(name, None)
+@@ -490,6 +537,7 @@
+         # stage load will overwrite/delete old sys.modules entries, must restore them on failure,
+         # otherwise the old plugin is still running but cannot be re-imported
+         _restore_sys_entries(path, old_sys_entries)
++        _restore_commands(old_commands)
+         log.plugin.error(f"failed to load staged plugin <blue>{path!r}</blue>, old plugin keeps running")
+         return result
+     if tasks := plugin.dispose(replacing=True):
+@@ -530,23 +578,37 @@
+         log.plugin.debug(f"parent <y>{parent_id!r}</y> uses <y>{path!r}</y> at module level, full tree reload")
+         return await reload_plugin(parent_id, parent.config.copy())
+     _conf = conf if conf is not None else plugin.config.copy()
++    old_subplugins = _collect_subtree(plugin)
++    old_commands = _snapshot_commands(plugin)
+     old_sys_entries = _snapshot_sys_entries(path)
++    for name in old_subplugins:
++        sys.modules.pop(name, None)
+     log.plugin.debug(f"staged loading sub-plugin <y>{path!r}</y>, old sub-plugin keeps running until swap")
+     try:
+         mod = import_plugin(path, config=_conf, staged=True)
+     except Exception as e:
+         await _discard_staged_state(path)
+         _restore_sys_entries(path, old_sys_entries)
++        _restore_commands(old_commands)
+         return _LoadResult(error=e)
+     if not mod:
+         await _discard_staged_state(path)
+         _restore_sys_entries(path, old_sys_entries)
++        _restore_commands(old_commands)
+         log.plugin.error(f"failed to load staged sub-plugin <blue>{path!r}</blue>, old sub-plugin keeps running")
+         return _LoadResult(
+             error=RuntimeError(f"failed to load staged sub-plugin {path!r}, old sub-plugin keeps running")
+         )
+-    if tasks := plugin.dispose(replacing=True):
++    tasks = set()
++    for name in reversed(old_subplugins):
++        if child := plugin_service.plugins.get(name):
++            tasks.update(child.dispose(replacing=True) or ())
++    tasks.update(plugin.dispose(replacing=True) or ())
++    if tasks:
+         await asyncio.wait(tasks)
++    if parent is not None:
++        retired = {path, *old_subplugins}
++        parent.subplugins[:] = [sid for sid in parent.subplugins if sid not in retired]
+     new_plugin = mod.__plugin__  # type: ignore
+     promote_staged(new_plugin)
+     _handle_dependents(new_plugin)

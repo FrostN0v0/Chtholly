@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 import asyncio
 
 from launart import Launart
 from arclet.entari import Ready, plugin, plugin_config
+from arclet.entari.core import on_stage
 from arclet.entari.logger import log
 from arclet.entari.event.plugin import PluginLoadedSuccess
+from graia.amnesia.builtins.sqla import SqlalchemyService
 
 from .config import LLMChatConfig
 from .agent_migration import migrate_legacy_agent_events
@@ -40,9 +43,7 @@ async def _initialize_store() -> None:
 
 
 @plugin.listen(Ready, priority=-90)
-async def initialize_agent_event_store() -> None:
-    database = Launart.current().get_component("database/sqlalchemy")
-    await database.status.wait_for("blocking")
+async def initialize_agent_event_store(database: Annotated[SqlalchemyService, on_stage("blocking")]) -> None:
     await _initialize_store()
 
 

@@ -23,6 +23,8 @@ import pytest
         "bindings",
         "niche",
         "watcher",
+        "readiness",
+        "schema",
     ],
 )
 def test_entari_reload_lifecycle(scenario: str, tmp_path: Path) -> None:

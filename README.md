@@ -88,15 +88,16 @@ uv run --locked main.py --check
 
 检查提示配置迁移时，按对应迁移说明操作；提示缺少资源时运行 `--prepare`，检查通过后再启动。仅 `git pull` 后直接用旧虚拟环境运行，不会自动完成依赖和配置升级。
 
-`uv.lock` 固定兼容组合：Entari `0.19.0+chtholly.1`、WebUI `1.0.3+chtholly.5`、HTMLRender `0.1.0+chtholly.1` 与基于原 Git 提交的 LLM `0.2.2+chtholly.2`。补丁制品随仓库提供；`python scripts/build_patched_wheel.py --package entari`（或 `webui`、`htmlrender`、`llm`）按固定来源与 SHA-256 重建，不手改 `.venv`。LLM 保留原工具桥，仅适配新的事件上下文与加载结果。干净环境验证入口为 `uv run --locked python scripts/smoke_startup.py --resources`；CI 使用 Python 3.11，分别覆盖 Windows/Linux 首启及 Linux 完整资源路径。
+`uv.lock` 固定兼容组合：Entari `0.19.1+chtholly.1`、WebUI `1.0.3+chtholly.5`、HTMLRender `0.1.0+chtholly.1` 与基于原 Git 提交的 LLM `0.2.2+chtholly.2`。补丁制品随仓库提供；`python scripts/build_patched_wheel.py --package entari`（或 `webui`、`htmlrender`、`llm`）按固定来源与 SHA-256 重建，不手改 `.venv`。LLM 保留原工具桥，仅适配新的事件上下文与加载结果。干净环境验证入口为 `uv run --locked python scripts/smoke_startup.py --resources`；CI 使用 Python 3.11，分别覆盖 Windows/Linux 首启及 Linux 完整资源路径。
 
-### Entari 0.19.0 迁移边界
+### Entari 0.19.1 升级边界
 
-- 依据[正式版发布说明](https://github.com/ArcletProject/Entari/releases/tag/v0.19.0)与 [rc2 至正式版源码差异](https://github.com/ArcletProject/Entari/compare/v0.19.0rc2...v0.19.0)迁移。加载与重载统一消费结果对象；临时插件使用 `plugin.niche`，不再引用 `RootlessPlugin`。
+- [0.19.1 发布说明](https://github.com/ArcletProject/Entari/releases/tag/v0.19.1)主要是暂存重载、导入绑定与配置 Schema 引用修复，不是新增业务能力。采用上游暂存事务与子插件平级挂载，删除重复的旧补丁；嵌套配置的完整文件 Schema 使用修复后的原生引用路径。
 - LLM 配置直接以运行时模型声明 metadata，本地化通过原生 `Plugin.register_schema` 完成，保留嵌套 `$defs`。WebUI 使用原生配置 Schema 和原子重载，并将 `$` 根下的内建插件映射回原 `.commands`、`.localdata` 等配置键；单个内建插件的开关不得影响兄弟插件。
-- 正式版仍需所有权、失败回滚、命令清理、别名重绑定与 Schema 片段隔离补丁。不能仅凭上游已支持热重载就删除本地安全边界；函数热替换、指纹与 API Hook 在原 rc2 中已经存在，并非本次新增能力。
+- 保留仍未被上游覆盖的命令解析器回滚、Schema 片段代际隔离、Service 对象清理、import 别名重绑定及子树替换补丁。原生 `plugin.niche`、函数热替换、指纹与 API Hook 已有使用，不为升级新增第二套运行边界。
+- 数据库 Ready 处理器使用原生 `on_stage("blocking")` 注入，在表准备完成后继续迁移与用户同步；保持原优先级，不改为可能早于建表完成的默认 `prepared` 阶段。
 - 保留生产 Satori 共享服务修复：锁定 `satori-python` `1.3.9.post1+chtholly.1` 与 `satori-python-server` `1.3.7+chtholly.1`，避免单个适配器结束导致 WebUI/HTTP 一同退出。两制品均进入工坊镜像，可分别用构建器的 `--package satori`、`--package satori-server` 重建。
-- 工坊必须用 `scripts/build_workshop_sandbox.py` 重建 Python 3.11 镜像；旧 3.10 镜像和验收报告不再接受。此迁移不更改个人配置、数据库或已发生的消息交付。
+- 框架版本变化后，工坊需用 `scripts/build_workshop_sandbox.py` 重建匹配的 Python 3.11 镜像并重新验收；旧框架镜像及报告不能用于新激活。此升级不更改个人配置、数据库或已发生的消息交付。
 
 
 更多框架用法见 [Entari 文档](https://arclet.top/tutorial/entari/)。

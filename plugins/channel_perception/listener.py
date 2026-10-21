@@ -8,13 +8,13 @@ from dataclasses import replace
 
 from arclet.entari import At, ChannelType, MessageChain, plugin
 from arclet.entari.config import EntariConfig
+from arclet.entari.event.api import SendResponse
 from arclet.entari.event.base import (
     MessageCreatedEvent,
     MessageDeletedEvent,
     MessageUpdatedEvent,
     GuildMemberUpdatedEvent,
 )
-from arclet.entari.event.send import SendResponse
 
 from .core import clean_text, display_name, normalize_message, is_prefixed_command
 from .schemas import (

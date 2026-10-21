@@ -1,8 +1,11 @@
 """Bounded public-channel perception service."""
 
-from launart import Launart
+from typing import Annotated
+
 from arclet.entari import Ready, plugin, metadata, add_service, plugin_config
+from arclet.entari.core import on_stage
 from arclet.entari.plugin import PluginRole
+from graia.amnesia.builtins.sqla import SqlalchemyService
 
 from .config import ChannelPerceptionConfig
 from .service import ChannelPerceptionService
@@ -22,9 +25,8 @@ add_service(channel_perception)
 
 
 @plugin.listen(Ready, priority=-100)
-async def wait_for_database_tables() -> None:
-    database = Launart.current().get_component("database/sqlalchemy")
-    await database.status.wait_for("blocking")
+async def wait_for_database_tables(database: Annotated[SqlalchemyService, on_stage("blocking")]) -> None:
+    """Gate later Ready handlers on completed database table initialization."""
 
 
 from . import (

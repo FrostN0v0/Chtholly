@@ -41,13 +41,13 @@ class WheelSpec:
 PACKAGES = {
     "entari": WheelSpec(
         "arclet_entari",
-        "0.19.0",
-        "0.19.0+chtholly.1",
-        "https://files.pythonhosted.org/packages/52/27/"
-        "7a853f955cfec9c8a5205b1b73dc0ab7089150fa0fd1b2783e56769d0f43/"
-        "arclet_entari-0.19.0-py3-none-any.whl",
-        "683320dbb030e074bc638b2fd8f923aad8f264a5e2450b921c3003dab46997a0",
-        "entari-0.19.0-native-reload.patch",
+        "0.19.1",
+        "0.19.1+chtholly.1",
+        "https://files.pythonhosted.org/packages/cc/40/"
+        "862604365b30fcd4686df7367b333e17bccd530ffd7daecf18a93a35232a/"
+        "arclet_entari-0.19.1-py3-none-any.whl",
+        "28b7d413051364331a455dd5539198e3348c7099899eef5175a7d7ec84bcc972",
+        "entari-0.19.1-native-reload.patch",
         "entari",
     ),
     "htmlrender": WheelSpec(
