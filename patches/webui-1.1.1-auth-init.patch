@@ -1,0 +1,22 @@
+--- a/frontend/src/stores/auth.ts
++++ b/frontend/src/stores/auth.ts
+@@ -3,17 +3,17 @@
+ import api from "@/api/client";
+ 
+ export const useAuthStore = defineStore("auth", () => {
+-  const localMode = ref(true);
++  const localMode = ref(false);
+   const initialized = ref(false);
+   const inited = ref(false);
+ 
+   async function init() {
+     if (inited.value) return;
+-    inited.value = true;
+     try {
+       const r = await api.get("/api/auth/check");
+       localMode.value = r.data.local_mode as boolean;
+       initialized.value = r.data.initialized as boolean;
++      inited.value = true;
+     } catch {
+       // 后端不可达由 useBackendHealth 处理
+     }

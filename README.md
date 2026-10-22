@@ -88,12 +88,14 @@ uv run --locked main.py --check
 
 检查提示配置迁移时，按对应迁移说明操作；提示缺少资源时运行 `--prepare`，检查通过后再启动。仅 `git pull` 后直接用旧虚拟环境运行，不会自动完成依赖和配置升级。
 
-`uv.lock` 固定兼容组合：Entari `0.19.1+chtholly.1`、WebUI `1.0.3+chtholly.5`、HTMLRender `0.1.0+chtholly.1` 与基于原 Git 提交的 LLM `0.2.2+chtholly.2`。补丁制品随仓库提供；`python scripts/build_patched_wheel.py --package entari`（或 `webui`、`htmlrender`、`llm`）按固定来源与 SHA-256 重建，不手改 `.venv`。LLM 保留原工具桥，仅适配新的事件上下文与加载结果。干净环境验证入口为 `uv run --locked python scripts/smoke_startup.py --resources`；CI 使用 Python 3.11，分别覆盖 Windows/Linux 首启及 Linux 完整资源路径。
+`uv.lock` 固定兼容组合：Entari `0.19.2+chtholly.1`、WebUI `1.1.1+chtholly.1`、Database `0.4.2`、HTMLRender `0.1.0+chtholly.1` 与基于原 Git 提交的 LLM `0.2.2+chtholly.2`。补丁制品随仓库提供；`python scripts/build_patched_wheel.py --package entari`（或 `webui`、`htmlrender`、`llm`）按固定来源与 SHA-256 重建，不手改 `.venv`。LLM 保留原工具桥及已验证的 Agno / LiteLLM 组合。干净环境验证入口为 `uv run --locked python scripts/smoke_startup.py --resources`；CI 使用 Python 3.11，分别覆盖 Windows/Linux 首启及 Linux 完整资源路径。
 
-### Entari 0.19.1 升级边界
+### Entari 0.19.2 / WebUI 1.1.1 升级边界
 
-- [0.19.1 发布说明](https://github.com/ArcletProject/Entari/releases/tag/v0.19.1)主要是暂存重载、导入绑定与配置 Schema 引用修复，不是新增业务能力。采用上游暂存事务与子插件平级挂载，删除重复的旧补丁；嵌套配置的完整文件 Schema 使用修复后的原生引用路径。
-- LLM 配置直接以运行时模型声明 metadata，本地化通过原生 `Plugin.register_schema` 完成，保留嵌套 `$defs`。WebUI 使用原生配置 Schema 和原子重载，并将 `$` 根下的内建插件映射回原 `.commands`、`.localdata` 等配置键；单个内建插件的开关不得影响兄弟插件。
+- [Entari 0.19.2](https://github.com/ArcletProject/Entari/releases/tag/v0.19.2) 提供原生 `ConfigModify` / `ApplyReport` 配置应用器；[WebUI 1.1.1](https://github.com/ArcletProject/entari-plugin-webui/releases/tag/v1.1.1) 采用字段级差异保存，不把新默认值写入文件，恢复默认值会删除对应字段，尽量保留注释、顺序、列表元素与环境引用。
+- 新增独立插件管理页，区分禁用与卸载，展示子插件及无 metadata 的插件，并支持配置、启停、重载和卸载。配置与 Schema 归属使用原生实现；受保护的内建插件仍遵守上游限制，工坊插件不能绕过其专属工具管理。
+- 两个原生配置 PUT 接口要求 `If-Match`：缺失返回 428，过期返回 409；请求按整段替换，未提交字段会删除。响应保留原生 `apply`、最新 `data` 和 `etag`，旧客户端不能继续依赖隐式合并。公网部署须同步 `scripts/webui.Caddyfile` 的内建插件列表与精确生命周期路由，不开放整个后端 API。
+- 不能只裸换官方 WebUI wheel：保留同 Cookie 多连接隔离、独立清理、认证初始化失败重试及布尔/数字差异补丁。认证修复从固定上游源码构建，所需 Node.js / npm 为 `24.15.0` / `11.12.1`；不改压缩后的业务脚本。
 - 保留仍未被上游覆盖的命令解析器回滚、Schema 片段代际隔离、Service 对象清理、import 别名重绑定及子树替换补丁。原生 `plugin.niche`、函数热替换、指纹与 API Hook 已有使用，不为升级新增第二套运行边界。
 - 数据库 Ready 处理器使用原生 `on_stage("blocking")` 注入，在表准备完成后继续迁移与用户同步；保持原优先级，不改为可能早于建表完成的默认 `prepared` 阶段。
 - 保留生产 Satori 共享服务修复：锁定 `satori-python` `1.3.9.post1+chtholly.1` 与 `satori-python-server` `1.3.7+chtholly.1`，避免单个适配器结束导致 WebUI/HTTP 一同退出。两制品均进入工坊镜像，可分别用构建器的 `--package satori`、`--package satori-server` 重建。
@@ -104,11 +106,11 @@ uv run --locked main.py --check
 
 ## WebUI 外观与配置应用
 
-管理页保留 Entari Logo 原色，使用中文、中性色卡片和语义状态色，支持深浅色与窄屏布局。会话页默认展示格式化正文、引用和实际回复；系统指令、工具记录在实色弹窗中阅读，原始数据按需切换。关系前后数值与增减合并为一张五轴图；Token 显示 K/M，并提供精确值与输入/输出占比。轮次默认最新在上，可切换排序。原生主题随 WebUI `1.0.3+chtholly.5` 补丁 wheel 安装；升级需同步源码并运行 `uv sync --locked --all-extras`，扩展页后端、`utils/webui_theme/` 与页面资源必须配套更新。原生主题修改通过 `scripts/build_patched_wheel.py --package webui` 重建，不直接修改第三方安装目录。
+管理页保留 Entari Logo 原色，使用中文、中性色卡片和语义状态色，支持深浅色与窄屏布局。会话页默认展示格式化正文、引用和实际回复；系统指令、工具记录在实色弹窗中阅读，原始数据按需切换。关系前后数值与增减合并为一张五轴图；Token 显示 K/M，并提供精确值与输入/输出占比。轮次默认最新在上，可切换排序。原生主题随 WebUI `1.1.1+chtholly.1` 补丁 wheel 安装；升级需同步源码并运行 `uv sync --locked --all-extras`，扩展页后端、`utils/webui_theme/` 与页面资源必须配套更新。原生主题修改通过 `scripts/build_patched_wheel.py --package webui` 重建，不直接修改第三方安装目录。
 
 启用 `webui_config_apply` 后，已加载 LLM 的模型目录、全局及分模型凭证引用、接口地址、提示词与模型参数可通过原生“保存”直接热生效，不重启 Bot。正在执行的主聊天保持原模型直到本轮纠正与最终化结束，新轮次使用新配置；删除模型时同步修复默认选择，保留会话指针和历史。不显示常驻浮窗或独立重启菜单。
 
-工具集合、其他插件、基础配置及适配器等变更仍交给 Linux 后台控制器执行完整 Bot 重启、健康检查和失败回滚，只重启 Bot、不重启 LLBot。控制器使用既有环境引用密码登录受保护的健康状态接口，Bot 重启或会话失效后重新认证；不会为探测放开匿名管理权限。已热生效的配置会跳过重复重启；未安装控制器时，不支持的变更会在写入前明确拒绝。模型热更新失败会回滚原配置文件，无法确认恢复时明确报错，不把失败显示为保存成功。
+普通插件保存使用原生配置应用器，成功后立即更新运行摘要；失败保留候选配置及仍存活的旧插件，显示失败报告，不冒充运行一致。LLM 工具集合、WebUI、数据库、协议服务、基础配置及适配器等变更仍交给 Linux 控制器完整重启 Bot、健康验收和失败回滚，不重启 LLBot；未安装控制器时，此类变更在写入前拒绝。控制器通过既有密码会话读取状态，对精确候选的原生应用最多等待 90 秒，再完成五次连续健康检查，避免保存期间抢先重启；控制器和 systemd 单元须配套更新。模型热更新失败仍恢复原文件，无法确认恢复时明确报错。
 
 控制器按 systemd 的停服期限等待，确认进程、控制任务及所属 cgroup 已结束后才继续启动；被 systemd 超时终止但已完全停止的服务仍可恢复。健康验收同时检查实际配置的必需插件，不能仅凭 WebUI HTTP 正常接受缺少 `llm_chat` 的运行状态。陪伴配置在写入前复用运行时限额校验，不再保存后才发现无法加载。
 

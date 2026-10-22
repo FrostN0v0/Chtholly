@@ -25,6 +25,7 @@ import pytest
         "watcher",
         "readiness",
         "schema",
+        "config",
     ],
 )
 def test_entari_reload_lifecycle(scenario: str, tmp_path: Path) -> None:

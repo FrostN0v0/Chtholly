@@ -9,6 +9,7 @@ import csv
 import sys
 import stat
 import base64
+import shutil
 import hashlib
 from pathlib import Path, PurePosixPath
 import tarfile
@@ -16,7 +17,7 @@ import zipfile
 import argparse
 import tempfile
 import subprocess
-from dataclasses import dataclass
+from dataclasses import replace, dataclass
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,13 +42,13 @@ class WheelSpec:
 PACKAGES = {
     "entari": WheelSpec(
         "arclet_entari",
-        "0.19.1",
-        "0.19.1+chtholly.1",
-        "https://files.pythonhosted.org/packages/cc/40/"
-        "862604365b30fcd4686df7367b333e17bccd530ffd7daecf18a93a35232a/"
-        "arclet_entari-0.19.1-py3-none-any.whl",
-        "28b7d413051364331a455dd5539198e3348c7099899eef5175a7d7ec84bcc972",
-        "entari-0.19.1-native-reload.patch",
+        "0.19.2",
+        "0.19.2+chtholly.1",
+        "https://files.pythonhosted.org/packages/4f/e2/"
+        "0427e71958084aa10cc794ebb54533246bd6b97bfb202cb6224466def1c7/"
+        "arclet_entari-0.19.2-py3-none-any.whl",
+        "98d3f1ed053c4264186cb0513827caaae7f74fc2067e2547f5aebd0fe3712fd1",
+        "entari-0.19.2-native-reload.patch",
         "entari",
     ),
     "htmlrender": WheelSpec(
@@ -96,13 +97,13 @@ PACKAGES = {
     ),
     "webui": WheelSpec(
         "entari_plugin_webui",
-        "1.0.3",
-        "1.0.3+chtholly.5",
-        "https://files.pythonhosted.org/packages/17/0c/"
-        "c02c08d5f23ee7577f0ce6613aedb78c4e01740cbbad34299b2129c32d1e/"
-        "entari_plugin_webui-1.0.3-py3-none-any.whl",
-        "43f7a67034c23490c18547ba840bb9f97a39f49f58bb10c5835456fc377c6341",
-        "webui-1.0.3-connection-lifecycle.patch",
+        "1.1.1",
+        "1.1.1+chtholly.1",
+        "https://files.pythonhosted.org/packages/72/7d/"
+        "bd7d87ea82eeb120b8e448fae13b3f8a1788b5a0fae0bc6973dbdec7d9d8/"
+        "entari_plugin_webui-1.1.1-py3-none-any.whl",
+        "94e61c23485dbe4d1f7d880bc7fa7fd0d7e16b4041e8962d582b0b38dc23210f",
+        "webui-1.1.1-connection-lifecycle.patch",
         "webui",
     ),
 }
@@ -111,6 +112,11 @@ MAX_WHEEL_BYTES = 16 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 30
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 BUILD_BACKEND = "pdm-backend==2.5.0"
+WEBUI_SOURCE_URL = "https://codeload.github.com/ArcletProject/entari-plugin-webui/tar.gz/refs/tags/v1.1.1"
+WEBUI_SOURCE_SHA256 = "abee0fa586beac41f163dd3c0bb64ea5d89cf8cde65849e7a2999a0dd156d5be"
+WEBUI_LOCK_SHA256 = "7d20ca283e2405241995db377b4dce493f81707d3fb1830376a2eef99e8f432c"
+WEBUI_NODE_VERSION = "v24.15.0"
+WEBUI_NPM_VERSION = "11.12.1"
 
 
 class BuildError(Exception):
@@ -349,6 +355,41 @@ def publish_wheel(spec: WheelSpec, source: Path, output: Path) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def build_webui_frontend(spec: WheelSpec, workspace: Path, wheel: Path, archive: Path | None) -> None:
+    """Rebuild the pinned native frontend from patched source, never compressed JavaScript."""
+    node = shutil.which("node")
+    npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
+    if node is None or npm is None:
+        raise BuildError("WebUI rebuild requires the pinned Node.js and npm toolchain")
+    npm_command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", npm] if os.name == "nt" else [npm]
+    for command, expected in (
+        ([node, "--version"], WEBUI_NODE_VERSION),
+        ([*npm_command, "--version"], WEBUI_NPM_VERSION),
+    ):
+        result = subprocess.run(command, capture_output=True, text=True, timeout=15, check=True)
+        if result.stdout.strip() != expected:
+            raise BuildError(f"WebUI rebuild requires tool version {expected}")
+    source_spec = replace(
+        spec,
+        url=WEBUI_SOURCE_URL,
+        sha256=WEBUI_SOURCE_SHA256,
+        patch="webui-1.1.1-auth-init.patch",
+    )
+    source = extract_source(read_upstream(source_spec, archive), workspace / "frontend-source")
+    frontend = source / "frontend"
+    if hashlib.sha256((frontend / "package-lock.json").read_bytes()).hexdigest() != WEBUI_LOCK_SHA256:
+        raise BuildError("WebUI frontend dependency lock does not match the pinned source")
+    apply_patch(source_spec, source)
+    for arguments in (("ci", "--no-audit", "--no-fund"), ("run", "build")):
+        subprocess.run([*npm_command, *arguments], cwd=frontend, timeout=300, check=True)
+    built = source / "src" / "entari_plugin_webui" / "static" / "frontend"
+    if not (built / "index.html").is_file():
+        raise BuildError("WebUI frontend build did not produce its native entry point")
+    target = wheel / "entari_plugin_webui" / "static" / "frontend"
+    shutil.rmtree(target)
+    shutil.copytree(built, target)
+
+
 def install_webui_theme(source: Path) -> None:
     """Add content-addressed appearance assets without rewriting upstream application logic."""
     frontend = source / "entari_plugin_webui" / "static" / "frontend"
@@ -375,7 +416,13 @@ def install_webui_theme(source: Path) -> None:
     entry.write_bytes(document.encode("utf-8"))
 
 
-def build(spec: WheelSpec, upstream: Path | None = None, output: Path | None = None) -> Path:
+def build(
+    spec: WheelSpec,
+    upstream: Path | None = None,
+    output: Path | None = None,
+    *,
+    frontend_source: Path | None = None,
+) -> Path:
     """Verify, build, patch and atomically publish a pinned distribution."""
     output = output or spec.output
     data = read_upstream(spec, upstream)
@@ -387,6 +434,7 @@ def build(spec: WheelSpec, upstream: Path | None = None, output: Path | None = N
         extract_upstream(data, source)
         apply_patch(spec, source)
         if spec.directory == "webui":
+            build_webui_frontend(spec, workspace, source, frontend_source)
             install_webui_theme(source)
         update_metadata(spec, source)
         publish_wheel(spec, source, output)
@@ -398,9 +446,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--package", choices=PACKAGES, required=True)
     parser.add_argument("--upstream", type=Path, help="local pinned wheel or source archive (verified by SHA256)")
     parser.add_argument("--output", type=Path, help="override the vendored output wheel")
+    parser.add_argument("--frontend-source", type=Path, help="local pinned WebUI frontend source archive")
     args = parser.parse_args(argv)
     try:
-        output = build(PACKAGES[args.package], args.upstream, args.output)
+        output = build(PACKAGES[args.package], args.upstream, args.output, frontend_source=args.frontend_source)
     except (
         BuildError,
         OSError,

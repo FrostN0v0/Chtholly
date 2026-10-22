@@ -49,6 +49,7 @@ html[data-ui-native] {
 }
 html[data-ui-native] body { color: var(--ui-text); font-size: 13px; -webkit-font-smoothing: antialiased; }
 html[data-ui-native] button { font-family: inherit; }
+html[data-ui-native] .el-segmented { --el-segmented-item-selected-color: var(--ui-text); --el-segmented-item-selected-bg-color: var(--ui-selected); }
 html[data-ui-native] :focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
 html[data-ui-native] ::selection { background: var(--ui-selected); color: var(--ui-text); }
 html[data-ui-native] #app > .el-container { height: 100dvh !important; }
@@ -115,7 +116,16 @@ html[data-ui-native] .settings-sidebar { width: 232px; flex-shrink: 0; padding: 
 html[data-ui-native] .settings-sidebar .group-title { color: var(--ui-muted); font-size: 11px; font-weight: 550; padding: 12px 9px 6px; }
 html[data-ui-native] .settings-sidebar .menu-item { padding: 8px 9px; border-radius: 5px; font-size: 12px; }
 html[data-ui-native] .settings-sidebar .menu-item.active { color: var(--ui-text); background: var(--ui-selected); }
-html[data-ui-native] .settings-main { padding: 26px 28px; scrollbar-gutter: stable; }
+html[data-ui-native] :is(.settings-main, .plugins-main) { padding: 26px 28px; scrollbar-gutter: stable; }
+html[data-ui-native] .plugin-manager-sidebar { width: 252px; background: var(--ui-bg); }
+html[data-ui-native] .plugin-manager-sidebar .sidebar-controls { padding: 18px 12px 12px; }
+html[data-ui-native] .plugin-manager-sidebar .group-title { color: var(--ui-muted); font-size: 11px; font-weight: 550; }
+html[data-ui-native] .plugin-manager-sidebar .menu-item { font-size: 12px; border-radius: 5px; }
+html[data-ui-native] .plugin-manager-sidebar .menu-item.active { color: var(--ui-text); background: var(--ui-selected); }
+html[data-ui-native] .plugins-main .page-header h1 { font-size: 22px; font-weight: 650; letter-spacing: -.035em; }
+html[data-ui-native] .plugin-detail-panel { padding: 18px; border: 1px solid var(--ui-border); border-radius: 8px; }
+html[data-ui-native] .plugin-detail-panel .title-row h2 { font-size: 18px; font-weight: 600; letter-spacing: -.025em; }
+html[data-ui-native] .plugin-detail-panel .description { overflow-wrap: anywhere; }
 html[data-ui-native] .section-header h3 { font-size: 21px; font-weight: 600; letter-spacing: -.025em; }
 html[data-ui-native] .plugin-header { border-radius: 8px; padding: 18px; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
 html[data-ui-native] .plugin-header .info { min-width: 0; }
@@ -153,7 +163,7 @@ html[data-ui-native] .reconnecting-banner { background: var(--ui-warning-soft); 
 @media (max-width: 1100px) {
   html[data-ui-native] :is(.dashboard-page, .market-page, .logs-page, .chat-page) { padding: 24px; }
   html[data-ui-native] .settings-sidebar { width: 206px; }
-  html[data-ui-native] .settings-main { padding: 20px; }
+  html[data-ui-native] :is(.settings-main, .plugins-main) { padding: 20px; }
 }
 @media (max-width: 760px) {
   html[data-ui-native] #app > .el-container { flex-direction: column; }
@@ -175,10 +185,14 @@ html[data-ui-native] .reconnecting-banner { background: var(--ui-warning-soft); 
   html[data-ui-native] .stat-card .el-card__body { padding: 16px; gap: 12px; }
   html[data-ui-native] .stat-value { font-size: 26px; }
   html[data-ui-native] .chart { height: 250px; }
-  html[data-ui-native] .settings-page { flex-direction: column; }
-  html[data-ui-native] .settings-sidebar { width: 100%; max-height: 180px; padding: 12px 16px; border-right: 0; border-bottom: 1px solid var(--ui-border); }
+  html[data-ui-native] :is(.settings-page, .plugins-page) { flex-direction: column; }
+  html[data-ui-native] :is(.settings-sidebar, .plugins-page .plugin-manager-sidebar) { width: 100%; max-height: 180px; padding: 12px 16px; border-right: 0; border-bottom: 1px solid var(--ui-border); }
+  html[data-ui-native] .plugins-page .plugin-manager-sidebar { height: min(280px, 36dvh); max-height: none; flex-shrink: 0; }
   html[data-ui-native] .settings-sidebar .menu-scroll { overflow: auto; margin-top: 8px; }
-  html[data-ui-native] .settings-main { padding: 18px 16px; }
+  html[data-ui-native] .plugin-manager-sidebar .sidebar-controls { padding: 0 0 10px; }
+  html[data-ui-native] .plugin-manager-sidebar .sidebar-scroll { overflow: auto; }
+  html[data-ui-native] :is(.settings-main, .plugins-main) { padding: 18px 16px; }
+  html[data-ui-native] .plugin-detail-panel { padding: 14px; flex-shrink: 0; }
   html[data-ui-native] .plugin-header .meta { display: grid; }
   html[data-ui-native] .simple-row { flex-wrap: wrap; }
   html[data-ui-native] .value-input { min-width: 150px; }

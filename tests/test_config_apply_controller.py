@@ -55,6 +55,7 @@ def controller(tmp_path, monkeypatch):
         sleeps=[],
         promotions=[],
         status_filter=None,
+        last_application=None,
         now=0.0,
         cgroup=cgroup,
         unit={
@@ -107,9 +108,7 @@ def controller(tmp_path, monkeypatch):
             state.active = False
             state.unit.update(ActiveState="inactive", SubState="dead", MainPID="0", ControlPID="0", Job="")
             state.unit.update(state.stop_overrides)
-            (state.cgroup / "cgroup.events").write_text(
-                f"populated {int(state.stop_populated)}\nfrozen 0\n"
-            )
+            (state.cgroup / "cgroup.events").write_text(f"populated {int(state.stop_populated)}\nfrozen 0\n")
             if state.after_stop is not None:
                 state.after_stop()
             return module.subprocess.CompletedProcess(command, state.stop_returncode)
@@ -121,6 +120,7 @@ def controller(tmp_path, monkeypatch):
             state.active = True
             state.health = "ok"
             state.running = module.digest(module.CONFIG_PATH.read_bytes())
+            state.last_application = None
             state.unit.update(ActiveState="active", SubState="running", MainPID="101")
             state.cgroup.mkdir(parents=True, exist_ok=True)
             (state.cgroup / "cgroup.events").write_text("populated 1\nfrozen 0\n")
@@ -150,6 +150,8 @@ def controller(tmp_path, monkeypatch):
             "in_sync": state.running == saved,
             "loaded_config_keys": ["llm", "webui_config_apply"],
         }
+        if state.last_application is not None:
+            status["last_application"] = dict(state.last_application)
         if state.status_filter is not None:
             state.status_filter(status)
         return status
@@ -257,9 +259,7 @@ def test_recovery_cannot_replace_config_while_a_descendant_survives(controller):
     state.stop_overrides = {"ActiveState": "failed", "SubState": "failed"}
     state.stop_populated = True
 
-    assert not module.restore_last_good(
-        state.candidate, state.old, None, reason="Rejected candidate", rejected=True
-    )
+    assert not module.restore_last_good(state.candidate, state.old, None, reason="Rejected candidate", rejected=True)
 
     assert state.operations == ["stop"]
     assert state.config_writes == []
@@ -496,6 +496,176 @@ def test_hot_save_requires_five_checks_and_promotes_without_restart(controller):
     assert status["result"] == "applied"
     assert status["application_mode"] == "hot_reload"
     assert status["candidate_sha256"] == module.digest(state.candidate)
+
+
+@pytest.mark.parametrize(("runtime_matches", "healthy_during_apply"), [(False, True), (True, True), (False, False)])
+def test_native_apply_finishes_before_five_healthy_checks_without_restart(
+    controller, runtime_matches, healthy_during_apply
+):
+    state = controller
+    module = state.module
+    expected = module.digest(state.candidate)
+    state.running = expected if runtime_matches else module.digest(state.old)
+    state.health = "ok" if healthy_during_apply else "failed"
+    state.last_application = {"result": "applying", "candidate_sha256": expected, "mode": "hot_reload"}
+
+    def complete_native_apply(status):
+        assert "stop" not in state.operations
+        assert state.promotions == []
+        if state.now < 3:
+            if state.now >= 2:
+                state.health = "ok"
+            status["loaded_config_keys"] = []
+            return
+        state.running = expected
+        state.last_application["result"] = "applied"
+        status.update(running_sha256=expected, in_sync=True, last_application=dict(state.last_application))
+
+    state.status_filter = complete_native_apply
+    assert module.apply_candidate(state.candidate, state.old, None, staged=False)
+    assert state.status_calls == 8
+    assert state.sleeps == [1] * 7
+    assert state.operations == ["is-active"] * 8
+    assert state.promotions == [state.candidate]
+    assert module.LAST_GOOD_PATH.read_bytes() == state.candidate
+    status = json.loads(module.STATUS_PATH.read_bytes())
+    assert status["result"] == "applied"
+    assert status["application_mode"] == "hot_reload"
+
+
+@pytest.mark.parametrize("candidate_starts", [False, True])
+def test_native_apply_failure_uses_managed_restart_and_existing_recovery(controller, candidate_starts):
+    state = controller
+    module = state.module
+    state.running = module.digest(state.old)
+    state.last_application = {
+        "result": "applying",
+        "candidate_sha256": module.digest(state.candidate),
+        "mode": "hot_reload",
+    }
+    state.start_results = [candidate_starts, True]
+
+    def fail_native_apply(status):
+        if "stop" not in state.operations:
+            assert state.promotions == []
+            assert module.LAST_GOOD_PATH.read_bytes() == state.old
+            if state.now >= 2:
+                state.last_application["result"] = "failed"
+                status["last_application"] = dict(state.last_application)
+
+    state.status_filter = fail_native_apply
+    assert module.apply_candidate(state.candidate, state.old, None, staged=False)
+    assert state.now == 6
+    assert state.status_calls == 8
+    assert state.operations.count("stop") == (1 if candidate_starts else 2)
+    assert state.operations.count("start") == (1 if candidate_starts else 2)
+    assert state.promotions == ([state.candidate] if candidate_starts else [])
+    assert module.LAST_GOOD_PATH.read_bytes() == (state.candidate if candidate_starts else state.old)
+    status = json.loads(module.STATUS_PATH.read_bytes())
+    assert status["result"] == ("applied" if candidate_starts else "rolled_back")
+    assert status["application_mode"] == "restart"
+
+
+def test_stuck_native_apply_has_bounded_wait_before_managed_restart(controller):
+    state = controller
+    module = state.module
+    state.running = module.digest(state.old)
+    state.last_application = {
+        "result": "applying",
+        "candidate_sha256": module.digest(state.candidate),
+        "mode": "hot_reload",
+    }
+
+    def preserve_last_good_until_restart(status):
+        if "stop" not in state.operations:
+            assert state.promotions == []
+            assert module.LAST_GOOD_PATH.read_bytes() == state.old
+
+    state.status_filter = preserve_last_good_until_restart
+    assert module.apply_candidate(state.candidate, state.old, None, staged=False)
+    assert state.now == module.NATIVE_APPLY_TIMEOUT + 4
+    assert state.status_calls == module.NATIVE_APPLY_TIMEOUT + 6
+    assert state.operations.count("stop") == 1
+    assert state.operations.count("start") == 1
+    assert state.promotions == [state.candidate]
+    status = json.loads(module.STATUS_PATH.read_bytes())
+    assert status["result"] == "applied"
+    assert status["application_mode"] == "restart"
+
+
+def test_newer_candidate_supersedes_native_apply_wait_without_promoting_old_candidate(controller):
+    state = controller
+    module = state.module
+    state.running = module.digest(state.old)
+    state.last_application = {
+        "result": "applying",
+        "candidate_sha256": module.digest(state.candidate),
+        "mode": "hot_reload",
+    }
+
+    def save_newer(status):
+        if state.status_calls == 2:
+            assert "stop" not in state.operations
+            assert state.promotions == []
+            module.CONFIG_PATH.write_bytes(state.newer)
+            state.last_application["candidate_sha256"] = module.digest(state.newer)
+            status.update(saved_sha256=module.digest(state.newer), last_application=dict(state.last_application))
+
+    state.status_filter = save_newer
+    assert module.apply_candidate(state.candidate, state.old, None, staged=False)
+    assert state.now == 5
+    assert state.promotions == [state.newer]
+    assert module.CONFIG_PATH.read_bytes() == state.newer
+    assert module.LAST_GOOD_PATH.read_bytes() == state.newer
+    assert state.operations.count("stop") == 1
+    assert state.operations.count("start") == 1
+    status = json.loads(module.STATUS_PATH.read_bytes())
+    assert status["candidate_sha256"] == module.digest(state.newer)
+    assert status["application_mode"] == "restart"
+
+
+def test_explicit_restart_bypasses_native_apply_wait(controller):
+    state = controller
+    module = state.module
+    state.running = module.digest(state.old)
+    state.last_application = {
+        "result": "applying",
+        "candidate_sha256": module.digest(state.candidate),
+        "mode": "hot_reload",
+    }
+    request_id = "e" * 32
+
+    assert module.apply_candidate(state.candidate, state.old, request_id, staged=False)
+    assert state.operations[:2] == ["stop", "start"]
+    assert state.status_calls == 5
+    assert state.now == 4
+    assert state.promotions == [state.candidate]
+    status = json.loads(module.STATUS_PATH.read_bytes())
+    assert status["result"] == "applied"
+    assert status["application_mode"] == "restart"
+    assert status["request_id"] == request_id
+
+
+@pytest.mark.parametrize(
+    ("result", "mode", "exact_candidate"),
+    [("pending", "restart", True), ("applying", "restart", True), ("applying", "hot_reload", False)],
+)
+def test_non_native_or_other_candidate_application_does_not_wait(controller, result, mode, exact_candidate):
+    state = controller
+    module = state.module
+    state.running = module.digest(state.old)
+    state.last_application = {
+        "result": result,
+        "mode": mode,
+        "candidate_sha256": module.digest(state.candidate if exact_candidate else state.newer),
+    }
+
+    assert module.apply_candidate(state.candidate, state.old, None, staged=False)
+    assert state.operations[:3] == ["is-active", "stop", "start"]
+    assert state.status_calls == 6
+    assert state.now == 4
+    assert state.promotions == [state.candidate]
+    assert json.loads(module.STATUS_PATH.read_bytes())["application_mode"] == "restart"
 
 
 def test_explicit_restart_is_not_skipped_even_for_last_good(controller):

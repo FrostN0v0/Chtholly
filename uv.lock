@@ -4,7 +4,7 @@ requires-python = "==3.11.*"
 
 [manifest]
 constraints = [{ name = "agno", specifier = "<3" }]
-overrides = [{ name = "arclet-entari", extras = ["full", "pydantic"], path = "vendor/entari/arclet_entari-0.19.1+chtholly.1-py3-none-any.whl" }]
+overrides = [{ name = "arclet-entari", extras = ["full", "pydantic"], path = "vendor/entari/arclet_entari-0.19.2+chtholly.1-py3-none-any.whl" }]
 
 [[package]]
 name = "agno"
@@ -207,8 +207,8 @@ wheels = [
 
 [[package]]
 name = "arclet-entari"
-version = "0.19.1+chtholly.1"
-source = { path = "vendor/entari/arclet_entari-0.19.1+chtholly.1-py3-none-any.whl" }
+version = "0.19.2+chtholly.1"
+source = { path = "vendor/entari/arclet_entari-0.19.2+chtholly.1-py3-none-any.whl" }
 dependencies = [
     { name = "arclet-alconna" },
     { name = "arclet-alconna-tools" },
@@ -219,7 +219,7 @@ dependencies = [
     { name = "simpleeval" },
 ]
 wheels = [
-    { filename = "arclet_entari-0.19.1+chtholly.1-py3-none-any.whl", hash = "sha256:eef000d9fdb53e3f7fd7e541c14c9f0277ac4b6cb9da203eeae8ff12c4fbb3da" },
+    { filename = "arclet_entari-0.19.2+chtholly.1-py3-none-any.whl", hash = "sha256:8dda9fecd8ef4e1f3b607f4601a32480b1d68de2d53f6fadfab5f826375b4952" },
 ]
 
 [package.optional-dependencies]
@@ -399,15 +399,15 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.14.3" },
-    { name = "arclet-entari", extras = ["full"], path = "vendor/entari/arclet_entari-0.19.1+chtholly.1-py3-none-any.whl" },
+    { name = "arclet-entari", extras = ["full"], path = "vendor/entari/arclet_entari-0.19.2+chtholly.1-py3-none-any.whl" },
     { name = "entari-plugin-browser", extras = ["jinja2"], specifier = ">=0.6.1" },
-    { name = "entari-plugin-database", specifier = ">=0.3.3" },
+    { name = "entari-plugin-database", specifier = ">=0.4.2" },
     { name = "entari-plugin-htmlrender", extras = ["playwright"], path = "vendor/htmlrender/entari_plugin_htmlrender-0.1.0+chtholly.1-py3-none-any.whl" },
     { name = "entari-plugin-llm", path = "vendor/llm/entari_plugin_llm-0.2.2+chtholly.2-py3-none-any.whl" },
     { name = "entari-plugin-permission", specifier = ">=0.1.1" },
     { name = "entari-plugin-server", specifier = ">=0.7.1" },
     { name = "entari-plugin-user", specifier = ">=0.2.0" },
-    { name = "entari-plugin-webui", path = "vendor/webui/entari_plugin_webui-1.0.3+chtholly.5-py3-none-any.whl" },
+    { name = "entari-plugin-webui", path = "vendor/webui/entari_plugin_webui-1.1.1+chtholly.1-py3-none-any.whl" },
     { name = "exa-py", specifier = ">=2.16.2" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.27.2" },
     { name = "jsonschema", specifier = ">=4.23,<5" },
@@ -587,7 +587,7 @@ jinja2 = [
 
 [[package]]
 name = "entari-plugin-database"
-version = "0.3.4"
+version = "0.4.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiosqlite" },
@@ -595,12 +595,12 @@ dependencies = [
     { name = "arclet-entari", extra = ["full", "pydantic"] },
     { name = "arclet-letoderea" },
     { name = "graia-amnesia" },
-    { name = "sqlalchemy" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "tarina" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/cf/00/7b8da876ef83a967c4bce0e8e04940ecc2c12c81225e2af92310b185aa73/entari_plugin_database-0.3.4.tar.gz", hash = "sha256:b817abdd1b79549977b6ef89c72d016320ee09bef9bd3337c5d09ebfae6cc97a", size = 18645, upload-time = "2026-08-16T03:37:57.976Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/63/7d/1018f8bb1f34d68010f86682dbc2853002ea09e8a9656792a58332717abd/entari_plugin_database-0.4.2.tar.gz", hash = "sha256:d1c5b3e0a86fd1a4d022a303063ff9e9778e7140f8982bcff2a550b243222a94", size = 21360, upload-time = "2026-10-20T03:55:21.392Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e0/e8/7bbc53c6efb402585c1902e69a5eacf3152458df6dca7eba3b7522ea9e5c/entari_plugin_database-0.3.4-py3-none-any.whl", hash = "sha256:bfa3348b1958561dd232fb6f2c167d9541c728192c8f12e21a4bd425f5dbb40d", size = 21187, upload-time = "2026-08-16T03:37:56.771Z" },
+    { url = "https://files.pythonhosted.org/packages/13/fd/84cddfa509bca46a4d0e8c0b8f286b4f24afc6d961da2a8bd47d7cb3935c/entari_plugin_database-0.4.2-py3-none-any.whl", hash = "sha256:a409e36f48bcd2ed7e0f48c6b5997286fab63106ee809e76d0bcb597add2f632", size = 23989, upload-time = "2026-10-20T03:55:20.056Z" },
 ]
 
 [[package]]
@@ -726,8 +726,8 @@ wheels = [
 
 [[package]]
 name = "entari-plugin-webui"
-version = "1.0.3+chtholly.5"
-source = { path = "vendor/webui/entari_plugin_webui-1.0.3+chtholly.5-py3-none-any.whl" }
+version = "1.1.1+chtholly.1"
+source = { path = "vendor/webui/entari_plugin_webui-1.1.1+chtholly.1-py3-none-any.whl" }
 dependencies = [
     { name = "ansi2html" },
     { name = "arclet-entari", extra = ["full", "pydantic"] },
@@ -736,14 +736,14 @@ dependencies = [
     { name = "fastapi" },
 ]
 wheels = [
-    { filename = "entari_plugin_webui-1.0.3+chtholly.5-py3-none-any.whl", hash = "sha256:a27f4a7d0faaab3e85b8c3038c6c94b403ac2243ed87c385d84e743c286e59e5" },
+    { filename = "entari_plugin_webui-1.1.1+chtholly.1-py3-none-any.whl", hash = "sha256:f27df4f1047c605765148a62e5b171c909be80a8a270d51d2c3f818a37db2773" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "ansi2html", specifier = ">=1.9.2" },
-    { name = "arclet-entari", extras = ["dotenv", "yaml"], specifier = ">=0.18.0" },
-    { name = "entari-plugin-database", specifier = ">=0.3.2" },
+    { name = "arclet-entari", extras = ["dotenv", "yaml"], specifier = ">=0.19.2" },
+    { name = "entari-plugin-database", specifier = ">=0.4.2" },
     { name = "entari-plugin-server", specifier = ">=0.7.1" },
     { name = "fastapi", specifier = ">=0.135.1" },
 ]
@@ -883,15 +883,15 @@ wheels = [
 
 [[package]]
 name = "graia-amnesia"
-version = "0.11.5"
+version = "0.11.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "launart" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bf/0e/8c1906e8d6d53e365dd8c72636e5fe1fa5a39b5df537893b15e3f89bb593/graia_amnesia-0.11.5.tar.gz", hash = "sha256:5cb3ff867205e1ee40dbb71499eb55a1d1475a642d77abddd732b2feb30d8350", size = 20929, upload-time = "2025-10-15T13:01:05.172Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/24/72/55c7b64d4c420b36dace78a5c9c3ee08eaa46539376a1e0496058399913a/graia_amnesia-0.11.6.tar.gz", hash = "sha256:56969bdcdc29b96a76a253d4330f57e9e4cf120eac3b4661ec1eb09862b522b7", size = 21081, upload-time = "2026-10-10T02:49:18.428Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/11/7a/086e66e76fde0a9b8a28116c4ab950800a3c66dd44991e8b0ea807424e75/graia_amnesia-0.11.5-py3-none-any.whl", hash = "sha256:454e58ac34a08d256a83b98bee44eaa64378d5438572914ebf15a00b25f7e67f", size = 27077, upload-time = "2025-10-15T13:01:04.221Z" },
+    { url = "https://files.pythonhosted.org/packages/11/85/d994bd88ef584f79d8d65c804ea750361b5a9827e4a6e3237ccbf99a73ce/graia_amnesia-0.11.6-py3-none-any.whl", hash = "sha256:af678c15f21e8a5e209fd7925af6366ac340d1e7cddee17abd40eef37eafb2a8", size = 27184, upload-time = "2026-10-10T02:49:17.327Z" },
 ]
 
 [package.optional-dependencies]
@@ -2045,6 +2045,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c2/f1/0f1b1d4800e51218e736a06ed55a3b2a59c257600bbaca7673bf13d2dbec/sqlalchemy-2.0.52-cp311-cp311-win32.whl", hash = "sha256:cef328349452ae152637df4d11ce5a0919ecdf0a363e16c830c3518ee33bde72", size = 2131248, upload-time = "2026-08-11T21:09:50.765Z" },
     { url = "https://files.pythonhosted.org/packages/7a/f0/04d2ac5ad66f3d31278f37064ed5f5ef3fe653f7bdaa67036663f223d186/sqlalchemy-2.0.52-cp311-cp311-win_amd64.whl", hash = "sha256:f1c850792a3b25a3ad74dade3f05e4f402cdebfea27438bcadafaa1617f77bcc", size = 2156943, upload-time = "2026-08-11T21:09:51.979Z" },
     { url = "https://files.pythonhosted.org/packages/b3/3f/3582293d1e185e71d19d7c731c3e2ee20ba21981c4a1115c0806c1f62120/sqlalchemy-2.0.52-py3-none-any.whl", hash = "sha256:3b81b8363a919ce53453591cdb93702e6bd54ade6c4fa2f468fc053baee5ed89", size = 1950700, upload-time = "2026-08-11T20:47:21.603Z" },
+]
+
+[package.optional-dependencies]
+asyncio = [
+    { name = "greenlet" },
 ]
 
 [[package]]

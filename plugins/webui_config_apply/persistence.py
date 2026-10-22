@@ -20,6 +20,8 @@ _PERSISTENCE_FIELDS = (
     "plugin_prefixes",
     "prelude_plugin",
     "plugin_extra_files",
+    "_root_plugin_keys",
+    "_extra_stems",
 )
 
 
@@ -38,6 +40,8 @@ def persist_candidate(
     candidate: EntariConfig,
     snapshots: Mapping[Path, tuple[bytes, dict[str, Any]]],
     changed: Mapping[Path, bytes],
+    *,
+    publish: bool = True,
 ) -> Iterator[None]:
     """Publish persistence only after the caller's runtime application succeeds."""
     with ExitStack() as stack:
@@ -53,7 +57,7 @@ def persist_candidate(
                 attempted.append(path)
                 _write(stream, changed[path])
             candidate.save_flag = False
-            candidate.reload()
+            candidate.reload(force=True)
             # Closing a file can fail too; finish it before publishing model state.
             stack.close()
             yield
@@ -86,5 +90,6 @@ def persist_candidate(
         else:
             # Never mutate running BasicConfig or existing plugin-owned objects.
             # Entari's shutdown save must still flush the newly persisted source.
-            for field in _PERSISTENCE_FIELDS:
-                setattr(live, field, getattr(candidate, field))
+            if publish:
+                for field in _PERSISTENCE_FIELDS:
+                    setattr(live, field, getattr(candidate, field))

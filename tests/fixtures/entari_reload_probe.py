@@ -12,6 +12,7 @@ from typing import Protocol, cast
 import asyncio
 from pathlib import Path
 import argparse
+from datetime import UTC
 import tempfile
 from textwrap import indent
 import importlib
@@ -32,6 +33,7 @@ SCENARIOS = (
     "watcher",
     "readiness",
     "schema",
+    "config",
 )
 
 
@@ -124,7 +126,7 @@ async def unload_tree(root: str, names: list[str], commands: list[str]) -> None:
 
 
 async def catalogue_reload() -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from satori import EventType, ChannelType
     from satori.model import User, Event, Login, Channel, MessageObject
@@ -138,7 +140,7 @@ async def catalogue_reload() -> None:
     account = Account(Login(sn=0, platform="probe", user=User("bot")), ApiInfo(), [], EntariProtocol)
     event = Event(
         EventType.MESSAGE_CREATED,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         account.self_info,
         channel=Channel("channel", ChannelType.TEXT),
         user=User("user"),
@@ -826,6 +828,130 @@ metadata(name="Nested configuration", config=Config)
         assert await unload_plugin_async("schema_probe")
 
 
+async def configuration_apply(config_path: Path) -> None:
+    from arclet.letoderea import post
+    from arclet.entari.config import EntariConfig
+    from arclet.entari.plugin import find_plugin
+    from arclet.entari.config.model import ApplyReport
+    from arclet.entari.event.config import ConfigModify
+    from arclet.entari.plugin.apply import applier
+
+    name = "reload_configured"
+    cfg = EntariConfig.instance
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+
+    def source(version: str) -> str:
+        return (
+            handlers("configured", version)
+            + f"""
+from arclet.entari import BasicConfModel, metadata, plugin_config
+from arclet.entari.plugin import get_plugin
+
+class Settings(BasicConfModel):
+    value: str = "default"
+
+metadata("Config apply probe", config=Settings)
+settings = plugin_config(Settings)
+
+@get_plugin().collect
+def disposed():
+    with Path("disposed.log").open("a", encoding="utf-8") as stream:
+        stream.write({(version + chr(10))!r})
+"""
+        )
+
+    def persist(value: str | None) -> None:
+        data["plugins"] = {} if value is None else {name: {"value": value}}
+        config_path.write_text(json.dumps(data), encoding="utf-8")
+
+    async def modify() -> ApplyReport:
+        result = await post(ConfigModify(config_path, source="lifecycle-probe"))
+        assert result is not None
+        assert isinstance(result.value, ApplyReport)
+        return result.value
+
+    def disposals() -> list[str]:
+        path = Path("disposed.log")
+        return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+    write_plugin(f"{name}.py", source("v1"))
+    persist("v1")
+    # ConfigModify consumes an already persisted file; it is not a save request.
+    assert name not in cfg.plugin
+    assert find_plugin(name) is None
+    report = await modify()
+    assert report.ok
+    assert report.applied
+    assert report.loaded == [name]
+    assert not report.errors
+    current = find_plugin(name)
+    assert current is not None
+    assert current.module.settings.value == "v1"
+    await assert_behavior({"configured": "v1"})
+
+    report = await modify()
+    assert report.ok
+    assert not report.applied
+    assert find_plugin(name) is current
+    assert disposals() == []
+
+    write_plugin(f"{name}.py", source("v2"))
+    persist("v2")
+    report = await modify()
+    assert report.ok
+    assert report.reloaded == [name]
+    previous = current
+    current = find_plugin(name)
+    assert current is not None
+    assert current is not previous
+    assert current.module.settings.value == "v2"
+    assert disposals() == ["v1"]
+    await assert_behavior({"configured": "v2"})
+
+    config_path.write_text("{", encoding="utf-8")
+    report = await modify()
+    assert not report.ok
+    assert report.errors
+    assert cfg.plugin[name]["value"] == "v2"
+    assert find_plugin(name) is current
+    assert config_path.read_text(encoding="utf-8") == "{"
+    assert disposals() == ["v1"]
+
+    label = "config-rejected"
+    write_plugin(f"{name}.py", source("rejected") + failure(label))
+    persist("v3")
+    report = await modify()
+    assert not report.ok
+    assert any(error.plugin == name for error in report.errors)
+    # Native apply retains desired disk/config state while the old runtime lives.
+    assert cfg.plugin[name]["value"] == "v3"
+    assert json.loads(config_path.read_text(encoding="utf-8"))["plugins"][name]["value"] == "v3"
+    assert find_plugin(name) is current
+    assert current.module.settings.value == "v2"
+    assert disposals() == ["v1", "rejected"]
+    await assert_behavior({"configured": "v2"})
+
+    file_path = str(current.module.__file__)
+    write_plugin(f"{name}.py", source("v3"))
+    assert await applier.retry(file_path)
+    assert not await applier.retry(file_path)
+    previous = current
+    current = find_plugin(name)
+    assert current is not None
+    assert current is not previous
+    assert current.module.settings.value == "v3"
+    assert disposals() == ["v1", "rejected", "v2"]
+    await assert_behavior({"configured": "v3"})
+
+    persist(None)
+    report = await modify()
+    assert report.ok
+    assert report.unloaded == [name]
+    assert find_plugin(name) is None
+    assert disposals() == ["v1", "rejected", "v2", "v3"]
+    await assert_behavior({"configured": None})
+
+
 async def run(scenario: str, config_path: Path) -> None:
     from launart import Service
     from arclet.entari import Entari, AiohttpClientService
@@ -872,6 +998,8 @@ async def run(scenario: str, config_path: Path) -> None:
         await readiness(app)
     elif scenario == "schema":
         await generated_schema()
+    elif scenario == "config":
+        await configuration_apply(config_path)
 
 
 def main() -> int:

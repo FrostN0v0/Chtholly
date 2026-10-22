@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from copy import deepcopy
 from typing import Any
 from pathlib import Path
 from collections.abc import Mapping, Callable
@@ -27,6 +28,53 @@ def read_source(path: Path) -> tuple[bytes, dict[str, Any]]:
     return content, source
 
 
+def canonical_plugins(raw: Mapping[str, Any]) -> dict[str, Any]:
+    plugins = deepcopy(raw)
+    if not isinstance(plugins, dict):
+        raise ConfigValidationError("Plugin configuration must be an object", path="config.plugins")
+    for raw_key in list(plugins):
+        if not isinstance(raw_key, str):
+            raise ConfigValidationError("Plugin keys must be strings", path="config.plugins")
+        if raw_key.startswith("$"):
+            continue
+        value = plugins[raw_key]
+        if not isinstance(value, dict):
+            raise ConfigValidationError("Plugin configuration must be an object", path="config.plugins")
+        key = raw_key.lstrip("~?")
+        if key != raw_key:
+            if key in plugins:
+                raise ConfigValidationError("Plugin keys must be unique", path="config.plugins")
+            del plugins[raw_key]
+            plugins[key] = value
+            value["$optional" if raw_key.startswith("?") else "$disable"] = True
+    return plugins
+
+
+def _preserve_plugin_keys(candidate: dict[str, Any], source: Mapping[str, Any]) -> None:
+    body = candidate.get("entari", candidate)
+    original = source.get("entari", source).get("plugins")
+    plugins = body.get("plugins")
+    if not isinstance(original, Mapping) or not isinstance(plugins, Mapping):
+        return
+    before, after = canonical_plugins(original), canonical_plugins(plugins)
+    source_keys = {key.lstrip("~?"): key for key in original if not key.startswith("$")}
+    restored = {}
+    for raw_key, value in plugins.items():
+        key = raw_key.lstrip("~?")
+        old_key = source_keys.get(key)
+        if old_key is not None and all(
+            before[key].get(flag, False) == after[key].get(flag, False) for flag in ("$optional", "$disable")
+        ):
+            # Unchanged markers must not rename unrelated YAML nodes and discard their comments.
+            raw_key, value = old_key, after[key]
+            if old_key.startswith("?"):
+                value.pop("$optional", None)
+            elif old_key.startswith("~"):
+                value.pop("$disable", None)
+        restored[raw_key] = value
+    body["plugins"] = restored
+
+
 def render_source(
     cfg: EntariConfig,
     path: Path,
@@ -37,6 +85,8 @@ def render_source(
     *,
     source: Mapping[str, Any] | None = None,
 ) -> bytes:
+    from entari_plugin_webui.services import config_ops
+
     if source is None:
         _, source = read_source(path)
     # Never call loader(): it interpolates and appends stale _records. Registry
@@ -46,16 +96,19 @@ def render_source(
         origin["entari"] = dict(data)
     else:
         origin = dict(data)
+    _preserve_plugin_keys(origin, source)
     restored = restore_environment_templates(origin, source, cfg.env_vars)
     if not isinstance(restored, dict):
         raise ConfigValidationError("Configuration must be an object")
     validate_config(restored, cfg.env_vars)
+    document = deepcopy(source if isinstance(source, dict) else dict(source))
+    config_ops.apply_ops(document, config_ops.diff(document, restored).ops)
     dumper = config_file._dumpers.get(save_path.suffix.lstrip("."))
     if dumper is None:
         raise ConfigValidationError("The configuration output format is not supported", code="unsupported_format")
     schema_file = f"{save_path.stem}.schema.json" if apply_schema else None
     try:
-        text, _ = dumper(restored, indent, schema_file)
+        text, _ = dumper(document, indent, schema_file)
         return text.encode("utf-8")
     except Exception:
         raise ConfigValidationError("The configuration could not be serialized", code="serialization_failed") from None

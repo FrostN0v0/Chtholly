@@ -13,7 +13,7 @@ import fcntl
 import hashlib
 import logging
 from pathlib import Path, PurePosixPath
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import subprocess
 from http.cookies import SimpleCookie
 import urllib.error
@@ -39,6 +39,7 @@ SYSTEMCTL_TIMEOUT = 45
 SYSTEMCTL_QUERY_TIMEOUT = 5
 MAX_STOP_TIMEOUT = 120
 STOP_WAIT_MARGIN = 15
+NATIVE_APPLY_TIMEOUT = 90
 LOGGER = logging.getLogger("chtholly-config-apply")
 _WEBUI_SESSION = ""
 
@@ -92,7 +93,7 @@ def record_status(
     application_mode: str = "restart",
 ) -> None:
     payload = {
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
         "result": result,
         "candidate_sha256": digest(candidate),
         "request_id": request_id,
@@ -276,28 +277,39 @@ def request_json(path: str) -> Mapping[str, object]:
     return result
 
 
-def health_ready(expected: str, required_plugins: set[str], *, require_synced: bool = False) -> bool:
+def runtime_health_status() -> tuple[bool, Mapping[str, object] | None]:
     try:
         if not run_systemctl("is-active", "--quiet", timeout=SYSTEMCTL_QUERY_TIMEOUT):
-            return False
-        if request_json("/api/health").get("status") != "ok":
-            return False
-        status = request_json("/api/config-apply/status")
-        keys = status.get("loaded_config_keys")
-        if require_synced and (
-            status.get("success") is not True
-            or status.get("saved_sha256") != expected
-            or status.get("in_sync") is not True
-        ):
-            return False
-        return (
-            status.get("running_sha256") == expected
-            and isinstance(keys, list)
-            and all(isinstance(key, str) for key in keys)
-            and required_plugins.issubset(keys)
-        )
+            return False, None
+        healthy = request_json("/api/health").get("status") == "ok"
+        return healthy, request_json("/api/config-apply/status")
     except (OSError, ValueError, urllib.error.URLError):
+        return False, None
+
+
+def status_ready(
+    status: Mapping[str, object], expected: str, required_plugins: set[str], *, require_synced: bool = False
+) -> bool:
+    keys = status.get("loaded_config_keys")
+    if require_synced and (
+        status.get("success") is not True or status.get("saved_sha256") != expected or status.get("in_sync") is not True
+    ):
         return False
+    return (
+        status.get("running_sha256") == expected
+        and isinstance(keys, list)
+        and all(isinstance(key, str) for key in keys)
+        and required_plugins.issubset(keys)
+    )
+
+
+def health_ready(expected: str, required_plugins: set[str], *, require_synced: bool = False) -> bool:
+    healthy, status = runtime_health_status()
+    return (
+        healthy
+        and status is not None
+        and status_ready(status, expected, required_plugins, require_synced=require_synced)
+    )
 
 
 def wait_for_health(expected: str, required_plugins: set[str], timeout: float = 90) -> bool:
@@ -315,13 +327,31 @@ def wait_for_health(expected: str, required_plugins: set[str], timeout: float = 
 
 def already_applied(candidate: bytes, required_plugins: set[str]) -> bool:
     expected = digest(candidate)
-    # Do not wait out the startup timeout when a normal restart is needed.
-    for check in range(5):
-        if CONFIG_PATH.read_bytes() != candidate or not health_ready(expected, required_plugins, require_synced=True):
+    deadline = time.monotonic() + NATIVE_APPLY_TIMEOUT
+    consecutive = 0
+    while CONFIG_PATH.read_bytes() == candidate:
+        healthy, status = runtime_health_status()
+        if status is None or status.get("success") is not True or status.get("saved_sha256") != expected:
             return False
-        if check < 4:
-            time.sleep(1)
-    return CONFIG_PATH.read_bytes() == candidate
+        application = status.get("last_application")
+        if isinstance(application, Mapping) and application.get("candidate_sha256") == expected:
+            if application.get("result") == "applying" and application.get("mode") == "hot_reload":
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                consecutive = 0
+                time.sleep(min(1, remaining))
+                continue
+            if application.get("result") != "applied":
+                return False
+        # Pending restarts and failed native reports must not consume the native wait.
+        if not healthy or not status_ready(status, expected, required_plugins, require_synced=True):
+            return False
+        consecutive += 1
+        if consecutive >= 5:
+            return CONFIG_PATH.read_bytes() == candidate
+        time.sleep(1)
+    return False
 
 
 def plugin_config(data: Mapping[str, object]) -> Mapping[str, object]:
@@ -345,7 +375,7 @@ def required_plugins(candidate: bytes) -> set[str]:
 
 
 def save_failed_candidate(candidate: bytes) -> None:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     path = STATE_DIR / f"failed-{stamp}-{digest(candidate)[:12]}.yml"
     atomic_write(path, candidate)
     failures = sorted(STATE_DIR.glob("failed-*.yml"), key=lambda item: item.stat().st_mtime_ns, reverse=True)

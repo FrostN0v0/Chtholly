@@ -42,6 +42,11 @@
       if (item === active) item.setAttribute("aria-current", "page");
       else item.removeAttribute("aria-current");
     }
+    const localItems = document.querySelectorAll(".settings-sidebar .menu-item, .plugin-manager-sidebar .menu-item");
+    for (const item of localItems) {
+      if (item.classList.contains("active")) item.setAttribute("aria-current", "page");
+      else item.removeAttribute("aria-current");
+    }
     let breadcrumb = header.querySelector(".workspace-breadcrumb");
     if (!breadcrumb) {
       breadcrumb = document.createElement("div");
@@ -68,7 +73,7 @@
   const appearance = new MutationObserver(broadcast);
   appearance.observe(root, { attributes: true, attributeFilter: ["class"] });
   const navigation = new MutationObserver((records) => {
-    if (records.some((record) => record.type === "childList" || record.target.matches(".el-menu, .el-menu-item"))) schedule();
+    if (records.some((record) => record.type === "childList" || record.target.matches(".el-menu, .el-menu-item, .menu-item"))) schedule();
   });
   const start = () => {
     const app = document.getElementById("app");

@@ -1,143 +1,125 @@
-"""Defend native YAML saves and rollback at the model hot-update boundary."""
+"""Defend protected native saves, observable plugin effects, and model rollback."""
 
 from __future__ import annotations
 
+import os
+import sys
 import json
-from types import SimpleNamespace
-from typing import Any
-from hashlib import sha256
+import asyncio
 from pathlib import Path
-from functools import partial
-from contextlib import contextmanager
-from dataclasses import field
 
 import pytest
-from arclet.entari import BasicConfModel
-from arclet.entari.config import EntariConfig, config_model_validate
 
-from utils.webui_config_core import ConfigValidationError, validate_candidate
-from plugins.webui_config_apply import saving
-from plugins.webui_config_apply.model_reload import ModelReloadBindings, prepare_model_reload
-
-
-class Model(BasicConfModel):
-    name: str
-    alias: str | None = None
-    api_key: str | None = None
-    base_url: str = "https://api.openai.com/v1"
-    prompt: str = ""
-    extra: dict[str, Any] = field(default_factory=dict)
-
-
-class Config(BasicConfModel):
-    api_key: str | None = None
-    base_url: str = "https://api.openai.com/v1"
-    prompt: str = ""
-    models: list[Model] = field(default_factory=list)
-    tools: dict[str, dict[str, Any]] = field(default_factory=dict)
+PROBE = Path(__file__).with_name("fixtures") / "native_protected_save.py"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
-def yaml_save(tmp_path, monkeypatch):
-    path = tmp_path / "entari.yml"
-    path.write_text(
-        'basic:\n  log:\n    level: "info"\nplugins:\n'
-        '  llm:\n    models:\n      - name: "old-model"\n'
-        '  other:\n    title: "quoted"\n    notes: |\n      first line\n      second line\n    ratio: 0.5\n',
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(EntariConfig, "instance", getattr(EntariConfig, "instance", None), raising=False)
-    monkeypatch.setattr(EntariConfig, "_inited", False)
-    config = EntariConfig(path, env_vars={})
-    runtime = config_model_validate(Config, {"models": [{"name": "old-model"}]})
-    plug = SimpleNamespace(config=config.plugin["llm"], _is_disposed=False)
-    state_path = tmp_path / "state.json"
-    state_path.write_text(json.dumps({"$default": {"default_model": "old-model"}}), encoding="utf-8")
-    bindings = ModelReloadBindings("llm", plug, runtime, Config, config_model_validate, state_path)
-    monkeypatch.setattr(saving, "prepare_model_reload", partial(prepare_model_reload, bindings=bindings))
-    saver = saving.ConfigSaver(sha256(path.read_bytes()).hexdigest(), restart_available=lambda: False)
-    return SimpleNamespace(saver=saver, path=path, state_path=state_path, runtime=runtime)
+def native_save(tmp_path: Path):
+    """Keep WebUI/Entari's plugin globals and generated credentials process-local."""
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() in {"PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP"}
+    }
+    environment.update({key: str(tmp_path) for key in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA")})
+    environment["NATIVE_SAVE_KEY"] = "isolated-save-fixture-not-a-real-credential"
+
+    async def run(scenario: str, value: object = None) -> None:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-X",
+            "utf8",
+            str(PROBE),
+            str(ROOT),
+            scenario,
+            json.dumps(value),
+            cwd=tmp_path,
+            env=environment,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), 75)
+        except BaseException:
+            if process.returncode is None:
+                process.kill()
+                await process.communicate()
+            raise
+        output = (stdout + stderr).decode("utf-8", errors="replace")
+        assert process.returncode == 0, output
+
+    return run
 
 
-def test_quoted_block_and_numeric_yaml_do_not_force_model_save_to_restart(yaml_save):
-    env = yaml_save
-    result = env.saver.save_section("plugins:llm", {"models": [{"name": "new-model"}]})
-    assert result["applied"] is True
-    assert result["application_mode"] == "hot_reload"
-    assert result["restart_required"] is False
-    assert json.loads(env.state_path.read_text())["$default"]["default_model"] == "new-model"
-    assert env.runtime.models[0].name == "new-model"
-    repeated = env.saver.save_section("plugins:llm", {"models": [{"name": "new-model"}]})
-    assert repeated["application_mode"] == "unchanged"
+async def test_quoted_block_and_numeric_yaml_do_not_force_model_save_to_restart(native_save):
+    await native_save("model-save")
 
 
-def test_failed_state_repair_restores_exact_yaml_and_keeps_old_runtime(yaml_save):
-    env = yaml_save
-    original = env.path.read_bytes()
-    inode = env.path.stat().st_ino
-    env.state_path.write_bytes(b"{unreadable-state")
-    with pytest.raises(ConfigValidationError) as error:
-        env.saver.save_section("plugins:llm", {"models": [{"name": "new-model"}]})
-    assert error.value.code == "model_state_failed"
-    assert "unreadable-state" not in str(error.value)
-    assert env.path.read_bytes() == original
-    assert env.path.stat().st_ino == inode
-    assert env.runtime.models[0].name == "old-model"
-    assert env.state_path.read_bytes() == b"{unreadable-state"
+async def test_failed_state_repair_restores_exact_yaml_and_keeps_old_runtime(native_save):
+    await native_save("state-rollback")
 
 
-def test_file_close_failure_cannot_publish_new_model_state(yaml_save, monkeypatch):
-    env = yaml_save
-    original = env.path.read_bytes()
-    state = env.state_path.read_bytes()
-    original_open = Path.open
-    fail_close = True
-
-    @contextmanager
-    def closing_failure(stream):
-        with stream:
-            yield stream
-        raise OSError("fixture close failure")
-
-    def open_file(path, mode="r", *args, **kwargs):
-        nonlocal fail_close
-        stream = original_open(path, mode, *args, **kwargs)
-        if path == env.path and mode == "r+b" and fail_close:
-            fail_close = False
-            return closing_failure(stream)
-        return stream
-
-    monkeypatch.setattr(Path, "open", open_file)
-    with pytest.raises(saving.SaveError):
-        env.saver.save_section("plugins:llm", {"models": [{"name": "new-model"}]})
-    assert env.path.read_bytes() == original
-    assert env.state_path.read_bytes() == state
-    assert env.runtime.models[0].name == "old-model"
+async def test_file_close_failure_cannot_publish_new_model_state(native_save):
+    await native_save("close-rollback")
 
 
 @pytest.mark.parametrize("value", [-1, True, "96"])
-def test_invalid_companion_budget_does_not_change_saved_or_running_config(yaml_save, value):
-    env = yaml_save
-    original = env.path.read_bytes()
-    inode = env.path.stat().st_ino
-    running = env.saver.running_sha256
-    with pytest.raises(ConfigValidationError) as caught:
-        env.saver.save_section("plugins:llm_chat", {"companion_daily_contacts": value})
-    assert caught.value.path == "config.plugins.llm_chat.companion_daily_contacts"
-    assert env.path.read_bytes() == original
-    assert env.path.stat().st_ino == inode
-    assert env.saver.running_sha256 == running
-    assert "llm_chat" not in EntariConfig.instance.plugin
+async def test_invalid_companion_budget_does_not_change_saved_or_running_config(native_save, value):
+    await native_save("invalid-budget", value)
 
 
-def test_operator_contact_budget_is_saved_without_clamping(yaml_save):
-    env = yaml_save
-    env.saver.restart_available = lambda: True
-    chosen = {
-        "companion_daily_contacts": 96,
-        "companion_daily_reflections": 48,
-        "companion_reflection_interval_minutes": 15,
-    }
-    result = env.saver.save_section("plugins:llm_chat", chosen)
-    assert result["restart_required"] is True
-    assert validate_candidate(env.path.read_bytes(), {})["plugins"]["llm_chat"] == chosen
+async def test_operator_contact_budget_is_saved_without_clamping(native_save):
+    await native_save("operator-budget")
+
+
+async def test_native_save_requires_current_etag_on_both_native_put_routes(native_save):
+    await native_save("native-etag")
+
+
+async def test_native_save_cannot_hide_invalid_true_as_existing_one(native_save):
+    await native_save("native-bool-number")
+
+
+async def test_native_save_removes_fields_and_omits_new_schema_defaults(native_save):
+    await native_save("native-deletion-defaults")
+
+
+async def test_native_yaml_save_preserves_user_comments_quotes_and_key_order(native_save):
+    await native_save("native-yaml-comments")
+
+
+async def test_native_whole_plugins_save_deletes_section_and_unloads_plugin(native_save):
+    await native_save("native-section-deletion")
+
+
+async def test_native_form_save_retains_original_credential_environment_reference(native_save):
+    await native_save("native-credential-reference")
+
+
+async def test_native_plugin_apply_reports_in_progress_without_blocking_status(native_save):
+    await native_save("native-apply")
+
+
+async def test_native_plugin_failure_preserves_candidate_and_last_running_digest(native_save):
+    await native_save("native-failed-candidate")
+
+
+async def test_native_partial_failure_cannot_claim_original_runtime_was_restored(native_save):
+    await native_save("native-partial-candidate")
+
+
+async def test_native_lifecycle_cannot_bypass_workshop_and_core_save_boundaries(native_save):
+    await native_save("native-protected-lifecycle")
+
+
+async def test_native_mutations_require_same_origin_and_real_authentication(native_save):
+    await native_save("native-origin")
+
+
+async def test_disposing_protected_save_restores_native_mutation_behavior(native_save):
+    await native_save("native-dispose")
+
+
+async def test_stale_disposer_cannot_remove_new_owners_hook_or_origin_guard(native_save):
+    await native_save("native-dispose-ownership")

@@ -11,8 +11,8 @@ EnvironmentFile=/etc/chtholly/chtholly.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONPATH=/opt/chtholly
 ExecStart=/usr/local/sbin/chtholly-config-apply
-# Covers two 135s stops, 45s starts and 90s health windows, including bounded probes/auth.
-TimeoutStartSec=660
+# Covers 90s native apply plus two 135s stops, 45s starts and 90s health windows, including bounded probes/auth.
+TimeoutStartSec=750
 UMask=0077
 StateDirectory=chtholly-config-apply
 StateDirectoryMode=0700

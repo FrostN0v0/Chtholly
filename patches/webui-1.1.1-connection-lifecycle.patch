@@ -1,0 +1,87 @@
+--- a/entari_plugin_webui/adapter.py
++++ b/entari_plugin_webui/adapter.py
+@@ -165,51 +165,31 @@
+         ]
+ 
+     async def websocket_server_handler(self, ws: WebSocket):
+-        sid = None
+         if not is_local_mode():
+-            sid = ws.cookies.get("webui_sid")
+             from entari_plugin_webui import _session_store
+ 
+-            if _session_store.get(sid) is None:
++            if _session_store.get(ws.cookies.get("webui_sid")) is None:
+                 await ws.close(code=1008, reason="Invalid session")
+                 return
+ 
+-        sid = sid or f"entari_{token_hex(8)}"
+-        if sid in self.connections:
+-            old = self.connections[sid]
+-            if old.alive:
+-                await ws.close(code=1008, reason="Duplicate connection")
+-                return
+-            self.connections.pop(sid, None)
+-
++        # Authentication belongs to the browser session; transport belongs to this socket.
++        sid = f"entari_{token_hex(16)}"
+         await ws.accept()
+         conn = WebsocketConnection(self, ws, session_id=sid)
++        login = Login(platform="webui", user=User(id=sid, name="Entari"), status=LoginStatus.ONLINE)
+         self.connections[sid] = conn
+-
+-        if sid not in self.logins:
+-            self.logins[sid] = Login(
+-                platform="webui",
+-                user=User(id=sid, name="Entari"),
+-                status=LoginStatus.ONLINE,
+-            )
+-            await self.server.post(Event(EventType.LOGIN_ADDED, datetime.now(), self.logins[sid]))
+-        else:
+-            self.logins[sid].status = LoginStatus.ONLINE
+-            await self.server.post(Event(EventType.LOGIN_UPDATED, datetime.now(), self.logins[sid]))
+-
++        self.logins[sid] = login
+         try:
+-            await any_completed(
+-                conn.message_handle(),
+-                conn.close_signal.wait(),
+-            )
++            await self.server.post(Event(EventType.LOGIN_ADDED, datetime.now(), login))
++            await any_completed(conn.message_handle(), conn.close_signal.wait())
+         finally:
+             await conn.connection_closed()
+             self.connections.pop(sid, None)
+-            if conn.response_waiters:
+-                for future in conn.response_waiters.values():
+-                    future.cancel()
+-            self.logins[sid].status = LoginStatus.OFFLINE
+-            await self.server.post(Event(EventType.LOGIN_REMOVED, datetime.now(), self.logins[sid]))
++            for future in conn.response_waiters.values():
++                future.cancel()
++            self.logins.pop(sid, None)
++            login.status = LoginStatus.OFFLINE
++            await self.server.post(Event(EventType.LOGIN_REMOVED, datetime.now(), login))
+ 
+     def get_platform(self) -> str:
+         return "webui"
+--- a/entari_plugin_webui/services/config_ops.py
++++ b/entari_plugin_webui/services/config_ops.py
+@@ -35,8 +35,17 @@
+     return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+ 
+ 
+ def _equal(left: Any, right: Any) -> bool:
+-    return left == right
++    if _is_mapping(left) and _is_mapping(right):
++        return left.keys() == right.keys() and all(_equal(value, right[key]) for key, value in left.items())
++    if _is_sequence(left) and _is_sequence(right):
++        return len(left) == len(right) and all(_equal(a, b) for a, b in zip(left, right))
++    if isinstance(left, bool) or isinstance(right, bool):
++        return type(left) is type(right) and left == right
++    for scalar_type in (str, int, float):
++        if isinstance(left, scalar_type) or isinstance(right, scalar_type):
++            return isinstance(left, scalar_type) and isinstance(right, scalar_type) and left == right
++    return type(left) is type(right) and left == right
+ 
+ 
+ def _wrap(value: Any) -> Any:
