@@ -30,7 +30,7 @@ class WheelSpec:
     patched: str
     url: str
     sha256: str
-    patch: str
+    patch: str | None
     directory: str
     source_archive: bool = False
 
@@ -43,7 +43,7 @@ PACKAGES = {
     "entari": WheelSpec(
         "arclet_entari",
         "0.19.2",
-        "0.19.2+chtholly.1",
+        "0.19.2+chtholly.2",
         "https://files.pythonhosted.org/packages/4f/e2/"
         "0427e71958084aa10cc794ebb54533246bd6b97bfb202cb6224466def1c7/"
         "arclet_entari-0.19.2-py3-none-any.whl",
@@ -71,6 +71,28 @@ PACKAGES = {
         "llm-0.2.2-entari-019.patch",
         "llm",
         source_archive=True,
+    ),
+    "permission": WheelSpec(
+        "entari_plugin_permission",
+        "0.2.0",
+        "0.2.0+chtholly.1",
+        "https://files.pythonhosted.org/packages/50/53/"
+        "d461af63003cb4cef76fa3396ea45231582babe2d2634ee6ac4fa71b5f03/"
+        "entari_plugin_permission-0.2.0-py3-none-any.whl",
+        "fc1e9b7e3a3e7c5a41308a6f66a13d0794a7cff363428c9c461b6093b69d949e",
+        None,
+        "permission",
+    ),
+    "server": WheelSpec(
+        "entari_plugin_server",
+        "0.8.0",
+        "0.8.0+chtholly.1",
+        "https://files.pythonhosted.org/packages/63/c2/"
+        "ddcd9cd6fa8e85d6f3db23777bd7dd7f2fd829799341ccccf5c531e07d16/"
+        "entari_plugin_server-0.8.0-py3-none-any.whl",
+        "faff99d66dd09baecc780333f7cf34df67d05ace3a1acfbbeff5a0f5c326bf7a",
+        "server-0.8.0-adapter-schema.patch",
+        "server",
     ),
     # Both distributions ship the server module; either installation order must be safe.
     "satori": WheelSpec(
@@ -267,6 +289,8 @@ def build_source_wheel(spec: WheelSpec, data: bytes, workspace: Path) -> bytes:
 
 
 def apply_patch(spec: WheelSpec, source: Path) -> None:
+    if spec.patch is None:
+        return
     patch = ROOT / "patches" / spec.patch
     if not patch.is_file():
         raise BuildError(f"patch not found: {patch}")
@@ -416,6 +440,15 @@ def install_webui_theme(source: Path) -> None:
     entry.write_bytes(document.encode("utf-8"))
 
 
+def install_permission_readme(spec: WheelSpec, source: Path) -> None:
+    """Restore the upstream README already embedded in its verified wheel metadata."""
+    metadata = source / f"{spec.package}-{spec.upstream}.dist-info" / "METADATA"
+    _, separator, description = metadata.read_text(encoding="utf-8").partition("\n\n")
+    if not separator or not description.strip():
+        raise BuildError("upstream permission METADATA has no README body")
+    (source / spec.package / "README.md").write_text(description, encoding="utf-8", newline="\n")
+
+
 def build(
     spec: WheelSpec,
     upstream: Path | None = None,
@@ -436,6 +469,8 @@ def build(
         if spec.directory == "webui":
             build_webui_frontend(spec, workspace, source, frontend_source)
             install_webui_theme(source)
+        if spec.directory == "permission":
+            install_permission_readme(spec, source)
         update_metadata(spec, source)
         publish_wheel(spec, source, output)
     return output

@@ -10,6 +10,8 @@ COPY vendor/entari/ vendor/entari/
 COPY vendor/webui/ vendor/webui/
 COPY vendor/htmlrender/ vendor/htmlrender/
 COPY vendor/llm/ vendor/llm/
+COPY vendor/server/ vendor/server/
+COPY vendor/permission/ vendor/permission/
 # Both distributions own satori/server; neither may overwrite the lifecycle repair.
 COPY vendor/satori/ vendor/satori/
 RUN uv sync --locked --python 3.11 --no-python-downloads --no-install-project --no-dev --all-extras

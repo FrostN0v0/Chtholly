@@ -1,0 +1,34 @@
+diff --git a/entari_plugin_server/__init__.py b/entari_plugin_server/__init__.py
+--- a/entari_plugin_server/__init__.py
++++ b/entari_plugin_server/__init__.py
+@@ -98,7 +98,7 @@
+             )
+             _schema = config_model_schema(
+                 dcls,
+-                ref_root=f"/properties/plugins/properties/{_plg._config_key}/properties/adapters/items/oneOf/{len(_adapter_schemas)}/"
++                ref_root=f"/$defs/adapter_{len(_adapter_schemas)}/"
+             )
+             _schema["properties"]["$path"] = {"const": adapter_config["$path"]}
+             _schema["required"] = ["$path"]
+@@ -117,7 +117,7 @@
+         )
+         _schema = config_model_schema(
+             dcls,
+-            ref_root=f"/properties/plugins/properties/{_plg._config_key}/properties/adapters/items/oneOf/{len(_adapter_schemas)}/"
++            ref_root=f"/$defs/adapter_{len(_adapter_schemas)}/"
+         )
+         _schema["properties"]["$path"] = {"const": adapter_config["$path"]}
+         _schema["required"] = ["$path"]
+@@ -136,7 +136,11 @@
+     "properties.adapters",
+     {
+         "type": "array",
+-        "items": {"oneOf": _adapter_schemas} if _adapter_schemas else {"type": "object"},
++        "items": {
++            "oneOf": [{"$ref": f"#/$defs/adapter_{index}"} for index in range(len(_adapter_schemas))]
++        } if _adapter_schemas else {"type": "object"},
++        # Entari rebases fragment definitions for standalone and full-file schemas.
++        "$defs": {f"adapter_{index}": schema for index, schema in enumerate(_adapter_schemas)},
+         "title": "Adapters"
+     },
+     replace=True

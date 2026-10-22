@@ -155,6 +155,8 @@ def build_inputs(root: Path, *, with_llm: bool) -> dict[str, bytes]:
         "entari": f"vendor/entari/arclet_entari-{FRAMEWORK}-py3-none-any.whl",
         "webui": "vendor/webui/entari_plugin_webui-1.0.3+chtholly.5-py3-none-any.whl",
         "htmlrender": "vendor/htmlrender/entari_plugin_htmlrender-0.1.0+chtholly.1-py3-none-any.whl",
+        "server": "vendor/server/entari_plugin_server-0.8.0+chtholly.1-py3-none-any.whl",
+        "permission": "vendor/permission/entari_plugin_permission-0.2.0+chtholly.1-py3-none-any.whl",
         "satori": "vendor/satori/satori_python-1.3.9.post1+chtholly.1-py3-none-any.whl",
         "satori-server": "vendor/satori/satori_python_server-1.3.7+chtholly.1-py3-none-any.whl",
     }

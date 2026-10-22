@@ -13,8 +13,8 @@ dependencies = [
     "entari-plugin-database>=0.4.2",
     "entari-plugin-htmlrender[playwright]>=0.1.0,<0.2",
     "entari-plugin-llm>=0.2.1",
-    "entari-plugin-permission>=0.1.1",
-    "entari-plugin-server>=0.7.1",
+    "entari-plugin-permission>=0.2.0",
+    "entari-plugin-server>=0.8.0",
     "entari-plugin-user>=0.2.0",
     "entari-plugin-webui==1.1.1",
     "exa-py>=2.16.2",
@@ -41,8 +41,10 @@ entari-plugin-htmlrender = { path = "vendor/htmlrender/entari_plugin_htmlrender-
 entari-plugin-llm = { path = "vendor/llm/entari_plugin_llm-0.2.2+chtholly.2-py3-none-any.whl" }
 satori-python = { path = "vendor/satori/satori_python-1.3.9.post1+chtholly.1-py3-none-any.whl" }
 satori-python-server = { path = "vendor/satori/satori_python_server-1.3.7+chtholly.1-py3-none-any.whl" }
-arclet-entari = { path = "vendor/entari/arclet_entari-0.19.2+chtholly.1-py3-none-any.whl" }
 entari-plugin-webui = { path = "vendor/webui/entari_plugin_webui-1.1.1+chtholly.1-py3-none-any.whl" }
+arclet-entari = { path = "vendor/entari/arclet_entari-0.19.2+chtholly.2-py3-none-any.whl" }
+entari-plugin-server = { path = "vendor/server/entari_plugin_server-0.8.0+chtholly.1-py3-none-any.whl" }
+entari-plugin-permission = { path = "vendor/permission/entari_plugin_permission-0.2.0+chtholly.1-py3-none-any.whl" }
 
 [project.optional-dependencies]
 adapters = [

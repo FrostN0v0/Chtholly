@@ -76,6 +76,8 @@ def collect_inputs(root: Path) -> tuple[dict[str, bytes], str, str]:
         ("webui", "entari_plugin_webui"),
         ("htmlrender", "entari_plugin_htmlrender"),
         ("llm", "entari_plugin_llm"),
+        ("server", "entari_plugin_server"),
+        ("permission", "entari_plugin_permission"),
         ("satori", "satori_python"),
         ("satori", "satori_python_server"),
     ):
