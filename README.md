@@ -88,7 +88,7 @@ uv run --locked main.py --check
 
 检查提示配置迁移时，按对应迁移说明操作；提示缺少资源时运行 `--prepare`，检查通过后再启动。仅 `git pull` 后直接用旧虚拟环境运行，不会自动完成依赖和配置升级。
 
-`uv.lock` 固定兼容组合：Entari `0.19.2+chtholly.2`、WebUI `1.1.1+chtholly.1`、Server `0.8.0+chtholly.1`、Permission `0.2.0+chtholly.1`、Database `0.4.2`、HTMLRender `0.1.0+chtholly.1` 与基于原 Git 提交的 LLM `0.2.2+chtholly.2`。补丁制品随仓库提供；`python scripts/build_patched_wheel.py --package entari`（或 `webui`、`server`、`permission`、`htmlrender`、`llm`）按固定来源与 SHA-256 重建，不手改 `.venv`。LLM 保留原工具桥及已验证的 Agno / LiteLLM 组合。干净环境验证入口为 `uv run --locked python scripts/smoke_startup.py --resources`；CI 使用 Python 3.11，分别覆盖 Windows/Linux 首启及 Linux 完整资源路径。
+`uv.lock` 固定兼容组合：Entari `0.19.2+chtholly.2`、WebUI `1.1.1+chtholly.1`、Server `0.8.0+chtholly.1`、Permission `0.2.0+chtholly.1`、Database `0.4.2`、HTMLRender `0.1.0+chtholly.1` 与基于原 Git 提交的 LLM `0.2.2+chtholly.3`。补丁制品随仓库提供；`python scripts/build_patched_wheel.py --package entari`（或 `webui`、`server`、`permission`、`htmlrender`、`llm`）按固定来源与 SHA-256 重建，不手改 `.venv`。LLM 保留原工具桥及已验证的 Agno / LiteLLM 组合。干净环境验证入口为 `uv run --locked python scripts/smoke_startup.py --resources`；CI 使用 Python 3.11，分别覆盖 Windows/Linux 首启及 Linux 完整资源路径。
 
 ### Entari 0.19.2 / WebUI 1.1.1 升级边界
 
@@ -97,6 +97,7 @@ uv run --locked main.py --check
 - 两个原生配置 PUT 接口要求 `If-Match`：缺失返回 428，过期返回 409；请求按整段替换，未提交字段会删除。响应保留原生 `apply`、最新 `data` 和 `etag`，旧客户端不能继续依赖隐式合并。公网部署须同步 `scripts/webui.Caddyfile` 的内建插件列表与精确生命周期路由，不开放整个后端 API。
 - 不能只裸换官方 WebUI wheel：保留同 Cookie 多连接隔离、独立清理、认证初始化失败重试及布尔/数字差异补丁。认证修复从固定上游源码构建，所需 Node.js / npm 为 `24.15.0` / `11.12.1`；不改压缩后的业务脚本。
 - 保留仍未被上游覆盖的命令解析器回滚、Schema 片段代际隔离、Service 对象清理、import 别名重绑定及子树替换补丁。原生 `plugin.niche`、函数热替换、指纹与 API Hook 已有使用，不为升级新增第二套运行边界。
+- LLM 工具声明绑定同一注册代际，跨暂停与纠正继续复用；暂存候选未提升时不接管旧工具，替换后拒绝旧轮次调用，不能把旧参数交给新一代同名 handler。外部工具纳入原生订阅者任务管理，卸载会取消并等待在途调用，阻止晚到副作用；继续使用原生 Function/schema、Session 注入及真实工具暂停/继续。
 - 数据库 Ready 处理器使用原生 `on_stage("blocking")` 注入，在表准备完成后继续迁移与用户同步；保持原优先级，不改为可能早于建表完成的默认 `prepared` 阶段。
 - 保留生产 Satori 共享服务修复：锁定 `satori-python` `1.3.9.post1+chtholly.1` 与 `satori-python-server` `1.3.7+chtholly.1`，避免单个适配器结束导致 WebUI/HTTP 一同退出。两制品均进入工坊镜像，可分别用构建器的 `--package satori`、`--package satori-server` 重建；`vendor/satori/*.whl` 在 Git 中显式按二进制保存，禁止行尾转换。
 - Server `0.8.0` 新增适配器配置 Schema；本地补丁保留 QQ WebSocket/Webhook 和 OneBot 的类型校验，修正独立 WebUI 与整份配置之间的嵌套引用，并支持官方适配器的 `PathLike` 字段。Permission `0.2.0` 在加载权限状态前等待原生数据库迁移；仅从官方 wheel 元数据补回漏打包的 README，不修改权限算法。两项新制品同时进入工坊构建输入。

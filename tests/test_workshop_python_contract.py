@@ -161,7 +161,7 @@ def build_inputs(root: Path, *, with_llm: bool) -> dict[str, bytes]:
         "satori-server": "vendor/satori/satori_python_server-1.3.7+chtholly.1-py3-none-any.whl",
     }
     if with_llm:
-        wheels["llm"] = "vendor/llm/entari_plugin_llm-0.2.2+chtholly.2-py3-none-any.whl"
+        wheels["llm"] = "vendor/llm/entari_plugin_llm-0.2.2+chtholly.3-py3-none-any.whl"
     for wheel in wheels.values():
         target = root / wheel
         target.parent.mkdir(parents=True, exist_ok=True)

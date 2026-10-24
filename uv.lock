@@ -403,7 +403,7 @@ requires-dist = [
     { name = "entari-plugin-browser", extras = ["jinja2"], specifier = ">=0.6.1" },
     { name = "entari-plugin-database", specifier = ">=0.4.2" },
     { name = "entari-plugin-htmlrender", extras = ["playwright"], path = "vendor/htmlrender/entari_plugin_htmlrender-0.1.0+chtholly.1-py3-none-any.whl" },
-    { name = "entari-plugin-llm", path = "vendor/llm/entari_plugin_llm-0.2.2+chtholly.2-py3-none-any.whl" },
+    { name = "entari-plugin-llm", path = "vendor/llm/entari_plugin_llm-0.2.2+chtholly.3-py3-none-any.whl" },
     { name = "entari-plugin-permission", path = "vendor/permission/entari_plugin_permission-0.2.0+chtholly.1-py3-none-any.whl" },
     { name = "entari-plugin-server", path = "vendor/server/entari_plugin_server-0.8.0+chtholly.1-py3-none-any.whl" },
     { name = "entari-plugin-user", specifier = ">=0.2.0" },
@@ -659,8 +659,8 @@ provides-extras = ["all", "filehost", "pillow", "playwright", "prometheus", "sen
 
 [[package]]
 name = "entari-plugin-llm"
-version = "0.2.2+chtholly.2"
-source = { path = "vendor/llm/entari_plugin_llm-0.2.2+chtholly.2-py3-none-any.whl" }
+version = "0.2.2+chtholly.3"
+source = { path = "vendor/llm/entari_plugin_llm-0.2.2+chtholly.3-py3-none-any.whl" }
 dependencies = [
     { name = "agno", extra = ["sqlite"] },
     { name = "arclet-entari", extra = ["full", "pydantic"] },
@@ -668,7 +668,7 @@ dependencies = [
     { name = "litellm" },
 ]
 wheels = [
-    { filename = "entari_plugin_llm-0.2.2+chtholly.2-py3-none-any.whl", hash = "sha256:938599facf38de5dc774672f21ea9dd899af6648fc14f44bdcb0756887aec860" },
+    { filename = "entari_plugin_llm-0.2.2+chtholly.3-py3-none-any.whl", hash = "sha256:15fd11829db14e6dcfaf19b5a1e54c83e96f6b20c04dfe10b63374fc04c6876c" },
 ]
 
 [package.metadata]

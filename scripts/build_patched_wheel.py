@@ -65,7 +65,7 @@ PACKAGES = {
     "llm": WheelSpec(
         "entari_plugin_llm",
         "0.2.2",
-        "0.2.2+chtholly.2",
+        "0.2.2+chtholly.3",
         "https://codeload.github.com/ArcletProject/entari-plugin-llm/tar.gz/1845f1c3c65f9df4493e97f96a4c43938b176320",
         "0dbcbb9d271fe4b1ca4032b6b4f6c6347f56af595cad48cd097e0185735e5df4",
         "llm-0.2.2-entari-019.patch",

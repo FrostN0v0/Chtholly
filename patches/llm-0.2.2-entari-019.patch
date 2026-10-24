@@ -1,5 +1,32 @@
 --- a/entari_plugin_llm/tools.py
 +++ b/entari_plugin_llm/tools.py
+@@ -212,8 +212,11 @@
+     llm_session: SessionInfo | None = None,
+     session: Session | None = None,
+     ctx: Contexts | None = None,
++    *,
++    tools: dict[str, tuple[Subscriber, Function]] | None = None,
+ ):
+     stops = []
++    functions = available_functions if tools is None else tools
+ 
+     requirements = [requirement for requirement in response.active_requirements if requirement.needs_external_execution]
+ 
+@@ -223,12 +226,12 @@
+             req.set_external_execution_result("No tool execution found")
+             return
+         tool_name = execution.tool_name
+-        if not tool_name or tool_name not in available_functions:
++        if not tool_name or tool_name not in functions:
+             req.set_external_execution_result(f"Tool {tool_name} not found")
+             return
+         tool_args = execution.tool_args or {}
+         context.update(tool_args)
+-        sub, fn = available_functions[tool_name]
++        sub, fn = functions[tool_name]
+         logger.debug(f"Agno bridge calling tool: {tool_name} with args: {tool_args}")
+         try:
+             result = await sub.handle(context, inner=True)
 @@ -257,6 +257,8 @@
          if fn.stop_after_tool_call:
              stops.append(req)

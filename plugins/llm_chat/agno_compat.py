@@ -11,7 +11,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from collections.abc import Iterator
 
-from arclet.entari import Session, plugin
+from arclet.entari import Plugin, Session, plugin
 from agno.run.agent import RunOutput
 from arclet.letoderea import Contexts, Subscriber
 from agno.models.message import Message
@@ -46,6 +46,7 @@ from .model_audit_runtime import (
     current_model_audit,
     install_model_http_audit,
 )
+from .core.workshop_records import WORKSHOP_TOOLS
 from .native_image_delivery import (
     NativeImageDeliveryError,
     capture_native_images,
@@ -53,7 +54,6 @@ from .native_image_delivery import (
     prepare_pending_native_images,
 )
 from .core.tool_trace_policy import DeliverySnapshot
-from .core.workshop_records import WORKSHOP_TOOLS
 
 _MIN_TOOL_CALL_LIMIT = 8
 _MAX_TOOL_CALL_LIMIT = 64
@@ -150,12 +150,40 @@ _INTERNAL_IMAGE_REFERENCE_TOOLS = {
 }
 _DELIVERY_TOOL_LOCK: ContextVar[asyncio.Lock | None] = ContextVar("llm_chat_agno_delivery_tool_lock", default=None)
 
+_ToolEntry = tuple[Subscriber[Any], Function]
+
+
+@dataclass(frozen=True)
+class _ToolRegistration:
+    owner: Plugin
+    predecessor: _ToolEntry | None
+
+
+def _registration(subscriber: Subscriber[Any]) -> _ToolRegistration | None:
+    return cast(_ToolRegistration | None, getattr(subscriber, "__llm_chat_registration__", None))
+
+
+def _active_tool(name: str) -> _ToolEntry | None:
+    entry = available_functions.get(name)
+    while entry is not None:
+        subscriber = entry[0]
+        registration = _registration(subscriber)
+        if (
+            subscriber.available
+            and not getattr(subscriber, "__llm_chat_disposed__", False)
+            and (registration is None or registration.owner.available and registration.owner.is_available)
+        ):
+            return entry
+        entry = registration.predecessor if registration is not None else None
+    return None
+
 
 @dataclass
 class _ToolBudget:
     limit: int
     used: int = 0
     pacing: ReplyPacing | None = None
+    tools: dict[str, _ToolEntry] | None = None
 
 
 @dataclass
@@ -205,7 +233,12 @@ def agno_tool_call_limit_scope(limit: int, *, pacing: ReplyPacing | None = None)
     budget = (
         _ToolBudget(normalized, pacing=pacing)
         if parent is None
-        else _ToolBudget(min(parent.limit, parent.used + normalized), used=parent.used, pacing=parent.pacing)
+        else _ToolBudget(
+            min(parent.limit, parent.used + normalized),
+            used=parent.used,
+            pacing=parent.pacing,
+            tools=parent.tools,
+        )
     )
     token = _TOOL_BUDGET.set(budget)
     try:
@@ -238,6 +271,8 @@ def register_llm_chat_tool(subscriber: Subscriber[Any]) -> None:
         # Reuse its schema generator, then guard its unconditional disposal pop.
         _ToolPropagator({"external_execution": True}).validate(subscriber)
     previous_dispose = subscriber.dispose
+    entry = available_functions[name]
+    setattr(subscriber, "__llm_chat_registration__", _ToolRegistration(Plugin.current(), predecessor))
     setattr(subscriber, "__llm_chat_disposed__", False)
 
     @wraps(previous_dispose)
@@ -249,23 +284,38 @@ def register_llm_chat_tool(subscriber: Subscriber[Any]) -> None:
             setattr(subscriber, "__llm_chat_disposed__", True)
             if current is not None and current[0] is not subscriber:
                 available_functions[name] = current
-            elif predecessor is not None and not getattr(predecessor[0], "__llm_chat_disposed__", False):
-                available_functions[name] = predecessor
+            elif predecessor is not None:
+                fallback = predecessor
+                while fallback is not None and getattr(fallback[0], "__llm_chat_disposed__", False):
+                    registration = _registration(fallback[0])
+                    fallback = registration.predecessor if registration is not None else None
+                if fallback is not None:
+                    available_functions[name] = fallback
 
     setattr(subscriber, "dispose", owned_dispose)
 
     @wraps(previous)
     async def observed_handle(context: Contexts, inner: bool = False) -> Any:
         invocation = _INVOCATION.get()
-        if invocation is None or invocation.subscriber is not subscriber:
-            return await previous(context, inner=inner)
+        task = asyncio.current_task()
+        tracked = task is not None and task in subscriber._tasks
         try:
+            if _active_tool(name) is not entry:
+                raise ValueError("Tool is not allowed: its registration is no longer available in this generation")
+            if task is not None and not tracked:
+                subscriber._tasks.add(task)
+            if invocation is None or invocation.subscriber is not subscriber:
+                return await previous(context, inner=inner)
             check_steer_boundary()
             invocation.result = await previous(context, inner=inner)
             return invocation.result
         except BaseException as exc:
-            invocation.error = exc
+            if invocation is not None and invocation.subscriber is subscriber:
+                invocation.error = exc
             raise
+        finally:
+            if task is not None and not tracked:
+                subscriber._tasks.discard(task)
 
     setattr(observed_handle, "__llm_chat_compat__", True)
     setattr(subscriber, "handle", observed_handle)
@@ -278,12 +328,12 @@ def register_llm_chat_tool(subscriber: Subscriber[Any]) -> None:
 
 
 def _authorized(name: str) -> bool:
-    entry = available_functions.get(name)
+    entry = _active_tool(name)
     if entry is None or not _is_compat_wrapper(entry[0].handle) or entry[1].external_execution is not True:
         return False
     if name in WORKSHOP_TOOLS:
-        from .tools._workshop import authorized_workshop_actor
         from .core.delivery import DeliveryError
+        from .tools._workshop import authorized_workshop_actor
 
         try:
             authorized_workshop_actor()
@@ -378,6 +428,13 @@ async def _run_local_tools(
     requirements = [req for req in response.active_requirements if req.needs_external_execution]
     budget = _TOOL_BUDGET.get() or _ToolBudget(_MIN_TOOL_CALL_LIMIT, used=len(recorder.events))
     remaining = max(0, budget.limit - budget.used)
+    if budget.tools is None:
+        budget.tools = {
+            name: entry
+            for name in available_functions
+            if (entry := _active_tool(name)) is not None and _authorized(name)
+        }
+    tools = budget.tools
     budget.used += min(remaining, len(requirements))
     exhausted = len(requirements) > remaining
     audit = current_model_audit()
@@ -432,7 +489,10 @@ async def _run_local_tools(
                 raise ValueError("Tool is not allowed in this llm_chat generation")
             if unsafe[index]:
                 raise ValueError("Invalid internal reference for this tool")
-            subscriber, function = available_functions[name]
+            entry = tools.get(name)
+            if entry is None or _active_tool(name) is not entry:
+                raise ValueError("Tool is not allowed: its registration is no longer available in this generation")
+            subscriber, function = entry
             arguments = execution.tool_args or {}
             if any(key not in function.parameters.get("properties", {}) for key in arguments) or any(
                 key not in arguments for key in function.parameters.get("required", [])
@@ -454,7 +514,9 @@ async def _run_local_tools(
             token = _INVOCATION.set(invocation)
             try:
                 with llm_chat_tool_execution_scope(call.execution_ref), model_audit_scope(None):
-                    continued = await runner(cast(RunOutput, _RequirementView((req,))), llm_session, session, context)
+                    continued = await runner(
+                        cast(RunOutput, _RequirementView((req,))), llm_session, session, context, tools={name: entry}
+                    )
             finally:
                 _INVOCATION.reset(token)
             should_continue = should_continue and continued
@@ -686,10 +748,18 @@ def install_agno_tool_bridge() -> None:
 
     @wraps(original["get_agno_tools"])
     def authorized_tools() -> list[Function]:
-        functions = original["get_agno_tools"]()
         if current_tool_trace() is None:
-            return functions
-        return [function for function in functions if _authorized(function.name)]
+            return original["get_agno_tools"]()
+        budget = _TOOL_BUDGET.get()
+        if budget is None:
+            return [entry[1] for name in available_functions if _authorized(name) and (entry := _active_tool(name))]
+        if budget.tools is None:
+            budget.tools = {
+                name: entry
+                for name in available_functions
+                if (entry := _active_tool(name)) is not None and _authorized(name)
+            }
+        return [entry[1] for name, entry in budget.tools.items() if _active_tool(name) is entry and _authorized(name)]
 
     @wraps(original["run_llm_tools"])
     async def run_tools(

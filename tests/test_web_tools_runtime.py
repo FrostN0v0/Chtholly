@@ -116,7 +116,10 @@ async def _settle_dispose_tasks(pending: set[asyncio.Task[Any]] | None) -> None:
         else:
             raise AssertionError("Plugin cleanup escaped the active test event loop")
     if local_tasks:
-        await asyncio.gather(*local_tasks)
+        results = await asyncio.gather(*local_tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                raise result
 
 
 @dataclass
@@ -127,11 +130,11 @@ class _PluginHarness:
     snapshot: _RegistrySnapshot
     disposed: bool = False
 
-    async def dispose(self) -> None:
+    async def dispose(self, *, replacing: bool = False) -> None:
         if self.disposed:
             return
         try:
-            await _settle_dispose_tasks(self.plugin.dispose())
+            await _settle_dispose_tasks(self.plugin.dispose(replacing=replacing))
         finally:
             self.disposed = True
 
@@ -412,6 +415,7 @@ async def _temporary_plugin(
     *,
     config: Mapping[str, Any] | None = None,
     module_path: Path | None = None,
+    owner_id: str | None = None,
 ) -> AsyncIterator[_PluginHarness]:
     snapshot = _registry_snapshot()
     module_name = f"plugins.llm_chat._web_runtime_test_{uuid4().hex}"
@@ -434,7 +438,7 @@ async def _temporary_plugin(
     token: Any = None
     harness: _PluginHarness | None = None
     try:
-        plugin = Plugin(module_name, module, config=dict(config or {}))
+        plugin = Plugin(owner_id or module_name, module, config=dict(config or {}))
         setattr(module, "__plugin__", plugin)
         token = current_plugin.set(plugin)
         harness = _PluginHarness(
@@ -4989,19 +4993,124 @@ async def test_staged_tool_replacement_retains_the_live_owner(
 
     async with _temporary_plugin() as original:
         register_sender(original, "old:")
-        async with _temporary_plugin() as staged:
+        async with _temporary_plugin(owner_id=original.plugin.id) as staged:
             register_sender(staged, "new:")
+            before_swap = _external_requirement("ownership_probe", {"text": "staging"}, "before-swap")
+            with (
+                local_modules.agno_compat.agno_tool_call_limit_scope(64),
+                llm_chat_tool_trace_scope(ToolTraceRecorder()),
+                llm_chat_context_scope(_tool_context(session)),
+            ):
+                llm_service_module.get_agno_tools()
+                assert await llm_service_module.run_llm_tools(RunOutput(requirements=[before_swap])) is True
+            assert json.loads(before_swap.external_execution_result)["ok"] is True
+            assert session.sent == ["old:staging"]
             if commit_replacement:
-                await original.dispose()
+                from arclet.entari.plugin.loader import promote_staged
+
+                await original.dispose(replacing=True)
+                promote_staged(staged.plugin)
             else:
                 await staged.dispose()
             requirement = _external_requirement("ownership_probe", {"text": "live"}, "staged-send")
-            with llm_chat_tool_trace_scope(ToolTraceRecorder()), llm_chat_context_scope(_tool_context(session)):
+            with (
+                local_modules.agno_compat.agno_tool_call_limit_scope(64),
+                llm_chat_tool_trace_scope(ToolTraceRecorder()),
+                llm_chat_context_scope(_tool_context(session)),
+            ):
                 exposed = llm_service_module.get_agno_tools()
                 assert available_functions["ownership_probe"][1] in exposed
                 assert await llm_service_module.run_llm_tools(RunOutput(requirements=[requirement])) is True
             assert json.loads(requirement.external_execution_result)["ok"] is True
-            assert session.sent == ["new:live" if commit_replacement else "old:live"]
+            assert session.sent == ["old:staging", "new:live" if commit_replacement else "old:live"]
+
+
+@pytest.mark.asyncio
+async def test_declared_tool_generation_cannot_execute_a_replacement(local_modules: SimpleNamespace) -> None:
+    from arclet.entari.plugin.loader import promote_staged
+
+    register = importlib.import_module("plugins.llm_chat.tools._registration").register_tool
+    session = _DeliveryToolSession()
+    trace = ToolTraceRecorder()
+
+    def register_sender(harness: _PluginHarness, prefix: str) -> None:
+        async def generation_probe(session: Session) -> str:
+            await session.send(prefix)
+            return "sent"
+
+        register(harness.dispatcher, generation_probe)
+
+    async with _temporary_plugin() as original:
+        register_sender(original, "old generation")
+        async with _temporary_plugin(owner_id=original.plugin.id) as replacement:
+            register_sender(replacement, "new generation")
+            with (
+                local_modules.agno_compat.agno_tool_call_limit_scope(64),
+                llm_chat_tool_trace_scope(trace),
+                llm_chat_context_scope(_tool_context(session)),
+            ):
+                llm_service_module.get_agno_tools()
+                await original.dispose(replacing=True)
+                promote_staged(replacement.plugin)
+                stale = _external_requirement("generation_probe", {}, "stale-generation")
+                assert await llm_service_module.run_llm_tools(RunOutput(requirements=[stale])) is True
+                assert json.loads(stale.external_execution_result)["ok"] is False
+                assert stale.tool_execution.tool_call_error is True
+                assert session.sent == []
+            with (
+                local_modules.agno_compat.agno_tool_call_limit_scope(64),
+                llm_chat_tool_trace_scope(ToolTraceRecorder()),
+                llm_chat_context_scope(_tool_context(session)),
+            ):
+                llm_service_module.get_agno_tools()
+                fresh = _external_requirement("generation_probe", {}, "fresh-generation")
+                assert await llm_service_module.run_llm_tools(RunOutput(requirements=[fresh])) is True
+            assert json.loads(fresh.external_execution_result)["ok"] is True
+            assert session.sent == ["new generation"]
+    assert [event.status for event in trace.events] == ["rejected"]
+
+
+@pytest.mark.asyncio
+async def test_native_owner_disposal_cancels_entered_executor_before_late_effects(
+    local_modules: SimpleNamespace,
+) -> None:
+    register = importlib.import_module("plugins.llm_chat.tools._registration").register_tool
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    session = _DeliveryToolSession()
+    trace = ToolTraceRecorder()
+
+    async def delayed_owner_probe(session: Session) -> str:
+        entered.set()
+        await release.wait()
+        await session.send("must not escape the closed owner")
+        return "sent"
+
+    async with _temporary_plugin() as harness:
+        register(harness.dispatcher, delayed_owner_probe)
+        requirement = _external_requirement("delayed_owner_probe", {}, "owner-closed")
+        with (
+            local_modules.agno_compat.agno_tool_call_limit_scope(64),
+            llm_chat_tool_trace_scope(trace),
+            llm_chat_context_scope(_tool_context(session)),
+        ):
+            llm_service_module.get_agno_tools()
+            task = asyncio.create_task(llm_service_module.run_llm_tools(RunOutput(requirements=[requirement])))
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=1)
+                await harness.dispose()
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            finally:
+                release.set()
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+    assert session.sent == []
+    assert json.loads(requirement.external_execution_result)["ok"] is False
+    assert requirement.tool_execution.tool_call_error is True
+    assert [event.status for event in trace.events] == ["cancelled"]
 
 
 @pytest.mark.asyncio
