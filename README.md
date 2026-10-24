@@ -98,7 +98,7 @@ uv run --locked main.py --check
 - 不能只裸换官方 WebUI wheel：保留同 Cookie 多连接隔离、独立清理、认证初始化失败重试及布尔/数字差异补丁。认证修复从固定上游源码构建，所需 Node.js / npm 为 `24.15.0` / `11.12.1`；不改压缩后的业务脚本。
 - 保留仍未被上游覆盖的命令解析器回滚、Schema 片段代际隔离、Service 对象清理、import 别名重绑定及子树替换补丁。原生 `plugin.niche`、函数热替换、指纹与 API Hook 已有使用，不为升级新增第二套运行边界。
 - 数据库 Ready 处理器使用原生 `on_stage("blocking")` 注入，在表准备完成后继续迁移与用户同步；保持原优先级，不改为可能早于建表完成的默认 `prepared` 阶段。
-- 保留生产 Satori 共享服务修复：锁定 `satori-python` `1.3.9.post1+chtholly.1` 与 `satori-python-server` `1.3.7+chtholly.1`，避免单个适配器结束导致 WebUI/HTTP 一同退出。两制品均进入工坊镜像，可分别用构建器的 `--package satori`、`--package satori-server` 重建。
+- 保留生产 Satori 共享服务修复：锁定 `satori-python` `1.3.9.post1+chtholly.1` 与 `satori-python-server` `1.3.7+chtholly.1`，避免单个适配器结束导致 WebUI/HTTP 一同退出。两制品均进入工坊镜像，可分别用构建器的 `--package satori`、`--package satori-server` 重建；`vendor/satori/*.whl` 在 Git 中显式按二进制保存，禁止行尾转换。
 - Server `0.8.0` 新增适配器配置 Schema；本地补丁保留 QQ WebSocket/Webhook 和 OneBot 的类型校验，修正独立 WebUI 与整份配置之间的嵌套引用，并支持官方适配器的 `PathLike` 字段。Permission `0.2.0` 在加载权限状态前等待原生数据库迁移；仅从官方 wheel 元数据补回漏打包的 README，不修改权限算法。两项新制品同时进入工坊构建输入。
 - 框架版本变化后，工坊需用 `scripts/build_workshop_sandbox.py` 重建匹配的 Python 3.11 镜像并重新验收；旧框架镜像及报告不能用于新激活。此升级不更改个人配置、数据库或已发生的消息交付。
 
