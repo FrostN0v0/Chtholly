@@ -69,7 +69,7 @@ if plug is not None:
     registered_pages = tuple(page for page in extension.pages if page.key == _PAGE_KEY)
 
     def _remove_extension_entries() -> None:
-        extension.menus[:] = [menu for menu in extension.menus if menu not in registered_menus]
-        extension.pages[:] = [page for page in extension.pages if page not in registered_pages]
+        extension.menus[:] = [menu for menu in extension.menus if not any(menu is owned for owned in registered_menus)]
+        extension.pages[:] = [page for page in extension.pages if not any(page is owned for owned in registered_pages)]
 
     plugin.collect_disposes(_remove_extension_entries)

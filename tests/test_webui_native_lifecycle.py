@@ -274,15 +274,85 @@ async def scenario(app):
 
 """
 
+EXTENSION_SCENARIO = r"""import asyncio
+
+import httpx
+from creart import it
+from launart import Launart
+from arclet.entari import Entari
+from arclet.entari.plugin import load_plugin
+from arclet.entari.plugin.loader import reload_plugin
+from arclet.letoderea.utils import set_event_loop
+
+async def scenario(app):
+    from entari_plugin_server import get_asgi
+    from entari_plugin_webui.core.extension import get_all_menus, get_all_pages, webui_extend
+    from entari_plugin_webui.api.deps import get_session_store
+    from entari_plugin_webui.core.security import set_local_mode
+
+    set_local_mode(False)
+    sid = get_session_store().create(ip="127.0.0.1")
+
+    independent = webui_extend("independent-ownership-probe")
+    independent.add_menu("independent", "mdi:puzzle", "/extension/independent")
+    independent.add_page("independent", "independent", "mdi:puzzle", "/api/independent/page")
+    pages = {
+        "meme_webui": ("llm-chat-memes", "/api/llm-chat/memes/page"),
+        "agent_webui": ("llm-chat-sessions", "/api/llm-chat/sessions/page"),
+        "reminder_webui": ("llm-chat-reminders", "/api/llm-chat/reminders/page"),
+    }
+    loaded = {}
+    for name in pages:
+        result = load_plugin(f"plugins.llm_chat.{name}", {})
+        assert result, result
+        loaded[name] = result.plugin
+
+    def assert_entries():
+        menus = [row["path"] for row in get_all_menus()]
+        definitions = [row["key"] for row in get_all_pages()]
+        for key, _ in pages.values():
+            assert menus.count(f"/extension/{key}") == 1, (key, menus)
+            assert definitions.count(key) == 1, (key, definitions)
+        assert menus.count("/extension/independent") == 1
+        assert definitions.count("independent") == 1
+
+    transport = httpx.ASGITransport(app=get_asgi())
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://localhost", headers={"Cookie": f"webui_sid={sid}"}
+    ) as client:
+        assert_entries()
+        for _ in range(2):
+            for name in pages:
+                result = await reload_plugin(loaded[name].id)
+                assert result, result
+                loaded[name] = result.plugin
+                assert_entries()
+                for _, path in pages.values():
+                    response = await client.get(path)
+                    assert response.status_code == 200, (path, response.status_code)
+                    assert response.headers["Content-Type"].startswith("text/html")
+        for name, plug in loaded.items():
+            if tasks := plug.dispose():
+                await asyncio.gather(*tasks)
+            key, path = pages[name]
+            assert f"/extension/{key}" not in {row["path"] for row in get_all_menus()}
+            assert key not in {row["key"] for row in get_all_pages()}
+            assert (await client.get(path)).status_code == 404
+        assert [row["path"] for row in get_all_menus()] == ["/extension/independent"]
+        assert [row["key"] for row in get_all_pages()] == ["independent"]
+"""
+
 
 @pytest.mark.parametrize(
-    "scenario", [SCENARIO + NATIVE_RUNNER, SOCKET_SCENARIO + NATIVE_RUNNER], ids=["native-config", "isolated-sockets"]
+    "scenario",
+    [SCENARIO + NATIVE_RUNNER, SOCKET_SCENARIO + NATIVE_RUNNER, EXTENSION_SCENARIO + NATIVE_RUNNER],
+    ids=["native-config", "isolated-sockets", "extension-ownership"],
 )
 def test_native_webui_preserves_root_configuration_and_atomic_reload(tmp_path: Path, scenario: str) -> None:
     config = {
         "basic": {
             "network": [],
-            "external_dirs": [str(tmp_path)],
+            "external_dirs": [str(tmp_path), str(Path(__file__).resolve().parents[1])],
             "log": {"level": "ERROR", "rich_error": False, "save": False},
             "schema": False,
         },
