@@ -21,12 +21,13 @@ def register_markdown2pic(
     async def markdown2pic(session: Session, markdown: str, width: int = DEFAULT_RENDER_WIDTH) -> dict[str, JSONType]:
         """Render self-contained Markdown and prepare one image for send_msg.
 
-        Use this for fenced code blocks, configuration examples, Markdown tables, multi-column comparisons, long
-        structured reports, or mixed headings and code. Include the returned media_ref in a send_msg media segment;
-        choose the order and spacing of any accompanying explanation explicitly. Do not repeat rendered content.
-        Keep code as text only when the user explicitly needs copyable source or the snippet is at most three short
-        lines. The image uses Inter with Noto Sans SC/CJK SC for Chinese fallback. The Markdown must not embed
-        scripts, event handlers, remote or local images, stylesheets, or other resources. This tool does not send.
+        Use this proactively whenever the answer contains Markdown or Markdown formatting would make it clearer,
+        even without an explicit rendering request: headings, lists, quotes, emphasis, fenced code, configuration,
+        tables, comparisons or structured reports. Send the returned media_ref in a send_msg media segment instead
+        of raw Markdown text. Choose any accompanying explanation's order and spacing; do not repeat the image's
+        content. Provide copyable source separately only when explicitly needed. The image uses Inter with
+        Noto Sans SC/CJK SC for Chinese fallback. Do not embed scripts, event handlers, remote or local images,
+        stylesheets or other resources. This tool prepares an image and does not send it.
 
         Args:
             markdown (str): Complete Markdown source to render, including any table syntax.

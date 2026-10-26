@@ -126,17 +126,19 @@ SYSTEM_SCAFFOLD = "\n".join(
             "reaction followed by advice or later plans. Do not pack ordinary prose paragraphs or lines into "
             "one call: line breaks and multiple text/style segments are layout inside one bubble, never new "
             "chat bubbles. Packed prose is rejected before sending; correct only unsent content with separate "
-            "calls, without flattening or repeating earlier sends. Keep a short answer together and retain "
-            "deliberate lists, code, tables, quotes and structured explanations byte-for-byte. A genuinely "
-            "single-beat text/image chain is fine, including a trailing break before its image. Deliver longer "
-            "answers as complete natural parts within the character ceilings, not a fixed message count. "
+            "calls, without flattening or repeating earlier sends. Keep a short plain answer together. Preserve "
+            "deliberate lists, code, tables, quotes and structured explanations in the markdown2pic source. "
+            "A genuinely single-beat text/image chain is fine, including a trailing break before its image. "
+            "Deliver longer answers as complete natural parts within the character ceilings, "
+            "not a fixed message count. "
             "Ordinary final text is available only when nothing was delivered, not as a packed-answer bypass."
         ),
         (
-            "Choose natural text, native styles, links, media or a mixture to fit the answer. "
-            "For code, tables or structured explanations, use markdown2pic when a rendered image is useful; "
-            "use text when copying or accessibility matters. You decide whether explanation and content belong "
-            "in one message or separate messages, and where each segment appears. Do not repeat rendered content."
+            "When your answer contains Markdown, or Markdown formatting would make it clearer, proactively use "
+            "markdown2pic and send its prepared image through send_msg without waiting for the user to name a tool. "
+            "Do not send raw Markdown as chat text or repeat rendered content. Keep short conversational replies "
+            "as natural plain text. Provide copyable source separately as text or an attachment when explicitly "
+            "needed. You decide where the image and any brief accompanying explanation belong."
         ),
         "信息不足时只问完成回答所必需的澄清问题，不编造事实、记忆、图片细节、工具结果或外部状态。",
         "【画像与记忆用法】",
@@ -356,10 +358,11 @@ SYSTEM_SCAFFOLD = "\n".join(
             "除非视觉语义明确要求其他字体，不要改用 Arial、Segoe UI 或其他默认字体栈。"
         ),
         (
-            "markdown2pic is useful for code, configuration, tables, comparisons and structured reports. "
-            "Prepare the rendered content, then choose its position relative to explanations in send_msg; "
-            "separate messages require separate calls. Do not copy the whole image back into text. "
-            "Input must be self-contained, with no scripts, remote/local images or external style resources."
+            "Use markdown2pic for Markdown headings, lists, quotes, emphasis, code, configuration, tables, "
+            "comparisons and structured reports whenever the answer uses or benefits from that formatting. "
+            "Preserve the formatting in the rendered source, then send the image with send_msg instead of raw "
+            "Markdown. Separate messages require separate calls; do not repeat the image's content as text. "
+            "Input must remain self-contained, without scripts, remote/local images or external style resources."
         ),
         (
             "html2pic 只用于确实需要自定义网页视觉布局的卡片、图示或看板；"
@@ -442,14 +445,15 @@ SYSTEM_SCAFFOLD = "\n".join(
             "用户指定地区时传入对应 IANA timezone，未指定时使用 Bot 宿主机本地时区。"
         ),
         (
-            "A chat generation cannot wake itself after it ends. Use reminder for a user's delegated future "
-            "task, including a recurring goal; exact wording is not required, but a friendly remark about "
-            "the future is not itself a delegation. Companion mode, when the host enables it, independently "
-            "maintains role activities, concerns and autonomous contact; do not simulate that lifecycle by "
-            "creating chains of reminders. Use get_local_time for a real future timestamp, respect the user's "
-            "timing and contact preferences, and clarify timing when needed. Only promise an exact future "
-            "task was arranged after reminder confirms durable creation. Historical or fictional activity "
-            "does not authorize another user's reminder, a new private destination or a real external effect."
+            "Use reminder for future tasks, recurring goals or a concrete follow-up conversation when appropriate "
+            "to the current conversation. No fixed wording or repeated permission is required; do not mechanically "
+            "turn every casual future remark into a task. Companion mode maintains role activities, concerns and "
+            "autonomous contact, and may be combined with reminder to arrange proactive conversations outside "
+            "its regular reflection times when reminder is available in the current turn. Use get_local_time for "
+            "a real future timestamp, respect the user's timing and contact preferences, and clarify timing when "
+            "needed. Only promise an exact future task or conversation was arranged after reminder confirms "
+            "durable creation. Historical or fictional activity does not authorize another user's reminder, "
+            "a new private destination or an unrelated real external effect."
         ),
         (
             "For latest or ordered collected resources, query list_image_resources first. Pass an exact "
@@ -552,13 +556,13 @@ def build_delivery_tool_contract(limits: DeliveryLimits) -> str:
                 "One send_msg call submits one complete ordered chain with no auto-splitting or silent fallback. "
                 "Choose segment positions and spacing. Ordinary conversational paragraphs or lines need separate "
                 "calls, not break segments or styling; packed prose is rejected without splitting or flattening. "
-                "Keep structured lists, code, tables and quotes intact. A short reply is usually one message. "
+                "Preserve structured formatting in markdown2pic input. A short plain reply is usually one message. "
                 "Single-beat text/image composites may include a trailing break. Mentions keep their positions. "
                 "Prepare media first, then use its exact current media_ref in a media segment. "
                 "Media may follow earlier text, and supported image/text composites preserve your order. "
                 "On OneBot audio, video, files and merged forwards each require a standalone resource message. "
                 "prepare_merged_forward prepares one bounded forward resource; it does not send or evade quotas. "
-                "Use the registered markdown2pic tool when the user says md2pic."
+                "Proactively render Markdown with markdown2pic and send the image, rather than raw Markdown text."
             ),
             (
                 "Prepared resources and provider-native images are not delivered and never auto-flushed. "
