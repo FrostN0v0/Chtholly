@@ -34,7 +34,7 @@ def companion_limits(config: LLMChatConfig) -> CompanionLimits:
 def mode_baseline(baseline: BaselineFingerprint, mode: str) -> BaselineFingerprint:
     if mode not in {"normal", "companion"}:
         raise ValueError("Unknown conversation mode")
-    version = ":social-dialogue-v5" if mode == "companion" else ""
+    version = ":social-dialogue-v6" if mode == "companion" else ""
     return replace(baseline, policy_version=f"{baseline.policy_version}:mode:{mode}{version}")
 
 

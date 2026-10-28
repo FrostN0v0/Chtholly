@@ -127,7 +127,9 @@ async def handle_chat_turn(
     reaction = None if quiet else MessageReactionFeedback(session, _LOGGER.warning)
     inputs = ImageInputs(warn=_LOGGER.warning)
     with (
-        group_delivery_scope(session, scheduled_reminder=quiet),
+        group_delivery_scope(
+            session, scheduled_reminder=quiet, auto_reply=not isinstance(steering, DialogueSteeringState)
+        ),
         delivery_audit_scope(session, _LOGGER.warning, scheduled_reminder=quiet),
         llm_chat_reaction_scope(reaction) if reaction is not None else nullcontext(),
         main_model_scope(),

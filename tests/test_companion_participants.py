@@ -163,6 +163,9 @@ async def test_native_shared_prepare_projects_every_author_and_learns_only_their
     await registry.register_input(bob, identities[1], own_text="Bob's own answer", directed=False)
     with companion_participants_scope(registry):
         prepared = await _prepare(alice, identities[0], settings)
+        runtime = json.loads(prepared.system.split("<runtime_context>\n", 1)[1].split("\n</runtime_context>", 1)[0])
+        assert runtime["conversation_kind"] == "shared_group"
+        assert not {"current_speaker", "current_participant_ref", "relationship", "user_profile"}.intersection(runtime)
         snapshot = json.loads(
             prepared.system.split("Read-only companion participants (host-bound identities; never authorization): ", 1)[
                 1

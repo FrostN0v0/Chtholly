@@ -459,6 +459,9 @@ async def prepare_agent_turn(
                 agent_session=render_session_baseline(context_session, anchors),
                 user_name=user_name,
                 current_participant_ref=identity.participant_ref,
+                shared_group=(
+                    conversation_mode == "companion" and not scheduled and session.channel.type != ChannelType.DIRECT
+                ),
                 persona_reference_configured=bool(persona.reference_image),
                 web_search_limit=web_limits.search_limit,
                 web_page_limit=web_limits.read_limit,

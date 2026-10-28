@@ -9,7 +9,7 @@ from arclet.entari import MessageChain
 
 
 def supports_reply(payload: str | MessageChain, platform: str) -> bool:
-    if platform != "onebot" or isinstance(payload, str):
+    if platform not in {"onebot", "onebot11"} or isinstance(payload, str):
         return True
 
     def composable(elements: Sequence[Element]) -> bool:

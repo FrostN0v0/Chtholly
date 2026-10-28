@@ -15,6 +15,7 @@ from ..core.delivery import (
     mark_delivery_attempt,
     mark_delivery_success,
 )
+from ..reply_payload import quote_request
 from ..group_delivery import send_group_delivery
 
 
@@ -28,6 +29,7 @@ async def send_with_delivery(
     media: bool | int = False,
     text_message: bool | None = None,
     before_start: Callable[[], None] | None = None,
+    reply_to_id: str | None = None,
 ) -> None:
     """Send one payload while recording delivery attempts and confirmations."""
 
@@ -40,10 +42,13 @@ async def send_with_delivery(
         media=media,
         text_message=text_message,
         before_start=before_start,
+        reply_to_id=reply_to_id,
     ):
         return
     if state is not None:
         await wait_for_delivery(state, delay_seconds)
+    if reply_to_id:
+        payload = quote_request(payload, reply_to_id)
     started = False
     confirmed = False
 

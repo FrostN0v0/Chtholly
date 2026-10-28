@@ -47,6 +47,7 @@ from ..core.delivery import (
     release_unstarted_message,
     require_llm_chat_delivery,
 )
+from ..reply_payload import supports_reply
 from ..prepared_media import PreparedMedia, confirm_media, consume_media, resolve_media
 from ._message_models import (
     MESSAGE_SEGMENTS,
@@ -64,6 +65,7 @@ from ..core.prose_linebreaks import (
     CODE_LAYOUT_MARKER,
     prose_layout_error,
 )
+from ..companion.participants import current_companion_participants
 
 _ONEBOT_PLATFORMS = frozenset({"onebot", "onebot11"})
 _NATIVE_EMOJI_ID = re.compile(r"(?:0|[1-9][0-9]{0,9})\Z", re.ASCII)
@@ -206,6 +208,18 @@ def _display_name(value: object, user_id: str) -> str:
         return "participant"
 
 
+def _resolve_reply(session: Session, reference: str | None) -> str | None:
+    if reference is None:
+        return None
+    registry = current_companion_participants()
+    if registry is None or not isinstance(reference, str) or not reference:
+        raise DeliveryRejected("reply_to_ref requires a live companion input reference")
+    try:
+        return registry.resolve_reply(session, reference)
+    except ValueError:
+        raise DeliveryRejected("Reply target is unavailable in this conversation; do not guess a message ID") from None
+
+
 async def _resolve_mentions(
     session: Session,
     segments: list[MessageSegment],
@@ -219,6 +233,11 @@ async def _resolve_mentions(
         if ref in resolved:
             continue
         if ref == "current_user":
+            participants = current_companion_participants()
+            if participants is not None and not participants.current_user_is_unambiguous():
+                raise DeliveryRejected(
+                    "current_user is ambiguous in this shared conversation; use the intended input's participant_ref"
+                )
             user = getattr(session.event, "user", None)
             member = getattr(session.event, "member", None)
             user_id = str(getattr(user, "id", "") or "").strip()
@@ -289,6 +308,7 @@ def register_send_msg(
             TextSegment | MentionSegment | LinkSegment | EmojiSegment | MediaSegment | BreakSegment | StyleSegment
         ],
         delay_seconds: float | None = None,
+        reply_to_ref: str | None = None,
     ) -> JSONType:
         """Send exactly one message chain, in the exact segment order and with no inserted spacing.
 
@@ -303,9 +323,15 @@ def register_send_msg(
         filesystem paths and URLs are preserved, never escape-decoded. Invalid prose is rejected before any send.
         Text is literal, never Satori markup. Place mentions exactly where direct address belongs; use current_user
         or an opaque current-channel participant_ref, never a raw ID.
+        In shared companion conversations, each current input has its own host-bound speaker, participant_ref
+        and reply_to_ref. Use that input's reply_to_ref to quote the message you are actually answering; use
+        separate calls to answer different people. Omitting it sends to the group without an automatic root
+        quote. For a mention, use that input's participant_ref; current_user is not a name for the latest
+        speaker and is rejected when multiple members are involved. Reply selection never changes tool
+        authority, current-user permissions or the channel. References from history or another turn are invalid.
         At most three mention occurrences are allowed, including repeats. Obtain media_ref from a preparation tool
-        first, then place media segments anywhere in this message. References expire with this generation and cannot
-        be reused after a send attempt. On OneBot, audio, video, file, and merged forward must each be the only segment.
+        first, then place media segments anywhere in this message. Media references expire with this generation
+        and cannot be reused after a send attempt. On OneBot, audio, video, file, and merged forward must be standalone.
         A required source edit or web-reference image must be included before any other message may be sent.
         Links require public HTTP(S) URLs; OneBot emoji IDs must be numeric. Unsupported composites are rejected,
         never split or retried through another delivery path. After success, final text is no longer delivered.
@@ -313,6 +339,7 @@ def register_send_msg(
         Args:
             segments: Tagged text, mention, link, emoji, media, break, or style segments, in exact visible order.
             delay_seconds: Target interval from the preceding confirmed or possibly confirmed delivery.
+            reply_to_ref: Exact current companion input reference to quote; omission keeps the mode's default behavior.
         Returns:
             A privacy-safe confirmation and guidance, without message content or capability references.
         """
@@ -323,6 +350,7 @@ def register_send_msg(
         platform = str(session.account.platform).casefold()
         parsed = _clean_segments(segments, platform)
         delay = normalize_delivery_delay(delay_seconds)
+        reply_to_id = _resolve_reply(session, reply_to_ref)
         refs = [segment.media_ref for segment in parsed if isinstance(segment, MediaSegment)]
         media = resolve_media(session, refs) if refs else ()
         for item in media:
@@ -350,6 +378,8 @@ def register_send_msg(
         except Exception as exc:
             raise DeliveryError(f"send_msg mention resolution failed: {type(exc).__name__}") from None
         payload, projection = _compose(parsed, mentions, media, platform)
+        if reply_to_id is not None and not supports_reply(payload, platform):
+            raise DeliveryRejected("This platform cannot quote this standalone media; send it without reply_to_ref")
         text_message = any(not isinstance(segment, (MediaSegment, BreakSegment)) for segment in parsed)
         check_steer_boundary()
         state = reserve_message(
@@ -357,6 +387,15 @@ def register_send_msg(
             media_count=len(media),
             text_message=text_message,
         )
+        started = False
+
+        def before_start() -> None:
+            nonlocal started
+            _resolve_reply(session, reply_to_ref)
+            if media:
+                consume_media(media)
+            started = True
+
         try:
             await send_with_delivery(
                 session,
@@ -366,10 +405,15 @@ def register_send_msg(
                 texts=[projection],
                 media=len(media),
                 text_message=text_message,
-                before_start=(lambda: consume_media(media)) if media else None,
+                before_start=before_start,
+                reply_to_id=reply_to_id,
             )
         except SteerPending:
             release_unstarted_message(state, projection, media_count=len(media), text_message=text_message)
+            raise
+        except DeliveryRejected:
+            if not started:
+                release_unstarted_message(state, projection, media_count=len(media), text_message=text_message)
             raise
         except asyncio.CancelledError:
             raise

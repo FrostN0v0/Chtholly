@@ -449,9 +449,17 @@ async def _run_local_tools(
         execution = req.tool_execution
         name = execution.tool_name if execution is not None else ""
         arguments = execution.tool_args or {} if execution is not None else {}
+        # Reply routing accepts one typed capability, not references embedded in outgoing content.
+        image_reference_arguments = (
+            {key: value for key, value in arguments.items() if key != "reply_to_ref"}
+            if name == "send_msg"
+            else arguments
+        )
         invalid_reference = (
             name not in _INTERNAL_PARTICIPANT_REFERENCE_TOOLS and contains_internal_participant_reference(arguments)
-        ) or (name not in _INTERNAL_IMAGE_REFERENCE_TOOLS and contains_internal_image_reference(arguments))
+        ) or (
+            name not in _INTERNAL_IMAGE_REFERENCE_TOOLS and contains_internal_image_reference(image_reference_arguments)
+        )
         unsafe.append(invalid_reference)
         call = recorder.start(
             name or "unknown",

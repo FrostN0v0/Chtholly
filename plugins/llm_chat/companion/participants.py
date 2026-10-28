@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+from secrets import token_hex
 from datetime import UTC, datetime
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -42,6 +43,7 @@ class _ParticipantInput:
     model_text: str
     directed: bool
     message_id: str
+    reply_to_ref: str
     received_at: datetime | None
     context: dict[str, object]
 
@@ -135,6 +137,7 @@ class CompanionParticipantRegistry:
             model_text=own_text if model_text is None else model_text,
             directed=bool(directed),
             message_id=str(getattr(event_message, "id", "") or "") if message_id is None else message_id,
+            reply_to_ref=f"message_{token_hex(16)}",
             received_at=received_at,
             context=self._contexts[identity.user_id],
         )
@@ -159,6 +162,21 @@ class CompanionParticipantRegistry:
             "directed": item.directed,
             "evidence_eligible": item.directed,
         }
+
+    def resolve_reply(self, session: object, reference: str) -> str:
+        """Resolve only a real input already applied within this live generation."""
+        self._check(session)
+        for event_id, item in self._inputs.items():
+            if item.reply_to_ref == reference and event_id in self._recorded and item.message_id:
+                return item.message_id
+        raise ValueError("Reply target is not an applied message in this conversation")
+
+    def current_user_is_unambiguous(self) -> bool:
+        return self.root_identity is not None and all(
+            item.identity.user_id == self.root_identity.user_id
+            for event_id, item in self._inputs.items()
+            if event_id in self._recorded
+        )
 
     def participant_context(self, session: object) -> dict[str, object]:
         self._check(session)
@@ -192,6 +210,8 @@ class CompanionParticipantRegistry:
                 **companion_history_payload(payload),
                 "speaker": author["display_name"],
                 "speaker_id": author["speaker_id"],
+                "participant_ref": author["participant_ref"],
+                "reply_to_ref": self._inputs[id(session.event)].reply_to_ref,
                 "companion_participant_context": self.participant_context(session),
             },
         )

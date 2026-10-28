@@ -14,7 +14,7 @@ import importlib
 from collections import Counter
 
 from creart import it
-from satori import At, Text, User, Event, Login, Channel, EventType, ChannelType
+from satori import At, Text, User, Event, Login, Quote, Channel, EventType, ChannelType
 from launart import Launart, Service
 import litellm
 from sqlalchemy import select
@@ -207,6 +207,20 @@ async def main():
             if phase == "group":
                 assert {item["content"] for item in inputs} == {"Probe alpha", "Probe beta", "Probe correction"}, inputs
                 assert len({item["speaker_id"] for item in inputs}) == 3
+                calls = [
+                    call(
+                        "send_msg",
+                        {
+                            "reply_to_ref": item["reply_to_ref"],
+                            "segments": [
+                                {"type": "mention", "target": item["participant_ref"]},
+                                {"type": "text", "text": f" Companion reply to {item['content']}"},
+                            ],
+                        },
+                        f"reply-member-{index}",
+                    )
+                    for index, item in enumerate(inputs)
+                ]
             calls.append(
                 call(
                     "companion_dialogue",
@@ -329,16 +343,23 @@ async def main():
         release.set()
         await finish(scope)
         assert counts["group"] == 2, (counts, wire)
-        assert len(wire) == 2, (counts, wire)
+        assert len(wire) == 4, (counts, wire)
         assert "Stale candidate" not in json.dumps(wire)
         assert "Companion reply" in wire[-1]["content"]
+        group_chains = [MessageChain.of(item["content"]) for item in wire[1:]]
+        assert [[item.id for item in chain.get(Quote)] for chain in group_chains] == [
+            ["group-a"],
+            ["group-b"],
+            ["group-c"],
+        ]
+        assert [[item.id for item in chain.get(At)] for chain in group_chains] == [["alpha"], ["beta"], ["gamma"]]
 
         phase = "private"
         private_scope = await enable("private")
         await es.publish(event("private", "peer", "private-a", "Private input"))
         await finish(private_scope)
         assert counts["private"] == 1, (counts, wire)
-        assert len(wire) == 3, (counts, wire)
+        assert len(wire) == 5, (counts, wire)
         assert wire[-1]["channel_id"] == "private"
         assert "Private reply" in wire[-1]["content"]
         await companion.drain()
@@ -355,7 +376,7 @@ async def main():
         await companion.claim_ready()
         await asyncio.wait_for(companion.drain(), 30)
         assert counts["host"] == 1, (counts, wire)
-        assert len(wire) == 4, wire
+        assert len(wire) == 6, wire
         contact = (await store.read_contact_history(host_scope.id, "alpha"))[0]
         assert contact["status"] == "delivered"
         async with get_session() as db:
@@ -367,7 +388,7 @@ async def main():
         await es.publish(event("group", "peer", "host-followup", "That painting idea sounds good"))
         await finish(host_scope)
         assert counts["followup"] == 1, (counts, wire)
-        assert len(wire) == 5, (counts, wire)
+        assert len(wire) == 7, (counts, wire)
         async with get_session() as db:
             turns = list(
                 (await db.scalars(select(models.AgentTurn).where(models.AgentTurn.trigger_kind == "message"))).all()
@@ -397,6 +418,8 @@ async def main():
                     "normal_addressed_only": True,
                     "group_single_owner": True,
                     "cross_member_steering": True,
+                    "per_message_reply_targets": True,
+                    "per_member_native_mentions": True,
                     "stale_candidate_sent": False,
                     "private_native_route": True,
                     "host_to_live_history": True,
