@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from copy import deepcopy
 from typing import TYPE_CHECKING, cast
-from datetime import datetime
+from datetime import UTC, datetime
 from dataclasses import replace
 from collections.abc import Callable
 
@@ -45,6 +45,7 @@ from .core.media_delivery import (
     current_media_requirements,
 )
 from .core.artifact_access import is_artifact_request
+from .companion.participants import current_companion_participants
 from .core.tool_trace_safety import compact_text
 
 if TYPE_CHECKING:
@@ -101,6 +102,7 @@ def bind_steer_inputs(
     state.request_input_budget = max(1024, int(captured.max_input_tokens) - max(0, int(captured.output_reserve_tokens)))
     recorder = prepared.agent_events
     original_access = prepared.agent_access
+    participants = current_companion_participants()
     inputs = prepared.image_inputs
     inputs.admit_input(root_session, state=state)
     original_messages = list(prepared.chat_messages)
@@ -156,11 +158,28 @@ def bind_steer_inputs(
                 "text_chars": len(text),
                 "text_truncated": len(text) > _MAX_RECEIPT_TEXT,
                 "source_message_id": compact_text(getattr(event_message, "id", ""), 256),
+                **(
+                    {
+                        "source_author": {
+                            "platform": str(item.session.account.platform),
+                            "self_id": str(item.session.account.self_id),
+                            "channel_id": str(item.session.channel.id),
+                            "platform_user_id": str(item.session.user.id),
+                        },
+                        "directed": bool(getattr(state, "directed")(item.session)),
+                    }
+                    if participants is not None
+                    else {}
+                ),
             },
             model_visible=False,
             status="received",
             effect="none",
-            created_at=item.received_at,
+            created_at=(
+                item.received_at.astimezone(UTC).replace(tzinfo=None)
+                if item.received_at.tzinfo is not None
+                else item.received_at
+            ),
         )
 
     async def reject(item: SteerInput, reason: str, *, status: str = "refused") -> None:
@@ -180,16 +199,21 @@ def bind_steer_inputs(
             await recorder.flush()
 
     def check_budget(message: ChatMessage) -> None:
+        snapshot = state.request_budget_snapshot
+        if snapshot is None:
+            base_messages = [{"role": "system", "content": prepared.system}, *original_messages]
+            baseline_sequences = frozenset({1})
+        else:
+            baseline_sequences, base_messages = snapshot
         messages: list[ChatMessage] = [
-            {"role": "system", "content": prepared.system},
-            *original_messages,
-            *applied_messages.values(),
+            *base_messages,
+            *(value for sequence, value in applied_messages.items() if sequence not in baseline_sequences),
             message,
         ]
         if estimate_tokens(model_name, messages) > cast(int, state.request_input_budget):
             raise SteerInputRejected("input_budget_exceeded")
 
-    async def process(item: SteerInput) -> ChatMessage:
+    async def process(item: SteerInput) -> ChatMessage | None:
         existing = applied_messages.get(item.sequence)
         if existing is not None:
             return existing
@@ -198,6 +222,10 @@ def bind_steer_inputs(
         if item.sequence in terminal:
             raise SteerInputRejected("input_already_refused")
         on_receive(item)
+        if state.defer_input(item.session):
+            inputs.discard_unapplied_input(item.session)
+            await reject(item, "ordered_after_budget_overflow", status="deferred")
+            return None
         session = item.session
         raw_text = session.elements.extract_plain_text().strip()
         try:
@@ -214,8 +242,16 @@ def bind_steer_inputs(
                 if not raw_text and not collect_message_images(session) and not forwarded and reply_to is None:
                     raise SteerInputRejected("empty_input")
                 identity = await resolve_chat_identity(session)
-                if identity.user_id != original_access.user_id:
+                if identity.user_id != original_access.user_id and participants is None:
                     raise SteerInputRejected("participant_identity_changed")
+                if participants is not None:
+                    await participants.register_input(
+                        session,
+                        identity,
+                        own_text=raw_text,
+                        directed=bool(getattr(state, "directed")(session)),
+                        received_at=item.received_at,
+                    )
                 mentioned = await resolve_mentioned_participants(session)
                 model_text = raw_text
                 if inputs.supports_image_input:
@@ -238,53 +274,75 @@ def bind_steer_inputs(
                     current_content = serialize_user_turn(
                         identity.display_name, model_text, forwarded, mentioned, views, reply_to=reply_to
                     )
-                message = update_user_payload(
-                    {"role": "user", "content": current_content},
-                    lambda payload: attribute_user_payload(
-                        payload, speaker_id=prepared.speaker_id, fallback_speaker=identity.display_name
-                    ),
-                )
+                message: ChatMessage = {"role": "user", "content": current_content}
+                if participants is not None:
+                    message = participants.attribute_message(session, message)
+                else:
+                    message = update_user_payload(
+                        message,
+                        lambda payload: attribute_user_payload(
+                            payload, speaker_id=prepared.speaker_id, fallback_speaker=identity.display_name
+                        ),
+                    )
                 check_budget(message)
                 attachments = await capture_user_input_images(session, inputs, warn=warn)
             message_id = await prepared.lifecycle.append_history(
-                root_session.channel.id, original_access.user_id, identity.display_name, "user", content
+                root_session.channel.id, identity.user_id, identity.display_name, "user", content
             )
             prepared.lifecycle.add_user_message(cast(int, message_id))
             applied_at = datetime.utcnow()
-            recorder.append(
-                "user_input",
-                role="user",
-                payload={
-                    "content": serialize_user_turn(
-                        identity.display_name,
-                        model_text,
-                        forwarded,
-                        mentioned,
-                        inputs.input_views(session=session),
-                        reply_to=reply_with_image_views(reply_to, inputs.input_views(session=session)),
-                        durable=True,
-                    ),
-                    "speaker": identity.display_name,
-                    "input_format": "structured_user_turn",
-                    "fresh_context": False,
-                    "attachments": attachments,
-                    "steer_sequence": item.sequence,
-                    "received_at": item.received_at.isoformat(),
-                    "applied_at": applied_at.isoformat(),
-                    "raw_user_text": raw_text,
-                },
-                status="applied",
-                model_visible=True,
-                created_at=applied_at,
+            stored_content = serialize_user_turn(
+                identity.display_name,
+                model_text,
+                forwarded,
+                mentioned,
+                inputs.input_views(session=session),
+                reply_to=reply_with_image_views(reply_to, inputs.input_views(session=session)),
+                durable=True,
             )
+            if participants is not None:
+                participants.record_input(
+                    recorder,
+                    session,
+                    stored_content,
+                    attachments=attachments,
+                    created_at=applied_at,
+                    steer_sequence=item.sequence,
+                )
+            else:
+                recorder.append(
+                    "user_input",
+                    role="user",
+                    payload={
+                        "content": stored_content,
+                        "speaker": identity.display_name,
+                        "input_format": "structured_user_turn",
+                        "fresh_context": False,
+                        "attachments": attachments,
+                        "steer_sequence": item.sequence,
+                        "received_at": item.received_at.isoformat(),
+                        "applied_at": applied_at.isoformat(),
+                        "raw_user_text": raw_text,
+                    },
+                    status="applied",
+                    model_visible=True,
+                    created_at=applied_at,
+                )
             inputs.commit_input_audit(session=session)
             if not await recorder.flush():
                 raise SteerInputRejected("input_audit_persistence_failed")
             applied_messages[item.sequence] = message
-            own_clauses.extend(request_clauses(raw_text))
-            refresh_policy("\n;\n".join(request_clauses(raw_text)))
+            if participants is None or (
+                identity.user_id == original_access.user_id and bool(getattr(state, "directed")(session))
+            ):
+                own_clauses.extend(request_clauses(raw_text))
+                refresh_policy("\n;\n".join(request_clauses(raw_text)))
             return message
         except SteerInputRejected as exc:
+            if exc.reason == "input_budget_exceeded" and state.defer_input(session, budget_exceeded=True):
+                inputs.discard_unapplied_input(session)
+                await reject(item, exc.reason, status="deferred")
+                return None
             await reject(item, exc.reason)
             raise
         except Exception as exc:
@@ -294,8 +352,12 @@ def bind_steer_inputs(
 
     async def on_close() -> None:
         for item in state.inputs:
-            if item.sequence > state.applied_revision and item.sequence not in terminal:
-                await reject(item, "task_closed_before_application", status="unapplied")
+            if not state.input_applied(item) and item.sequence not in terminal:
+                if state.input_deferred(item):
+                    inputs.discard_unapplied_input(item.session)
+                    await reject(item, "preparation_closed_before_application", status="deferred")
+                else:
+                    await reject(item, "task_closed_before_application", status="unapplied")
         await recorder.flush()
 
     state.on_receive = on_receive

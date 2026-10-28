@@ -420,7 +420,7 @@ async def test_cancelled_embedding_keeps_relationship_and_memory_evidence_recove
     async with relationship_store.factory() as db:
         assert (await db.get(UserRelation, ("alice", "channel"))).trust == 30.0
         assert list((await db.execute(select(UserMemory.text))).scalars()) == []
-        retained = await db.get(RelationshipEvidence, turn.id)
+        retained = await db.get(RelationshipEvidence, (turn.id, turn.user_id))
         assert retained.status == "pending"
         assert (await db.get(AgentEvent, retained.event_id)).status == "pending"
     release.set()
@@ -463,7 +463,7 @@ async def test_memory_write_failure_rolls_back_the_entire_evaluation(
         assert (await db.get(UserRelation, ("alice", "channel"))).trust == 30.0
         assert (await db.get(UserAffect, ("alice", "channel"))).version == batch.version
         assert list((await db.execute(select(UserMemory.text))).scalars()) == []
-        assert (await db.get(RelationshipEvidence, turn.id)).status == "running"
+        assert (await db.get(RelationshipEvidence, (turn.id, turn.user_id))).status == "running"
         assert (await db.get(AgentEvent, batch.event_ids[0])).status == "running"
     monkeypatch.setattr(evaluation_store, "apply_memory_updates", apply_memory)
     await evaluation_store.commit_evaluation(batch, result, memory=prepared)
@@ -472,7 +472,7 @@ async def test_memory_write_failure_rolls_back_the_entire_evaluation(
     async with relationship_store.factory() as db:
         assert (await db.get(UserRelation, ("alice", "channel"))).trust == 34.0
         assert list((await db.execute(select(UserMemory.text))).scalars()) == ["We repaired a bicycle together."]
-        assert (await db.get(RelationshipEvidence, turn.id)).status == "processed"
+        assert (await db.get(RelationshipEvidence, (turn.id, turn.user_id))).status == "processed"
 
 
 @pytest.mark.asyncio

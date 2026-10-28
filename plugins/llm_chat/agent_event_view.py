@@ -702,6 +702,7 @@ def event_relationship_evaluation(event: AgentEvent, payload: Mapping[str, JSONT
         "event_ref": event.event_ref,
         "status": event.status,
         "evaluation_ref": payload.get("evaluation_ref") if isinstance(payload.get("evaluation_ref"), str) else None,
+        **{key: payload[key] for key in ("subject_user_id", "owner_user_id") if isinstance(payload.get(key), str)},
         "evidence_turn_ids": cast(JSONType, _turn_ids(payload.get("evidence_turn_ids"))),
         "before": relationship_snapshot(payload.get("before")),
         "after": relationship_snapshot(payload.get("after")) if succeeded else None,
@@ -757,6 +758,7 @@ def project_relationship_views(events: Sequence[AgentEvent], *, compact: bool = 
         "response_decision": None,
         "engagement": None,
     }
+    evaluations: list[dict[str, object]] = []
     for event in events:
         if event.event_type not in (
             "persona_state",
@@ -786,6 +788,16 @@ def project_relationship_views(events: Sequence[AgentEvent], *, compact: bool = 
                 if compact and evaluation
                 else evaluation
             )
+            if isinstance(views["relationship_evaluation"], dict):
+                projection = dict(views["relationship_evaluation"])
+                projection.update(
+                    {
+                        key: evaluation[key]
+                        for key in ("subject_user_id", "owner_user_id")
+                        if evaluation and key in evaluation
+                    }
+                )
+                evaluations.append(projection)
         elif event.event_type == "response_decision":
             decision = event_response_decision(event, payload)
             views["response_decision"] = (
@@ -796,6 +808,10 @@ def project_relationship_views(events: Sequence[AgentEvent], *, compact: bool = 
         else:
             engagement = event_engagement(event, payload)
             views["engagement"] = {"level_label": engagement["level_label"]} if compact and engagement else engagement
+    if len(evaluations) > 1:
+        # There is no single member-owned result for a shared real turn.
+        views["relationship_evaluations"] = evaluations
+        views["relationship_evaluation"] = None
     return views
 
 

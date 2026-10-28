@@ -67,7 +67,7 @@ class CompanionChatEvidence(Base):
     scope_id: Mapped[int] = mapped_column(primary_key=True)
     persona_key: Mapped[str] = mapped_column(primary_key=True)
     turn_id: Mapped[int] = mapped_column(primary_key=True)
-    member_ref: Mapped[str] = mapped_column(index=True)
+    member_ref: Mapped[str] = mapped_column(primary_key=True, index=True)
     received_at: Mapped[datetime]
 
 

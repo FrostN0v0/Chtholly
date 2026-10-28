@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 from secrets import token_hex
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
@@ -25,8 +25,9 @@ from .types import (
 )
 from .models import CompanionLife, CompanionMode, CompanionMember, CompanionReview, CompanionContact
 from ..models import ChatScope, ReminderPreference, ScopePersonaSelection
+from .scope_kind_models import CompanionScopeKind
 
-UTC = timezone.utc
+UTC = UTC
 SHANGHAI = timezone(timedelta(hours=8))
 ACTIVE = "active"
 FINAL_STATUSES = frozenset({"delivered", "silent", "declined", "failed", "cancelled", "unknown"})
@@ -228,16 +229,36 @@ def bound_contact(row: CompanionContact | None, claim: ContactClaim) -> bool:
     )
 
 
+async def validate_contact_target(db: AsyncSession, scope_id: int, proposal: ContactProposal) -> None:
+    """Validate destination semantics without creating a recipient for a channel topic."""
+    await native_scope(db, scope_id)
+    kind = await db.get(CompanionScopeKind, scope_id)
+    if proposal.target == "channel":
+        if kind is None or kind.kind != "text":
+            raise CompanionConflict("Channel contact requires a host-observed native text channel")
+        return
+    mode = await db.get(CompanionMode, scope_id)
+    member = await db.get(CompanionMember, (scope_id, mode.persona_key, proposal.member_ref)) if mode else None
+    if member is None:
+        raise CompanionConflict("Companion contact requires a registered member")
+    if kind is not None and kind.kind == "direct":
+        peers = (await db.scalars(select(CompanionMember.user_id).where(CompanionMember.scope_id == scope_id))).all()
+        if set(peers) != {member.user_id}:
+            raise CompanionConflict("Private companion contact must target its one known peer")
+
+
 async def valid_contact(db: AsyncSession, row: CompanionContact | None, claim: ContactClaim, now: datetime) -> bool:
     if not bound_contact(row, claim) or row.status != ACTIVE or row.lease_deadline <= now:
         return False
     mode = await enabled_mode(db, claim.scope_id, claim.persona_key)
+    if mode is None or mode.revision != claim.mode_revision or mode.context_revision != claim.context_revision:
+        return False
+    if claim.target == "channel":
+        kind = await db.get(CompanionScopeKind, claim.scope_id)
+        return bool(kind is not None and kind.kind == "text" and not claim.user_id and not claim.platform_user_id)
     member = await db.get(CompanionMember, (claim.scope_id, claim.persona_key, claim.member_ref))
     return (
-        mode is not None
-        and mode.revision == claim.mode_revision
-        and mode.context_revision == claim.context_revision
-        and member is not None
+        member is not None
         and member.version == claim.member_version
         and member.user_id == claim.user_id
         and member.platform_user_id == claim.platform_user_id

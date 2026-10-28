@@ -33,9 +33,9 @@ pytest_plugins = ["companion_helpers"]
     ("propose", "outcome", "cap", "status", "reason"),
     [
         (False, "success", 24, "not_proposed", "no_contact_proposed"),
-        (True, "success", 0, "blocked", "daily_contact_limit"),
-        (True, "success", 24, "reserved", "contact_reserved"),
-        (True, "unknown", 24, "reserved", "contact_reserved"),
+        (True, "success", 0, "queued", "dialogue_opportunity_queued"),
+        (True, "success", 24, "queued", "dialogue_opportunity_queued"),
+        (True, "unknown", 24, "queued", "dialogue_opportunity_queued"),
         (True, "provider_error", 24, "failed", "TimeoutError"),
     ],
 )
@@ -90,15 +90,15 @@ async def test_native_reflection_records_actual_gate_without_replaying(
         review = (await native_rows(companion_db, CompanionReview))[0]
         assert decision["review_ref"] == review.lease_token
         if cap == 0:
-            assert decision["facts"]["limits"]["daily_contacts"] == 0
-            assert decision["facts"]["contacts_today"] == 0
             assert review.status == "completed"
             assert review.contact_proposal_json is not None
         contacts = await native_rows(companion_db, CompanionContact)
-        if status == "reserved":
+        should_attempt = propose and cap > 0 and outcome != "provider_error"
+        assert "attempt_ref" not in decision
+        if should_attempt:
             assert len(contacts) == 1
             assert len(native_transport.network.wire) == 1
-            assert decision["attempt_ref"] == contacts[0].attempt_ref
+            assert contacts[0].origin_review_token == review.lease_token
             assert contacts[0].status == ("unknown" if outcome == "unknown" else "delivered")
         else:
             assert contacts == []
@@ -106,7 +106,7 @@ async def test_native_reflection_records_actual_gate_without_replaying(
         requests = len(payloads)
         await settled(worker)
         assert len(payloads) == requests
-        assert len(native_transport.network.wire) == (1 if status == "reserved" else 0)
+        assert len(native_transport.network.wire) == (1 if should_attempt else 0)
     finally:
         await worker.aclose()
 

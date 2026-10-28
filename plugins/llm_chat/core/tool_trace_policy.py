@@ -32,6 +32,7 @@ ToolStatus = Literal["succeeded", "pending", "failed", "rejected", "cancelled"]
 ToolEffect = Literal["observed", "confirmed", "partial", "none", "unknown"]
 
 _DELIVERY_TOOLS = {"send_msg", "call_plugin"}
+_CONTROL_TOOLS = {"companion_dialogue"}
 _PREPARATION_TOOLS = {
     "edit_image",
     "generate_image",
@@ -122,6 +123,8 @@ def project_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> d
         return {"action": action if isinstance(action, str) else ""}
     if tool_name == "finish_turn":
         return selected_arguments(arguments, "outcome")
+    if tool_name in _CONTROL_TOOLS:
+        return selected_arguments(arguments, "action", "seconds", "engaged_speakers")
     if tool_name == "get_local_time":
         return selected_arguments(arguments, "timezone")
     if tool_name == "list_image_resources":
@@ -215,7 +218,7 @@ def project_tool_success(
         return "succeeded", reminder_effect_from_result(result), outcome
     if tool_name in {"list_workshop_plugins", "read_workshop_plugin"}:
         return "succeeded", "observed", outcome
-    if tool_name == "finish_turn":
+    if tool_name == "finish_turn" or tool_name in _CONTROL_TOOLS:
         return "succeeded", "none", outcome
     if tool_name in WORKSHOP_TOOLS:
         if tool_name == "submit_plugin":
@@ -405,6 +408,8 @@ def _project_tool_result(
         }
     if tool_name == "finish_turn" and parsed is not None:
         return selected_arguments(parsed, "outcome")
+    if tool_name in _CONTROL_TOOLS and parsed is not None:
+        return selected_arguments(parsed, "action", "seconds", "engaged_speakers")
     if tool_name == "capture_web_reference" and parsed is not None:
         return {
             "available": parsed.get("available") is True,

@@ -6,7 +6,7 @@ import re
 from typing import Any
 import asyncio
 from functools import partial
-from contextlib import suppress
+from contextlib import suppress, nullcontext
 
 from arclet.entari import At, Session, MessageCreatedEvent, plugin, plugin_config
 from arclet.letoderea import STOP, BLOCK, enter_if
@@ -54,6 +54,7 @@ from .chat_completion import settle_chat_response
 from .chat_evaluation import (
     cancel_pending_evaluations,
     schedule_relationship_evaluation,
+    schedule_companion_relationship_evaluation,
 )
 from .forward_context import resolve_merged_forward_messages
 from .tools._delivery import send_with_delivery
@@ -66,6 +67,8 @@ from .reaction_feedback import (
     llm_chat_reaction_scope,
 )
 from .native_image_delivery import native_image_delivery_scope
+from .companion.participants import current_companion_participants
+from .companion.dialogue_steering import DialogueSteeringState
 
 _LOGGER = log.wrapper("[llm_chat]")
 _CHAT_FAILURE_REPLY = "这次回复没有成功，请稍后重试。"
@@ -114,29 +117,36 @@ async def on_chat(session: Session, ctx: Contexts):
     return await handle_chat_turn(session, ctx)
 
 
-async def handle_chat_turn(session: Session, ctx: Contexts):
-    """Share one inbound lifecycle between group chat and opt-in companion DMs."""
-    interrupt_companion_for_input(session)
-    reaction = MessageReactionFeedback(session, _LOGGER.warning)
+async def handle_chat_turn(
+    session: Session, ctx: Contexts, *, quiet: bool = False, turn_config: LLMChatConfig | None = None
+):
+    """Share native execution while companion admission remains scope-owned."""
+    steering = current_steering()
+    if not isinstance(steering, DialogueSteeringState):
+        interrupt_companion_for_input(session)
+    reaction = None if quiet else MessageReactionFeedback(session, _LOGGER.warning)
     inputs = ImageInputs(warn=_LOGGER.warning)
     with (
-        group_delivery_scope(session),
-        delivery_audit_scope(session, _LOGGER.warning),
-        llm_chat_reaction_scope(reaction),
+        group_delivery_scope(session, scheduled_reminder=quiet),
+        delivery_audit_scope(session, _LOGGER.warning, scheduled_reminder=quiet),
+        llm_chat_reaction_scope(reaction) if reaction is not None else nullcontext(),
         main_model_scope(),
         image_inputs_scope(inputs),
     ):
         try:
-            await reaction.set_stage("processing")
-            result = await _run_chat(session, ctx, reaction)
-            if not reaction.terminal:
+            if reaction is not None:
+                await reaction.set_stage("processing")
+            result = await _run_chat(session, ctx, reaction, turn_config=turn_config)
+            if reaction is not None and not reaction.terminal:
                 await reaction.finish("failed")
             return result
         except asyncio.CancelledError:
-            await settle_reaction_update(reaction.clear_transient())
+            if reaction is not None:
+                await settle_reaction_update(reaction.clear_transient())
             raise
         except Exception:
-            await settle_reaction_update(reaction.finish("failed"))
+            if reaction is not None:
+                await settle_reaction_update(reaction.finish("failed"))
             raise
         finally:
             close_task = asyncio.create_task(inputs.aclose())
@@ -150,8 +160,11 @@ async def handle_chat_turn(session: Session, ctx: Contexts):
 async def _run_chat(
     session: Session,
     ctx: Contexts,
-    reaction: MessageReactionFeedback,
+    reaction: MessageReactionFeedback | None,
+    *,
+    turn_config: LLMChatConfig | None = None,
 ):
+    active_config = turn_config or config
     model_text = session.elements.extract_plain_text().strip()
     raw_user_text = model_text
     message_images = collect_message_images(session)
@@ -163,17 +176,18 @@ async def _run_chat(
     register_message_image_inputs(session, inputs, reply_to=reply_to)
 
     try:
-        forwarded_messages = await resolve_merged_forward_messages(config, session, _LOGGER.warning)
+        forwarded_messages = await resolve_merged_forward_messages(active_config, session, _LOGGER.warning)
     except Exception as exc:
         _LOGGER.warning(f"merged forward normalization failed: {type(exc).__name__}")
         forwarded_messages = []
 
     if not model_text and not message_images and not forwarded_messages and reply_to is None:
-        await reaction.finish("failed")
+        if reaction is not None:
+            await reaction.finish("failed")
         return BLOCK
 
     try:
-        model_name = pin_main_model(get_model_config(config.model, channel_id)).name
+        model_name = pin_main_model(get_model_config(active_config.model, channel_id)).name
     except ModelNotFoundError as exc:
         _LOGGER.warning(f"channel model resolve failed, using global default: {summarize_exception(exc)}")
         model_name = None
@@ -184,8 +198,9 @@ async def _run_chat(
         identity = await resolve_chat_identity(session)
     except Exception as exc:
         _LOGGER.warning(f"user identity resolve failed: {summarize_exception(exc)}")
-        await send_with_delivery(session, _CHAT_FAILURE_REPLY, None)
-        await reaction.finish("failed")
+        if reaction is not None:
+            await send_with_delivery(session, _CHAT_FAILURE_REPLY, None)
+            await reaction.finish("failed")
         return BLOCK
     user_name = identity.display_name
     mentioned_participants = await resolve_mentioned_participants(session)
@@ -193,7 +208,7 @@ async def _run_chat(
     current_content: str | list[dict[str, Any]] | None = None
     if supports_image_input:
         current_content, content = await build_multimodal_user_content(
-            config,
+            active_config,
             session,
             user_name,
             model_text,
@@ -203,7 +218,7 @@ async def _run_chat(
             reply_to=reply_to,
         )
     else:
-        image_notes = await build_image_notes(config, session, _LOGGER.warning, forwarded_messages)
+        image_notes = await build_image_notes(active_config, session, _LOGGER.warning, forwarded_messages)
         if image_notes:
             model_text = " ".join(part for part in [model_text, *image_notes] if part)
         views = inputs.input_views(session=session)
@@ -219,7 +234,8 @@ async def _run_chat(
         )
 
     if not content:
-        await reaction.finish("failed")
+        if reaction is not None:
+            await reaction.finish("failed")
         return BLOCK
     input_attachments = await capture_user_input_images(
         session,
@@ -227,7 +243,7 @@ async def _run_chat(
         warn=_LOGGER.warning,
     )
     prepared = await prepare_agent_turn(
-        config,
+        active_config,
         session,
         identity,
         model_name=model_name,
@@ -247,8 +263,25 @@ async def _run_chat(
     inputs.commit_input_audit()
     steering = current_steering()
     if steering is not None:
-        bind_steer_inputs(steering, prepared, config, session, model_name=model_name, warn=_LOGGER.warning)
-    await run_prepared_agent_turn(session, ctx, prepared, model_name=model_name, turn_config=config, reaction=reaction)
+        bind_steer_inputs(steering, prepared, active_config, session, model_name=model_name, warn=_LOGGER.warning)
+    if isinstance(steering, DialogueSteeringState):
+        from .companion.internal import settle_owned
+
+        try:
+            await steering.prepare_first_request(prepared)
+        except BaseException as exc:
+            await settle_owned(prepared.lifecycle.preserve_and_rollback())
+            await settle_owned(
+                prepared.lifecycle.finalize_agent_turn(
+                    "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
+                )
+            )
+            raise
+    status = await run_prepared_agent_turn(
+        session, ctx, prepared, model_name=model_name, turn_config=active_config, reaction=reaction
+    )
+    if isinstance(steering, DialogueSteeringState):
+        steering.status = status
     return BLOCK
 
 
@@ -356,20 +389,38 @@ async def run_prepared_agent_turn(
         async def finalize_with_delivery_audit() -> None:
             if delivery_audit is not None:
                 await delivery_audit.drain()
+            participants = current_companion_participants()
+            if participants is not None:
+                agent_events.append(
+                    "companion_participation",
+                    payload=participants.participation_payload(confirmed=bool(delivery_state.confirmed_deliveries)),
+                    model_visible=False,
+                )
             await turn.finalize_agent_turn(turn_status)
             if (
-                agent_access.trigger_kind == "message"
+                (
+                    agent_access.trigger_kind == "message"
+                    or (participants is not None and participants.evidence_members())
+                )
                 and turn_status in {"completed", "silent", "declined"}
                 and turn.agent_turn_id is not None
             ):
-                schedule_relationship_evaluation(
-                    active_config,
-                    turn_id=turn.agent_turn_id,
-                    user_id=user_id,
-                    channel_id=channel_id,
-                    persona_prompt=prepared.persona.prompt,
-                    warn=_LOGGER.warning,
-                )
+                if participants is not None:
+                    schedule_companion_relationship_evaluation(
+                        active_config,
+                        turn_id=turn.agent_turn_id,
+                        persona_prompt=prepared.persona.prompt,
+                        warn=_LOGGER.warning,
+                    )
+                else:
+                    schedule_relationship_evaluation(
+                        active_config,
+                        turn_id=turn.agent_turn_id,
+                        user_id=user_id,
+                        channel_id=channel_id,
+                        persona_prompt=prepared.persona.prompt,
+                        warn=_LOGGER.warning,
+                    )
                 try:
                     await record_companion_chat(session, prepared)
                 except Exception as exc:

@@ -54,6 +54,7 @@ from .native_image_delivery import (
     prepare_pending_native_images,
 )
 from .core.tool_trace_policy import DeliverySnapshot
+from .companion.dialogue_control import current_dialogue_control
 
 _MIN_TOOL_CALL_LIMIT = 8
 _MAX_TOOL_CALL_LIMIT = 64
@@ -331,6 +332,11 @@ def _authorized(name: str) -> bool:
     entry = _active_tool(name)
     if entry is None or not _is_compat_wrapper(entry[0].handle) or entry[1].external_execution is not True:
         return False
+    if name == "companion_dialogue":
+        return current_dialogue_control() is not None
+    access = current_agent_access()
+    if access is not None and access.trigger_kind == "message" and "companion.ambient" in access.capability_names:
+        return name in _AUTONOMOUS_ALLOWED_TOOLS and "send_msg" in access.capability_names
     if name in WORKSHOP_TOOLS:
         from .core.delivery import DeliveryError
         from .tools._workshop import authorized_workshop_actor
@@ -340,7 +346,6 @@ def _authorized(name: str) -> bool:
         except DeliveryError:
             return False
         return True
-    access = current_agent_access()
     if access is not None and access.trigger_kind == "autonomous":
         return name in _AUTONOMOUS_ALLOWED_TOOLS and "send_msg" in access.capability_names
     if access is not None and access.trigger_kind == "scheduled":
@@ -749,7 +754,11 @@ def install_agno_tool_bridge() -> None:
     @wraps(original["get_agno_tools"])
     def authorized_tools() -> list[Function]:
         if current_tool_trace() is None:
-            return original["get_agno_tools"]()
+            return [
+                function
+                for function in original["get_agno_tools"]()
+                if function.name != "companion_dialogue" or current_dialogue_control() is not None
+            ]
         budget = _TOOL_BUDGET.get()
         if budget is None:
             return [entry[1] for name in available_functions if _authorized(name) and (entry := _active_tool(name))]

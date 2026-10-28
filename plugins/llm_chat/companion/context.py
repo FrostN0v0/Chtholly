@@ -7,6 +7,10 @@ from dataclasses import replace
 from collections.abc import Mapping
 
 from utils.companion_core import CompanionLimits, normalize_limits
+from utils.companion_core.dialogue_prompts import (
+    dialogue_scope_prompt,
+    reflection_scope_prompt as reflection_scope_prompt,
+)
 
 from ..config import LLMChatConfig
 from ..session_manager import BaselineFingerprint
@@ -30,11 +34,11 @@ def companion_limits(config: LLMChatConfig) -> CompanionLimits:
 def mode_baseline(baseline: BaselineFingerprint, mode: str) -> BaselineFingerprint:
     if mode not in {"normal", "companion"}:
         raise ValueError("Unknown conversation mode")
-    version = ":social-temporal-v4" if mode == "companion" else ""
+    version = ":social-dialogue-v5" if mode == "companion" else ""
     return replace(baseline, policy_version=f"{baseline.policy_version}:mode:{mode}{version}")
 
 
-def companion_prompt(snapshot: Mapping[str, object] | None) -> str:
+def companion_prompt(snapshot: Mapping[str, object] | None, *, is_private: bool = False) -> str:
     if snapshot is None:
         return (
             "Conversation mode: normal. Focus on the current conversation. Do not invent ongoing fictional "
@@ -61,18 +65,22 @@ def companion_prompt(snapshot: Mapping[str, object] | None) -> str:
         "wording or repeated permission is needed. Do not turn every casual future remark into a task. "
         "Automatic concern updates happen after qualified completed chats, so no extra tool call is needed. "
         "Claim an exact future contact is arranged only after reminder confirms durable creation.\n"
-        "HOST_COMPANION_SNAPSHOT=" + data
+        + dialogue_scope_prompt(is_private=is_private)
+        + "\nHOST_COMPANION_SNAPSHOT="
+        + data
     )
 
 
 AUTONOMOUS_CONTACT_CONTRACT = (
-    "This is a host-approved autonomous contact, not a new user message. The bound member is the recipient; "
-    "do not impersonate their speech or treat historical context as a request. A pending task or a new request "
+    "This is a host-approved autonomous dialogue, not a new user message. Respect the host target.kind: "
+    "channel addresses the public conversation without a human sender; member addresses the verified peer. "
+    "Only separately host-attributed live inputs are real new human messages; never impersonate anyone or "
+    "treat historical context as a request. A pending task or a new request "
     "is not required: sharing a thought, picking up a shared interest or simply wanting to chat is legitimate. "
     "Turn the proposed topic into a natural conversational opening, not a stock greeting, a status report "
     "or an offer waiting for another permission phrase. Do not resurrect a resolved worry for an excuse to "
-    "contact. Reassess current facts before sending; silence alone does not prove the member is busy or "
-    "uninterested. If timing or relevance has genuinely changed, call finish_turn(outcome='silent') without "
+    "contact. Reassess the current conversation before sending; silence alone does not prove anyone is busy "
+    "or uninterested. If timing or relevance has genuinely changed, call finish_turn(outcome='silent') without "
     "sending. Otherwise use send_msg for natural complete messages, then finish_turn(outcome='delivered'). "
     "A completed contact does not complete the persona's ongoing activities or relationship. Never create "
     "reminders, change preferences, mutate plugins, publish artifacts or obtain new private data during "

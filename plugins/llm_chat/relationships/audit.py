@@ -7,7 +7,7 @@ from typing import cast
 from datetime import datetime
 from collections.abc import Mapping, Sequence
 
-from sqlalchemy import update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .types import EvaluationBatch
@@ -51,6 +51,7 @@ def evaluation_payload(
                 changes[axis] = {"before": value, "after": new_value, "delta": round(new_value - value, 3)}
     return {
         "evaluation_ref": batch.evaluation_ref,
+        "owner_user_id": batch.user_id,
         "evidence_turn_ids": list(batch.turn_ids),
         "before": batch.before,
         "after": cast(JSONType, dict(after)) if after is not None else None,
@@ -71,14 +72,17 @@ async def update_evaluation_events(
     payload: Mapping[str, JSONType],
     duration_ms: int = 0,
 ) -> None:
-    await db.execute(
-        update(AgentEvent)
-        .where(AgentEvent.id.in_(event_ids), AgentEvent.event_type == "relationship_evaluation")
-        .values(
-            status=status,
-            effect="state_updated" if status == "succeeded" else "none",
-            payload_json=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            duration_ms=max(0, duration_ms),
-            model_visible=False,
+    events = (
+        await db.execute(
+            select(AgentEvent).where(AgentEvent.id.in_(event_ids), AgentEvent.event_type == "relationship_evaluation")
         )
-    )
+    ).scalars()
+    for event in events:
+        previous = json.loads(event.payload_json)
+        if not isinstance(previous, dict):
+            raise ValueError("Relationship evaluation event payload is not an object")
+        event.status = status
+        event.effect = "state_updated" if status == "succeeded" else "none"
+        event.payload_json = json.dumps({**previous, **payload}, ensure_ascii=False, separators=(",", ":"))
+        event.duration_ms = max(0, duration_ms)
+        event.model_visible = False

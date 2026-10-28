@@ -6,41 +6,48 @@ from copy import deepcopy
 import math
 from typing import Any
 import asyncio
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from dataclasses import field, dataclass
 from collections.abc import Mapping, Callable, Iterable, Sequence, Awaitable
 
+from satori import Channel, ChannelType
 from launart import Launart, Service
 from sqlalchemy import select
 from arclet.entari import Session
 from launart.status import Phase
 from arclet.entari.logger import log
 from entari_plugin_database import get_session
+from arclet.letoderea.context import Contexts
 
 from utils.sqlite_errors import sqlite_error_label
 from utils.companion_core import ReflectionProposal, next_review_at
 
-from . import store
-from .types import ReviewClaim, ContactClaim, CompanionConflict
+from . import store, dialogue_store
+from .types import ReviewClaim, CompanionConflict
 from .models import CompanionMode, CompanionReview, CompanionContact
 from ..config import LLMChatConfig
 from ..models import AgentTurn, ChatScope, ContextSession, ScopePersonaSelection
-from .contact import run_contact
 from .context import companion_limits
 from .accounts import AccountAvailability
 from .internal import settle_owned, run_reflection
+from .scope_kinds import bind_scope_channel
 from ..personality import persona_scope_lock, select_scope_persona, resolve_scope_persona
+from .participants import current_companion_participants
+from .opportunities import build_opportunity
 from ..channel_turns import participant_turn_active
 from .decision_audit import ContactDecision, persist_review_decision
-from ..session_manager import finish_turn
+from ..session_manager import finish_turn, scope_identity
+from .dialogue_manager import DialogueBatch, DialogueManager, DialogueOutcome
+from .dialogue_session import host_dialogue_session
 from ..agent_turn_setup import PreparedAgentTurn
+from .dialogue_execution import run_dialogue_batch
 
 _LOGGER = log.wrapper("[llm_chat.companion]")
 AccountKey = tuple[str, str]
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _key(account: Any) -> AccountKey:
@@ -54,7 +61,6 @@ class _Worker:
     review: ReviewClaim
     input_revision: int
     task: asyncio.Task[None] | None = None
-    contact: ContactClaim | None = None
     members: frozenset[str] = field(default_factory=frozenset)
     snapshot_loaded: bool = False
     review_committing: bool = False
@@ -73,6 +79,7 @@ class CompanionService(Service):
         reflection: Callable[..., Awaitable[ReflectionProposal]] | None = None,
         runner: Callable[..., Awaitable[str]] | None = None,
         clock: Callable[[], datetime] = _now,
+        dialogue_runner: Callable[[DialogueBatch], Awaitable[DialogueOutcome]] | None = None,
         concurrency: int = 2,
     ) -> None:
         super().__init__()
@@ -95,6 +102,47 @@ class CompanionService(Service):
         self._start_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._claim_lock = asyncio.Lock()
+        self.dialogues = DialogueManager(
+            config,
+            dialogue_runner or self._run_dialogue,
+            clock=clock,
+            session_factory=lambda: get_session(),
+            restore_session=self._restore_dialogue_session,
+        )
+
+    async def _run_dialogue(self, batch: DialogueBatch) -> DialogueOutcome:
+        if not await self._availability.online(batch.account, fresh=True):
+            return DialogueOutcome(status="cancelled")
+        return await run_dialogue_batch(
+            self.config, batch, tool_schemas=self.tool_schemas, clock=self._clock, runner=self._runner
+        )
+
+    async def _restore_dialogue_session(self, scope: ChatScope) -> Session | None:
+        self._refresh_accounts()
+        account = self._accounts.get((scope.platform, scope.account_id))
+        if account is None or not await self._availability.online(account, fresh=True):
+            return None
+        channel = await account.protocol.channel_get(scope.channel_id)
+        if not isinstance(channel, Channel):
+            raise ValueError("Companion channel lookup did not return a native channel")
+        await bind_scope_channel(scope, channel, session_factory=lambda: get_session())
+        return host_dialogue_session(account, scope, channel)
+
+    async def admit_dialogue(self, session: Session, ctx: Contexts, *, directed: bool) -> bool:
+        if self._closed:
+            return False
+        await self.start()
+        resolved = await dialogue_store.resolve_scope(scope_identity(session), session_factory=lambda: get_session())
+        if resolved is None:
+            return False
+        self._accounts[_key(session.account)] = session.account
+        await bind_scope_channel(resolved[0], session.channel, session_factory=lambda: get_session())
+        return await self.dialogues.admit(session, ctx, directed=directed)
+
+    async def revise_dialogue(
+        self, session: Session, ctx: Contexts, *, deleted: bool = False, directed: bool = False
+    ) -> None:
+        await self.dialogues.revise(session, ctx, deleted=deleted, directed=directed)
 
     @property
     def required(self) -> set[str]:
@@ -107,6 +155,7 @@ class CompanionService(Service):
     def wake(self) -> None:
         if not self._closed:
             self._wake.set()
+            self.dialogues.wake()
 
     @staticmethod
     def _stop(worker: _Worker) -> None:
@@ -143,6 +192,7 @@ class CompanionService(Service):
         worker = self._workers.get(scope_id)
         if worker is not None:
             self._stop(worker)
+        await self.dialogues.cancel_scope(scope_id)
         # Cancellation is immediate; draining here under a persona lock would deadlock preparation.
         self.wake()
 
@@ -159,6 +209,7 @@ class CompanionService(Service):
     async def _initialize(self) -> None:
         await store.initialize_store(now=self._clock())
         await self._recover_native_turns()
+        await self.dialogues.start()
         if self._closed:
             return
         self._started = True
@@ -167,7 +218,7 @@ class CompanionService(Service):
 
     async def _recover_native_turns(self) -> None:
         """Close abandoned internal audit rows without replaying generation or transport."""
-        moment = self._clock().astimezone(timezone.utc).replace(tzinfo=None)
+        moment = self._clock().astimezone(UTC).replace(tzinfo=None)
         abandoned: list[int] = []
         async with get_session() as db:
             rows = (
@@ -275,36 +326,12 @@ class CompanionService(Service):
             return False
         return self._owned_current(worker)
 
-    async def _contact_current(self, worker: _Worker) -> bool:
-        claim = worker.contact
-        if not self._owned_current(worker) or claim is None:
-            return False
-        if not await store.contact_valid(claim, now=self._clock()):
-            return False
-        persona = await resolve_scope_persona(self.config, worker.scope.id)
-        if persona.key != claim.persona_key:
-            return False
-        if participant_turn_active(
-            worker.scope.platform,
-            worker.scope.account_id,
-            worker.scope.channel_id,
-            claim.platform_user_id,
-        ):
-            return False
-        if self._accounts_provider is not None:
-            self._refresh_accounts()
-            if self._accounts.get(_key(worker.account)) is not worker.account:
-                return False
-        if not await self._availability.online(worker.account, fresh=True):
-            return False
-        return self._owned_current(worker)
-
     async def _reconcile_workers(self) -> None:
         for worker in tuple(self._workers.values()):
             if worker.stopped or worker.task is None or worker.task.done():
                 continue
-            valid = await self._contact_current(worker) if worker.contact else await self._review_current(worker)
-            if valid and worker.contact is None:
+            valid = await self._review_current(worker)
+            if valid:
                 valid = await self._availability.online(worker.account)
             if not valid:
                 self._stop(worker)
@@ -328,7 +355,7 @@ class CompanionService(Service):
             for mode in due:
                 if capacity <= 0 or self._closed:
                     break
-                if mode.scope_id in self._workers:
+                if mode.scope_id in self._workers or self.dialogues.active(mode.scope_id):
                     continue
                 async with get_session() as db:
                     scope = await db.get(ChatScope, mode.scope_id)
@@ -407,6 +434,10 @@ class CompanionService(Service):
             if not await self._availability.online(worker.account):
                 decision.set("blocked", "account_unavailable", at=self._clock())
                 raise CompanionConflict("Companion reflection was revoked before generation")
+            native_session = await self._restore_dialogue_session(worker.scope)
+            if native_session is None:
+                decision.set("blocked", "account_unavailable", at=self._clock())
+                return
             proposal = await asyncio.wait_for(
                 self._reflection(
                     config=config,
@@ -416,6 +447,7 @@ class CompanionService(Service):
                     limits=limits,
                     now=self._clock(),
                     tool_schemas=self.tool_schemas,
+                    is_private=native_session.channel.type == ChannelType.DIRECT,
                 ),
                 timeout=limits.request_timeout + 30,
             )
@@ -450,49 +482,20 @@ class CompanionService(Service):
             ):
                 decision.set("blocked", "mode_changed", at=self._clock())
                 return
-            if participant_turn_active(
-                worker.scope.platform,
-                worker.scope.account_id,
-                worker.scope.channel_id,
-                next(
-                    (
-                        member.platform_user_id
-                        for member in snapshot.members
-                        if member.member_ref == proposal.contact.member_ref
-                    ),
-                    "",
-                ),
-            ):
-                decision.set("blocked", "participant_active", at=self._clock())
-                return
-            contact = await store.claim_contact(
+            queued = await self.dialogues.offer_opportunity(
                 claim.scope_id,
-                claim.persona_key,
-                proposal.contact.member_ref,
-                proposal.contact,
-                origin=claim,
-                now=self._clock(),
-                limits=limits,
-                lease_seconds=300,
-                decision=decision,
+                build_opportunity(claim, proposal.contact),
+                session=native_session,
+                key=claim.lease_token,
             )
-            if contact is None:
-                return
-            worker.contact = contact
-            await run_contact(
-                config=config,
-                scope=worker.scope,
-                account=worker.account,
-                claim=contact,
-                proposal=proposal.contact,
-                guard=lambda: self._contact_current(worker),
-                clock=self._clock,
-                tool_schemas=self.tool_schemas,
-                runner=self._runner,
+            decision.set(
+                "queued" if queued else "blocked",
+                "dialogue_opportunity_queued" if queued else "dialogue_opportunity_pending",
+                at=self._clock(),
             )
         except asyncio.CancelledError:
             failure = "reflection_interrupted"
-            if decision.status != "reserved":
+            if decision.status != "queued":
                 decision.set("interrupted", "reflection_interrupted", at=self._clock())
             raise
         except Exception as exc:
@@ -527,10 +530,11 @@ class CompanionService(Service):
     async def record_chat(self, session: Session, prepared: PreparedAgentTurn) -> None:
         """Record only completed native ordinary-chat feedback under its captured mode."""
         access = prepared.agent_access
+        participants = current_companion_participants()
         if (
             self._closed
             or prepared.conversation_mode != "companion"
-            or access.trigger_kind != "message"
+            or (access.trigger_kind != "message" and participants is None)
             or not access.turn_id
         ):
             return
@@ -557,27 +561,36 @@ class CompanionService(Service):
                 or turn.finished_at is None
             ):
                 return
-            member = await store.record_chat(
-                access.scope_id,
-                prepared.persona.key,
-                user_id=access.user_id,
-                platform_user_id=str(session.user.id),
-                display_name=str(session.user.name or ""),
-                turn_id=access.turn_id,
-                now=self._clock(),
-                expected_revision=prepared.companion_revision,
-            )
+            if participants is None:
+                sources = ((session, access.user_id, str(session.user.name or "")),)
+            else:
+                sources = tuple(
+                    (source, identity.user_id, identity.display_name)
+                    for source, identity in participants.evidence_members()
+                )
+            member = None
+            for source, user_id, display_name in sources:
+                member = await store.record_chat(
+                    access.scope_id,
+                    prepared.persona.key,
+                    user_id=user_id,
+                    platform_user_id=str(source.user.id),
+                    display_name=display_name,
+                    turn_id=access.turn_id,
+                    now=self._clock(),
+                    expected_revision=prepared.companion_revision,
+                )
         if member is not None:
             current = await store.get_mode(access.scope_id)
             worker = self._workers.get(access.scope_id)
             if worker is not None:
-                claim = worker.contact or worker.review
+                claim = worker.review
                 if (claim.persona_key, claim.mode_revision, claim.context_revision) != (
                     current.persona_key,
                     current.revision,
                     current.context_revision,
                 ):
-                    await self.cancel_scope(access.scope_id)
+                    self._stop(worker)
             self.wake()
 
     async def _run_loop(self) -> None:
@@ -598,6 +611,7 @@ class CompanionService(Service):
         tasks = tuple(worker.task for worker in self._workers.values() if worker.task is not None)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await self.dialogues.drain()
 
     async def aclose(self) -> None:
         async with self._close_lock:
@@ -605,6 +619,7 @@ class CompanionService(Service):
                 return
             self._closed = True
             self._wake.set()
+            await self.dialogues.aclose()
             for task in (self._startup, self._loop):
                 if task is not None:
                     task.cancel()

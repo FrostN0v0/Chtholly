@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 
-from sqlalchemy import exists, select
+from sqlalchemy import or_, and_, exists, select
 from entari_plugin_database import get_session
 
-from ..models import AgentTurn, ChatScope, AgentEvent, ContextSession, MigrationState, RelationshipEvidence
-from .evidence import enqueue_relationship_evidence
+from ..models import AgentTurn, ChatScope, AgentEvent, ContextSession, MigrationState
+from .evidence import enqueue_relationship_evidence, enqueue_companion_relationship_evidence
 
 
 async def recover_unqueued_evidence(model: str) -> int:
@@ -32,14 +32,14 @@ async def recover_unqueued_evidence(model: str) -> int:
                     select(AgentTurn.id, AgentTurn.user_id, ChatScope.channel_id)
                     .join(ContextSession, ContextSession.id == AgentTurn.session_id)
                     .join(ChatScope, ChatScope.id == ContextSession.scope_id)
-                    .outerjoin(RelationshipEvidence, RelationshipEvidence.turn_id == AgentTurn.id)
                     .where(
                         AgentTurn.id > after_turn,
-                        AgentTurn.trigger_kind == "message",
-                        ContextSession.purpose == "chat",
+                        or_(
+                            and_(AgentTurn.trigger_kind == "message", ContextSession.purpose == "chat"),
+                            and_(AgentTurn.trigger_kind == "autonomous", ContextSession.purpose == "companion"),
+                        ),
                         AgentTurn.status.in_(("completed", "silent", "declined")),
                         AgentTurn.finished_at.is_not(None),
-                        RelationshipEvidence.turn_id.is_(None),
                         decision_recorded,
                     )
                     .order_by(AgentTurn.id)
@@ -51,6 +51,24 @@ async def recover_unqueued_evidence(model: str) -> int:
         for turn_id, user_id, channel_id in rows:
             after_turn = turn_id
             async with get_session() as db:
+                inputs = (
+                    (
+                        await db.execute(
+                            select(AgentEvent.payload_json).where(
+                                AgentEvent.turn_id == turn_id,
+                                AgentEvent.event_type == "user_input",
+                                AgentEvent.model_visible.is_(True),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if not inputs:
+                    continue
+                companion_inputs = any(
+                    isinstance(json.loads(raw), dict) and "host_author" in json.loads(raw) for raw in inputs
+                )
                 raw = await db.scalar(
                     select(AgentEvent.payload_json)
                     .where(AgentEvent.turn_id == turn_id, AgentEvent.event_type == "context_snapshot")
@@ -64,10 +82,17 @@ async def recover_unqueued_evidence(model: str) -> int:
             prompt = persona.get("prompt") if isinstance(persona, dict) else None
             if not isinstance(prompt, str):
                 raise ValueError("Unqueued relationship evidence has no usable captured persona")
-            recovered += await enqueue_relationship_evidence(
-                turn_id=turn_id,
-                user_id=user_id,
-                channel_id=channel_id,
-                persona_prompt=prompt,
-                model=model,
-            )
+            if companion_inputs:
+                recovered += await enqueue_companion_relationship_evidence(
+                    turn_id=turn_id,
+                    persona_prompt=prompt,
+                    model=model,
+                )
+            else:
+                recovered += await enqueue_relationship_evidence(
+                    turn_id=turn_id,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    persona_prompt=prompt,
+                    model=model,
+                )

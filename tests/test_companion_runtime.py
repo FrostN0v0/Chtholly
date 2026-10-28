@@ -186,7 +186,8 @@ async def test_life_and_concerns_continue_across_no_contact_rounds_and_restart(c
     seen = []
 
     async def reflection(**kwargs):
-        assert set(kwargs) == {"config", "scope", "claim", "snapshot", "limits", "now", "tool_schemas"}
+        assert set(kwargs) == {"config", "scope", "claim", "snapshot", "limits", "now", "tool_schemas", "is_private"}
+        assert kwargs["is_private"] is False
         snapshot = kwargs["snapshot"]
         round_number = len(seen) + 1
         seen.append(snapshot)
@@ -279,7 +280,7 @@ async def test_task_free_contact_uses_exact_native_target_and_real_receipt(compa
         captured.append(prepared)
         assert session.account is native_transport.account
         assert session.channel.id == native_scope.channel_id
-        assert session.user.id == member.platform_user_id
+        assert session.user.id == native_transport.account.self_id
         assert session.event.message is None
         assert ctx["$event"] is session.event
         assert prepared.agent_access.user_id == member.user_id

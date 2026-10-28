@@ -1,4 +1,4 @@
-"""Opt-in private companion chat through the same ordinary-chat lifecycle."""
+"""Opt-in private companion admission through its scope-owned dialogue loop."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from arclet.entari.plugin.model import Plugin
 from . import store
 from .. import chat_handler
 from ..models import ChatScope
-from ..channel_turns import steer_participant_turn
+from .runtime import current_companion_service
 
 _owner = Plugin.current()
 if _owner is not None and _owner.module.__name__ == __name__:
@@ -49,9 +49,10 @@ if _owner is not None and _owner.module.__name__ == __name__:
 
     @_owner.dispatch(MessageCreatedEvent).register(priority=900)
     @enter_if(_should_handle_private)
-    @steer_participant_turn
     async def on_private_chat(session: Session, ctx: Contexts):
-        await chat_handler.handle_chat_turn(session, ctx)
+        runtime = current_companion_service()
+        if runtime is not None:
+            await runtime.admit_dialogue(session, ctx, directed=True)
         return BLOCK
 
     @_owner.dispatch(MessageCreatedEvent).register(priority=999)

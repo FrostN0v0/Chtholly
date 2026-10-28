@@ -12,7 +12,6 @@ from datetime import datetime
 from launart import Launart
 import litellm
 from arclet.entari import Audio, Session, plugin, command, plugin_config
-from entari_plugin_llm import LLMToolEvent  # entari: plugin
 from arclet.entari.logger import log
 import entari_plugin_browser as _browser  # entari: plugin  # noqa: F401
 from entari_plugin_browser import PlaywrightService
@@ -20,7 +19,6 @@ from entari_plugin_database import get_session  # entari: plugin
 import entari_plugin_htmlrender as _htmlrender  # entari: plugin  # noqa: F401
 from entari_plugin_htmlrender import HtmlRenderer
 from entari_plugin_llm.config import get_model_list, get_model_config
-from arclet.entari.plugin.model import PluginDispatcher
 from entari_plugin_llm.exception import ModelNotFoundError
 from entari_plugin_htmlrender.entari import HtmlRenderService
 
@@ -55,7 +53,7 @@ from .tools.call_plugin import CommandToolContext, register_call_plugin
 from .tools.finish_turn import register_finish_turn
 from .tools.pin_context import register_pin_context
 from .tools.markdown2pic import register_markdown2pic
-from .tools._registration import register_tool
+from .tools._registration import register_tool, create_tool_dispatcher
 from .tools.inspect_image import register_inspect_image
 from .tools.list_sessions import register_list_sessions
 from .tools.prepare_audio import AudioToolContext, register_prepare_audio
@@ -67,6 +65,7 @@ from .tools.list_tts_voices import TTSVoiceToolContext, register_list_tts_voices
 from .tools.read_agent_event import register_read_agent_event
 from .tools.prepare_image_ref import register_prepare_image_ref
 from .tools.synthesize_speech import SpeakToolContext, register_synthesize_speech
+from .tools.companion_dialogue import register_companion_dialogue
 from .tools.get_channel_avatar import register_get_channel_avatar
 from .tools.read_tool_execution import register_read_tool_execution
 from .tools.screenshot_web_page import (
@@ -91,7 +90,7 @@ RENDER_TEMPLATE_DIR = Path(__file__).resolve().parent / "render_templates"
 _LOGGER = log.wrapper("[llm_chat]")
 
 config = plugin_config(LLMChatConfig)
-tools = cast(PluginDispatcher[JSONType], plugin.dispatch(LLMToolEvent))
+tools = create_tool_dispatcher("generation_tools")
 tools.register_hooks.append(register_llm_chat_tool)
 registered_tools: list[str] = []
 
@@ -342,6 +341,8 @@ tag_image = register_tag_image(tools, tag_image_context)
 registered_tools.append("tag_image")
 finish_turn = register_finish_turn(tools)
 registered_tools.append("finish_turn")
+# Its declaration is generation-local and must not change normal-mode tool fingerprints.
+companion_dialogue = register_companion_dialogue(tools)
 plugin.collect_disposes(cancel_pending_image_collections)
 
 

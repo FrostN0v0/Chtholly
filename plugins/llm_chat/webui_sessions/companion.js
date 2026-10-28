@@ -13,6 +13,7 @@
     unknown: "\u7ed3\u679c\u672a\u77e5", missing: "\u5386\u53f2\u672a\u8bb0\u5f55", not_recorded: "\u5386\u53f2\u672a\u8bb0\u5f55", not_proposed: "\u672a\u63d0\u8bae\u8054\u7cfb",
     reserved: "\u5df2\u9884\u7559\u8054\u7cfb", confirmed: "\u5df2\u786e\u8ba4\u9001\u8fbe", sent: "\u5df2\u53d1\u9001", silent: "\u4e3b\u52a8\u6c89\u9ed8", pending: "\u7b49\u5f85\u4e2d",
     delivered: "\u5df2\u786e\u8ba4\u9001\u8fbe", expired: "\u5df2\u8fc7\u671f",
+    queued: "\u5df2\u6392\u5165\u4f1a\u8bdd\u673a\u4f1a",
     recorded: "\u5df2\u8bb0\u5f55", invalid: "\u8bb0\u5f55\u65e0\u6548",
     planned: "\u8ba1\u5212\u4e2d", paused: "\u5df2\u6682\u505c", open: "\u6301\u7eed\u5173\u6ce8", waiting_reply: "\u7b49\u5f85\u56de\u590d", dormant: "\u6682\u65f6\u4f11\u7720", resolved: "\u5df2\u89e3\u51b3",
     concern: "\u5173\u5207", topic: "\u8bdd\u9898", connection: "\u8054\u7cfb", check_in: "\u95ee\u5019", share: "\u5206\u4eab", continue: "\u7ee7\u7eed\u8bdd\u9898", free_chat: "\u95f2\u804a",
@@ -28,6 +29,8 @@
     quiet_hours: "\u514d\u6253\u6270\u65f6\u6bb5", daily_contact_limit: "\u8fbe\u5230\u6bcf\u65e5\u8054\u7cfb\u9650\u5236", recent_user_activity: "\u7528\u6237\u521a\u521a\u6d3b\u52a8", member_inactive: "\u6210\u5458\u4e0d\u5728\u6d3b\u8dc3\u7a97\u53e3",
     contact_interval: "\u8054\u7cfb\u95f4\u9694\u672a\u5230", duplicate_contact: "\u91cd\u590d\u8054\u7cfb", review_changed: "\u53cd\u601d\u5df2\u53d8\u66f4", member_preference: "\u6210\u5458\u8054\u7cfb\u504f\u597d\u9650\u5236",
     contact_reserved: "\u901a\u8fc7\u5bbf\u4e3b\u68c0\u67e5\u5e76\u9884\u7559", contact_claim_failed: "\u8054\u7cfb\u9884\u7559\u5931\u8d25", reflection_interrupted: "\u590d\u76d8\u88ab\u4e2d\u65ad",
+    dialogue_opportunity_queued: "\u5df2\u4ea4\u7ed9\u5f53\u524d\u9891\u9053\u4f1a\u8bdd\u51b3\u5b9a\u65f6\u673a",
+    dialogue_opportunity_pending: "\u9891\u9053\u5df2\u6709\u5f85\u5904\u7406\u673a\u4f1a",
   });
   const missing = "\u5386\u53f2\u672a\u8bb0\u5f55";
   function purpose(value) { return PURPOSES[value] || value || "\u7528\u9014\u672a\u8bb0\u5f55"; }
@@ -48,7 +51,7 @@
       const item = node("span", "badge companion-status", label(value));
       item.dataset.status = value || "missing";
       if (["failed", "cancelled", "interrupted", "blocked"].includes(value)) item.classList.add("badge-danger");
-      if (["active", "pending", "reserved", "unknown"].includes(value)) item.classList.add("badge-pending");
+      if (["active", "pending", "queued", "reserved", "unknown"].includes(value)) item.classList.add("badge-pending");
       if (["confirmed", "succeeded", "completed", "committed", "sent"].includes(value)) item.classList.add("badge-success");
       return item;
     }
@@ -204,8 +207,10 @@
       const panel = section("\u5b9e\u9645\u8054\u7cfb\u5c1d\u8bd5");
       panel.dataset.recordKey = contact.attempt_ref;
       const row = node("div", "actions");
-      row.append(node("strong", "", contact.display_name || missing), badge(contact.status));
-      panel.append(row, node("p", "muted", `${contact.member_ref || missing} \u00b7 \u8054\u7cfb\u5f00\u59cb ${date(contact.created_at)} \u00b7 \u7ed3\u675f ${date(contact.finished_at)}`), node("p", "", reason(contact.reason)), metric("\u786e\u8ba4\u9001\u8fbe\u6d88\u606f", number(contact.confirmed_count)));
+      const destination = contact.target === "channel" ? "\u5f53\u524d\u9891\u9053" : contact.display_name || missing;
+      row.append(node("strong", "", destination), badge(contact.status));
+      const subject = contact.target === "channel" ? "\u9891\u9053\u8bdd\u9898" : contact.member_ref || missing;
+      panel.append(row, node("p", "muted", `${subject} \u00b7 \u8054\u7cfb\u5f00\u59cb ${date(contact.created_at)} \u00b7 \u7ed3\u675f ${date(contact.finished_at)}`), node("p", "", reason(contact.reason)), metric("\u786e\u8ba4\u9001\u8fbe\u6d88\u606f", number(contact.confirmed_count)));
       if (contact.status === "unknown") panel.append(node("p", "partial-notice", "\u53d1\u9001\u7ed3\u679c\u672a\u77e5\uff1b\u4e0d\u7b49\u4e8e\u672a\u53d1\u9001\uff0c\u4e0d\u63a8\u65ad\u9001\u8fbe\u3002"));
       const transport = stableDetails("\u4f20\u8f93\u4e0e\u6536\u636e\u6355\u83b7", "contact-transport", {
         transport_started_at: contact.transport_started_at, transport_inflight: contact.transport_inflight,
@@ -233,7 +238,10 @@
       overview.append(stages);
       const application = item.changes?.committed === true ? "\u5df2\u5e94\u7528" : item.transaction_committed === true ? "\u4e8b\u52a1\u5df2\u63d0\u4ea4\uff0c\u53d8\u66f4\u5feb\u7167\u4e0d\u53ef\u7528" : "\u672a\u5e94\u7528";
       overview.append(node("p", "muted", `\u6570\u636e\u5e93\u4e8b\u52a1\uff1a${item.transaction_committed === true ? "\u5df2\u63d0\u4ea4" : item.transaction_committed === false ? "\u672a\u63d0\u4ea4" : "\u5386\u53f2\u672a\u8bb0\u5f55"} \u00b7 \u5feb\u7167\u53d8\u66f4\uff1a${application}`));
-      if (item.contact) overview.append(node("p", "", `${item.contact.display_name || item.contact.member_ref || missing} \u00b7 ${label(item.contact.purpose)}\uff1a${item.contact.topic || missing}`), node("p", "", `\u7ed3\u6784\u5316\u6a21\u578b\u7406\u7531\uff1a${item.contact.reason || missing}`));
+      if (item.contact) {
+        const destination = item.contact.target === "channel" ? "\u5f53\u524d\u9891\u9053" : item.contact.display_name || item.contact.member_ref || missing;
+        overview.append(node("p", "", `${destination} \u00b7 ${label(item.contact.purpose)}\uff1a${item.contact.topic || missing}`), node("p", "", `\u7ed3\u6784\u5316\u6a21\u578b\u7406\u7531\uff1a${item.contact.reason || missing}`));
+      }
       overview.append(node("p", "muted", "\u663e\u793a\u7684\u7406\u7531\u6765\u81ea\u7ed3\u6784\u5316\u6a21\u578b\u8f93\u51fa\uff0c\u4e0d\u662f\u9690\u85cf\u601d\u7ef4\u94fe\u3002"));
       const decisionSummary = item.decision_summary ?? item.proposal?.decision_summary;
       overview.append(node("p", "companion-decision-summary", `\u590d\u76d8\u7ed3\u8bba\uff1a${decisionSummary || "\u590d\u76d8\u7ed3\u8bba\u672a\u8bb0\u5f55"}`));

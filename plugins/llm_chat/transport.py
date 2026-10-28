@@ -13,6 +13,7 @@ async def send_turn_transport(
 ) -> Any:
     from .companion.delivery import send_companion_transport
     from .reminders.delivery import send_reminder_transport
+    from .companion.dialogue_transport import send_dialogue_transport
 
     async def observed_send() -> Any:
         receipts = await send()
@@ -22,4 +23,6 @@ async def send_turn_transport(
             on_confirmed()
         return receipts
 
-    return await send_companion_transport(lambda: send_reminder_transport(observed_send))
+    return await send_dialogue_transport(
+        lambda: send_companion_transport(lambda: send_reminder_transport(observed_send))
+    )

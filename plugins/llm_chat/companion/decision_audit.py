@@ -13,7 +13,7 @@ from .types import ReviewClaim
 from ..models import AgentTurn, AgentEvent, ContextSession
 from .persistence import dumps, naive
 
-DecisionStatus = Literal["not_proposed", "blocked", "reserved", "interrupted", "failed"]
+DecisionStatus = Literal["not_proposed", "blocked", "queued", "reserved", "interrupted", "failed"]
 
 
 @dataclass(slots=True)

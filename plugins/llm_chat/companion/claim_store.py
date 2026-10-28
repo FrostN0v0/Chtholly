@@ -11,10 +11,10 @@ from collections.abc import Sequence
 
 from sqlalchemy import func, select
 
-from utils.companion_core import CompanionLimits, ContactProposal, contact_ready, normalize_limits
+from utils.companion_core import CompanionLimits, ContactProposal, normalize_limits
 from utils.companion_core.policy import contact_block_reason
 
-from .types import ReviewClaim, ContactClaim, CompanionConflict, CompanionCorruptState
+from .types import ReviewClaim, ContactClaim, ModeSnapshot, CompanionConflict, CompanionCorruptState
 from .models import CompanionLife, CompanionMode, CompanionMember, CompanionReview, CompanionContact, CompanionAttention
 from ..models import AgentTurn, ContextSession
 from .persistence import (
@@ -29,6 +29,7 @@ from .persistence import (
     session,
     positive,
     receipts,
+    permitted,
     life_state,
     transaction,
     enabled_mode,
@@ -36,6 +37,7 @@ from .persistence import (
     valid_contact,
     attention_state,
     contact_proposal,
+    validate_contact_target,
 )
 from .state_store import validate_evidence
 from .decision_audit import ContactDecision
@@ -55,6 +57,7 @@ def _claim(row: CompanionContact) -> ContactClaim:
         row.display_name,
         row.lease_token,
         aware(row.lease_deadline),
+        "wait" if not row.origin_review_token else "opportunity",
     )
 
 
@@ -72,10 +75,13 @@ async def _budget(db: Any, scope_id: int, user_id: str, day: str, *, excluding: 
         .where(
             CompanionContact.scope_id == scope_id,
             CompanionContact.budget_day == day,
-            CompanionContact.user_id == user_id,
-            (CompanionContact.status == ACTIVE) | CompanionContact.transport_started_at.is_not(None),
+            (CompanionContact.status == ACTIVE)
+            | CompanionContact.transport_started_at.is_not(None)
+            | (CompanionContact.origin_review_token == ""),
         )
     )
+    if user_id:
+        query = query.where(CompanionContact.user_id == user_id)
     if excluding is not None:
         query = query.where(CompanionContact.attempt_ref != excluding)
     return await db.scalar(query)
@@ -105,6 +111,52 @@ async def _user_history(
     return last_contact, last_user
 
 
+async def _scope_history(
+    db: Any, scope_id: int, *, excluding: str | None = None
+) -> tuple[datetime | None, datetime | None]:
+    """Channel activity comes from actual message turns, not a synthetic recipient."""
+    last_user = await db.scalar(
+        select(func.max(AgentTurn.created_at))
+        .join(ContextSession, ContextSession.id == AgentTurn.session_id)
+        .where(ContextSession.scope_id == scope_id, AgentTurn.trigger_kind == "message")
+    )
+    member_time = await db.scalar(
+        select(func.max(CompanionMember.last_user_at)).where(CompanionMember.scope_id == scope_id)
+    )
+    known = [value for value in (last_user, member_time) if value is not None]
+    query = select(func.max(CompanionContact.transport_started_at)).where(
+        CompanionContact.scope_id == scope_id, CompanionContact.transport_started_at.is_not(None)
+    )
+    if excluding is not None:
+        query = query.where(CompanionContact.attempt_ref != excluding)
+    return await db.scalar(query), max(known) if known else None
+
+
+def _block_reason(
+    now: datetime,
+    *,
+    last_contact: datetime | None,
+    last_user: datetime | None,
+    count: int,
+    limits: CompanionLimits,
+    wait: bool = False,
+) -> str | None:
+    if last_user is None:
+        return "no_actual_input"
+    user_time = aware(last_user)
+    if wait:
+        # One explicit continuation is not a fresh contact cooldown, but still
+        # consumes the durable daily budget and obeys quiet/inactivity fences.
+        user_time = min(user_time, now - timedelta(minutes=5))
+    return contact_block_reason(
+        now,
+        last_contact=None if wait else aware(last_contact),
+        last_user_at=user_time,
+        contacts_today=count,
+        limits=limits,
+    )
+
+
 async def read_contact_timing(
     db: Any, member: CompanionMember, *, now: datetime, limits: CompanionLimits
 ) -> dict[str, object]:
@@ -132,14 +184,15 @@ async def read_contact_timing(
 async def claim_contact(
     scope_id: int,
     persona_key: str,
-    member_ref: str,
+    member_ref: str | None,
     proposal: ContactProposal,
     *,
     now: datetime,
-    origin: ReviewClaim,
+    origin: ReviewClaim | None,
     limits: CompanionLimits,
     lease_seconds: int = 300,
     decision: ContactDecision | None = None,
+    mode_snapshot: ModeSnapshot | None = None,
 ) -> ContactClaim | None:
     current_time = naive(now)
     if decision is not None:
@@ -148,7 +201,7 @@ async def claim_contact(
     validated = ContactProposal.model_validate(proposal.model_dump(mode="json"))
     validated_limits = normalize_limits(asdict(limits))
     if validated.member_ref != member_ref:
-        raise CompanionConflict("Contact proposal does not match the requested registered member")
+        raise CompanionConflict("Contact proposal does not match its requested target")
     day = now.astimezone(SHANGHAI).date().isoformat()
     async with transaction() as db:
         mode = await enabled_mode(db, scope_id, persona_key)
@@ -156,59 +209,80 @@ async def claim_contact(
             if decision is not None:
                 decision.set("blocked", "mode_changed")
             return None
-        if (origin.scope_id, origin.persona_key, origin.mode_revision, origin.context_revision) != (
-            scope_id,
-            persona_key,
-            mode.revision,
-            mode.context_revision,
-        ):
-            if decision is not None:
-                decision.set("blocked", "mode_changed")
-            return None
-        review = await db.get(CompanionReview, origin.lease_token)
-        life = await db.get(CompanionLife, (scope_id, persona_key))
-        life_version = life.version if life is not None else 0
-        if (
-            review is None
-            or (
-                review.scope_id,
-                review.persona_key,
-                review.mode_revision,
-                review.context_revision,
-                review.life_version,
+        if origin is None:
+            if mode_snapshot is None or (
+                mode_snapshot.scope_id,
+                mode_snapshot.persona_key,
+                mode_snapshot.revision,
+                mode_snapshot.context_revision,
+            ) != (scope_id, persona_key, mode.revision, mode.context_revision):
+                return None
+        else:
+            if (origin.scope_id, origin.persona_key, origin.mode_revision, origin.context_revision) != (
+                scope_id,
+                persona_key,
+                mode.revision,
+                mode.context_revision,
+            ):
+                if decision is not None:
+                    decision.set("blocked", "mode_changed")
+                return None
+            review = await db.get(CompanionReview, origin.lease_token)
+            life = await db.get(CompanionLife, (scope_id, persona_key))
+            if (
+                review is None
+                or review.status != "completed"
+                or (
+                    review.scope_id,
+                    review.persona_key,
+                    review.mode_revision,
+                    review.context_revision,
+                    review.life_version,
+                )
+                != (
+                    origin.scope_id,
+                    origin.persona_key,
+                    origin.mode_revision,
+                    origin.context_revision,
+                    origin.life_version,
+                )
+                or review.committed_life_version != (life.version if life else 0)
+            ):
+                if decision is not None:
+                    decision.set("blocked", "review_changed")
+                return None
+            if review.contact_proposal_json is None or contact_proposal(review.contact_proposal_json) != validated:
+                raise CompanionConflict("Contact motive does not match its committed originating review")
+        await validate_contact_target(db, scope_id, validated)
+        member = None
+        if validated.target == "member":
+            member = await validate_evidence(
+                db,
+                scope_id,
+                persona_key,
+                member_ref,
+                validated.evidence_turn_ids,
+                required=validated.purpose in {"check_in", "continue"},
             )
-            != (
-                origin.scope_id,
-                origin.persona_key,
-                origin.mode_revision,
-                origin.context_revision,
-                origin.life_version,
-            )
-            or review.status != "completed"
-            or review.committed_life_version != life_version
-        ):
-            if decision is not None:
-                decision.set("blocked", "review_changed")
-            return None
-        if review.contact_proposal_json != dumps(validated.model_dump(mode="json")):
-            raise CompanionConflict("Contact motive does not match its committed originating review")
-        member = await validate_evidence(
-            db,
-            scope_id,
-            persona_key,
-            member_ref,
-            validated.evidence_turn_ids,
-            required=validated.purpose in {"check_in", "continue"},
-        )
+            if not await permitted(db, scope_id, member.user_id):
+                return None
+        registered_ref = member_ref or ""
         blocked = await db.scalar(
             select(CompanionContact.attempt_ref)
             .where(
                 CompanionContact.scope_id == scope_id,
                 CompanionContact.persona_key == persona_key,
-                CompanionContact.member_ref == member_ref,
+                (CompanionContact.member_ref == registered_ref) if member is not None else True,
                 (
                     (CompanionContact.status == ACTIVE)
-                    | ((CompanionContact.status == "unknown") & (CompanionContact.proposal_key == validated.key))
+                    | (
+                        (CompanionContact.status == "unknown")
+                        & (
+                            (CompanionContact.proposal_key == validated.key)
+                            if origin is not None and member is not None
+                            else True
+                        )
+                    )
                 ),
             )
             .limit(1)
@@ -217,17 +291,20 @@ async def claim_contact(
             if decision is not None:
                 decision.set("blocked", "contact_inflight_or_unknown")
             return None
-        count = await _budget(db, scope_id, member.user_id, day)
-        last_contact, last_user = await _user_history(db, member)
+        user_id = member.user_id if member is not None else ""
+        count = await _budget(db, scope_id, user_id, day)
+        last_contact, last_user = (
+            await _user_history(db, member) if member is not None else await _scope_history(db, scope_id)
+        )
         user_time = aware(last_user)
         contact_time = aware(last_contact)
-        assert user_time is not None
-        reason = contact_block_reason(
+        reason = _block_reason(
             now,
-            last_contact=contact_time,
-            last_user_at=user_time,
-            contacts_today=count,
+            last_contact=last_contact,
+            last_user=last_user,
+            count=count,
             limits=validated_limits,
+            wait=origin is None,
         )
         if reason is not None:
             if decision is not None:
@@ -238,7 +315,7 @@ async def claim_contact(
                         "contacts_today": count,
                         "limits": asdict(validated_limits),
                         "last_contact_at": contact_time.isoformat() if contact_time else None,
-                        "last_user_at": user_time.isoformat(),
+                        "last_user_at": user_time.isoformat() if user_time else None,
                         "timezone": "Asia/Shanghai",
                     },
                 )
@@ -248,13 +325,13 @@ async def claim_contact(
             life = await db.get(CompanionLife, (scope_id, persona_key))
             life_state(life)
             base["life_version"] = life.version if life else 0
-            base["member_version"] = member.version
+            base["member_version"] = member.version if member is not None else 0
         identity = sha256(dumps(base).encode("utf-8")).hexdigest()
         prior = await db.scalar(
             select(CompanionContact.attempt_ref).where(
                 CompanionContact.scope_id == scope_id,
                 CompanionContact.persona_key == persona_key,
-                CompanionContact.member_ref == member_ref,
+                CompanionContact.member_ref == registered_ref,
                 CompanionContact.identity == identity,
             )
         )
@@ -268,12 +345,12 @@ async def claim_contact(
             persona_key=persona_key,
             mode_revision=mode.revision,
             context_revision=mode.context_revision,
-            member_ref=member_ref,
-            origin_review_token=origin.lease_token,
-            member_version=member.version,
-            user_id=member.user_id,
-            platform_user_id=member.platform_user_id,
-            display_name=member.display_name,
+            member_ref=registered_ref,
+            origin_review_token=origin.lease_token if origin is not None else "",
+            member_version=member.version if member is not None else 0,
+            user_id=user_id,
+            platform_user_id=member.platform_user_id if member is not None else "",
+            display_name=member.display_name if member is not None else "",
             proposal_key=validated.key,
             identity=identity,
             proposal_json=dumps(validated.model_dump(mode="json")),
@@ -293,6 +370,47 @@ async def claim_contact(
         )
         decision.attempt_ref = claim.attempt_ref
     return claim
+
+
+async def claim_wait_contact(
+    mode: ModeSnapshot, *, now: datetime, limits: CompanionLimits
+) -> tuple[ContactClaim, ContactProposal] | None:
+    """Reserve one explicit host continuation without inventing a review or human."""
+    from .scope_kinds import scope_is_private
+
+    async with session() as db:
+        private = await scope_is_private(db, mode.scope_id)
+        member = None
+        if private:
+            members = (
+                await db.scalars(
+                    select(CompanionMember).where(
+                        CompanionMember.scope_id == mode.scope_id, CompanionMember.persona_key == mode.persona_key
+                    )
+                )
+            ).all()
+            if len(members) != 1:
+                return None
+            member = members[0]
+    proposal = ContactProposal(
+        target="member" if member is not None else "channel",
+        member_ref=member.member_ref if member is not None else None,
+        key=token("wait"),
+        purpose="free_chat",
+        topic="Reconsider the explicitly scheduled companion continuation at the current host time.",
+        reason="The previous live dialogue selected one finite wait; no new human input is implied.",
+    )
+    claim = await claim_contact(
+        mode.scope_id,
+        mode.persona_key,
+        proposal.member_ref,
+        proposal,
+        now=now,
+        origin=None,
+        limits=limits,
+        mode_snapshot=mode,
+    )
+    return (claim, proposal) if claim is not None else None
 
 
 async def contact_valid(claim: ContactClaim, *, now: datetime) -> bool:
@@ -353,16 +471,28 @@ async def record_transport_started(claim: ContactClaim, *, now: datetime) -> boo
             return False
         if row.turn_id is None:
             raise CompanionConflict("A contact must be bound to its real internal turn before transport")
-        member = await db.get(CompanionMember, (claim.scope_id, claim.persona_key, claim.member_ref))
+        member = (
+            await db.get(CompanionMember, (claim.scope_id, claim.persona_key, claim.member_ref))
+            if claim.member_ref
+            else None
+        )
         limits = _limits(row)
         used = await _budget(db, claim.scope_id, claim.user_id, day, excluding=row.attempt_ref)
-        last_contact, last_user = await _user_history(db, member, excluding=row.attempt_ref)
-        if not contact_ready(
-            now,
-            last_contact=aware(last_contact),
-            last_user_at=aware(last_user),
-            contacts_today=used,
-            limits=limits,
+        last_contact, last_user = (
+            await _user_history(db, member, excluding=row.attempt_ref)
+            if member is not None
+            else await _scope_history(db, claim.scope_id, excluding=row.attempt_ref)
+        )
+        if (
+            _block_reason(
+                now,
+                last_contact=last_contact,
+                last_user=last_user,
+                count=used,
+                limits=limits,
+                wait=not row.origin_review_token,
+            )
+            is not None
         ):
             return False
         # Commit this boundary before the caller attempts each native send.
@@ -370,7 +500,8 @@ async def record_transport_started(claim: ContactClaim, *, now: datetime) -> boo
         if row.transport_started_at is None:
             row.transport_started_at = current_time
             row.budget_day = day
-        member.last_contact_at = max(member.last_contact_at or current_time, current_time)
+        if member is not None:
+            member.last_contact_at = max(member.last_contact_at or current_time, current_time)
         return True
 
 

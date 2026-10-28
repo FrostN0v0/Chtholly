@@ -8,6 +8,7 @@ from datetime import datetime
 from sqlalchemy import func, text, select
 from entari_plugin_database import get_session
 
+from .schema import migrate_evidence_identity
 from ..models import AgentTurn, AgentEvent, MigrationState, RelationshipEvidence
 
 _MIGRATION_KEY = "relationship_affect_v1"
@@ -15,6 +16,8 @@ _MIGRATION_KEY = "relationship_affect_v1"
 
 async def initialize_relationship_store() -> None:
     async with get_session() as db:
+        connection = await db.connection()
+        await connection.run_sync(migrate_evidence_identity)
         marker = await db.get(MigrationState, _MIGRATION_KEY)
         if marker is None:
             dialect = db.get_bind().dialect.name

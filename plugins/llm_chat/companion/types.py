@@ -105,3 +105,8 @@ class ContactClaim:
     display_name: str
     lease_token: str
     lease_deadline: datetime
+    trigger: str = "opportunity"
+
+    @property
+    def target(self) -> str:
+        return "member" if self.member_ref else "channel"

@@ -22,6 +22,7 @@ from ..core.delivery import (
 from ..core.tool_trace import current_tool_trace
 from ..core.media_delivery import current_media_requirements
 from ..core.tool_trace_policy import (
+    _CONTROL_TOOLS,
     _DELIVERY_TOOLS,
     _OBSERVATION_TOOLS,
     _PREPARATION_TOOLS,
@@ -46,7 +47,7 @@ def _check_effects(outcome: str) -> None:
     if trace is None:
         return
     for event in trace.events:
-        if event.tool_name == "finish_turn":
+        if event.tool_name == "finish_turn" or event.tool_name in _CONTROL_TOOLS:
             continue
         reminder_action = reminder_action_from_arguments(event.arguments) if event.tool_name == "reminder" else ""
         if event.status == "pending" or event.effect in {"partial", "unknown"}:

@@ -4471,7 +4471,9 @@ async def test_local_generation_exposes_only_original_authorized_external_functi
         assert "unrelated_builtin" in {function.name for function in native}
         for function in exposed:
             assert "session" not in function.parameters["properties"]
-        assert llm_service_module.get_agno_tools() == native
+        assert llm_service_module.get_agno_tools() == [
+            function for function in native if function.name != "companion_dialogue"
+        ]
         await harness.dispose()
         _assert_registry_matches(baseline)
 

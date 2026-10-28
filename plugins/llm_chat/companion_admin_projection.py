@@ -171,8 +171,10 @@ def contact_view(
     if not isinstance(proposal, Mapping):
         return None
     member_ref = proposal.get("member_ref")
+    raw_target = proposal.get("target", "member")
+    target = raw_target if isinstance(raw_target, str) and raw_target in {"member", "channel"} else None
     display_name = None
-    if isinstance(state, Mapping) and isinstance(state.get("members"), list):
+    if target == "member" and isinstance(state, Mapping) and isinstance(state.get("members"), list):
         display_name = next(
             (
                 item.get("display_name")
@@ -181,11 +183,12 @@ def contact_view(
             ),
             None,
         )
-    if display_name is None:
+    if target == "member" and display_name is None:
         display_name = next(
             (item.get("display_name") for item in contacts if item.get("member_ref") == member_ref), None
         )
     return {
+        "target": target,
         **{
             key: value[:400] if isinstance(value := proposal.get(key), str) else None
             for key in ("purpose", "topic", "reason", "member_ref")

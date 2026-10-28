@@ -13,7 +13,7 @@ from .persona.runner import run_evaluation
 from .relationships.types import EvaluationBatch
 from .persona.memory_update import prepare_memory_updates
 from .persona.memory_context import load_evaluator_profile_facts
-from .relationships.evidence import enqueue_relationship_evidence
+from .relationships.evidence import enqueue_relationship_evidence, enqueue_companion_relationship_evidence
 from .relationships.migration import pending_relationship_owners
 from .relationships.evaluation_store import claim_evaluation, commit_evaluation, release_evaluation
 
@@ -178,6 +178,41 @@ def schedule_relationship_evaluation(
 
     task = asyncio.create_task(enqueue(), name="llm-chat-relationship-evidence")
     _track(task)
+
+
+def schedule_companion_relationship_evaluation(
+    config: LLMChatConfig,
+    *,
+    turn_id: int,
+    persona_prompt: str,
+    warn: WarningSink,
+) -> None:
+    """Dispatch one finalized multi-member turn through the existing owner workers."""
+    if _STOPPING:
+        return
+
+    async def enqueue() -> None:
+        try:
+            persistence = asyncio.create_task(
+                enqueue_companion_relationship_evidence(
+                    turn_id=turn_id,
+                    persona_prompt=persona_prompt,
+                    model=config.eval_model or config.model or "default",
+                )
+            )
+            try:
+                await asyncio.shield(persistence)
+            except asyncio.CancelledError:
+                await persistence
+                raise
+            for key in await pending_relationship_owners():
+                _start_worker(config, key, warn)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            warn(f"companion relationship evidence enqueue failed: {summarize_exception(exc)}")
+
+    _track(asyncio.create_task(enqueue(), name="llm-chat-companion-relationship-evidence"))
 
 
 async def resume_relationship_evaluations(config: LLMChatConfig, warn: WarningSink) -> None:

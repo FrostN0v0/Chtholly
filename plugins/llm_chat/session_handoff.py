@@ -13,7 +13,7 @@ from .models import ChatScope, ContextSession
 from .agent_events import load_event_payload, load_session_events
 from .context_reads import model_readable_payload
 from .core.model_json import load_model_json
-from .core.user_turns import derive_speaker_id
+from .core.user_turns import derive_speaker_id, event_user_author, project_event_user_content
 from .core.model_audit import ADMIN_ONLY_EVENT_TYPES
 from .scheduled_chat_context import _user_content, _join_user_inputs
 
@@ -35,9 +35,10 @@ _UNKNOWN_SUBJECT = "unknown"
 _MAX_PARTICIPANTS = 20
 _HANDOFF_INSTRUCTIONS = (
     "Summarize one completed group chat context session as strict JSON. Use only supplied events. "
-    "Several members may share the session: participants maps each speaker_id to its display name, and every "
-    "event of one turn_id belongs to the speaker_id on that turn's user_input. Never merge different members or "
-    "describe a member's request, promise, emotion or joke as someone else's. Each item of goals, decisions, "
+    "Several members may share the session: participants maps each speaker_id to its display name, and each "
+    "user_input has its own host-authored speaker_id even when several members share one turn_id. Never merge "
+    "different members or describe a member's request, promise, emotion or joke as someone else's. "
+    "Each item of goals, decisions, "
     'constraints and open_loops must be an object {"subject": speaker_id or "group", "text": string}; use '
     '"group" only for genuinely shared context. Never include hidden reasoning, secrets, raw large payloads or '
     f"unsupported claims. Return exactly these keys: {', '.join(_MODEL_KEYS)}."
@@ -60,6 +61,9 @@ def _event_summary(event, *, fallback_speaker: str = "user") -> dict[str, object
             own_input = {**payload, "input_format": load_event_payload(event).get("input_format")}
             speaker, content = _user_content(own_input, fallback_speaker)
             item["speaker"] = speaker
+            if "host_author" in load_event_payload(event):
+                member, name = event_user_author(load_event_payload(event), speaker_id="", fallback_speaker=speaker)
+                item["speaker"], item["speaker_id"] = name, member
         else:
             content = payload.get("content")
         if isinstance(content, str):
@@ -79,14 +83,28 @@ async def _source_events(context_session: ContextSession, max_chars: int, *, sco
     used = 2
     for turn, events in reversed(rows):
         speaker_id = derive_speaker_id(scope_ref, turn.user_id)
+        companion_turn = turn.trigger_kind == "autonomous" or any(
+            event.event_type == "user_input" and "host_author" in load_event_payload(event) for event in events
+        )
         summaries = [
             _event_summary(event, fallback_speaker=turn.user_name)
             for event in events
-            if event.event_type not in ADMIN_ONLY_EVENT_TYPES and event.model_visible
+            if event.event_type not in ADMIN_ONLY_EVENT_TYPES | {"companion_participation"}
+            and event.model_visible
+            and (not companion_turn or event.event_type != "assistant_output" or event.status == "confirmed")
+            and (turn.trigger_kind != "autonomous" or event.event_type in {"user_input", "assistant_output"})
+            and (
+                event.event_type != "user_input"
+                or "host_author" not in load_event_payload(event)
+                or project_event_user_content(
+                    load_event_payload(event), speaker_id=speaker_id, fallback_speaker=turn.user_name
+                )
+                is not None
+            )
         ]
         for item in summaries:
             if item["type"] == "user_input":
-                item["speaker_id"] = speaker_id
+                item.setdefault("speaker_id", speaker_id)
         sizes = [len(json.dumps(item, ensure_ascii=False, separators=(",", ":"))) + 1 for item in summaries]
         required = sum(size for item, size in zip(summaries, sizes) if item["type"] == "user_input")
         if used + required > max_chars:
@@ -124,7 +142,9 @@ def _last_visible_exchange(events: Sequence[Mapping[str, object]], max_chars: in
     user_inputs = [
         str(item.get("content", ""))
         for item in visible
-        if item.get("type") == "user_input" and item.get("turn_id") == turn_id
+        if item.get("type") == "user_input"
+        and item.get("turn_id") == turn_id
+        and item.get("speaker_id") == last_user_event.get("speaker_id")
     ]
     assistant = next(
         (

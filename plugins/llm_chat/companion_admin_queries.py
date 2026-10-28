@@ -6,7 +6,7 @@ import json
 import base64
 from typing import Any, cast
 import binascii
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from collections.abc import Mapping, Sequence
 
 from sqlalchemy import JSON, or_, and_, case, func, select, type_coerce
@@ -16,6 +16,7 @@ from .models import AgentTurn, ChatScope, AgentEvent, ContextSession
 from .companion.types import CompanionCorruptState
 from .companion.models import CompanionMember, CompanionReview, CompanionContact, CompanionChatEvidence
 from .core.personality import validate_persona_key
+from .companion.evidence import has_member_input
 from .session_inspection import summarize_usage, project_model_calls
 from .companion.persistence import receipts
 from .companion_admin_projection import (
@@ -74,7 +75,7 @@ def _cursor_values(cursor: str, scope_ref: str, persona_key: str, status: str) -
         moment = datetime.fromisoformat(stamp)
         if moment.tzinfo is None:
             raise ValueError
-        return moment.astimezone(timezone.utc).replace(tzinfo=None), ref
+        return moment.astimezone(UTC).replace(tzinfo=None), ref
     except (ValueError, TypeError, KeyError, binascii.Error, UnicodeError, RecursionError):
         raise CompanionAdminError("Invalid review cursor", code="invalid_cursor") from None
 
@@ -315,11 +316,14 @@ def _contact_item(row: CompanionContact, links: Mapping[str, object], *, detail:
         count = len(receipts(row))
     except CompanionCorruptState:
         count = None
+    proposal = json_object(row.proposal_json)
+    target = proposal.get("target", "member") if proposal is not None else None
     item: dict[str, object] = {
         "attempt_ref": row.attempt_ref,
         "status": row.status,
         "reason": row.reason[:1000],
         "member_ref": row.member_ref,
+        "target": target if isinstance(target, str) and target in {"member", "channel"} else None,
         "display_name": row.display_name[:200],
         "created_at": utc(row.created_at),
         "finished_at": utc(row.finished_at),
@@ -329,7 +333,7 @@ def _contact_item(row: CompanionContact, links: Mapping[str, object], *, detail:
     if detail:
         item.update(
             {
-                "proposal": bounded_value(json_object(row.proposal_json))[0],
+                "proposal": bounded_value(proposal)[0],
                 "limits": bounded_value(json_object(row.limits_json))[0],
                 "transport_started_at": utc(row.transport_started_at),
                 "transport_inflight": row.transport_inflight,
@@ -498,10 +502,9 @@ async def _evidence_links(db: Any, review: CompanionReview, pairs: set[tuple[str
         await db.execute(
             select(
                 CompanionChatEvidence.member_ref,
-                AgentTurn.id,
-                AgentTurn.turn_ref,
-                AgentTurn.sequence,
+                AgentTurn,
                 ContextSession.session_ref,
+                CompanionMember,
             )
             .select_from(CompanionChatEvidence)
             .join(AgentTurn, AgentTurn.id == CompanionChatEvidence.turn_id)
@@ -519,29 +522,40 @@ async def _evidence_links(db: Any, review: CompanionReview, pairs: set[tuple[str
                 CompanionChatEvidence.persona_key == review.persona_key,
                 CompanionChatEvidence.turn_id.in_({turn_id for _, turn_id in pairs}),
                 ContextSession.scope_id == review.scope_id,
-                ContextSession.purpose == "chat",
-                AgentTurn.trigger_kind == "message",
+                or_(
+                    and_(ContextSession.purpose == "chat", AgentTurn.trigger_kind == "message"),
+                    and_(ContextSession.purpose == "companion", AgentTurn.trigger_kind == "autonomous"),
+                ),
                 AgentTurn.status.in_(("completed", "silent", "declined")),
                 AgentTurn.finished_at.is_not(None),
-                or_(
-                    AgentTurn.user_id == CompanionMember.user_id, AgentTurn.user_id == CompanionMember.platform_user_id
-                ),
             )
             .order_by(AgentTurn.id.asc())
             .limit(1001)
         )
     ).all()
-    return [
-        {
-            "member_ref": member_ref,
-            "turn_id": turn_id,
-            "turn_ref": turn_ref,
-            "sequence": sequence,
-            "session_ref": session_ref,
-        }
-        for member_ref, turn_id, turn_ref, sequence, session_ref in rows
-        if (member_ref, turn_id) in pairs
-    ][:1000]
+    links = []
+    scope = await db.get(ChatScope, review.scope_id)
+    if scope is None:
+        return []
+    for member_ref, turn, session_ref, member in rows:
+        if (member_ref, turn.id) not in pairs or not await has_member_input(
+            db,
+            turn,
+            user_id=member.user_id,
+            platform_user_id=member.platform_user_id,
+            channel_id=scope.channel_id,
+        ):
+            continue
+        links.append(
+            {
+                "member_ref": member_ref,
+                "turn_id": turn.id,
+                "turn_ref": turn.turn_ref,
+                "sequence": turn.sequence,
+                "session_ref": session_ref,
+            }
+        )
+    return links[:1000]
 
 
 async def companion_review_detail(scope_ref: str, review_ref: str, *, session_factory: Any = None) -> dict[str, object]:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -59,12 +59,14 @@ class SteeringState:
         self.applied_revision = 1
         self.accepting = True
         self.closed = False
-        self.processor: Callable[[SteerInput], Awaitable[ChatMessage]] | None = None
+        self.processor: Callable[[SteerInput], Awaitable[ChatMessage | None]] | None = None
+        self.on_request: Callable[[list[ChatMessage]], None] | None = None
+        self.request_budget_snapshot: tuple[frozenset[int], list[ChatMessage]] | None = None
         self.on_receive: Callable[[SteerInput], None] | None = None
         self.on_flush: Callable[[], Awaitable[object]] | None = None
         self.on_close: Callable[[], Awaitable[object]] | None = None
         self.access: AgentAccessContext | None = None
-        root = SteerInput(1, root_session, root_ctx, datetime.now(timezone.utc).replace(tzinfo=None))
+        root = SteerInput(1, root_session, root_ctx, datetime.now(UTC).replace(tzinfo=None))
         self.request_input_budget = 0
         self.request_model_name: str | None = None
         self.media_requested = False
@@ -87,19 +89,37 @@ class SteeringState:
     def pending(self) -> bool:
         return self.applied_revision < self.revision
 
-    def owns(self, session: Session) -> bool:
-        return participant_scope(session) == self.scope and any(session.event is event for event in self._events)
+    @property
+    def application_revision(self) -> int:
+        return self.applied_revision
 
-    def receive(self, session: Session, ctx: Contexts) -> bool:
+    def input_applied(self, item: SteerInput) -> bool:
+        return item.sequence <= self.applied_revision
+
+    def input_deferred(self, item: SteerInput) -> bool:
+        return False
+
+    def accepts_input(self, session: Session) -> bool:
+        """Keep ordinary steering member-local; scoped dialogue may override admission."""
+        return participant_scope(session) == self.scope
+
+    def owns(self, session: Session) -> bool:
+        return self.accepts_input(session) and any(session.event is event for event in self._events)
+
+    def defer_input(self, session: Session, *, budget_exceeded: bool = False) -> bool:
+        """Ordinary participant steering refuses overflow instead of transferring ownership."""
+        return False
+
+    def receive(self, session: Session, ctx: Contexts, *, received_at: datetime | None = None) -> bool:
         """Atomically admit an input, or acknowledge a real protocol-ID duplicate."""
-        if participant_scope(session) != self.scope:
+        if not self.accepts_input(session):
             return False
         message_id = _message_id(session)
         if self.owns(session) or (message_id is not None and message_id in self._message_ids):
             return True
         if self.closed or not self.accepting or len(self._inputs) >= MAX_STEER_INPUTS:
             return False
-        entry = SteerInput(self.revision + 1, session, ctx, datetime.now(timezone.utc).replace(tzinfo=None))
+        entry = SteerInput(self.revision + 1, session, ctx, received_at or datetime.now(UTC).replace(tzinfo=None))
         self._inputs.append(entry)
         self._events.append(session.event)
         if message_id is not None:
@@ -132,6 +152,8 @@ class SteeringState:
                     self._processing_error = exc
                     raise
                 self._check_open()
+                if message is None:
+                    raise RuntimeError("Deferred input requires a dialogue owner")
                 self.applied_revision = entry.sequence
                 messages.append(message)
             return messages

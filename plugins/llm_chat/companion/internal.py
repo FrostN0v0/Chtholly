@@ -23,12 +23,14 @@ from .types import ReviewClaim, CompanionConflict, ReflectionSnapshot
 from ..config import LLMChatConfig
 from ..models import ChatScope
 from .context import mode_baseline
+from .persistence import session
 from ..personality import persona_scope_lock, resolve_scope_persona, remember_session_persona
 from .observations import reflection_input
 from ..agent_events import persist_agent_events
 from ..context_builder import build_baseline_fingerprint
 from ..session_manager import start_turn, finish_turn, rollover_session, ensure_active_session
 from ..core.agent_trace import AgentTurnRecorder
+from .scope_kind_models import CompanionScopeKind
 from ..core.context_snapshot import build_context_snapshot
 
 _LOGGER = log.wrapper("[llm_chat.companion]")
@@ -86,6 +88,7 @@ async def run_reflection(
     limits: CompanionLimits,
     now: datetime,
     tool_schemas: Sequence[Mapping[str, object]] = (),
+    is_private: bool | None = None,
 ) -> ReflectionProposal:
     """Make exactly one real provider request in a private, native internal turn."""
     turn_id: int | None = None
@@ -185,8 +188,12 @@ async def run_reflection(
                 "appearance": persona.appearance,
                 "has_reference_image": bool(persona.reference_image),
             }
+            async with session() as db:
+                channel_kind = await db.get(CompanionScopeKind, scope.id)
+            allow_channel = channel_kind is not None and channel_kind.kind == "text" and is_private is not True
             system = build_reflection_system(
-                json.dumps(persona_input, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+                json.dumps(persona_input, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+                is_private=(channel_kind.kind == "direct") if channel_kind is not None else None,
             )
             envelope = len(build_reflection_prompt({}, now=now)) - 2
             available = limits.input_chars - len(system) - envelope
@@ -221,6 +228,7 @@ async def run_reflection(
                 limits=limits,
                 member_turn_ids=source_ids,
                 recorder=recorder,
+                allow_channel=allow_channel,
             )
             if audit_failures or any(
                 event.event_type in {"model_request", "model_response"}

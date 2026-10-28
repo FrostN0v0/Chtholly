@@ -26,6 +26,7 @@ from .models import (
     CompanionChatEvidence,
 )
 from ..models import AgentTurn, ContextSession, ScopePersonaSelection
+from .evidence import has_member_input
 from .persistence import (
     UTC,
     ACTIVE,
@@ -46,6 +47,7 @@ from .persistence import (
     member_snapshot,
     contact_snapshot,
 )
+from .evidence_schema import migrate_companion_evidence
 
 __all__ = [
     "bind_contact_turn",
@@ -76,11 +78,16 @@ __all__ = [
 
 async def initialize_store(*, now: datetime | None = None) -> None:
     """Create only the additive owned tables, then recover expired capabilities."""
+    from .scope_kind_models import CompanionScopeKind
+
     async with transaction() as db:
         connection = await db.connection()
         await connection.run_sync(
-            lambda conn: Base.metadata.create_all(conn, tables=list(OWNED_TABLES), checkfirst=True)
+            lambda conn: Base.metadata.create_all(
+                conn, tables=[*OWNED_TABLES, CompanionScopeKind.__table__], checkfirst=True
+            )
         )
+        await connection.run_sync(migrate_companion_evidence)
     await recover_stale(now=now or datetime.now(UTC))
 
 
@@ -276,13 +283,39 @@ async def record_chat(
         turn, context = native
         if (
             context.scope_id != scope_id
-            or context.purpose != "chat"
-            or turn.trigger_kind != "message"
+            or (turn.trigger_kind, context.purpose) not in {("message", "chat"), ("autonomous", "companion")}
             or turn.status not in {"completed", "silent", "declined"}
             or turn.finished_at is None
-            or turn.user_id not in {user_id, platform_user_id}
         ):
             raise CompanionConflict("Turn is not an attributable completed ordinary chat")
+        from ..relationships.identity import resolve_relationship_owner
+
+        scope = await native_scope(db, scope_id, persona_key)
+        user_id = await resolve_relationship_owner(db, user_id, scope.channel_id)
+        if not await has_member_input(
+            db,
+            turn,
+            user_id=user_id,
+            platform_user_id=platform_user_id,
+            channel_id=scope.channel_id,
+        ):
+            raise CompanionConflict("Completed chat has no eligible input from this member")
+        registered = await db.scalar(
+            select(CompanionMember).where(
+                CompanionMember.scope_id == scope_id,
+                CompanionMember.persona_key == persona_key,
+                CompanionMember.platform_user_id == platform_user_id,
+            )
+        )
+        if registered is not None and registered.user_id != user_id:
+            if await resolve_relationship_owner(db, registered.user_id, scope.channel_id) != user_id:
+                raise CompanionConflict("Platform target is already bound to another verified member")
+            registered.user_id = user_id
+            registered.version += 1
+            await invalidate(db, mode, current_time, "member_identity_changed")
+            mode.context_revision += 1
+            mode.updated_at = current_time
+            await db.flush()
         member, _ = await _member(
             db,
             scope_id,
@@ -292,10 +325,8 @@ async def record_chat(
             display_name=display_name,
             now=current_time,
         )
-        evidence = await db.get(CompanionChatEvidence, (scope_id, persona_key, turn_id))
+        evidence = await db.get(CompanionChatEvidence, (scope_id, persona_key, turn_id, member.member_ref))
         if evidence is not None:
-            if evidence.member_ref != member.member_ref:
-                raise CompanionConflict("Completed chat evidence belongs to a different member")
             return member_snapshot(member)
         db.add(
             CompanionChatEvidence(

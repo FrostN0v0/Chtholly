@@ -23,7 +23,7 @@ from .core.user_turns import (
     update_user_payload,
     attribute_user_payload,
     describe_previous_turn,
-    attribute_stored_user_content,
+    project_event_user_content,
 )
 from .session_manager import BaselineFingerprint
 from .core.model_audit import ADMIN_ONLY_EVENT_TYPES
@@ -214,6 +214,7 @@ def _turn_messages(
     inline_chars: int,
     validators: Mapping[str, Draft202012Validator],
     references: list[ContextReadReference] | None = None,
+    companion_visible: bool = False,
 ) -> list[ChatMessage]:
     visible_types = {"user_input", "assistant_tool_call", "tool_result", "assistant_output"}
     events = [
@@ -221,6 +222,13 @@ def _turn_messages(
         for event in events
         if event.model_visible and event.event_type in visible_types and event.event_type not in ADMIN_ONLY_EVENT_TYPES
     ]
+    if companion_visible:
+        events = [
+            event
+            for event in events
+            if (event.event_type != "assistant_output" or event.status == "confirmed")
+            and (turn.trigger_kind != "autonomous" or event.event_type in {"user_input", "assistant_output"})
+        ]
     result_index = {
         (event.attempt, event.execution_ref or _event_tool_call_id(event)): (index, event)
         for index, event in enumerate(events)
@@ -232,16 +240,14 @@ def _turn_messages(
     while event_index < len(events):
         event = events[event_index]
         if event.event_type == "user_input":
-            content = load_event_payload(event).get("content")
-            if isinstance(content, str) and content:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": attribute_stored_user_content(
-                            content, speaker_id=speaker_id, fallback_speaker=turn.user_name
-                        ),
-                    }
-                )
+            content = project_event_user_content(
+                load_event_payload(event),
+                speaker_id=speaker_id,
+                fallback_speaker=turn.user_name,
+                companion_history=companion_visible,
+            )
+            if content:
+                messages.append({"role": "user", "content": content})
             event_index += 1
             continue
         if event.event_type == "assistant_tool_call":
@@ -374,10 +380,21 @@ def _attribute_current_message(
     scope_ref: str,
     user_id: str | None,
     previous: tuple[str, str] | None,
+    preserve_host_author: bool = False,
 ) -> ChatMessage:
     if user_id is None:
         return message
     speaker_id = derive_speaker_id(scope_ref, user_id)
+    if preserve_host_author:
+        return update_user_payload(
+            message,
+            lambda payload: (
+                payload
+                if payload.get("speaker_id") == speaker_id
+                and isinstance(payload.get("companion_participant_context"), Mapping)
+                else attribute_user_payload(payload, speaker_id=speaker_id, fallback_speaker="")
+            ),
+        )
     previous_turn = None if previous is None else describe_previous_turn(*previous, speaker_id)
     return update_user_payload(
         message,
@@ -402,11 +419,16 @@ async def select_session_context(
     minimum_recent_turns: int,
     inline_event_chars: int,
     fresh_context: bool,
+    companion_visible: bool = False,
 ) -> ContextSelection:
     """Select whole turns; current_user_id is None only for host-triggered input without a speaker."""
     if fresh_context:
         current_message = _attribute_current_message(
-            current_message, scope_ref=scope_ref, user_id=current_user_id, previous=None
+            current_message,
+            scope_ref=scope_ref,
+            user_id=current_user_id,
+            previous=None,
+            preserve_host_author=companion_visible,
         )
         base_tokens = estimate_tokens(model_name, [{"role": "system", "content": system}, current_message])
         return ContextSelection(
@@ -419,11 +441,22 @@ async def select_session_context(
         )
 
     turn_rows = await load_session_events(context_session.id, model_visible_only=True)
+    if companion_visible:
+        from .companion.timeline import confirmed_companion_outputs
+
+        known = {turn.id for turn, _events in turn_rows}
+        turn_rows.extend(
+            (turn, events)
+            for turn, events in await confirmed_companion_outputs(context_session, session_factory=get_session)
+            if turn.id not in known
+        )
+        turn_rows.sort(key=lambda row: (row[0].created_at, row[0].id))
     current_message = _attribute_current_message(
         current_message,
         scope_ref=scope_ref,
         user_id=current_user_id,
         previous=_previous_speaker(context_session, [turn for turn, _events in turn_rows], scope_ref),
+        preserve_host_author=companion_visible,
     )
     validators = {
         name: Draft202012Validator({**parameters, "additionalProperties": False})
@@ -440,6 +473,7 @@ async def select_session_context(
                 validators=validators,
                 inline_chars=max(256, inline_event_chars),
                 references=turn_references.setdefault(turn.id, []),
+                companion_visible=companion_visible,
             ),
         )
         for turn, events in turn_rows

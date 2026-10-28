@@ -196,6 +196,7 @@ plugins:
     relationship_eval_batch_size: 8
     relationship_eval_debounce_seconds: 2.0
     # All scopes remain normal until a native operator explicitly opts in.
+    # Companion group/private dialogue keeps using model; this selects slow reflection only.
     companion_model: null
     companion_request_timeout: 60.0
     companion_reflection_interval_minutes: 60

@@ -10,6 +10,37 @@ from collections.abc import Mapping, Callable
 from .types import ChatMessage
 
 _HOST_ATTRIBUTION_KEYS = frozenset({"speaker", "speaker_id", "previous_turn"})
+_COMPANION_PRIVATE_FIELDS = frozenset(
+    {
+        "host_author",
+        "own_text",
+        "companion_participant_context",
+        "user_id",
+        "platform_user_id",
+        "participant_ref",
+        "participant_refs",
+        "current_participant_ref",
+        "source_message_id",
+        "source_message_ids",
+        "message_id",
+        "image_ref",
+        "media_ref",
+        "reply_to_ref",
+        "evidence_turn_ids",
+        "processed_turn_id",
+    }
+)
+
+
+def companion_history_payload(value: object) -> object:
+    """Keep conversation data, never stale profile/identity capabilities or audit metadata."""
+    if isinstance(value, Mapping):
+        return {
+            key: companion_history_payload(item) for key, item in value.items() if key not in _COMPANION_PRIVATE_FIELDS
+        }
+    if isinstance(value, list):
+        return [companion_history_payload(item) for item in value]
+    return value
 
 
 def derive_speaker_id(scope_ref: str, user_id: str) -> str:
@@ -75,3 +106,52 @@ def attribute_stored_user_content(content: str, *, speaker_id: str, fallback_spe
         payload = {"content": content}
     attributed = attribute_user_payload(payload, speaker_id=speaker_id, fallback_speaker=fallback_speaker)
     return json.dumps(attributed, ensure_ascii=False, separators=(",", ":"))
+
+
+def event_user_author(payload: Mapping[str, object], *, speaker_id: str, fallback_speaker: str) -> tuple[str, str]:
+    """Use only host event metadata, never author claims inside user content."""
+    author = payload.get("host_author")
+    if isinstance(author, Mapping) and author.get("version") == 1:
+        member, name = author.get("speaker_id"), author.get("display_name")
+        if isinstance(member, str) and member and isinstance(name, str):
+            return member, name or "member"
+    return speaker_id, fallback_speaker
+
+
+def project_event_user_content(
+    payload: Mapping[str, object], *, speaker_id: str, fallback_speaker: str, companion_history: bool = False
+) -> str | None:
+    content = payload.get("content")
+    if not isinstance(content, str) or not content:
+        return None
+    member, name = event_user_author(payload, speaker_id=speaker_id, fallback_speaker=fallback_speaker)
+    host_bound = "host_author" in payload
+    if not host_bound and not companion_history:
+        return attribute_stored_user_content(content, speaker_id=member, fallback_speaker=name)
+    author = payload.get("host_author")
+    if host_bound and (
+        not isinstance(author, Mapping)
+        or type(author.get("version")) is not int
+        or author.get("version") != 1
+        or not isinstance(author.get("user_id"), str)
+        or not author["user_id"]
+        or not isinstance(author.get("speaker_id"), str)
+        or not author["speaker_id"]
+        or not isinstance(author.get("display_name"), str)
+    ):
+        return None
+    try:
+        nested = json.loads(content)
+    except ValueError:
+        nested = None
+    if not isinstance(nested, dict) or "content" not in nested:
+        nested = {"content": content}
+    nested = cast(dict[str, object], companion_history_payload(nested))
+    # Unlike legacy inputs, companion event authors are exact host bindings.
+    if host_bound:
+        nested["speaker"] = name
+    return json.dumps(
+        attribute_user_payload(nested, speaker_id=member, fallback_speaker=name),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )

@@ -202,15 +202,22 @@ class AttentionUpdate(_DurableModel):
 
 
 class ContactProposal(_DurableModel):
-    member_ref: MemberRef
+    member_ref: MemberRef | None = None
     key: StateKey
     purpose: Literal["check_in", "share", "continue", "free_chat"]
     topic: Annotated[DurableText, Field(min_length=1, max_length=400)]
     reason: Annotated[DurableText, Field(min_length=1, max_length=400)]
     evidence_turn_ids: Evidence = Field(default_factory=list)
+    target: Literal["member", "channel"] = "member"
 
     @model_validator(mode="after")
     def unique_evidence(self) -> ContactProposal:
+        if self.target == "member" and self.member_ref is None:
+            raise ValueError("member contacts require a host-known member")
+        if self.target == "channel" and (
+            self.member_ref is not None or self.purpose not in {"share", "free_chat"} or self.evidence_turn_ids
+        ):
+            raise ValueError("channel contacts require share/free_chat without member identity or evidence")
         if len(set(self.evidence_turn_ids)) != len(self.evidence_turn_ids):
             raise ValueError("contact contains duplicate evidence turn IDs")
         return self
@@ -264,7 +271,7 @@ def _complete_output(value: object) -> None:
         for entry in attention:
             _complete_object(entry, AttentionUpdate.model_fields, label="attention item")
     if value["contact"] is not None:
-        _complete_object(value["contact"], ContactProposal.model_fields, label="contact")
+        _complete_object(value["contact"], set(ContactProposal.model_fields) - {"target"}, label="contact")
 
 
 def _turn_set(values: Collection[int], *, label: str) -> set[int]:
@@ -281,6 +288,7 @@ def parse_reflection(
     member_refs: Collection[str],
     turn_ids: Collection[int],
     member_turn_ids: Mapping[str, Collection[int]] | None = None,
+    allow_channel: bool = False,
 ) -> ReflectionProposal:
     """Parse a complete response and fence all identities against host evidence.
 
@@ -304,14 +312,10 @@ def parse_reflection(
         if not isinstance(member_turn_ids, Mapping) or set(member_turn_ids) - members:
             raise ReflectionValidationError("member_turn_ids contains an unknown member")
         owned_turns = {}
-        assigned_turns: set[int] = set()
         for ref, values in member_turn_ids.items():
             owned = _turn_set(values, label="member_turn_ids")
             if not owned.issubset(known_turns):
                 raise ReflectionValidationError("member_turn_ids contains evidence outside turn_ids")
-            if assigned_turns.intersection(owned):
-                raise ReflectionValidationError("member_turn_ids assigns the same evidence to multiple members")
-            assigned_turns.update(owned)
             owned_turns[ref] = owned
     candidate = text.strip()
     if candidate.startswith("```"):
@@ -335,7 +339,11 @@ def parse_reflection(
         raise ReflectionValidationError("reflection is not valid complete JSON") from exc
     updates = list(proposal.attention)
     if proposal.contact is not None:
-        updates.append(proposal.contact)
+        if proposal.contact.target == "channel":
+            if not allow_channel:
+                raise ReflectionValidationError("this scope cannot propose channel contact")
+        else:
+            updates.append(proposal.contact)
     for update in updates:
         if update.member_ref not in members:
             raise ReflectionValidationError("reflection references an unknown member")

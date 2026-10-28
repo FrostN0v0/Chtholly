@@ -43,6 +43,7 @@ async def request_reflection(
     limits: CompanionLimits,
     member_turn_ids: Mapping[str, tuple[int, ...]],
     recorder: AgentTurnRecorder,
+    allow_channel: bool = False,
 ) -> ReflectionProposal:
     if len(system) + len(prompt) > limits.input_chars:
         raise ValueError("Companion reflection input exceeds the configured character budget")
@@ -80,4 +81,5 @@ async def request_reflection(
         member_refs=set(member_turn_ids),
         turn_ids={turn_id for values in member_turn_ids.values() for turn_id in values},
         member_turn_ids=member_turn_ids,
+        allow_channel=allow_channel,
     )

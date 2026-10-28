@@ -7,7 +7,7 @@ from uuid import uuid4
 from types import SimpleNamespace
 import asyncio
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 import importlib
 from contextlib import asynccontextmanager
 from collections import deque
@@ -45,7 +45,7 @@ from plugins.llm_chat.delivery_audit import install_delivery_audit
 from plugins.llm_chat.group_delivery import install_group_delivery
 from plugins.llm_chat.session_manager import ScopeIdentity
 
-UTC = timezone.utc
+UTC = UTC
 NOW = datetime(2026, 10, 10, 2, 0, tzinfo=UTC)
 MODEL = SimpleNamespace(
     name="test-model",
@@ -221,7 +221,7 @@ def install_provider(monkeypatch: pytest.MonkeyPatch, responses):
     monkeypatch.setattr(litellm, "acompletion", completion)
     for module_name in (
         "plugins.llm_chat.companion.provider",
-        "plugins.llm_chat.companion.contact",
+        "plugins.llm_chat.companion.host_dialogue",
         "entari_plugin_llm.service",
     ):
         monkeypatch.setattr(importlib.import_module(module_name), "get_model_config", lambda *_args, **_kwargs: MODEL)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from types import MappingProxyType
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timezone, timedelta
 from dataclasses import FrozenInstanceError, dataclass
 
 import pytest
@@ -27,7 +27,7 @@ from utils.companion_core import (
 )
 from utils.companion_core.policy import contact_block_reason
 
-UTC = timezone.utc
+UTC = UTC
 SHANGHAI = timezone(timedelta(hours=8))
 MEMBERS = ("member:1", "member:2")
 OWNED_TURNS = {"member:1": (101, 103), "member:2": (102,)}
@@ -71,6 +71,45 @@ def _parse(payload: dict, **kwargs) -> ReflectionProposal:
         member_turn_ids=OWNED_TURNS,
         **kwargs,
     )
+
+
+def test_shared_native_turn_can_belong_to_two_actual_members_without_borrowing_other_sources() -> None:
+    payload = _payload()
+    payload["attention"] = [_attention("member:1", [101]), _attention("member:2", [101])]
+    owned = {"member:1": (101, 103), "member:2": (101, 102)}
+    parsed = parse_reflection(json.dumps(payload), member_refs=MEMBERS, turn_ids=(101, 102, 103), member_turn_ids=owned)
+    assert [entry.member_ref for entry in parsed.attention] == list(MEMBERS)
+    payload["attention"][1]["evidence_turn_ids"] = [103]
+    with pytest.raises(ReflectionValidationError, match="different member"):
+        parse_reflection(json.dumps(payload), member_refs=MEMBERS, turn_ids=(101, 102, 103), member_turn_ids=owned)
+
+
+def test_channel_topic_requires_group_permission_and_never_invents_a_member() -> None:
+    payload = _payload()
+    payload["contact"] = ContactProposal(
+        target="channel",
+        key="shared-colors",
+        purpose="share",
+        topic="An imagined palette for the group",
+        reason="A concrete shared-interest thought",
+    ).model_dump(mode="json")
+    with pytest.raises(ReflectionValidationError, match="cannot propose channel"):
+        _parse(payload)
+    contact = _parse(payload, allow_channel=True).contact
+    assert contact.target == "channel"
+    assert contact.member_ref is None
+    assert contact.evidence_turn_ids == []
+    for changed in ({"member_ref": "member:1"}, {"purpose": "check_in"}, {"evidence_turn_ids": [101]}):
+        candidate = {**payload, "contact": {**payload["contact"], **changed}}
+        with pytest.raises(ReflectionValidationError):
+            _parse(candidate, allow_channel=True)
+
+
+def test_legacy_member_proposal_without_target_remains_readable() -> None:
+    payload = _payload()
+    payload["contact"] = _contact()
+    del payload["contact"]["target"]
+    assert _parse(payload).contact.target == "member"
 
 
 def _ready(now: datetime, **overrides) -> bool:
@@ -244,7 +283,6 @@ def test_flat_evidence_abi_remains_supported_but_cannot_check_ownership() -> Non
         {"member_refs": MEMBERS, "turn_ids": {101: "owner"}},
         {"member_refs": MEMBERS, "turn_ids": (101,), "member_turn_ids": {"member:99": (101,)}},
         {"member_refs": MEMBERS, "turn_ids": (101,), "member_turn_ids": {"member:1": (102,)}},
-        {"member_refs": MEMBERS, "turn_ids": (101,), "member_turn_ids": {"member:1": (101,), "member:2": (101,)}},
     ],
 )
 def test_invalid_host_identity_and_evidence_sets_are_errors(kwargs: dict) -> None:

@@ -44,6 +44,7 @@ def test_domain_and_tts_core_imports_do_not_load_plugin_entrypoints():
         "utils.tts_service_core.providers.factory",
     ]
     forbidden = [
+        "entari_plugin_llm",
         "plugins.llm_chat.chat_handler",
         "plugins.llm_chat.tool_runtime",
         "plugins.llm_chat.meme_store",
@@ -56,31 +57,20 @@ def test_domain_and_tts_core_imports_do_not_load_plugin_entrypoints():
     script = f"""
 import importlib
 import sys
-from pathlib import Path
-from types import ModuleType
-
-import plugins
-
-package = ModuleType("plugins.llm_chat")
-package.__path__ = [str(Path.cwd() / "plugins" / "llm_chat")]
-sys.modules["plugins.llm_chat"] = package
-setattr(plugins, "llm_chat", package)
 for name in {modules!r}:
     importlib.import_module(name)
 for name in {forbidden!r}:
     assert name not in sys.modules, name
-print("ok")
 """
 
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
+    subprocess.run(
+        [sys.executable, "-E", "-X", "utf8", "-c", script],
         cwd=root,
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
-
-    assert completed.stdout.strip() == "ok"
 
 
 def test_web_policy_import_does_not_load_provider_adapter():
@@ -88,27 +78,16 @@ def test_web_policy_import_does_not_load_provider_adapter():
     script = """
 import importlib
 import sys
-from pathlib import Path
-from types import ModuleType
-
-import plugins
-
-package = ModuleType("plugins.llm_chat")
-package.__path__ = [str(Path.cwd() / "plugins" / "llm_chat")]
-sys.modules["plugins.llm_chat"] = package
-setattr(plugins, "llm_chat", package)
 importlib.import_module("plugins.llm_chat.web.policy")
 assert "plugins.llm_chat.web.exa" not in sys.modules
 assert "agno.tools.exa" not in sys.modules
-print("ok")
 """
 
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
+    subprocess.run(
+        [sys.executable, "-E", "-X", "utf8", "-c", script],
         cwd=root,
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
-
-    assert completed.stdout.strip() == "ok"

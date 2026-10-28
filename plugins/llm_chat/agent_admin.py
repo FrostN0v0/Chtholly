@@ -36,6 +36,7 @@ from .agent_attachments import (
     event_attachment_metadata,
 )
 from .companion.context import mode_baseline
+from .companion.evidence import has_member_input
 from .session_inspection import (
     turn_events,
     session_usage,
@@ -262,43 +263,79 @@ class AgentAdminService:
         return {turn_id: project_relationship_views(events, compact=True) for turn_id, events in grouped.items()}
 
     async def _relationship_evidence_turns(self, turn: AgentTurn, views: dict[str, object]) -> list[dict[str, object]]:
-        """Resolve host-owned evidence references only within this member's scope."""
-        ids: set[int] = set()
-        evaluation = views.get("relationship_evaluation")
-        snapshots = [views.get("relationship")]
-        if isinstance(evaluation, dict):
-            ids.update(evaluation.get("evidence_turn_ids", []))
-            snapshots.extend((evaluation.get("before"), evaluation.get("after")))
-        for snapshot in snapshots:
-            if isinstance(snapshot, dict) and isinstance(snapshot.get("emotions"), list):
-                for emotion in snapshot["emotions"]:
-                    if isinstance(emotion, dict):
-                        ids.update(emotion.get("evidence_turn_ids", []))
-        if not ids:
-            return []
+        """Resolve each evaluation's references only within its own member and scope."""
         context_session = await self._session_id(turn.session_id)
+        plural = views.get("relationship_evaluations")
+        evaluations = plural if isinstance(plural, list) else [views.get("relationship_evaluation")]
         async with get_session() as db:
             scope = await db.get(ChatScope, context_session.scope_id)
             if scope is None:
                 raise AgentAdminError("Scope not found", code="not_found", status=404)
-            owner = await resolve_relationship_owner(db, turn.user_id, scope.channel_id)
+            requested: dict[int, set[str]] = {}
+
+            async def collect(owner_id: str, ids: object) -> None:
+                owner = await resolve_relationship_owner(db, owner_id, scope.channel_id)
+                if isinstance(ids, list):
+                    for value in ids:
+                        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                            requested.setdefault(value, set()).add(owner)
+
+            async def snapshot_refs(owner_id: str, snapshot: object) -> None:
+                if isinstance(snapshot, dict) and isinstance(snapshot.get("emotions"), list):
+                    for emotion in snapshot["emotions"]:
+                        if isinstance(emotion, dict):
+                            await collect(owner_id, emotion.get("evidence_turn_ids"))
+
+            await snapshot_refs(turn.user_id, views.get("relationship"))
+            for evaluation in evaluations:
+                if not isinstance(evaluation, dict):
+                    continue
+                owner = evaluation.get("owner_user_id", turn.user_id)
+                if not isinstance(owner, str) or not owner:
+                    continue
+                await collect(owner, evaluation.get("evidence_turn_ids"))
+                await snapshot_refs(owner, evaluation.get("before"))
+                await snapshot_refs(owner, evaluation.get("after"))
+            if not requested:
+                return []
             rows = (
                 await db.execute(
-                    select(AgentTurn.id, AgentTurn.turn_ref, AgentTurn.sequence, ContextSession.session_ref)
+                    select(
+                        AgentTurn,
+                        ContextSession.session_ref,
+                        RelationshipEvidence.user_id,
+                        RelationshipEvidence.subject_user_id,
+                    )
                     .join(ContextSession, AgentTurn.session_id == ContextSession.id)
                     .join(RelationshipEvidence, RelationshipEvidence.turn_id == AgentTurn.id)
                     .where(
-                        AgentTurn.id.in_(ids),
+                        AgentTurn.id.in_(requested),
                         ContextSession.scope_id == context_session.scope_id,
-                        RelationshipEvidence.user_id == owner,
+                        RelationshipEvidence.user_id.in_(set().union(*requested.values())),
                         RelationshipEvidence.channel_id == scope.channel_id,
                     )
                 )
             ).all()
-        return [
-            {"turn_id": turn_id, "turn_ref": turn_ref, "sequence": sequence, "session_ref": session_ref}
-            for turn_id, turn_ref, sequence, session_ref in rows
-        ]
+            links = []
+            for source, session_ref, owner, subject in rows:
+                if owner not in requested[source.id] or not await has_member_input(
+                    db,
+                    source,
+                    user_id=subject,
+                    platform_user_id=subject,
+                    channel_id=scope.channel_id,
+                ):
+                    continue
+                links.append(
+                    {
+                        "turn_id": source.id,
+                        "turn_ref": source.turn_ref,
+                        "sequence": source.sequence,
+                        "session_ref": session_ref,
+                        **({"owner_user_id": owner, "subject_user_id": subject} if isinstance(plural, list) else {}),
+                    }
+                )
+            return links
 
     async def read_event_payload(
         self,

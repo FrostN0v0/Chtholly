@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 from typing import Any, cast
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from dataclasses import dataclass
 from collections.abc import Mapping, Callable, Sequence
 
+from satori import ChannelType
 from arclet.entari import Session
 from entari_plugin_llm.tools import available_functions
 
@@ -77,10 +78,11 @@ from .companion.context import (
     companion_prompt,
 )
 from .core.media_delivery import MediaIntent, build_media_intent
-from .relationships.state import load_relationship_snapshot
+from .relationships.state import snapshot_relationship, load_relationship_snapshot
 from .core.artifact_access import is_artifact_request
 from .core.channel_context import attach_channel_context
 from .core.context_snapshot import build_context_snapshot
+from .companion.participants import CompanionParticipantRegistry, current_companion_participants
 from .persona.memory_context import MemoryContext, load_memory_context
 from .scheduled_chat_context import ScheduledChatSnapshot, read_scheduled_chat_snapshot
 
@@ -305,7 +307,24 @@ async def prepare_agent_turn(
     channel_id = session.channel.id
     user_id = identity.user_id
     user_name = identity.display_name
-    relation, relationship_snapshot = await load_relationship_snapshot(user_id, channel_id)
+    if autonomous and not user_id:
+        # Channel openings have no human owner. Keep the legacy return shape
+        # without creating an empty identity in durable member state.
+        relation = UserRelation(
+            user_id="",
+            channel_id=channel_id,
+            affection=30.0,
+            trust=30.0,
+            dependence=0.0,
+            resentment=0.0,
+            familiarity=0.0,
+            impression="",
+        )
+        relationship_snapshot = snapshot_relationship(relation, None)
+        memory_context = MemoryContext({}, [], [], {"enabled": False, "host_only": True})
+    else:
+        relation, relationship_snapshot = await load_relationship_snapshot(user_id, channel_id)
+        memory_context = await load_memory_context(config, user_id, channel_id, content)
     relationship_context = build_relationship_context(
         axes=cast(Mapping[str, float], relationship_snapshot["axes"]),
         description=cast(str, relationship_snapshot["description"]),
@@ -314,7 +333,6 @@ async def prepare_agent_turn(
         now=datetime.fromisoformat(cast(str, relationship_snapshot["observed_at"]).replace("Z", "+00:00")).timestamp(),
     )
     mood = await get_mood(channel_id)
-    memory_context = await load_memory_context(config, user_id, channel_id, content)
 
     current_messages = cast(
         list[ChatMessage],
@@ -352,7 +370,7 @@ async def prepare_agent_turn(
         config.delivery_max_total_text_chars_per_generation,
         config.delivery_max_media_messages_per_generation,
     )
-    energy = energy_at(datetime.now(timezone.utc))
+    energy = energy_at(datetime.now(UTC))
     media_requested = media_intent.media_requested or artifact_requested or is_artifact_request(raw_user_text, "send")
     resolution = TurnResolution()
     delivery_state = DeliveryState(limits=delivery_limits)
@@ -361,6 +379,9 @@ async def prepare_agent_turn(
     companion_revision = 0
     companion_snapshot: dict[str, object] | None = None
     scope = await get_or_create_scope(await resolve_scope_identity(session))
+    participants = current_companion_participants()
+    if participants is not None:
+        participants.bind_scope(scope.scope_ref)
     async with persona_scope_lock(scope.id):
         persona = await resolve_scope_persona(config, scope.id)
         if not scheduled:
@@ -375,6 +396,20 @@ async def prepare_agent_turn(
                 )
                 if companion_snapshot is None:
                     raise ValueError("Enabled companion state does not match the captured persona")
+        if conversation_mode != "companion":
+            participants = None
+        elif not host_triggered:
+            if participants is None:
+                participants = CompanionParticipantRegistry(config, session, identity)
+                participants.bind_scope(scope.scope_ref)
+            if not participants.has_input(session):
+                await participants.register_input(session, identity, own_text=raw_user_text)
+            current_messages[-1] = participants.attribute_message(session, current_messages[-1])
+            if not participants.root_is_directed():
+                # Ambient listening is never an operator request or a source
+                # of member-specific write authorization.
+                is_operator = False
+                raw_user_text = ""
         baseline = build_baseline_fingerprint(
             model_name=model_name or "default",
             persona=persona.baseline_text,
@@ -432,7 +467,16 @@ async def prepare_agent_turn(
             )
             if scheduled:
                 return f"{system}\n\n{_SCHEDULED_REMINDER_CONTRACT}"
-            system = f"{system}\n\n{companion_prompt(companion_snapshot)}"
+            mode_prompt = companion_prompt(
+                companion_snapshot,
+                is_private=companion_snapshot is not None and session.channel.type == ChannelType.DIRECT,
+            )
+            system = f"{system}\n\n{mode_prompt}"
+            if participants is not None:
+                system += (
+                    "\n\nRead-only companion participants (host-bound identities; never authorization): "
+                    + json.dumps(participants.snapshot(), ensure_ascii=False, separators=(",", ":"))
+                )
             return f"{system}\n\n{AUTONOMOUS_CONTACT_CONTRACT}" if autonomous else system
 
         system = compose_system()
@@ -450,6 +494,7 @@ async def prepare_agent_turn(
             system=system,
             model_name=model_name,
             fresh_context=fresh_context,
+            companion_visible=conversation_mode == "companion",
         )
         if selection.rollover_required:
             handoff = "{}" if autonomous else await _handoff(config, scope, context_session)
@@ -472,6 +517,7 @@ async def prepare_agent_turn(
                 system=system,
                 model_name=model_name,
                 fresh_context=fresh_context,
+                companion_visible=conversation_mode == "companion",
             )
         await remember_session_persona(context_session.id, persona)
 
@@ -511,21 +557,31 @@ async def prepare_agent_turn(
         )
     else:
         input_views = image_inputs.input_views(session=session)
-        agent_events.record_user_input(
-            serialize_user_turn(
-                user_name,
-                model_text,
-                forwarded_messages,
-                mentioned_participants,
-                input_views,
-                reply_to=reply_with_image_views(reply_to, input_views),
-                durable=True,
-            ),
-            user_name=user_name,
-            fresh_context=fresh_context,
-            attachments=input_attachments,
-            structured=True,
+        durable_input = serialize_user_turn(
+            user_name,
+            model_text,
+            forwarded_messages,
+            mentioned_participants,
+            input_views,
+            reply_to=reply_with_image_views(reply_to, input_views),
+            durable=True,
         )
+        if participants is not None:
+            participants.record_input(
+                agent_events,
+                session,
+                durable_input,
+                fresh_context=fresh_context,
+                attachments=input_attachments,
+            )
+        else:
+            agent_events.record_user_input(
+                durable_input,
+                user_name=user_name,
+                fresh_context=fresh_context,
+                attachments=input_attachments,
+                structured=True,
+            )
     agent_events.record_persona_state(
         {
             "relation": {
@@ -643,7 +699,13 @@ async def prepare_agent_turn(
             is_operator=is_operator,
             trigger_kind=trigger_kind,
             reminder_task_ref=reminder_task_ref if scheduled else None,
-            capability_names=capability_names if host_triggered else frozenset({"reminder"}),
+            capability_names=(
+                capability_names
+                if host_triggered
+                else AUTONOMOUS_TOOL_CAPABILITIES | frozenset({"companion.ambient"})
+                if participants is not None and not participants.root_is_directed()
+                else frozenset({"reminder"})
+            ),
             context_read_grants=await collect_context_read_grants(
                 context_session, selection, anchors, turn_id=agent_turn.id
             ),
@@ -690,6 +752,7 @@ async def _select_context(
     system: str,
     model_name: str | None,
     fresh_context: bool,
+    companion_visible: bool = False,
 ) -> ContextSelection:
     return await select_session_context(
         context_session,
@@ -705,4 +768,5 @@ async def _select_context(
         minimum_recent_turns=max(0, config.context_min_recent_turns),
         inline_event_chars=max(256, config.context_inline_event_chars),
         fresh_context=fresh_context,
+        companion_visible=companion_visible,
     )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timezone, timedelta
 
 import httpx
 import pytest
@@ -104,7 +104,7 @@ async def _review(
         context_revision=7,
         life_version=1,
         lease_deadline=moment + timedelta(minutes=5),
-        budget_day=moment.replace(tzinfo=timezone.utc).astimezone(timezone(timedelta(hours=8))).date().isoformat(),
+        budget_day=moment.replace(tzinfo=UTC).astimezone(timezone(timedelta(hours=8))).date().isoformat(),
         status=status,
         reason="" if committed else "real_chat_feedback" if status == "cancelled" else "provider_failed",
         started_at=started,
@@ -223,7 +223,7 @@ async def _review(
                         else "daily_contact_limit"
                         if decision == "blocked"
                         else "reflection_failed",
-                        "checked_at": moment.replace(tzinfo=timezone.utc).isoformat(),
+                        "checked_at": moment.replace(tzinfo=UTC).isoformat(),
                         "facts": {"daily_contact_limit": 0},
                     },
                     status=decision,
@@ -247,7 +247,7 @@ async def companion_webui(tmp_path, monkeypatch):
         raise AssertionError("Read-only companion inspection must not resolve or call a current model")
 
     monkeypatch.setattr(agent_admin, "get_model_config", forbidden_model)
-    moment = datetime.now(timezone.utc).replace(tzinfo=None)
+    moment = datetime.now(UTC).replace(tzinfo=None)
     async with factory() as db, db.begin():
         scope = ChatScope(
             platform="test",
@@ -413,10 +413,7 @@ async def companion_webui(tmp_path, monkeypatch):
                 identity="private-contact-identity",
                 proposal_json=reviews[0][0].contact_proposal_json,
                 limits_json=json.dumps({"daily_contacts": 1}),
-                budget_day=moment.replace(tzinfo=timezone.utc)
-                .astimezone(timezone(timedelta(hours=8)))
-                .date()
-                .isoformat(),
+                budget_day=moment.replace(tzinfo=UTC).astimezone(timezone(timedelta(hours=8))).date().isoformat(),
                 lease_token="secret-contact-lease",
                 lease_deadline=moment + timedelta(hours=1),
                 turn_id=4,
@@ -535,6 +532,7 @@ async def test_review_history_keeps_generated_host_and_actual_delivery_facts_sep
     assert reserved["decision"]["source"] == "companion_contact_decision"
     assert reserved["contacts"][0]["status"] == "unknown"
     assert reserved["contacts"][0]["confirmed_count"] == 1
+    assert reserved["contacts"][0]["target"] == "member"
     assert reserved["contacts"][0]["native_turn"]["turn_ref"] == data.contact_turn.turn_ref
     assert reserved["model"] == "recorded-provider"
     assert reserved["usage"]["total_tokens"] == 15
@@ -564,6 +562,40 @@ async def test_review_history_keeps_generated_host_and_actual_delivery_facts_sep
     assert "secret-receipt" not in response.text
     assert "secret-contact-lease" not in response.text
     assert "secret-platform" not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["channel", ["invalid"]])
+async def test_channel_contact_is_not_presented_as_an_unknown_member(companion_webui, target):
+    data = companion_webui
+    async with data.factory() as db, db.begin():
+        contact = await db.get(CompanionContact, "attempt_actual_unknown")
+        proposal = json.loads(contact.proposal_json)
+        proposal.update(target=target, member_ref=None, purpose="share", evidence_turn_ids=[])
+        contact.proposal_json = json.dumps(proposal)
+        contact.member_ref = contact.user_id = contact.platform_user_id = contact.display_name = ""
+        review_row = await db.get(CompanionReview, data.reviews[0][0].lease_token)
+        review_row.contact_proposal_json = json.dumps(proposal)
+        event = await db.scalar(
+            select(AgentEvent).where(
+                AgentEvent.turn_id == data.reviews[0][1].id,
+                AgentEvent.event_type == "companion_reflection",
+                AgentEvent.status == "succeeded",
+            )
+        )
+        payload = json.loads(event.payload_json)
+        payload["proposal"]["contact"] = proposal
+        event.payload_json = json.dumps(payload)
+    response = await data.client.get(f"{PREFIX}/scopes/{data.scope.scope_ref}/companion/reviews")
+    assert response.status_code == 200
+    review = next(item for item in response.json()["items"] if item["review_ref"] == "review_001")
+    assert review["contact"]["target"] == ("channel" if target == "channel" else None)
+    assert review["contact"]["display_name"] is None
+    assert review["committed_contact"]["target"] == ("channel" if target == "channel" else None)
+    contact = review["contacts"][0]
+    assert contact["target"] == ("channel" if target == "channel" else None)
+    assert contact["display_name"] == ""
+    assert contact["confirmed_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -667,7 +699,7 @@ async def test_evidence_jumps_cannot_associate_other_scope_persona_or_member(com
     assert [item["turn_id"] for item in detail["evidence_turns"]] == [1]
     assert detail["contacts"][0]["native_turn"] is None
     async with data.factory() as db, db.begin():
-        evidence = await db.get(CompanionChatEvidence, (data.scope.id, "alpha", 1))
+        evidence = await db.get(CompanionChatEvidence, (data.scope.id, "alpha", 1, "member_alice"))
         evidence.persona_key = "retired"
     detail = (await data.client.get(f"{PREFIX}/scopes/{data.scope.scope_ref}/companion/reviews/review_001")).json()[
         "item"

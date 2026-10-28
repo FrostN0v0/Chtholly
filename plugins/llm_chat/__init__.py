@@ -86,7 +86,8 @@ if plug is not None and plug.module.__name__ == __name__:
 
     from . import agent_command as agent_command  # entari: package
     from . import reminder_command as reminder_command  # entari: subplugin
-    for child_name in ("command", "private_chat"):
+
+    for child_name in ("command", "private_chat", "group_chat"):
         module_name = f"{__name__}.companion.{child_name}"
         plugin.package(module_name)
         if not plugin.load_plugin(module_name, config={"$filter": ""}):

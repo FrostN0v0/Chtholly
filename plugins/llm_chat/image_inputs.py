@@ -155,7 +155,7 @@ class ImageInputs:
         root = state.inputs[0].session
         root_owner = _session_owner(root)
         owner = _session_owner(session)
-        if owner[:4] != root_owner[:4] or (self._owner is not None and self._owner != root_owner):
+        if owner[:3] != root_owner[:3] or (self._owner is not None and self._owner != root_owner):
             raise ImageInputError("Image reference belongs to another account, channel, or turn")
         if self._steering is not None and self._steering is not state:
             raise ImageInputError("Image registry belongs to another task")
@@ -169,6 +169,35 @@ class ImageInputs:
         self._owner = root_owner
         self._admitted[root_owner] = (getattr(root, "event", None), 1)
         self._admitted[owner] = (getattr(session, "event", None), entry.sequence)
+
+    def discard_unapplied_input(self, session: Session) -> None:
+        """Revoke normalized images when their real input returns to a later owner."""
+        owner = _session_owner(session)
+        admitted = self._admitted.get(owner)
+        if admitted is None:
+            return
+        if (
+            admitted[0] is not getattr(session, "event", None)
+            or owner == self._owner
+            or owner in self._committed_input_owners
+        ):
+            raise ImageInputError("Only an unapplied supplement can lose its image capability")
+        discarded = {ref for ref, entry in self._entries.items() if entry.owner == owner}
+        remove_agent_attachments(
+            [
+                dict(self._entries[ref].snapshot.attachment)
+                for ref in discarded
+                if self._entries[ref].snapshot is not None and self._entries[ref].snapshot.attachment is not None
+            ],
+            root=self.attachment_root,
+        )
+        for ref in discarded:
+            self._entries.pop(ref)
+            self._inspections.pop(ref, None)
+        self._positions = {index: ref for index, ref in self._positions.items() if ref not in discarded}
+        self._references = {key: ref for key, ref in self._references.items() if ref not in discarded}
+        self._admitted.pop(owner)
+        self._input_offsets.pop(owner, None)
 
     def register(
         self,
@@ -309,6 +338,8 @@ class ImageInputs:
             raise ImageInputError("Image reference belongs to another admitted input")
         if purpose not in _PERMISSIONS[entry.source]:
             raise ImageInputError("This image source is not authorized for the requested use")
+        if purpose == "collect" and self._owner is not None and entry.owner[:4] != self._owner[:4]:
+            raise ImageInputError("Another participant's image cannot enter the current user's collection")
         if entry.snapshot is not None:
             return entry.snapshot
         acquisition = entry.acquisition

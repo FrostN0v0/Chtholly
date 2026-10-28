@@ -1,6 +1,5 @@
 """Persistent reminder storage and the utility-owned native reminder tool."""
 
-from typing import cast
 from hashlib import sha256
 from pathlib import Path
 
@@ -49,12 +48,11 @@ from .runtime import (
     current_reminder_decision,
     propose_reminder_decision,
 )
-from ..core.types import JSONType
 
 # Entari imports this package as a real utility subplugin from the llm_chat
 # root. Direct imports in tests and storage workers do not create an owner.
 try:
-    from arclet.entari import plugin, metadata
+    from arclet.entari import metadata
     from arclet.entari.plugin import PluginRole
     from arclet.entari.plugin.model import Plugin
 
@@ -65,18 +63,9 @@ except (ImportError, LookupError):
 registered_tools: list[str] = []
 registered_tool_schemas: list[dict[str, str]] = []
 if _owner is not None and _owner.module.__name__ == __name__:
-    from entari_plugin_llm import LLMToolEvent  # entari: plugin
-    from arclet.entari.filter.parse import FilterPropagator
-    from arclet.entari.plugin.model import PluginDispatcher
-
     from .tool import register_reminder_tools as _register_reminder_tools
     from ..agno_compat import register_llm_chat_tool
-
-    # Child plugins inherit the root public filter from copied config. The
-    # reminder handler performs its own capability and exact-target checks.
-    _scope = getattr(_owner, "_scope", None)
-    if _scope is not None:
-        _scope.propagators[:] = [item for item in _scope.propagators if not isinstance(item, FilterPropagator)]
+    from ..tools._registration import create_tool_dispatcher
 
     metadata(
         name="llm_chat_reminders",
@@ -85,7 +74,7 @@ if _owner is not None and _owner.module.__name__ == __name__:
         description="Host-bound persistent reminder management for llm_chat.",
         role=PluginRole.UTILITY,
     )
-    _dispatcher = cast(PluginDispatcher[JSONType], plugin.dispatch(LLMToolEvent))
+    _dispatcher = create_tool_dispatcher("reminder_tools")
     if register_llm_chat_tool not in _dispatcher.register_hooks:
         _dispatcher.register_hooks.append(register_llm_chat_tool)
     _register_reminder_tools(_dispatcher)

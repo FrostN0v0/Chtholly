@@ -21,7 +21,8 @@ from .models import (
     CompanionLifeRecord,
     CompanionChatEvidence,
 )
-from ..models import AgentTurn, ContextSession, ScopePersonaSelection
+from ..models import AgentTurn, ChatScope, ContextSession, ScopePersonaSelection
+from .evidence import has_member_input
 from .persistence import (
     ACTIVE,
     SHANGHAI,
@@ -41,6 +42,7 @@ from .persistence import (
     mode_snapshot,
     attention_state,
     contact_snapshot,
+    validate_contact_target,
 )
 
 
@@ -60,9 +62,12 @@ async def validate_evidence(
         raise CompanionConflict("Private attention and follow-up contacts require actual member evidence")
     if len(turn_ids) != len(set(turn_ids)):
         raise CompanionConflict("Duplicate contact or attention evidence")
+    scope = await db.get(ChatScope, scope_id)
+    if scope is None:
+        raise CompanionConflict("Evidence scope no longer exists")
     for turn_id in turn_ids:
         positive(turn_id, "evidence turn_id", maximum=2**63 - 1)
-        evidence = await db.get(CompanionChatEvidence, (scope_id, persona_key, turn_id))
+        evidence = await db.get(CompanionChatEvidence, (scope_id, persona_key, turn_id, member_ref))
         native = (
             await db.execute(
                 select(AgentTurn, ContextSession)
@@ -78,13 +83,19 @@ async def validate_evidence(
         turn, context = native
         if (
             context.scope_id != scope_id
-            or context.purpose != "chat"
-            or turn.trigger_kind != "message"
+            or (turn.trigger_kind, context.purpose) not in {("message", "chat"), ("autonomous", "companion")}
             or turn.status not in {"completed", "silent", "declined"}
             or turn.finished_at is None
-            or turn.user_id not in {member.user_id, member.platform_user_id}
         ):
             raise CompanionConflict("Evidence is not a completed ordinary chat from this member")
+        if not await has_member_input(
+            db,
+            turn,
+            user_id=member.user_id,
+            platform_user_id=member.platform_user_id,
+            channel_id=scope.channel_id,
+        ):
+            raise CompanionConflict("Evidence has no eligible input from this member")
     return member
 
 
@@ -318,14 +329,16 @@ async def finish_review(
             )
         if validated.contact is not None:
             item = validated.contact
-            await validate_evidence(
-                db,
-                claim.scope_id,
-                claim.persona_key,
-                item.member_ref,
-                item.evidence_turn_ids,
-                required=item.purpose in {"check_in", "continue"},
-            )
+            await validate_contact_target(db, claim.scope_id, item)
+            if item.target == "member":
+                await validate_evidence(
+                    db,
+                    claim.scope_id,
+                    claim.persona_key,
+                    item.member_ref,
+                    item.evidence_turn_ids,
+                    required=item.purpose in {"check_in", "continue"},
+                )
         life = await db.get(CompanionLife, (claim.scope_id, claim.persona_key))
         encoded = dumps(validated.life.model_dump(mode="json"))
         previous_life = life_state(life)

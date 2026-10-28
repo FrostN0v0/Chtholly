@@ -9,10 +9,11 @@ from typing import Any, cast
 import asyncio
 from hashlib import sha256
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from dataclasses import replace
 
 import pytest
+from satori import Channel, ChannelType
 from sqlalchemy import select
 from arclet.entari import Session
 from arclet.entari.config import EntariConfig
@@ -715,7 +716,7 @@ async def test_running_turn_exposes_recorded_context_without_replaying_operator_
 
     fake_session = SimpleNamespace(
         account=SimpleNamespace(platform="test", self_id="bot"),
-        channel=SimpleNamespace(id="channel", name="Test Channel"),
+        channel=Channel(id="channel", type=ChannelType.TEXT, name="Test Channel"),
         guild=SimpleNamespace(id="guild", name="Test Guild"),
         event=SimpleNamespace(message=SimpleNamespace(id="message-1")),
     )
@@ -1467,7 +1468,7 @@ async def test_flushed_event_sequences_stay_frozen_against_earlier_tool_timestam
         before=DeliverySnapshot(active=True),
         after=DeliverySnapshot(active=True, attempts=1, confirmed=1),
     )
-    stale = replace(trace.events[0], started_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    stale = replace(trace.events[0], started_at=datetime(2020, 1, 1, tzinfo=UTC))
     recorder.record_tool_events([stale])
 
     assert [event.sequence for event in recorder.events[:2]] == [1, 2]

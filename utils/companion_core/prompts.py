@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from .models import MAX_LIFE_STATE_CHARS, ReflectionProposal, ReflectionValidationError
 from .policy import _aware_utc
+from .dialogue_prompts import reflection_scope_prompt
 
 MAX_PROMPT_CHARS = 64000
 
@@ -36,7 +37,18 @@ def _output_schema() -> dict[str, object]:
         {
             "if": {"properties": {"purpose": {"enum": ["check_in", "continue"]}}, "required": ["purpose"]},
             "then": {"properties": {"evidence_turn_ids": {"minItems": 1}}},
-        }
+        },
+        {
+            "if": {"properties": {"target": {"const": "channel"}}, "required": ["target"]},
+            "then": {
+                "properties": {
+                    "member_ref": {"type": "null"},
+                    "purpose": {"enum": ["share", "free_chat"]},
+                    "evidence_turn_ids": {"maxItems": 0},
+                }
+            },
+            "else": {"properties": {"member_ref": {"type": "string", "minLength": 1}}},
+        },
     ]
     schema["$defs"]["LifeState"]["properties"]["interests"]["uniqueItems"] = True
     schema["$defs"]["LifeState"]["$comment"] = (
@@ -45,7 +57,7 @@ def _output_schema() -> dict[str, object]:
     return schema
 
 
-def build_reflection_system(persona_prompt: str) -> str:
+def build_reflection_system(persona_prompt: str, *, is_private: bool | None = None) -> str:
     """Describe a complete reflection, not a reminder or a message template."""
     if not isinstance(persona_prompt, str) or len(persona_prompt) > MAX_PROMPT_CHARS:
         raise ReflectionValidationError("persona prompt must be bounded text")
@@ -168,6 +180,7 @@ def build_reflection_system(persona_prompt: str) -> str:
         "incomplete output.\n\n"
         f"Exact output JSON Schema (all numeric and string bounds apply):\n{schema}\n\n"
         f"Persona specification as quoted data:\n{persona}"
+        + ("\n\n" + reflection_scope_prompt(is_private=is_private) if is_private is not None else "")
     )
 
 

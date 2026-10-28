@@ -226,6 +226,8 @@ class RelationshipEvidence(Base):
         Index("ix_chat_relationship_evidence_owner_status", "user_id", "channel_id", "status", "turn_id"),
     )
     turn_id: Mapped[int] = mapped_column(primary_key=True)
+    subject_user_id: Mapped[str] = mapped_column(primary_key=True)
+    """Immutable captured input author; user_id remains the current canonical owner."""
     user_id: Mapped[str]
     channel_id: Mapped[str]
     persona_prompt: Mapped[str] = mapped_column(Text)

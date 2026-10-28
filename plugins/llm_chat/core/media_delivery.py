@@ -143,11 +143,11 @@ _WEB_IMAGE_REFERENCE_TERM = (
     r"以.{0,16}为(?:参考|参照)|参考|照着|仿照|based on|reference)"
 )
 _WEB_IMAGE_REFERENCE_REQUEST = re.compile(
-    rf"(?=.*{_WEB_IMAGE_LOOKUP_TERM})"
+    rf"^(?=.*{_WEB_IMAGE_LOOKUP_TERM})"
     r"(?=.*(?:图片|照片|立绘|形象|截图|image|picture|photo))"
     rf"(?=.*{_WEB_IMAGE_REFERENCE_TERM})"
     r"(?=.*(?:替换|换掉|编辑|修改|重绘|重画|生成|创作|绘制|画|edit|replace|redraw|generate|create|draw))",
-    re.IGNORECASE,
+    re.IGNORECASE | re.MULTILINE,
 )
 
 

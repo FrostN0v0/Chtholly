@@ -47,32 +47,56 @@ async def claim_evaluation(
         if busy is not None:
             await db.commit()
             return None
+        turn_ids = (
+            select(RelationshipEvidence.turn_id)
+            .where(
+                RelationshipEvidence.user_id == user_id,
+                RelationshipEvidence.channel_id == channel_id,
+                RelationshipEvidence.status.in_(("pending", "failed")),
+            )
+            .distinct()
+            .order_by(RelationshipEvidence.turn_id)
+            .limit(max(1, min(16, batch_size)))
+        )
         candidates = list(
             (
-                await db.execute(
+                await db.scalars(
                     select(RelationshipEvidence)
                     .where(
                         RelationshipEvidence.user_id == user_id,
                         RelationshipEvidence.channel_id == channel_id,
                         RelationshipEvidence.status.in_(("pending", "failed")),
+                        RelationshipEvidence.turn_id.in_(turn_ids),
                     )
-                    .order_by(RelationshipEvidence.turn_id)
-                    .limit(max(1, min(16, batch_size)))
+                    .order_by(RelationshipEvidence.turn_id, RelationshipEvidence.subject_user_id)
                 )
-            ).scalars()
+            ).all()
         )
         if not candidates:
             await db.commit()
             return None
-        selected: list[RelationshipEvidence] = []
-        characters = 0
+        by_turn: dict[int, list[RelationshipEvidence]] = {}
         for evidence in candidates:
-            if evidence.persona_prompt != candidates[0].persona_prompt:
+            by_turn.setdefault(evidence.turn_id, []).append(evidence)
+        selected: list[RelationshipEvidence] = []
+        episodes: list[dict[str, JSONType]] = []
+        characters = 0
+        for rows in by_turn.values():
+            if any(row.persona_prompt != candidates[0].persona_prompt for row in rows):
                 break
-            size = len(evidence.payload_json)
+            size = sum(len(row.payload_json) for row in rows)
             if selected and characters + size > _MAX_BATCH_CHARS:
                 break
-            selected.append(evidence)
+            sources = [cast(dict[str, JSONType], json.loads(row.payload_json)) for row in rows]
+            episode = dict(sources[0])
+            if len(sources) > 1:
+                # An explicit canonical identity merge can unite old source
+                # authors, but never erase their evidence or invent new turns.
+                episode.pop("subject_user_id", None)
+                episode["subject_user_ids"] = [row.subject_user_id for row in rows]
+                episode["user"] = "\n\n".join(str(source["user"]) for source in sources)
+            episodes.append(episode)
+            selected.extend(rows)
             characters += size
         relation = await db.get(UserRelation, (user_id, channel_id))
         if relation is None:
@@ -83,9 +107,9 @@ async def claim_evaluation(
             user_id=user_id,
             channel_id=channel_id,
             persona_prompt=selected[0].persona_prompt,
-            turn_ids=tuple(item.turn_id for item in selected),
+            turn_ids=tuple(dict.fromkeys(item.turn_id for item in selected)),
             event_ids=tuple(item.event_id for item in selected),
-            episodes=tuple(cast(dict[str, JSONType], json.loads(item.payload_json)) for item in selected),
+            episodes=tuple(episodes),
             before=snapshot_relationship(relation, affect, now=now),
             version=affect.version,
             queued_at=utc_text(selected[0].queued_at),
@@ -161,13 +185,15 @@ async def commit_evaluation(
         settled = await db.execute(
             update(RelationshipEvidence)
             .where(
-                RelationshipEvidence.turn_id.in_(batch.turn_ids),
+                RelationshipEvidence.event_id.in_(batch.event_ids),
+                RelationshipEvidence.user_id == batch.user_id,
+                RelationshipEvidence.channel_id == batch.channel_id,
                 RelationshipEvidence.evaluation_ref == batch.evaluation_ref,
                 RelationshipEvidence.status == "running",
             )
             .values(status="processed", finished_at=now, error="")
         )
-        if getattr(settled, "rowcount", 0) != len(batch.turn_ids):
+        if getattr(settled, "rowcount", 0) != len(batch.event_ids):
             raise RelationshipConflict("Relationship evidence claim was superseded")
         after = snapshot_relationship(relation, affect, now=now)
         await update_evaluation_events(
@@ -189,7 +215,9 @@ async def release_evaluation(batch: EvaluationBatch, error: str, *, cancelled: b
                 await db.execute(
                     update(RelationshipEvidence)
                     .where(
-                        RelationshipEvidence.turn_id.in_(batch.turn_ids),
+                        RelationshipEvidence.event_id.in_(batch.event_ids),
+                        RelationshipEvidence.user_id == batch.user_id,
+                        RelationshipEvidence.channel_id == batch.channel_id,
                         RelationshipEvidence.evaluation_ref == batch.evaluation_ref,
                         RelationshipEvidence.status == "running",
                     )

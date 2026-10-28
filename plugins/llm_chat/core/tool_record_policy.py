@@ -21,6 +21,7 @@ _MAX_RECORDED_TEXT = 50_000
 _MAX_GENERIC_TEXT = 16_000
 _PROJECTED_RESULT_TOOLS = {
     "finish_turn",
+    "companion_dialogue",
     "capture_web_reference",
     "edit_image",
     "call_plugin",
@@ -56,6 +57,8 @@ def record_tool_arguments(tool_name: str, arguments: Mapping[str, object]) -> di
 
     if tool_name == "finish_turn":
         return _record_selected(arguments, "outcome")
+    if tool_name == "companion_dialogue":
+        return _record_selected(arguments, "action", "seconds", "engaged_speakers")
     if tool_name in ARTIFACT_TOOLS:
         return project_artifact_arguments(tool_name, arguments)
     if tool_name in WORKSHOP_TOOLS:

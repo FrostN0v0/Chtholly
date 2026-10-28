@@ -30,12 +30,18 @@ def steer_request_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
     return parameters
 
 
-async def apply_model_steering(messages: list[Message]) -> None:
+async def apply_model_steering(
+    messages: list[Message],
+    *,
+    format_messages: Callable[[list[Message]], list[dict[str, Any]]] | None = None,
+) -> None:
     state = _request_steering()
     if state is None:
         return
     token = _APPLYING.set(True)
     try:
+        if state.on_request is not None and format_messages is not None:
+            state.on_request(format_messages(messages))
         additions = await state.drain()
         messages.extend(Message.model_validate(message) for message in additions)
         if additions:
@@ -62,7 +68,7 @@ async def invoke_with_steering(
     if state is None:
         return await invoke(messages, *args, **kwargs)
     while True:
-        await apply_model_steering(messages)
+        await apply_model_steering(messages, format_messages=format_messages)
         if state.applied_revision > 1 and state.request_input_budget > 0:
             tokens = estimate_tokens(state.request_model_name, format_messages(messages))
             if tokens > state.request_input_budget:
@@ -81,10 +87,16 @@ async def invoke_with_steering(
                     )
                     await recorder.flush()
                 raise RuntimeError("Steered request exceeds the captured input budget")
-        revision = state.applied_revision
+        revision = state.application_revision
         response = await invoke(messages, *args, **kwargs)
         if not state.pending:
             return response
+        if state.on_request is not None:
+            # Companion overflow returns only unapplied sources. Keep this exact
+            # candidate if no fitting correction changed the model transcript.
+            await apply_model_steering(messages, format_messages=format_messages)
+            if state.application_revision == revision:
+                return response
         # Nothing from this candidate has crossed the external-tool boundary.
         discard_pending_native_images()
         recorder = current_model_audit()

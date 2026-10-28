@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -421,7 +421,7 @@ async def test_confirmed_delivery_inspection_preserves_prefix_and_receipt_author
         conversation_user_id=None,
         fresh_context=False,
     )
-    received = datetime(2026, 9, 10, 12, tzinfo=timezone.utc)
+    received = datetime(2026, 9, 10, 12, tzinfo=UTC)
     output_ref = "output_" + "a" * 32
     reference_ref = "reference_" + "b" * 32
     image_bytes = b"private-confirmed-render"
@@ -560,7 +560,7 @@ async def test_confirmed_delivery_inspection_preserves_prefix_and_receipt_author
 
 
 def test_turn_timing_distinguishes_unknown_legacy_running_and_no_delivery() -> None:
-    started = datetime.now(timezone.utc) - timedelta(seconds=10)
+    started = datetime.now(UTC) - timedelta(seconds=10)
     turn = AgentTurn(status="completed", created_at=None, finished_at=None)
     timing = session_inspection.project_turn_timing(turn, [])
     assert timing["duration_ms"] is None
@@ -652,7 +652,7 @@ async def test_relationship_inspection_preserves_snapshots_batch_states_and_auth
         conversation_user_id=None,
         fresh_context=False,
     )
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     captured = {
         "version": 3,
         "axes": {"affection": 41, "trust": 50, "dependence": 22, "resentment": 15, "familiarity": 60},
@@ -723,6 +723,7 @@ async def test_relationship_inspection_preserves_snapshots_batch_states_and_auth
             db.add(
                 RelationshipEvidence(
                     turn_id=turn.id,
+                    subject_user_id=turn.user_id,
                     user_id=turn.user_id,
                     channel_id=scope.channel_id,
                     persona_prompt="Test persona",
@@ -870,7 +871,7 @@ async def test_relationship_evidence_navigation_survives_identity_migration_with
         await session_manager.finish_turn(turn.id, status="silent", final_text="")
         turns.append(turn)
     legacy, current, other_member, foreign, unowned = turns
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     captured = {
         "version": 7,
         "axes": {"affection": 40, "trust": 50, "dependence": 20, "resentment": 10, "familiarity": 60},
@@ -934,6 +935,7 @@ async def test_relationship_evidence_navigation_survives_identity_migration_with
             db.add(
                 RelationshipEvidence(
                     turn_id=turn.id,
+                    subject_user_id=turn.user_id,
                     user_id=turn.user_id,
                     channel_id=scope.channel_id,
                     persona_prompt="Test persona",
@@ -981,8 +983,8 @@ async def test_relationship_evidence_navigation_survives_identity_migration_with
 
             async with session_factory() as db:
                 historical_turn = await db.get(AgentTurn, legacy.id)
-                historical_evidence = await db.get(RelationshipEvidence, legacy.id)
-                unrelated_evidence = await db.get(RelationshipEvidence, other_member.id)
+                historical_evidence = await db.get(RelationshipEvidence, (legacy.id, legacy.user_id))
+                unrelated_evidence = await db.get(RelationshipEvidence, (other_member.id, other_member.user_id))
                 assert historical_turn is not None
                 assert historical_turn.user_id == "alice-old"
                 assert historical_evidence is not None

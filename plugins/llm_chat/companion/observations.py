@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from collections.abc import Mapping
 
-from sqlalchemy import select
+from sqlalchemy import or_, and_, select
 from entari_plugin_database import get_session
 
 from utils.companion_core import CompanionLimits
@@ -15,10 +15,12 @@ from utils.companion_core.policy import SHANGHAI, USER_QUIET_GRACE_MINUTES
 from .types import CompanionConflict, ReflectionSnapshot
 from .models import CompanionMember
 from ..models import AgentTurn, AgentEvent, ContextSession
+from .evidence import member_input_text, eligible_member_inputs
 from .claim_store import read_contact_timing
 from .persistence import aware
 from ..relationships.state import load_relationship_snapshot
-from ..scheduled_chat_context import _user_content, _assistant_content
+from ..relationships.identity import resolve_relationship_owner
+from ..scheduled_chat_context import _safe_text, _user_content, _assistant_content
 
 
 def _size(value: Mapping[str, object]) -> int:
@@ -73,7 +75,7 @@ async def reflection_input(
     source_map = snapshot.member_turn_ids
     ids = {turn_id for member in snapshot.members for turn_id in source_map.get(member.member_ref, ())[-6:]}
     rows: list[tuple[int, str, str, str, datetime | None]] = []
-    events: list[tuple[int, str, str]] = []
+    events: list[AgentEvent] = []
     if ids:
         async with get_session() as db:
             rows = list(
@@ -90,8 +92,10 @@ async def reflection_input(
                         .where(
                             AgentTurn.id.in_(ids),
                             ContextSession.scope_id == scope_id,
-                            ContextSession.purpose == "chat",
-                            AgentTurn.trigger_kind == "message",
+                            or_(
+                                and_(ContextSession.purpose == "chat", AgentTurn.trigger_kind == "message"),
+                                and_(ContextSession.purpose == "companion", AgentTurn.trigger_kind == "autonomous"),
+                            ),
                             AgentTurn.status.in_(("completed", "silent", "declined")),
                             AgentTurn.finished_at.is_not(None),
                         )
@@ -107,30 +111,51 @@ async def reflection_input(
                 events = list(
                     (
                         await db.execute(
-                            select(AgentEvent.turn_id, AgentEvent.event_type, AgentEvent.payload_json)
+                            select(AgentEvent)
                             .where(
                                 AgentEvent.turn_id.in_(valid_ids),
-                                AgentEvent.event_type.in_(("user_input", "assistant_output")),
-                                AgentEvent.model_visible.is_(True),
+                                AgentEvent.event_type.in_(
+                                    ("user_input", "assistant_output", "companion_participation", "response_decision")
+                                ),
                             )
                             .order_by(AgentEvent.turn_id, AgentEvent.sequence)
                         )
                     )
-                    .tuples()
+                    .scalars()
                     .all()
                 )
-    by_turn: dict[int, dict[str, object]] = {}
-    for turn_id, event_type, raw in events:
-        parsed = json.loads(str(raw))
-        if not isinstance(parsed, Mapping):
-            continue
-        item = by_turn.setdefault(int(turn_id), {})
-        if event_type == "user_input":
-            _speaker, text = _user_content(parsed, "user")
-            previous = item.get("user")
-            item["user"] = f"{previous}\n\n{text[:800]}" if isinstance(previous, str) else text[:800]
-        elif event_type == "assistant_output":
-            item["assistant"] = _assistant_content(parsed)[:800]
+    by_turn: dict[tuple[int, str], dict[str, object]] = {}
+    assistants: dict[int, str] = {}
+    turn_owners = {int(row[0]): str(row[1]) for row in rows}
+    grouped_events: dict[int, list[AgentEvent]] = {}
+    for event in events:
+        grouped_events.setdefault(event.turn_id, []).append(event)
+    async with get_session() as db:
+        owners: dict[str, str] = {}
+        for turn_id, turn_events in grouped_events.items():
+            for event in turn_events:
+                if event.event_type != "assistant_output" or not event.model_visible or event.status != "confirmed":
+                    continue
+                parsed = json.loads(event.payload_json)
+                if isinstance(parsed, Mapping):
+                    assistants[turn_id] = _assistant_content(parsed)[:800]
+            for parsed, subject in eligible_member_inputs(turn_events, turn_owners[turn_id]):
+                own_text = member_input_text(parsed)
+                if own_text is None:
+                    continue
+                if subject not in owners:
+                    owners[subject] = await resolve_relationship_owner(db, subject, channel_id)
+                item = by_turn.setdefault((turn_id, owners[subject]), {})
+                speaker, _ = _user_content(parsed, "user")
+                author = parsed.get("host_author")
+                item["speaker"] = author.get("display_name", speaker) if isinstance(author, Mapping) else speaker
+                previous = item.get("user")
+                own_text = _safe_text(own_text, limit=800)
+                item["user"] = f"{previous}\n\n{own_text}" if isinstance(previous, str) else own_text
+        member_owners = {
+            member.member_ref: await resolve_relationship_owner(db, member.user_id, channel_id)
+            for member in snapshot.members
+        }
     selected: list[dict[str, object]] = []
     ownership: dict[str, tuple[int, ...]] = {}
     timing: dict[str, dict[str, object]] = {}
@@ -150,7 +175,7 @@ async def reflection_input(
         if len(timing) != len(snapshot.members):
             raise CompanionConflict("Companion timing no longer has every selected member")
     for member in snapshot.members:
-        _relation, relationship = await load_relationship_snapshot(member.user_id, channel_id)
+        _relation, relationship = await load_relationship_snapshot(member_owners[member.member_ref], channel_id)
         attention = [dict(item) for item in snapshot.attention if item.get("member_ref") == member.member_ref]
         item: dict[str, object] = {
             "member_ref": member.member_ref,
@@ -178,18 +203,19 @@ async def reflection_input(
         newest_first: list[dict[str, object]] = []
         # Rows arrive newest first: fill the budget with the latest contiguous history, then show it in time order.
         for turn_id, owner, speaker, outcome, created_at in rows:
-            if str(owner) not in {member.user_id, member.platform_user_id} or int(turn_id) not in allowed:
+            if int(turn_id) not in allowed:
                 continue
-            text = by_turn.get(int(turn_id), {})
+            text = by_turn.get((int(turn_id), member_owners[member.member_ref]), {})
             if "user" not in text:
                 continue
             episode_time = _episode_time(created_at, now)
             episode = {
                 "turn_id": int(turn_id),
-                "speaker": str(speaker),
+                "speaker": text.get("speaker", str(speaker)),
                 "outcome": str(outcome),
                 **episode_time,
                 **text,
+                "assistant": assistants.get(int(turn_id), ""),
             }
             item["episodes"] = [episode, *reversed(newest_first)]
             if _size(payload) > available_chars:
