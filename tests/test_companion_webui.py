@@ -678,6 +678,184 @@ async def test_review_detail_uses_native_input_proposal_and_real_commit_boundary
 
 
 @pytest.mark.asyncio
+async def test_reflection_inspection_reuses_authoritative_historical_review(companion_webui):
+    data = companion_webui
+    turn = data.reviews[0][1]
+    response = await data.client.get(f"{PREFIX}/turns/{turn.turn_ref}/inspection")
+    assert response.status_code == 200
+    inspection = response.json()["item"]
+    review = inspection["companion"]["review"]
+    detail = (await data.client.get(f"{PREFIX}/scopes/{data.scope.scope_ref}/companion/reviews/review_001")).json()[
+        "item"
+    ]
+    assert review == detail
+    assert review["native_turn"]["turn_ref"] == turn.turn_ref
+    assert review["persona_key"] == inspection["persona"]["key"] == "alpha"
+    assert review["historical"] is True
+    assert review["proposal"]["decision_summary"] == "A brief structured decision summary."
+    assert review["state"]["life"] == LIFE_BEFORE
+    assert review["proposal"]["life"] == LIFE_AFTER
+    assert review["changes"]["committed"] is True
+    assert review["transaction_committed"] is True
+    assert review["committed_life_version"] == 2
+    assert review["decision"]["status"] == "reserved"
+    assert review["decision"]["reason"] == "contact_reserved"
+    assert review["contacts"][0]["confirmed_count"] == 1
+    assert review["contacts"][0]["status"] == "unknown"
+    assert review["contacts"][0]["limits"] == {"daily_contacts": 1}
+    assert [item["turn_id"] for item in review["evidence_turns"]] == [1]
+    assert inspection["companion"]["reflection"]["proposal"] == review["proposal"]
+    serialized = json.dumps(review)
+    for private in (
+        "CURRENT ONLY",
+        "lease_token",
+        "lease_deadline",
+        "secret-platform",
+        "secret-contact-lease",
+        "secret-receipt",
+        "private-contact-identity",
+        "HTTP-body-not-for-list",
+        "HTTP-response-not-for-list",
+    ):
+        assert private not in serialized
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("index", "status", "committed", "gate"),
+    [
+        (1, "completed", True, "not_proposed"),
+        (2, "completed", True, "blocked"),
+        (3, "failed", False, "failed"),
+        (4, "cancelled", False, None),
+    ],
+)
+async def test_reflection_inspection_preserves_actual_review_outcomes(companion_webui, index, status, committed, gate):
+    data = companion_webui
+    turn = data.reviews[index][1]
+    result = (await data.client.get(f"{PREFIX}/turns/{turn.turn_ref}/inspection")).json()["item"]
+    review = result["companion"]["review"]
+    assert review["review_ref"] == data.reviews[index][0].lease_token
+    assert review["status"] == status
+    assert review["changes"]["committed"] is committed
+    assert (review["decision"]["status"] if review["decision"] else None) == gate
+    assert (review["proposal"] is not None) is (status != "failed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("purpose", "trigger"),
+    [("chat", "message"), ("chat", "reflection"), ("companion_reflection", "message"), ("companion", "autonomous")],
+)
+async def test_nonreflection_inspection_and_turn_lists_skip_review_lookup(companion_webui, monkeypatch, purpose, trigger):
+    data = companion_webui
+    turn = data.reviews[0][1]
+    async with data.factory() as db, db.begin():
+        stored_turn = await db.get(AgentTurn, turn.id)
+        context = await db.get(ContextSession, turn.session_id)
+        stored_turn.trigger_kind = trigger
+        context.purpose = purpose
+        session_ref = context.session_ref
+
+    def forbidden_review(*args, **kwargs):
+        raise AssertionError("Only native reflection inspection may look up a review")
+
+    monkeypatch.setattr(agent_admin, "companion_review_detail", forbidden_review)
+    result = (await data.client.get(f"{PREFIX}/turns/{turn.turn_ref}/inspection")).json()["item"]
+    assert result["companion"]["review"] is None
+    assert result["companion"]["reflection"]["proposal"]["life"] == LIFE_AFTER
+    turns = await data.client.get(f"{PREFIX}/sessions/{session_ref}/turns")
+    assert turns.status_code == 200
+    assert len(turns.json()["items"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ownership",
+    [
+        "missing_start",
+        "public_start",
+        "invalid_ref",
+        "missing_review",
+        "foreign_review",
+        "wrong_scope",
+        "wrong_persona",
+        "missing_persona",
+        "unkeyed_persona",
+        "duplicate_start",
+        "conflicting_start",
+        "duplicate_owner",
+    ],
+)
+async def test_reflection_inspection_rejects_missing_or_ambiguous_review_ownership(companion_webui, ownership):
+    data = companion_webui
+    turn = data.reviews[0][1]
+    async with data.factory() as db, db.begin():
+        start = await db.scalar(
+            select(AgentEvent).where(
+                AgentEvent.turn_id == turn.id,
+                AgentEvent.event_type == "companion_reflection",
+                AgentEvent.status == "started",
+            )
+        )
+        if ownership == "missing_start":
+            await db.delete(start)
+        elif ownership == "public_start":
+            start.model_visible = True
+        elif ownership in {"invalid_ref", "missing_review", "foreign_review"}:
+            start.payload_json = json.dumps(
+                {
+                    "lease_token": []
+                    if ownership == "invalid_ref"
+                    else "missing-review"
+                    if ownership == "missing_review"
+                    else data.foreign_review.lease_token
+                }
+            )
+        elif ownership == "wrong_scope":
+            context = await db.get(ContextSession, turn.session_id)
+            context.scope_id = data.other.id
+        elif ownership == "wrong_persona":
+            review = await db.get(CompanionReview, "review_001")
+            review.persona_key = "retired"
+        elif ownership in {"missing_persona", "unkeyed_persona"}:
+            snapshot = await db.get(SessionPersonaSnapshot, turn.session_id)
+            if ownership == "missing_persona":
+                await db.delete(snapshot)
+            else:
+                snapshot.snapshot_json = json.dumps({"name": "Historical without an identity"})
+        elif ownership in {"duplicate_start", "conflicting_start"}:
+            db.add(
+                _event(
+                    turn.id,
+                    9,
+                    "companion_reflection",
+                    {"lease_token": "review_001" if ownership == "duplicate_start" else "review_002"},
+                    status="started",
+                )
+            )
+        elif ownership == "duplicate_owner":
+            competing_start = await db.scalar(
+                select(AgentEvent).where(
+                    AgentEvent.turn_id == data.reviews[1][1].id,
+                    AgentEvent.event_type == "companion_reflection",
+                    AgentEvent.status == "started",
+                )
+            )
+            competing_start.payload_json = start.payload_json
+    response = await data.client.get(f"{PREFIX}/turns/{turn.turn_ref}/inspection")
+    assert response.status_code == 200
+    companion = response.json()["item"]["companion"]
+    assert companion["review"] is None
+    assert companion["reflection"]["historical"] is True
+    assert companion["reflection"]["proposal"]["life"] == LIFE_AFTER
+    if ownership == "duplicate_owner":
+        competing = await data.client.get(f"{PREFIX}/turns/{data.reviews[1][1].turn_ref}/inspection")
+        assert competing.status_code == 200
+        assert competing.json()["item"]["companion"]["review"] is None
+
+
+@pytest.mark.asyncio
 async def test_evidence_jumps_cannot_associate_other_scope_persona_or_member(companion_webui):
     data = companion_webui
     reflection_turn = data.reviews[0][1]

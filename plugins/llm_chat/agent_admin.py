@@ -205,6 +205,9 @@ class AgentAdminService:
         events = await turn_events(turn.id)
         context_session = await self._session_id(turn.session_id)
         relationship = project_relationship_views(events)
+        persona = await self._historical_persona(turn.session_id)
+        companion = project_companion(events)
+        companion["review"] = await self._turn_companion_review(turn, context_session, events, persona)
         return {
             "turn": {
                 **self._serialize_turn(turn),
@@ -212,16 +215,57 @@ class AgentAdminService:
                 **summarize_turn_events(events),
                 **project_turn_timing(turn, events),
             },
-            "persona": await self._historical_persona(turn.session_id),
+            "persona": persona,
             "usage": summarize_usage(events),
             "context": project_context(events),
             "model_calls": project_model_calls(events, turn_status=turn.status),
             "tool_calls": project_tool_calls(events, turn_status=turn.status),
             "outputs": project_outputs(events),
             **relationship,
-            "companion": project_companion(events),
+            "companion": companion,
             "evidence_turns": await self._relationship_evidence_turns(turn, relationship),
         }
+
+    async def _turn_companion_review(
+        self,
+        turn: AgentTurn,
+        context_session: ContextSession,
+        events: list[AgentEvent],
+        persona: dict[str, object] | None,
+    ) -> dict[str, object] | None:
+        """Attach only a uniquely owned historical review, never current companion state."""
+        if context_session.purpose != "companion_reflection" or turn.trigger_kind != "reflection":
+            return None
+        starts = [
+            event
+            for event in events
+            if event.event_type == "companion_reflection" and event.status == "started" and not event.model_visible
+        ]
+        if len(starts) != 1:
+            return None
+        review_ref = load_event_payload(starts[0]).get("lease_token")
+        persona_key = persona.get("key") if persona else None
+        if not isinstance(review_ref, str) or not 1 <= len(review_ref) <= 200:
+            return None
+        if not isinstance(persona_key, str) or not persona_key:
+            return None
+        scope = await self._scope_id(context_session.scope_id)
+        try:
+            detail = await self.companion_review_detail(scope.scope_ref, review_ref)
+        except AgentAdminError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        native = detail.get("native_turn")
+        if (
+            detail.get("review_ref") != review_ref
+            or detail.get("persona_key") != persona_key
+            or not isinstance(native, dict)
+            or native.get("turn_ref") != turn.turn_ref
+            or native.get("session_ref") != context_session.session_ref
+        ):
+            return None
+        return detail
 
     @staticmethod
     async def _turn_relationship_summaries(turns: list[AgentTurn]) -> dict[int, dict[str, object]]:

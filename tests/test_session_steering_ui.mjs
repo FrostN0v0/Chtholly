@@ -6,6 +6,7 @@ import { createContext, runInContext } from "node:vm";
 const app = readFileSync(new URL("../plugins/llm_chat/webui_sessions/app.js", import.meta.url), "utf8");
 const content = readFileSync(new URL("../plugins/llm_chat/webui_sessions/content.js", import.meta.url), "utf8");
 const companion = readFileSync(new URL("../plugins/llm_chat/webui_sessions/companion.js", import.meta.url), "utf8");
+const navigation = readFileSync(new URL("../plugins/llm_chat/webui_sessions/navigation.js", import.meta.url), "utf8");
 
 function page() {
   function descendants(element) {
@@ -136,6 +137,8 @@ function page() {
   sandbox.SessionContent = window.SessionContent;
   runInContext(companion, sandbox);
   sandbox.SessionCompanion = window.SessionCompanion;
+  runInContext(navigation, sandbox);
+  sandbox.SessionTree = window.SessionTree;
   runInContext(app + `
     renderTurns = () => {};
     renderSession = () => {};

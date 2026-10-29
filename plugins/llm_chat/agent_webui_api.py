@@ -25,6 +25,7 @@ _ASSET_FILES = {
     "app.js": "text/javascript; charset=utf-8",
     "companion.css": "text/css; charset=utf-8",
     "companion.js": "text/javascript; charset=utf-8",
+    "navigation.js": "text/javascript; charset=utf-8",
 }
 _PAGE_HEADERS = {
     "Cache-Control": "no-store",
@@ -93,7 +94,7 @@ def create_agent_sessions_router(
             document = (asset_dir / "index.html").read_text(encoding="utf-8")
             stylesheet, script = themed_assets(
                 asset_dir,
-                script_names=("content.js", "charts.js", "companion.js", "app.js"),
+                script_names=("content.js", "charts.js", "companion.js", "navigation.js", "app.js"),
                 style_names=("app.css", "content.css", "charts.css", "companion.css"),
             )
         except (OSError, UnicodeError):

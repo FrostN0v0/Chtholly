@@ -38,7 +38,10 @@ const state = {
   scopes: [], scope: null, sessions: [], session: null, detail: null, turns: [], turn: null,
   inspection: null, events: [], navigation: 0, scopeLoad: 0, sessionLoad: 0,
   pollTimer: null, pollBusy: false, payload: null, action: null, actionBusy: false,
-  newestFirst: true, purposeFilter: "chat", activeView: "sessions", companion: null,
+  newestFirst: true, purposeFilter: "", sessionLoading: false,
+  channel: null, channelLoad: 0, channelLoading: false, channelError: "",
+  selectedReview: "", review: null, reviewError: "",
+  reviewPollRemaining: 0, scopePollRemaining: 20,
 };
 
 function node(tag, className = "", text = "") {
@@ -62,7 +65,7 @@ function short(value, limit = 140) {
   return source.length > limit ? `${source.slice(0, limit)}…` : source;
 }
 function label(value) { return labels[value] || value || "未知"; }
-const purposeLabels = { chat: "\u666e\u901a\u804a\u5929", reminder: "\u63d0\u9192", companion: "\u4e3b\u52a8\u8054\u7cfb", companion_reflection: "\u966a\u4f34\u53cd\u601d" };
+const purposeLabels = { chat: "\u666e\u901a\u804a\u5929", reminder: "\u63d0\u9192", companion: "\u4e3b\u52a8\u8054\u7cfb", companion_reflection: "\u590d\u76d8" };
 function purposeLabel(value) { return purposeLabels[value] || value || "\u7528\u9014\u672a\u8bb0\u5f55"; }
 function turnSpeaker(turn) {
   return turn.purpose === "companion_reflection" ? "\u5185\u90e8\u590d\u76d8" : turn.user_name || "\u7528\u6237";
@@ -306,23 +309,16 @@ function affectIndicators(view, turnStatus) {
 }
 async function selectEvidenceTurn(evidence) {
   if (!evidence?.turn_ref || !evidence.session_ref) return;
-  const fromCompanion = state.activeView === "companion";
   if (state.session?.session_ref !== evidence.session_ref) {
     const generation = state.navigation;
     const result = await request(`/sessions/${encodeURIComponent(evidence.session_ref)}`);
     if (generation !== state.navigation) return;
     if (!state.sessions.some((session) => session.session_ref === evidence.session_ref)) state.sessions.push(result.item);
-    if (fromCompanion) setActiveView("sessions");
-    state.purposeFilter = result.item.purpose || "chat";
+    if (state.purposeFilter && state.purposeFilter !== (result.item.purpose || "chat")) state.purposeFilter = "";
     $("purpose-select").value = state.purposeFilter;
-    await selectSession(result.item, evidence.turn_ref);
-  } else {
-    if (fromCompanion) setActiveView("sessions");
-    state.purposeFilter = state.session.purpose || "chat";
-    $("purpose-select").value = state.purposeFilter;
-    await selectTurn(state.turns.find((turn) => turn.turn_ref === evidence.turn_ref) || evidence);
-  }
-  if (fromCompanion) selectTab($(state.session?.purpose === "companion_reflection" ? "tab-timeline" : "tab-io"));
+    if (!await selectSession(result.item, evidence.turn_ref, { showDetail: true })) return;
+  } else if (!await selectTurn(state.turns.find((turn) => turn.turn_ref === evidence.turn_ref) || evidence)) return;
+  selectTab($("tab-io"));
 }
 function evidenceLinks(ids, recordKey) {
   const row = node("div", "actions evidence-links");
@@ -436,16 +432,21 @@ async function loadScopes() {
     $("scope-select").append(option);
   }
   state.scope = state.scopes.find((scope) => scope.scope_ref === oldScope) || state.scopes[0] || null;
+  if (oldScope !== state.scope?.scope_ref) { state.sessions = []; state.session = null; state.channel = null; }
   $("scope-select").value = state.scope?.scope_ref || "";
   renderScope();
-  await loadSessions(state.session?.session_ref);
-  if (generation === state.scopeLoad && oldScope === state.scope?.scope_ref && previousView === "list") $("sessions-workspace").dataset.view = "list";
-  if (generation === state.scopeLoad && state.activeView === "companion") await state.companion.activate(state.scope);
-  if (generation === state.scopeLoad) status(state.scopes.length ? "已同步" : "暂无聊天范围");
+  const selectedReview = oldScope === state.scope?.scope_ref ? state.selectedReview : "";
+  if (!await loadSessions(state.session?.session_ref) || generation !== state.scopeLoad) return;
+  if (selectedReview && previousView === "detail") await selectReview(selectedReview);
+  if (oldScope === state.scope?.scope_ref && previousView === "list") $("sessions-workspace").dataset.view = "list";
+  await loadChannelOverview();
+  await sessionTree.refresh();
+  if (generation === state.scopeLoad) status(state.scopes.length ? "\u5df2\u540c\u6b65" : "\u6682\u65e0\u804a\u5929\u8303\u56f4");
 }
 function renderScope() {
   const scope = state.scope;
   $("scope-meta").replaceChildren();
+  $("session-title").textContent = scope?.channel_name || scope?.display_name || "\u9891\u9053\u4fe1\u606f";
   if (scope) {
     $("scope-meta").append(node("p", "", `${scope.platform || ""}${scope.persona ? ` · 当前 ${personaName(scope.persona)}` : ""}`));
     $("scope-meta").append(rawDetails("范围标识", { channel_id: scope.channel_id, scope_ref: scope.scope_ref }));
@@ -455,36 +456,94 @@ function renderScope() {
   $("rollover-button").disabled = !active || state.actionBusy;
   $("hard-reset-button").disabled = !scope || state.actionBusy;
 }
+function renderChannelOverview() {
+  const target = $("scope-overview");
+  const opened = new Set([...target.querySelectorAll("details[open]")].map((item) => item.dataset.detailKey));
+  const focused = target.contains(document.activeElement) && document.activeElement.tagName === "SUMMARY"
+    ? document.activeElement.parentElement.dataset.detailKey : null;
+  const modal = document.querySelector("#session-dialog .modal-body");
+  const scroll = modal.scrollTop;
+  target.replaceChildren();
+  if (state.channelError) target.append(node("p", "error", state.channelError));
+  if (state.channel) target.append(companionRenderer.overview(state.channel));
+  else if (state.channelLoading) target.append(node("p", "muted", "\u6b63\u5728\u8bfb\u53d6\u9891\u9053\u72b6\u6001\u2026"));
+  for (const item of target.querySelectorAll("details")) {
+    item.open = opened.has(item.dataset.detailKey);
+    if (focused && focused === item.dataset.detailKey) item.querySelector("summary")?.focus({ preventScroll: true });
+  }
+  modal.scrollTop = scroll;
+}
+async function loadChannelOverview() {
+  const scope = state.scope;
+  const generation = ++state.channelLoad;
+  state.channelLoading = Boolean(scope);
+  state.channelError = "";
+  if (!scope) state.channel = null;
+  renderChannelOverview();
+  if (!scope) return;
+  try {
+    const result = await request(`/scopes/${encodeURIComponent(scope.scope_ref)}/companion`);
+    if (generation === state.channelLoad && scope === state.scope) state.channel = result.item;
+  } catch (error) {
+    if (generation === state.channelLoad && scope === state.scope && error?.name !== "AbortError") state.channelError = error.message;
+  } finally {
+    if (generation === state.channelLoad && scope === state.scope) {
+      state.channelLoading = false; renderChannelOverview(); state.scopePollRemaining = 20; startPolling();
+    }
+  }
+}
+async function selectReview(reviewRef) {
+  if (!state.scope || !reviewRef) return;
+  stopPolling();
+  ++state.sessionLoad;
+  const generation = beginNavigation();
+  const scope = state.scope;
+  state.selectedReview = reviewRef;
+  state.review = null;
+  state.reviewError = "";
+  state.reviewPollRemaining = 20;
+  state.turn = null;
+  state.inspection = null;
+  state.events = [];
+  $("sessions-workspace").dataset.view = "detail";
+  document.querySelector(".inspector").scrollTop = 0;
+  renderTurns(); renderWorkspace();
+  try {
+    const result = await request(`/scopes/${encodeURIComponent(scope.scope_ref)}/companion/reviews/${encodeURIComponent(reviewRef)}`);
+    if (generation !== state.navigation || scope !== state.scope) return;
+    if (result.item.native_turn?.turn_ref && result.item.native_turn?.session_ref) {
+      await selectEvidenceTurn(result.item.native_turn);
+      return;
+    }
+    state.review = result.item;
+  } catch (error) {
+    if (generation === state.navigation && error?.name !== "AbortError") state.reviewError = error.message;
+  } finally {
+    if (generation === state.navigation) { renderWorkspace(); startPolling(); }
+  }
+}
+
 async function loadSessions(preferredRef = "") {
   stopPolling();
   const generation = ++state.sessionLoad;
+  renderSessions(); renderTurns();
   const scope = state.scope;
   const result = scope ? await request(`/scopes/${encodeURIComponent(scope.scope_ref)}/sessions?limit=500`) : { items: [] };
-  if (generation !== state.sessionLoad || scope !== state.scope) return;
+  if (generation !== state.sessionLoad || scope !== state.scope) return false;
   state.sessions = result.items || [];
   const visible = state.sessions.filter((item) => !state.purposeFilter || (item.purpose || "chat") === state.purposeFilter);
   const selected = visible.find((item) => item.session_ref === preferredRef)
     || visible.find((item) => item.status === "active") || visible[0] || null;
   const turnRef = selected?.session_ref === state.session?.session_ref ? state.turn?.turn_ref : "";
-  await selectSession(selected, turnRef);
+  return selectSession(selected, turnRef, { showDetail: Boolean(turnRef) && $("sessions-workspace").dataset.view === "detail" });
 }
 function renderSessions() {
-  const visible = state.sessions.filter((session) => !state.purposeFilter || (session.purpose || "chat") === state.purposeFilter || session.session_ref === state.session?.session_ref);
-  $("session-count").textContent = state.sessions.length ? `(${state.sessions.length})` : "";
-  const select = $("session-select");
-  select.replaceChildren();
-  select.disabled = !visible.length;
-  if (!visible.length) select.append(node("option", "", state.sessions.length ? "\u5f53\u524d\u7528\u9014\u65e0\u4f1a\u8bdd" : "\u6682\u65e0\u4f1a\u8bdd"));
-  for (const session of visible) {
-    const sessionPurpose = session.purpose || "chat";
-    const option = node("option", "", `#${session.sequence} \xb7 ${purposeLabel(sessionPurpose)} \xb7 ${personaName(session.persona)} \xb7 ${label(session.status)} \xb7 ${date(session.created_at)}`);
-    option.value = session.session_ref;
-    select.append(option);
-  }
-  select.value = state.session?.session_ref || "";
+  const count = state.sessions.filter((session) => !state.purposeFilter || (session.purpose || "chat") === state.purposeFilter).length;
+  $("session-count").textContent = `(${count})`;
 }
-async function selectSession(session, preferredTurnRef = "") {
+async function selectSession(session, preferredTurnRef = "", { showDetail = false } = {}) {
   stopPolling();
+  ++state.sessionLoad;
   const generation = beginNavigation();
   state.session = session;
   state.detail = null;
@@ -492,24 +551,39 @@ async function selectSession(session, preferredTurnRef = "") {
   state.turns = [];
   state.inspection = null;
   state.events = [];
+  state.selectedReview = "";
+  state.review = null;
+  state.reviewError = "";
+  state.sessionLoading = Boolean(session);
+  if (!showDetail) $("sessions-workspace").dataset.view = "list";
   renderSessions(); renderScope(); renderSession(); renderTurns(); renderWorkspace();
-  if (!session) return;
+  if (!session) return true;
   const ref = encodeURIComponent(session.session_ref);
-  const [detail, turns] = await Promise.all([request(`/sessions/${ref}`), request(`/sessions/${ref}/turns?limit=1000`)]);
-  if (generation !== state.navigation) return;
-  state.detail = detail.item;
-  state.turns = turns.items || [];
-  renderSession(); renderTurns();
-  if (preferredTurnRef) await selectTurn(state.turns.find((turn) => turn.turn_ref === preferredTurnRef) || { turn_ref: preferredTurnRef });
-  else if (state.turns.length) await selectTurn(state.turns.reduce((latest, turn) => turn.sequence > latest.sequence ? turn : latest));
+  try {
+    const [detail, turns] = await Promise.all([request(`/sessions/${ref}`), request(`/sessions/${ref}/turns?limit=1000`)]);
+    if (generation !== state.navigation) return false;
+    state.detail = detail.item;
+    state.turns = turns.items || [];
+    if (!showDetail && preferredTurnRef) state.turn = state.turns.find((turn) => turn.turn_ref === preferredTurnRef) || null;
+    state.sessionLoading = false;
+    renderSession(); renderTurns();
+    if (showDetail && preferredTurnRef) return await selectTurn(state.turns.find((turn) => turn.turn_ref === preferredTurnRef) || { turn_ref: preferredTurnRef });
+    if (showDetail && state.turns.length) return await selectTurn(state.turns.reduce((latest, turn) => turn.sequence > latest.sequence ? turn : latest));
+    return true;
+  } finally {
+    if (state.session === session) { state.sessionLoading = false; renderTurns(); startPolling(); }
+  }
 }
 function renderSession() {
   const container = $("session-detail");
   container.replaceChildren();
-  $("session-details-button").disabled = !state.detail;
-  if (!state.detail) return empty(container, state.session ? "\u6b63\u5728\u8bfb\u53d6\u4f1a\u8bdd\u2026" : "\u8bf7\u9009\u62e9\u4e00\u4e2a\u4f1a\u8bdd");
+  $("session-details-button").disabled = !state.scope;
+  if (!state.detail) {
+    if (state.sessionLoading) empty(container, "\u6b63\u5728\u8bfb\u53d6\u4f1a\u8bdd\u2026");
+    return;
+  }
   const detail = state.detail;
-  $("session-title").textContent = `\u4f1a\u8bdd #${detail.sequence} \xb7 ${purposeLabel(detail.purpose || "chat")} \xb7 ${personaName(detail.persona)}`;
+  container.append(node("h3", "", `\u9009\u4e2d\u4f1a\u8bdd #${detail.sequence} \xb7 ${purposeLabel(detail.purpose || "chat")} \xb7 ${personaName(detail.persona)}`));
   const overview = node("div", "session-summary");
   overview.append(metric("\u72b6\u6001", label(detail.status)), metric("\u8f6e\u6b21", number(detail.turn_count)), metric("\u521b\u5efa\u65f6\u95f4", date(detail.created_at)));
   container.append(overview);
@@ -529,35 +603,36 @@ function renderSession() {
   if (!detail.anchors?.length) anchors.content.append(node("p", "muted", "\u6682\u65e0\u56fa\u5b9a\u4e8b\u4ef6"));
   container.append(anchors.item, rawDetails("\u539f\u59cb\u4f1a\u8bdd\u6570\u636e", detail));
 }
+function turnListItem(turn) {
+  const item = button("", () => selectTurn(turn), "list-item");
+  item.dataset.focusKey = turn.turn_ref;
+  item.classList.toggle("is-active", turn.turn_ref === state.turn?.turn_ref);
+  item.setAttribute("aria-current", String(turn.turn_ref === state.turn?.turn_ref));
+  const heading = node("div", "item-heading");
+  const statusBadge = badge(turn.status);
+  if (turn.purpose === "companion_reflection") statusBadge.textContent = `\u6a21\u578b ${label(turn.status)}`;
+  heading.append(node("strong", "", turnSpeaker(turn)), statusBadge);
+  const missingInput = turn.purpose === "companion_reflection" ? "\u67e5\u770b\u590d\u76d8\u7ed3\u8bba\u4e0e\u7ed3\u679c" : "\u7528\u6237\u8f93\u5165\u6458\u8981\u672a\u8bb0\u5f55";
+  item.append(heading, node("p", "snippet", turn.input_preview == null ? missingInput : short(turn.input_preview, 180)));
+  const meta = node("div", "turn-list-meta");
+  const timing = node("span", "", compactDuration(turn));
+  timing.title = turnDuration(turn);
+  meta.append(node("span", "", `#${turn.sequence} \xb7 ${date(turn.created_at)}`), timing);
+  if (turn.input_count > 1) meta.append(node("span", "", `${turn.input_count - 1} \u6761\u8865\u5145\u8f93\u5165`));
+  item.append(meta);
+  const evaluation = turn.relationship_evaluation;
+  const changes = Object.entries(evaluation?.changes || {}).filter(([, change]) => typeof change.delta === "number" && change.delta !== 0);
+  if (changes.length) item.append(node("p", "muted batch-summary", `\u6279\u6b21\uff1a${changes.map(([key, change]) => `${relationshipAxes[key] || key} ${axisDelta(change.delta)}`).join(" \xb7 ")}`));
+  else if (["failed", "pending", "running"].includes(evaluation?.status)) item.append(node("p", "muted batch-summary", evaluationStatus(evaluation.status)));
+  return item;
+}
 function renderTurns() {
-  $("turn-count").textContent = String(state.turns.length);
   $("turn-order-button").textContent = state.newestFirst ? "\u6700\u65b0\u5728\u4e0a" : "\u6700\u65e9\u5728\u4e0a";
   $("turn-order-button").setAttribute("aria-pressed", String(state.newestFirst));
-  $("turn-order-button").title = state.newestFirst ? "\u5207\u6362\u4e3a\u6700\u65e9\u5728\u4e0a" : "\u5207\u6362\u4e3a\u6700\u65b0\u5728\u4e0a";
-  $("turn-list").replaceChildren();
-  if (!state.turns.length) empty($("turn-list"), "\u6682\u65e0\u8f6e\u6b21");
-  const ordered = [...state.turns].sort((a, b) => state.newestFirst ? b.sequence - a.sequence : a.sequence - b.sequence);
-  for (const turn of ordered) {
-    const item = button("", () => selectTurn(turn), "list-item");
-    item.dataset.focusKey = turn.turn_ref;
-    item.classList.toggle("is-active", turn.turn_ref === state.turn?.turn_ref);
-    item.setAttribute("aria-current", String(turn.turn_ref === state.turn?.turn_ref));
-    const heading = node("div", "item-heading");
-    heading.append(node("strong", "", turnSpeaker(turn)), badge(turn.status), node("span", "muted turn-purpose", purposeLabel(turn.purpose || state.session?.purpose || "chat")));
-    const missingInput = turn.purpose === "companion_reflection" ? "\u7cfb\u7edf\u89e6\u53d1\uff0c\u65e0\u65b0\u7528\u6237\u8f93\u5165" : "\u7528\u6237\u8f93\u5165\u6458\u8981\u672a\u8bb0\u5f55";
-    item.append(heading, node("p", "snippet", turn.input_preview == null ? missingInput : short(turn.input_preview, 180)));
-    const meta = node("div", "turn-list-meta");
-    const timing = node("span", "", compactDuration(turn));
-    timing.title = turnDuration(turn);
-    meta.append(node("span", "", `#${turn.sequence} \xb7 ${date(turn.created_at)}`), timing);
-    if (turn.input_count > 1) meta.append(node("span", "", `${turn.input_count - 1} \u6761\u8865\u5145\u8f93\u5165`));
-    item.append(meta);
-    const evaluation = turn.relationship_evaluation;
-    const changes = Object.entries(evaluation?.changes || {}).filter(([, change]) => typeof change.delta === "number" && change.delta !== 0);
-    if (changes.length) item.append(node("p", "muted batch-summary", `\u6279\u6b21\uff1a${changes.map(([key, change]) => `${relationshipAxes[key] || key} ${axisDelta(change.delta)}`).join(" \xb7 ")}`));
-    else if (["failed", "pending", "running"].includes(evaluation?.status)) item.append(node("p", "muted batch-summary", evaluationStatus(evaluation.status)));
-    $("turn-list").append(item);
-  }
+  sessionTree.render($("turn-list"), {
+    scope: state.scope, sessions: state.sessions, session: state.session, turns: state.turns,
+    purpose: state.purposeFilter, newestFirst: state.newestFirst, reviewRef: state.selectedReview, loading: state.sessionLoading,
+  });
 }
 async function fetchTurn(turnRef) {
   const ref = encodeURIComponent(turnRef);
@@ -566,8 +641,12 @@ async function fetchTurn(turnRef) {
 }
 async function selectTurn(turn) {
   stopPolling();
+  ++state.sessionLoad;
   const generation = beginNavigation();
   state.turn = turn;
+  state.selectedReview = "";
+  state.review = null;
+  state.reviewError = "";
   state.inspection = null;
   state.events = [];
   $("sessions-workspace").dataset.view = "detail";
@@ -575,18 +654,21 @@ async function selectTurn(turn) {
   document.querySelector(".inspector").scrollTop = 0;
   renderTurns(); renderWorkspace();
   const result = await fetchTurn(turn.turn_ref);
-  if (generation !== state.navigation) return;
+  if (generation !== state.navigation) return false;
   state.inspection = result.inspection;
   state.events = result.events;
   state.turn = result.inspection.turn;
+  state.reviewPollRemaining = state.turn.purpose === "companion_reflection" ? 20 : 0;
   renderTurns(); renderWorkspace();
   startPolling();
+  return true;
 }
 function renderOverview(inspection) {
   const target = $("turn-overview");
   const overview = node("section", "overview-section");
   const statusLine = node("div", "overview-status");
-  statusLine.append(badge(inspection.turn.status), node("span", "", purposeLabel(inspection.turn.purpose || "chat")));
+  const reflection = inspection.turn.purpose === "companion_reflection";
+  statusLine.append(badge(inspection.turn.status), node("span", "", reflection ? "\u6a21\u578b\u8f6e\u6b21" : purposeLabel(inspection.turn.purpose || "chat")));
   overview.append(statusLine);
   const facts = node("dl", "fields overview-facts");
   const models = [...new Set((inspection.model_calls || []).map((call) => call.model).filter(Boolean))];
@@ -596,9 +678,9 @@ function renderOverview(inspection) {
     ["\u65f6\u95f4", date(inspection.turn.created_at)],
     ["\u6a21\u578b", models.join(" / ") || inspection.turn.model || "\u672a\u8bb0\u5f55"],
     ["\u89d2\u8272", personaName(inspection.persona)],
-    ["\u9996\u6761\u56de\u590d", confirmed.length ? duration(confirmed[0].duration_ms) : "\u672a\u8bb0\u5f55", "\u5df2\u8bb0\u5f55\u7684\u5904\u7406\u8d77\u70b9\u5230\u9996\u6761\u786e\u8ba4\u56de\u6267\uff1b\u4e0d\u542b\u672a\u8bb0\u5f55\u7684\u65e9\u671f\u6392\u961f"],
+    ...(!reflection ? [["\u9996\u6761\u56de\u590d", confirmed.length ? duration(confirmed[0].duration_ms) : "\u672a\u8bb0\u5f55", "\u5df2\u8bb0\u5f55\u7684\u5904\u7406\u8d77\u70b9\u5230\u9996\u6761\u786e\u8ba4\u56de\u6267\uff1b\u4e0d\u542b\u672a\u8bb0\u5f55\u7684\u65e9\u671f\u6392\u961f"]] : []),
     ["\u8017\u65f6", compactDuration(inspection.turn), turnDuration(inspection.turn)],
-    ["\u5de5\u5177", `${number(inspection.turn.tool_call_count)} \u6b21`],
+    ...(!reflection ? [["\u5de5\u5177", `${number(inspection.turn.tool_call_count)} \u6b21`]] : []),
   ]) {
     const detail = node("dd", "", value);
     if (explanation) detail.title = explanation;
@@ -631,6 +713,30 @@ function renderWorkspace() {
   const header = $("turn-header");
   header.replaceChildren();
   $("turn-overview").replaceChildren();
+  const reflection = state.turn?.purpose === "companion_reflection" || Boolean(state.selectedReview);
+  $("tab-io").textContent = reflection ? "\u590d\u76d8\u7ed3\u679c" : "\u5bf9\u8bdd\u8bb0\u5f55";
+  $("tab-relationship").hidden = reflection;
+  $("tab-timeline").hidden = Boolean(state.selectedReview);
+  $("tab-context").hidden = Boolean(state.selectedReview);
+  const selectedTab = tabs.find((tab) => tab.getAttribute("aria-selected") === "true");
+  if (selectedTab?.hidden) selectTab($("tab-io"));
+  else $("inspection-label").textContent = (selectedTab || $("tab-io")).textContent;
+  if (state.selectedReview) {
+    header.append(node("h2", "", "\u590d\u76d8\u7ed3\u679c"), node("p", "turn-identifier", state.selectedReview));
+    for (const id of ["timeline-view", "context-view", "relationship-view"]) $(id).replaceChildren();
+    const body = $("io-view");
+    body.replaceChildren();
+    if (state.review) {
+      body.append(companionRenderer.review(state.review, null));
+      const overview = node("section", "overview-section");
+      overview.append(badge(state.review.status), node("p", "muted", "\u672a\u5173\u8054\u6a21\u578b\u8f6e\u6b21"));
+      overview.append(node("p", "", date(state.review.started_at)), node("p", "muted", `${state.review.persona_key || "\u4eba\u683c\u672a\u8bb0\u5f55"} \u00b7 ${duration(state.review.duration_ms)}`));
+      $("turn-overview").append(overview);
+    } else body.append(node("p", state.reviewError ? "error" : "muted", state.reviewError || "\u6b63\u5728\u8bfb\u53d6\u590d\u76d8\u2026"));
+    $("collapse-details-button").disabled = !state.review;
+    $("overview-toggle").disabled = !state.review;
+    return;
+  }
   $("collapse-details-button").disabled = !state.inspection;
   $("overview-toggle").disabled = !state.inspection;
   if (!state.inspection) {
@@ -639,7 +745,7 @@ function renderWorkspace() {
     return;
   }
   const inspection = state.inspection;
-  header.append(node("h2", "", "\u8c03\u7528\u8be6\u60c5"), node("p", "turn-identifier", inspection.turn.turn_ref));
+  header.append(node("h2", "", reflection ? "\u590d\u76d8\u8be6\u60c5" : "\u8c03\u7528\u8be6\u60c5"), node("p", "turn-identifier", inspection.turn.turn_ref));
   renderOverview(inspection);
   renderTimeline(); renderContext(); renderIO();
   $("relationship-view").replaceChildren(relationshipPanel());
@@ -1000,6 +1106,15 @@ function inputCard(event, index, steering) {
 }
 function renderIO() {
   const target = $("io-view");
+  if (state.turn.purpose === "companion_reflection") {
+    const flow = node("div", "conversation-flow");
+    flow.append(companionRenderer.review(state.inspection.companion?.review, state.inspection.companion?.reflection));
+    const calls = node("div", "trace-group");
+    for (const entry of timelineCalls(false).sort((a, b) => (a.sequence ?? Infinity) - (b.sequence ?? Infinity))) calls.append(entry.card());
+    flow.append(calls);
+    target.replaceChildren(flow);
+    return;
+  }
   const applied = new Set(state.events.filter((event) => event.event_type === "user_input" && event.steering).map((event) => event.steering.sequence));
   const checkpoints = new Map(state.events.filter((event) => event.event_type === "steer_checkpoint" && event.steering).map((event) => [event.steering.sequence, event.steering]));
   const inputs = state.events.filter((event) => event.event_type === "user_input" || (event.event_type === "steer_received" && event.steering && !applied.has(event.steering.sequence)));
@@ -1019,7 +1134,7 @@ function renderIO() {
   }
   rows.sort((a, b) => (a.sequence ?? Infinity) - (b.sequence ?? Infinity));
   const flow = node("div", "conversation-flow");
-  if (!inputs.length) flow.append(node("p", "muted", state.turn.purpose === "companion_reflection" ? "\u7cfb\u7edf\u89e6\u53d1\uff0c\u65e0\u65b0\u7528\u6237\u8f93\u5165" : "\u7528\u6237\u8f93\u5165\u672a\u8bb0\u5f55"));
+  if (!inputs.length) flow.append(node("p", "muted", "\u7528\u6237\u8f93\u5165\u672a\u8bb0\u5f55"));
   let group = null;
   let groupKind = null;
   let unknownOrder = false;
@@ -1049,7 +1164,7 @@ function renderIO() {
     }
   }
   if (!outputs.length) {
-    const message = state.turn.purpose === "companion_reflection" ? "\u5185\u90e8\u590d\u76d8\uff0c\u4e0d\u76f4\u63a5\u53d1\u9001\u6d88\u606f" : state.turn.status === "silent" ? "\u672c\u8f6e\u4e3b\u52a8\u6c89\u9ed8" : state.turn.status === "running" ? "\u6b63\u5728\u751f\u6210\u2026" : "\u65e0\u5df2\u786e\u8ba4\u56de\u590d";
+    const message = state.turn.status === "silent" ? "\u672c\u8f6e\u4e3b\u52a8\u6c89\u9ed8" : state.turn.status === "running" ? "\u6b63\u5728\u751f\u6210\u2026" : "\u65e0\u5df2\u786e\u8ba4\u56de\u590d";
     flow.append(node("p", "flow-gap muted", message));
   }
   target.replaceChildren(flow);
@@ -1070,7 +1185,7 @@ function refreshPanels() {
   const focusKey = focused?.dataset.focusKey ? `${detailKey(focused)}|${focused.dataset.focusKey}` : null;
   const focusedDetail = focused?.tagName === "SUMMARY" ? detailKey(focused.parentElement) : null;
   const scrollPositions = [...document.querySelectorAll(".workspace .scroll, .inspector, .context-popover, #session-dialog .modal-body")].map((item) => [item, item.scrollTop, item.scrollLeft]);
-  const contentScrollers = () => [...document.querySelectorAll(".workspace .call-panel .invocation-content")].flatMap((root) =>
+  const contentScrollers = () => [...document.querySelectorAll(".workspace .invocation-content")].flatMap((root) =>
     [...root.querySelectorAll(".content-code, .invocation-message > .invocation-body")].map((item, index) => [`${detailKey(root)}|${index}`, item]));
   const contentScroll = new Map(contentScrollers().map(([key, item]) => [key, { top: item.scrollTop, left: item.scrollLeft }]));
   const pageScroll = { top: window.scrollY, left: window.scrollX, behavior: "instant" };
@@ -1101,12 +1216,64 @@ function stopPolling() {
 }
 function startPolling() {
   stopPolling();
+  if (document.hidden || !pageActive) return;
   const evaluation = state.inspection?.relationship_evaluation;
   const awaitingAffect = ["pending", "running", "failed"].includes(evaluation?.status)
     || (!evaluation && state.inspection?.relationship && ["completed", "silent", "declined"].includes(state.turn?.status));
-  if (document.hidden || (state.turn?.status !== "running" && !awaitingAffect)) return;
-  $("auto-refresh").classList.remove("is-hidden");
-  state.pollTimer = setTimeout(pollTurn, 3000);
+  const review = state.selectedReview ? state.review : state.inspection?.companion?.review;
+  const awaitingReview = state.reviewPollRemaining > 0 && (review?.status === "active"
+    || review?.contacts?.some((contact) => contact.status === "active")
+    || (!review?.contacts?.length && ["queued", "reserved"].includes(review?.decision?.status))
+    || (review?.transaction_committed === true && !review.decision));
+  if (state.turn?.status === "running" || awaitingAffect || awaitingReview) {
+    $("auto-refresh").classList.remove("is-hidden");
+    state.pollTimer = setTimeout(state.selectedReview ? pollReview : pollTurn, 3000);
+    return;
+  }
+  const due = state.channel?.mode?.mode === "companion" ? Date.parse(state.channel.mode.next_review_at) : NaN;
+  if ($("sessions-workspace").dataset.view === "list" && state.scopePollRemaining > 0 && Number.isFinite(due)) {
+    $("auto-refresh").classList.remove("is-hidden");
+    state.pollTimer = setTimeout(pollScope, Math.max(10000, Math.min(86400000, due - Date.now() + 3000)));
+  }
+}
+async function pollReview() {
+  if (state.pollBusy) { startPolling(); return; }
+  const generation = state.navigation;
+  const ref = state.selectedReview;
+  if (!ref || !state.scope || document.hidden) return stopPolling();
+  state.pollBusy = true;
+  --state.reviewPollRemaining;
+  try {
+    const result = await request(`/scopes/${encodeURIComponent(state.scope.scope_ref)}/companion/reviews/${encodeURIComponent(ref)}`);
+    if (generation !== state.navigation) return;
+    if (result.item.native_turn?.turn_ref && result.item.native_turn?.session_ref) await selectEvidenceTurn(result.item.native_turn);
+    else { state.review = result.item; refreshPanels(); }
+  } catch (error) { showError(error); }
+  finally { state.pollBusy = false; if (generation === state.navigation) startPolling(); }
+}
+async function pollScope() {
+  if (state.pollBusy) { startPolling(); return; }
+  const generation = state.navigation;
+  const scope = state.scope;
+  const session = state.session;
+  if (!scope || document.hidden || $("sessions-workspace").dataset.view !== "list") return stopPolling();
+  state.pollBusy = true;
+  --state.scopePollRemaining;
+  try {
+    const path = `/scopes/${encodeURIComponent(scope.scope_ref)}`;
+    const [sessions, channel, turns] = await Promise.all([
+      request(`${path}/sessions?limit=500`), request(`${path}/companion`),
+      session ? request(`/sessions/${encodeURIComponent(session.session_ref)}/turns?limit=1000`) : Promise.resolve(null),
+    ]);
+    if (generation !== state.navigation || scope !== state.scope) return;
+    state.sessions = sessions.items || [];
+    if (session && !state.sessions.some((item) => item.session_ref === session.session_ref)) state.sessions.push(session);
+    state.channel = channel.item;
+    if (turns) state.turns = turns.items || [];
+    renderSessions(); renderTurns();
+    if (!$("session-dialog").open) renderChannelOverview();
+  } catch (error) { showError(error); }
+  finally { state.pollBusy = false; if (generation === state.navigation) startPolling(); }
 }
 async function pollTurn() {
   if (state.pollBusy) { startPolling(); return; }
@@ -1115,6 +1282,7 @@ async function pollTurn() {
   const sessionRef = state.session?.session_ref;
   if (!turnRef || !sessionRef || document.hidden) return stopPolling();
   state.pollBusy = true;
+  if (state.turn?.purpose === "companion_reflection" && state.turn.status !== "running" && state.reviewPollRemaining > 0) --state.reviewPollRemaining;
   try {
     const [result, turns, detail] = await Promise.all([
       fetchTurn(turnRef), request(`/sessions/${encodeURIComponent(sessionRef)}/turns?limit=1000`), request(`/sessions/${encodeURIComponent(sessionRef)}`),
@@ -1275,25 +1443,11 @@ function confirmUnpin(anchor) {
   } });
 }
 
-const companionRenderer = SessionCompanion.create({
-  $, node, button, section, disclosure, metric, date, number, short, request, status, showError, eventButton,
-  selectEvidenceTurn, duration, isPageActive: () => pageActive,
+const companionRenderer = SessionCompanion.create({ node, button, disclosure, date, number, duration, eventButton, selectEvidenceTurn });
+const sessionTree = SessionTree.create({
+  node, button, date, label, purposeLabel, personaName, request, showError,
+  renderTurn: turnListItem, selectSession, selectReview,
 });
-state.companion = companionRenderer;
-function setActiveView(view) {
-  const next = view === "companion" ? "companion" : "sessions";
-  if (state.activeView === next) return;
-  state.activeView = next;
-  const companion = next === "companion";
-  $("sessions-workspace").hidden = companion;
-  $("companion-workspace").hidden = !companion;
-  for (const control of document.querySelectorAll(".session-picker, .purpose-picker, .admin-menu")) control.hidden = companion;
-  $("session-details-button").hidden = companion;
-  if (companion) stopPolling();
-  $("companion-view-button").textContent = companion ? "\u4f1a\u8bdd\u68c0\u67e5" : "\u966a\u4f34\u89c6\u56fe";
-  if (companion) companionRenderer.activate(state.scope).catch(showError);
-  else { companionRenderer.suspend(); startPolling(); }
-}
 
 const tabs = [...document.querySelectorAll("[role=tab]")];
 function selectTab(selected) {
@@ -1308,16 +1462,18 @@ function selectTab(selected) {
   document.querySelector(".inspector").scrollTop = 0;
   $("inspection-label").textContent = selected.textContent;
 }
-for (const [index, tab] of tabs.entries()) {
+for (const tab of tabs) {
   tab.addEventListener("click", () => {
     selectTab(tab);
     $("inspection-menu").open = false;
     $("inspection-label").focus({ preventScroll: true });
   });
   tab.addEventListener("keydown", (event) => {
-    const next = event.key === "ArrowRight" ? (index + 1) % tabs.length : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : null;
+    const visibleTabs = tabs.filter((item) => !item.hidden);
+    const index = visibleTabs.indexOf(tab);
+    const next = event.key === "ArrowRight" ? (index + 1) % visibleTabs.length : event.key === "ArrowLeft" ? (index + visibleTabs.length - 1) % visibleTabs.length : event.key === "Home" ? 0 : event.key === "End" ? visibleTabs.length - 1 : null;
     if (next === null) return;
-    event.preventDefault(); selectTab(tabs[next]); tabs[next].focus();
+    event.preventDefault(); selectTab(visibleTabs[next]); visibleTabs[next].focus();
   });
 }
 $("overview-toggle").addEventListener("click", () => {
@@ -1333,18 +1489,17 @@ $('scope-select').addEventListener("change", () => {
   beginNavigation();
   state.scope = state.scopes.find((scope) => scope.scope_ref === $("scope-select").value) || null;
   state.session = null;
+  state.sessions = [];
+  state.turns = [];
   renderScope();
-  loadSessions().then(() => {
-    if (state.activeView === "companion") return state.companion.activate(state.scope);
-  }).catch(showError);
+  state.channel = null;
+  loadSessions().then(loadChannelOverview).catch(showError);
 });
 $('purpose-select').addEventListener("change", () => {
   state.purposeFilter = $("purpose-select").value;
-  loadSessions(state.session?.session_ref).catch(showError);
-});
-$('companion-view-button').addEventListener("click", () => setActiveView(state.activeView === "companion" ? "sessions" : "companion"));
-$("session-select").addEventListener("change", () => {
-  selectSession(state.sessions.find((session) => session.session_ref === $("session-select").value) || null).catch(showError);
+  if (state.session && state.purposeFilter && (state.session.purpose || "chat") !== state.purposeFilter) {
+    selectSession(null).catch(showError);
+  } else { renderSessions(); renderTurns(); }
 });
 $("turn-order-button").addEventListener("click", () => {
   state.newestFirst = !state.newestFirst;
@@ -1354,6 +1509,7 @@ $("turn-order-button").addEventListener("click", () => {
 $("back-to-turns").addEventListener("click", () => {
   $("sessions-workspace").dataset.view = "list";
   $("turn-list").querySelector("[aria-current=true]")?.focus({ preventScroll: true });
+  startPolling();
 });
 document.addEventListener("click", (event) => {
   for (const menu of document.querySelectorAll(".context-bar > details[open], .message-details[open], .inspection-menu[open]")) {
@@ -1367,7 +1523,10 @@ document.addEventListener("keydown", (event) => {
     menu.open = false;
   }
 });
-$("session-details-button").addEventListener("click", () => $("session-dialog").showModal());
+$("session-details-button").addEventListener("click", () => {
+  $("session-dialog").showModal();
+  loadChannelOverview().catch(showError);
+});
 $("payload-reader-button").addEventListener("click", () => setPayloadMode(false));
 $("payload-source-button").addEventListener("click", () => setPayloadMode(true));
 $("refresh-button").addEventListener("click", () => loadScopes().catch(showError));
@@ -1416,14 +1575,13 @@ $("pin-event-button").addEventListener("click", () => {
   } });
 });
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) stopPolling();
-  if (state.activeView === "companion") state.companion.visibility();
-  else if (!document.hidden) startPolling();
+  if (document.hidden) { stopPolling(); sessionTree.cancel(); }
+  else startPolling();
 });
 window.addEventListener("pagehide", () => {
   pageActive = false;
   stopPolling();
-  state.companion.suspend();
+  sessionTree.cancel();
   pageController.abort();
   beginNavigation();
   attachmentVisibility.disconnect();
@@ -1434,6 +1592,6 @@ window.addEventListener("pageshow", (event) => {
   pageActive = true;
   pageController = new AbortController();
   attachmentRemoval.observe(document.body, { childList: true, subtree: true });
-  loadScopes().then(() => { if (state.activeView === "companion") return state.companion.activate(state.scope); }).catch(showError);
+  loadScopes().catch(showError);
 });
 loadScopes().catch(showError);

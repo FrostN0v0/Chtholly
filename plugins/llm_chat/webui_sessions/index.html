@@ -14,20 +14,15 @@
         <label for="scope-select">&#39057;&#36947;</label>
         <select id="scope-select" aria-label="&#36873;&#25321;&#32842;&#22825;&#33539;&#22260;"></select>
       </div>
-      <div class="context-picker session-picker">
-        <label for="session-select">&#20250;&#35805; <span id="session-count"></span></label>
-        <select id="session-select" aria-label="&#36873;&#25321;&#20250;&#35805;"></select>
-      </div>
       <div class="context-picker purpose-picker">
         <label for="purpose-select">&#29992;&#36884;</label>
-        <select id="purpose-select" aria-label="&#25353;&#29992;&#36884;&#36807;&#28388;"><option value="chat">&#26222;&#36890;&#32842;&#22825;</option><option value="">&#20840;&#37096;&#29992;&#36884;</option><option value="reminder">&#25552;&#37266;</option><option value="companion">&#20027;&#21160;&#32852;&#31995;</option><option value="companion_reflection">&#38506;&#20276;&#21453;&#24605;</option></select>
+        <select id="purpose-select" aria-label="&#25353;&#29992;&#36884;&#36807;&#28388;"><option value="">&#20840;&#37096;&#29992;&#36884;</option><option value="chat">&#26222;&#36890;&#32842;&#22825;</option><option value="companion">&#20027;&#21160;&#32852;&#31995;</option><option value="reminder">&#25552;&#37266;</option><option value="companion_reflection">&#22797;&#30424;</option></select>
       </div>
       <div class="context-actions">
         <span id="status" role="status" aria-live="polite">正在连接…</span>
         <span id="auto-refresh" class="is-hidden">自动刷新中</span>
         <button id="refresh-button" type="button">刷新</button>
-        <button id="companion-view-button" type="button">&#38506;&#20276;&#35270;&#22270;</button>
-        <button id="session-details-button" class="session-info" type="button" disabled>&#20250;&#35805;&#35814;&#24773;</button>
+        <button id="session-details-button" class="session-info" type="button" disabled>&#39057;&#36947;&#20449;&#24687;</button>
         <details class="admin-menu">
           <summary>&#31649;&#29702;</summary>
           <div class="context-popover session-controls">
@@ -38,16 +33,16 @@
         </details>
       </div>
     </div>
-    <main id="sessions-workspace" class="workspace" data-view="detail">
-      <section class="panel turn-panel" aria-label="&#35843;&#29992;&#35760;&#24405;">
+    <main id="sessions-workspace" class="workspace" data-view="list">
+      <section class="panel turn-panel" aria-label="&#20250;&#35805;&#35760;&#24405;">
         <div class="panel-head">
-          <h2>&#35843;&#29992;&#35760;&#24405; <span id="turn-count" class="muted">0</span></h2>
+          <h2>&#20250;&#35805;&#35760;&#24405; <span id="session-count" class="muted">0</span></h2>
           <button id="turn-order-button" class="quiet-button" type="button" aria-pressed="true">&#26368;&#26032;&#22312;&#19978;</button>
         </div>
-        <nav id="turn-list" class="scroll list" aria-label="&#36873;&#25321;&#35843;&#29992;&#35760;&#24405;"></nav>
+        <nav id="turn-list" class="scroll list session-tree" aria-label="&#20250;&#35805;&#19982;&#36718;&#27425;"></nav>
       </section>
       <section class="panel inspector" aria-label="&#36718;&#27425;&#24037;&#20316;&#21306;" data-overview-open="false">
-        <button id="back-to-turns" class="back-button" type="button">&#8592; &#35843;&#29992;&#35760;&#24405;</button>
+        <button id="back-to-turns" class="back-button" type="button">&#8592; &#20250;&#35805;&#35760;&#24405;</button>
         <div class="detail-heading">
           <div id="turn-header" class="turn-header">&#35831;&#36873;&#25321;&#19968;&#26465;&#35760;&#24405;&#12290;</div>
           <div class="inspector-navigation">
@@ -79,34 +74,11 @@
         </div>
       </section>
     </main>
-    <main id="companion-workspace" class="companion-workspace" data-mobile-view="list" hidden>
-      <nav class="companion-mobile-navigation" aria-label="&#38506;&#20276;&#35270;&#22270;">
-        <button id="companion-overview-button" type="button" aria-pressed="false">&#27010;&#35272;</button>
-        <button id="companion-history-button" type="button" aria-pressed="true">&#22797;&#30424;</button>
-      </nav>
-      <section class="companion-overview-pane panel" aria-label="&#38506;&#20276;&#27010;&#35272;">
-        <div class="panel-head"><h2>&#38506;&#20276;&#27010;&#35272;</h2><span id="companion-poll-status" class="muted"></span></div>
-        <div id="companion-overview" class="scroll companion-scroll"></div>
-      </section>
-      <section class="companion-history-pane panel" aria-label="&#38506;&#20276;&#21453;&#24605;&#21015;&#34920;">
-        <div class="panel-head"><h2>&#21453;&#24605; <span id="companion-review-count" class="muted">0</span></h2><button id="companion-collapse-button" class="quiet-button" type="button">&#20840;&#37096;&#25240;&#21472;</button></div>
-        <div class="companion-filters">
-          <label>&#20154;&#26684;<select id="companion-persona-filter" aria-label="&#25353;&#20154;&#26684;&#36807;&#28388;"></select></label>
-          <label>&#29366;&#24577;<select id="companion-status-filter" aria-label="&#25353;&#29366;&#24577;&#36807;&#28388;"><option value="">&#20840;&#37096;&#29366;&#24577;</option><option value="active">&#36827;&#34892;&#20013;</option><option value="completed">&#24050;&#23436;&#25104;</option><option value="failed">&#22833;&#36133;</option><option value="cancelled">&#24050;&#21462;&#28040;</option><option value="expired">&#24050;&#36807;&#26399;</option></select></label>
-        </div>
-        <nav id="companion-review-list" class="scroll list" aria-label="&#36873;&#25321;&#21453;&#24605;"></nav>
-        <div class="companion-pagination actions"><button id="companion-previous-button" type="button">&#19978;&#19968;&#39029;</button><span id="companion-page-status" class="muted"></span><button id="companion-next-button" type="button">&#19979;&#19968;&#39029;</button></div>
-      </section>
-      <section class="companion-detail-pane panel" aria-label="&#21453;&#24605;&#35814;&#24773;">
-        <button id="companion-back-button" class="back-button" type="button">&#8592; &#21453;&#24605;&#21015;&#34920;</button>
-        <div id="companion-detail-scroll" class="scroll companion-detail-scroll"><div id="companion-review-detail" class="view"></div></div>
-      </section>
-    </main>
   </div>
   <dialog id="session-dialog" class="modal modal-session" aria-labelledby="session-title">
     <form method="dialog" class="modal-card">
-      <header class="modal-head"><div><p class="eyebrow">&#20250;&#35805;&#27010;&#35272;</p><h2 id="session-title">&#20250;&#35805;&#35814;&#24773;</h2></div><button type="submit" aria-label="&#20851;&#38381;&#20250;&#35805;&#35814;&#24773;">&#20851;&#38381;</button></header>
-      <div class="modal-body"><div id="scope-meta" class="muted"></div><div id="session-detail" class="session-detail"></div></div>
+      <header class="modal-head"><div><p class="eyebrow">&#39057;&#36947;&#20449;&#24687;</p><h2 id="session-title">&#39057;&#36947;&#20449;&#24687;</h2></div><button type="submit" aria-label="&#20851;&#38381;&#39057;&#36947;&#20449;&#24687;">&#20851;&#38381;</button></header>
+      <div class="modal-body"><div id="scope-meta" class="muted"></div><div id="scope-overview"></div><div id="session-detail" class="session-detail"></div></div>
     </form>
   </dialog>
   <dialog id="payload-dialog" class="modal modal-wide" aria-labelledby="payload-title">
