@@ -65,7 +65,6 @@
   .companion-metrics .metric-value, .companion-stages .metric-value { font-size: 13px; }
 }
 @media (max-width: 520px) {
-  .purpose-picker { order: 3; }
   .companion-scroll { padding: 12px; }
   .companion-filters { padding: 8px; }
   .companion-metrics, .companion-stages { grid-template-columns: repeat(3, minmax(0, 1fr)); }

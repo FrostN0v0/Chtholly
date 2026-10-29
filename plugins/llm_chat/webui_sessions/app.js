@@ -79,10 +79,10 @@ function duration(value) {
   return value < 1000 ? `${number(value)} ms` : `${(value / 1000).toFixed(value < 10000 ? 2 : 1)} s`;
 }
 function turnDuration(turn) {
-  if (turn.duration_source === "received_to_confirmed_delivery") return `总耗时 ${duration(turn.duration_ms)}（接收输入 → 最后确认送达）`;
+  if (turn.duration_source === "received_to_confirmed_delivery") return `\u4ea4\u4ed8\u8ba1\u65f6 ${duration(turn.duration_ms)}\uff08\u5df2\u8bb0\u5f55\u7684\u5904\u7406\u8d77\u70b9 \u2192 \u6700\u540e\u786e\u8ba4\u9001\u8fbe\uff1b\u65e9\u671f\u6392\u961f\u53ef\u80fd\u672a\u8ba1\u5165\uff09`;
   if (turn.duration_source === "legacy_lifecycle") return `旧版生命周期估算 ${duration(turn.duration_ms)}（不含完整准备阶段，非送达耗时）`;
   if (turn.duration_source === "running") {
-    const basis = turn.received_at ? "接收输入起" : "旧版生命周期起";
+    const basis = turn.received_at ? "\u5df2\u8bb0\u5f55\u7684\u5904\u7406\u8d77\u70b9" : "\u8f6e\u6b21\u521b\u5efa\u8d77\u70b9";
     const delivered = turn.duration_ms == null ? "尚无确认送达计时" : `最后确认送达 ${duration(turn.duration_ms)}`;
     return `运行中已过 ${duration(turn.elapsed_ms)}（${basis}，非最终耗时） · ${delivered}`;
   }
@@ -580,34 +580,65 @@ async function selectTurn(turn) {
   renderTurns(); renderWorkspace();
   startPolling();
 }
+function renderOverview(inspection) {
+  const target = $("turn-overview");
+  target.replaceChildren();
+  const overview = node("section", "overview-section");
+  overview.append(node("h3", "overview-title", "\u8fd0\u884c\u6982\u89c8"));
+  const facts = node("dl", "fields overview-facts");
+  const models = [...new Set((inspection.model_calls || []).map((call) => call.model).filter(Boolean))];
+  const rootSpeaker = inspection.turn.trigger_kind && inspection.turn.trigger_kind !== "message"
+    ? "\u5bbf\u4e3b\u89e6\u53d1" : inspection.turn.user_name || "\u672a\u8bb0\u5f55";
+  for (const [title, value] of [
+    ["\u6a21\u578b", models.length ? models.join(" / ") : inspection.turn.model || "\u672a\u8bb0\u5f55"],
+    ["\u89d2\u8272", personaName(inspection.persona)],
+    ["\u6839\u8f93\u5165\u4f5c\u8005", rootSpeaker],
+    ["\u5df2\u5e94\u7528\u8f93\u5165", `${number(inspection.turn.input_count)} \u6761`],
+    ["\u6a21\u578b\u8bf7\u6c42", number(inspection.turn.model_call_count)],
+    ["\u5de5\u5177\u8c03\u7528", number(inspection.turn.tool_call_count)],
+  ]) facts.append(node("dt", "", title), node("dd", "", value));
+  overview.append(facts);
+  target.append(overview);
+  const confirmed = (inspection.outputs || []).filter((output) => output.source === "message_delivery");
+  const metrics = node("div", "turn-metrics");
+  metrics.append(
+    metric("\u9996\u6761\u9001\u8fbe", confirmed.length ? duration(confirmed[0].duration_ms) : "\u672a\u8bb0\u5f55",
+      "\u5df2\u8bb0\u5f55\u7684\u5904\u7406\u8d77\u70b9\u5230\u9996\u6761\u786e\u8ba4\u56de\u6267\uff1b\u4e0d\u63a8\u6d4b\u65e9\u671f\u6392\u961f\u8017\u65f6"),
+    metric("\u8f6e\u6b21\u8ba1\u65f6", compactDuration(inspection.turn), turnDuration(inspection.turn)),
+  );
+  target.append(metrics);
+  target.append(node("p", "overview-note muted", "\u8ba1\u65f6\u4ee5\u5f53\u65f6\u8bb0\u5f55\u4e3a\u51c6\uff0c\u4e0d\u8865\u7b97\u672a\u8bb0\u5f55\u7684\u6392\u961f\u9636\u6bb5\u3002"));
+  const delivery = node("section", "overview-section");
+  delivery.append(node("h3", "overview-title", "\u4ea4\u4ed8\u4e0e\u8bc1\u636e"));
+  delivery.append(node("p", "", confirmed.length
+    ? `\u5df2\u786e\u8ba4 ${confirmed.length} \u6761\u6d88\u606f`
+    : (inspection.outputs || []).length ? "\u4ec5\u6709\u5386\u53f2\u6458\u8981\uff0c\u7f3a\u5c11\u72ec\u7acb\u9001\u8fbe\u51ed\u636e" : "\u6682\u65e0\u786e\u8ba4\u9001\u8fbe\u8bb0\u5f55"));
+  const replacements = state.events.filter((event) => event.event_type === "steer_checkpoint"
+    && event.details?.some((detail) => detail.label === "status" && detail.value === "candidate_replaced")).length;
+  delivery.append(node("p", "muted", replacements
+    ? `\u5df2\u8bb0\u5f55 ${replacements} \u6b21\u5019\u9009\u66ff\u6362\uff08\u4e0d\u4ee3\u8868\u5168\u90e8\u66ff\u6362\uff09`
+    : "\u672a\u89c1\u5019\u9009\u66ff\u6362\u8bb0\u5f55"));
+  target.append(delivery, usageDetails(inspection.usage));
+  target.append(node("p", "overview-note muted", "Token \u6309\u672c\u8f6e\u5b9e\u9645\u8bb0\u5f55\u7d2f\u8ba1\uff1b\u7f13\u5b58\u548c\u63a8\u7406\u662f\u5b50\u9879\uff0c\u4e0d\u91cd\u590d\u52a0\u603b\u3002"));
+}
 function renderWorkspace() {
   const header = $("turn-header");
   header.replaceChildren();
+  $("turn-overview").replaceChildren();
   $("collapse-details-button").disabled = !state.inspection;
+  $("overview-toggle").disabled = !state.inspection;
   if (!state.inspection) {
-    header.append(node("p", "", state.turn ? "正在读取轮次…" : "请选择一个轮次。"));
-    for (const id of ["timeline-view", "context-view", "io-view", "relationship-view", "decision-view"]) empty($(id), state.turn ? "正在读取轮次…" : "请选择一个轮次。");
+    header.append(node("p", "", state.turn ? "\u6b63\u5728\u8bfb\u53d6\u8f6e\u6b21\u2026" : "\u8bf7\u9009\u62e9\u4e00\u4e2a\u8f6e\u6b21\u3002"));
+    for (const id of ["timeline-view", "context-view", "io-view", "relationship-view", "decision-view", "turn-overview"]) empty($(id), state.turn ? "\u6b63\u5728\u8bfb\u53d6\u8f6e\u6b21\u2026" : "\u8bf7\u9009\u62e9\u4e00\u4e2a\u8f6e\u6b21\u3002");
     return;
   }
   const inspection = state.inspection;
   const heading = node("div", "item-heading");
-  heading.append(node("h2", "", turnSpeaker(inspection.turn)), badge(inspection.turn.status));
+  heading.append(node("h2", "", `\u8f6e\u6b21 #${number(inspection.turn.sequence)}`), badge(inspection.turn.status));
   heading.append(node("span", "muted turn-purpose", purposeLabel(inspection.turn.purpose || state.session?.purpose || "chat")));
-  heading.append(node("span", "muted turn-date", `#${inspection.turn.sequence} \xb7 ${date(inspection.turn.created_at)}`));
-  const models = [...new Set((inspection.model_calls || []).map((call) => call.model).filter(Boolean))];
-  const identity = node("p", "muted turn-identity", `${personaName(inspection.persona)} \xb7 ${models.length ? models.join(" / ") : inspection.turn.model || "\u6a21\u578b\u672a\u8bb0\u5f55"}`);
-  identity.title = identity.textContent;
-  const metrics = node("div", "turn-metrics");
-  const tokens = metric("Token", compactTokens(inspection.usage?.total_tokens), `${number(inspection.usage?.total_tokens)} Token`);
-  if (inspection.usage?.coverage?.complete === false && inspection.usage.total_tokens != null) tokens.append(node("span", "metric-note", "\u90e8\u5206\u7edf\u8ba1"));
-  metrics.append(metric("\u8017\u65f6", compactDuration(inspection.turn), turnDuration(inspection.turn)), tokens,
-    metric("\u6a21\u578b\u8bf7\u6c42", number(inspection.turn.model_call_count)), metric("\u5de5\u5177\u8c03\u7528", number(inspection.turn.tool_call_count)));
-  const statistics = node("details", "turn-statistics");
-  statistics.dataset.recordKey = "turn-statistics";
-  const usage = usageDetails(inspection.usage);
-  usage.open = true;
-  statistics.append(node("summary", "", "\u8be6\u7ec6\u7edf\u8ba1"), usage, node("p", "muted", turnDuration(inspection.turn)));
-  header.append(heading, identity, metrics, statistics);
+  heading.append(node("span", "muted turn-date", date(inspection.turn.created_at)));
+  header.append(heading);
+  renderOverview(inspection);
   renderTimeline(); renderContext(); renderIO();
   $("relationship-view").replaceChildren(relationshipPanel());
   $("decision-view").replaceChildren(SessionCompanion.decisionPanel(inspection, { node, section, disclosure, eventButton, date, number, outcomeLabel, badge, label }));
@@ -639,7 +670,7 @@ function modelCard(call, index) {
   content.append(panels, rawDetails("请求标识与统计", { request_id: call.request_id, request_event_ref: call.request_event_ref, response_event_ref: call.response_event_ref, usage: call.usage }));
   return item;
 }
-function toolCard(call, index) {
+function toolCard(call, index, includeDeliveries = true) {
   const deliveries = call.deliveries || [];
   const imageCount = deliveries.reduce((count, delivery) => count + (delivery.images?.length || 0), 0);
   const deliveryNote = deliveries.length ? `已确认送达 ${deliveries.length} 条消息${imageCount ? ` · ${imageCount} 张图片` : ""}` : "工具调用";
@@ -652,7 +683,7 @@ function toolCard(call, index) {
   meta.append(badge(call.status), node("span", "record-duration", duration(call.duration_ms)));
   summary.append(meta);
   content.append(node("p", "muted", `\u6267\u884c\u6548\u679c \xb7 ${label(call.effect)}`));
-  for (const delivery of deliveries) content.append(deliveryCard(delivery, `tool-delivery:${delivery.event_ref}`));
+  if (includeDeliveries) for (const delivery of deliveries) content.append(deliveryCard(delivery, `tool-delivery:${delivery.event_ref}`));
   if (call.delivery_source === "legacy_incomplete") content.append(node("p", "muted", "旧记录没有独立送达凭据；未留存的历史输出图片无法还原，不重新渲染历史 Markdown。"));
   const panels = node("div", "call-panels");
   const argumentsPanel = callPanel("\u8c03\u7528\u53c2\u6570", call.arguments_display ?? call.arguments_preview, call.call_event_ref, call.arguments_path || "");
@@ -667,15 +698,18 @@ function toolCard(call, index) {
   content.append(rawDetails("执行标识", { execution_ref: call.execution_ref, call_event_ref: call.call_event_ref, result_event_ref: call.result_event_ref }));
   return item;
 }
+function timelineCalls(includeDeliveries = true) {
+  const inspection = state.inspection;
+  return [
+    ...(inspection.model_calls || []).map((call, index) => ({ ref: call.request_event_ref || call.response_event_ref, card: () => modelCard(call, index) })),
+    ...(inspection.tool_calls || []).map((call, index) => ({ ref: call.call_event_ref || call.result_event_ref, card: () => toolCard(call, index, includeDeliveries) })),
+  ].map((entry) => ({ ...entry, sequence: eventByRef(entry.ref)?.sequence }));
+}
 function renderTimeline() {
   const target = $("timeline-view");
   target.replaceChildren();
   const inspection = state.inspection;
-  const calls = [
-    ...(inspection.model_calls || []).map((call, index) => ({ ref: call.request_event_ref || call.response_event_ref, card: () => modelCard(call, index) })),
-    ...(inspection.tool_calls || []).map((call, index) => ({ ref: call.call_event_ref || call.result_event_ref, card: () => toolCard(call, index) })),
-  ];
-  calls.sort((a, b) => (eventByRef(a.ref)?.sequence ?? Infinity) - (eventByRef(b.ref)?.sequence ?? Infinity));
+  const calls = timelineCalls().sort((a, b) => (a.sequence ?? Infinity) - (b.sequence ?? Infinity));
   const overview = node("div", "timeline-overview");
   overview.append(node("h3", "", "\u6267\u884c\u987a\u5e8f"), node("p", "muted", `${number(inspection.turn.model_call_count)} \u6b21\u8bf7\u6c42 \xb7 ${number(inspection.turn.tool_call_count)} \u6b21\u5de5\u5177\u8c03\u7528`));
   target.append(overview);
@@ -890,48 +924,66 @@ function deliveryCard(output, recordKey) {
   card.append(more);
   return card;
 }
+function inputCard(event, index, steering) {
+  const card = section(steering ? `\u8865\u5145\u8f93\u5165 ${steering.sequence - 1}` : "\u7528\u6237\u8f93\u5165", event.message?.speaker ? "" : "\u53d1\u8a00\u4eba\u672a\u8bb0\u5f55");
+  card.classList.add("input-record");
+  card.dataset.recordKey = steering ? `input:steer:${steering.sequence}` : `input:${event.event_ref || index}`;
+  if (steering) {
+    const timing = node("div", "event-meta");
+    timing.append(badge(steering.status), node("span", "", `\u63a5\u6536 ${date(steering.received_at)}`));
+    if (steering.applied_at) timing.append(node("span", "", `\u5e94\u7528 ${date(steering.applied_at)}`));
+    if (steering.reason) timing.append(node("span", "", steering.reason));
+    card.append(timing);
+  }
+  card.append(SessionContent.message(event.message || { speaker: null, content: eventPreview(event) ?? "\u672a\u8bb0\u5f55", quotes: [], mentions: [], truncated: false }));
+  appendImages(card, event);
+  const more = node("details", "raw-details");
+  const fullInput = eventButton(event.event_ref, "\u67e5\u770b\u5b8c\u6574\u8f93\u5165", "content");
+  fullInput.dataset.focusKey = `${card.dataset.recordKey}|content`;
+  more.append(node("summary", "", "\u8f93\u5165\u8bb0\u5f55"), fullInput);
+  card.append(more);
+  return card;
+}
 function renderIO() {
   const target = $("io-view");
   target.replaceChildren();
+  target.append(node("p", "flow-caption muted", "\u5bf9\u8bdd\u4e0e\u8c03\u7528\u6309\u5df2\u8bb0\u5f55\u7684\u4e8b\u4ef6\u987a\u5e8f\u5c55\u793a\uff1b\u5de5\u5177\u51c6\u5907\u6210\u529f\u4e0d\u7b49\u4e8e\u5df2\u53d1\u9001\u3002"));
   const applied = new Set(state.events.filter((event) => event.event_type === "user_input" && event.steering).map((event) => event.steering.sequence));
   const checkpoints = new Map(state.events.filter((event) => event.event_type === "steer_checkpoint" && event.steering).map((event) => [event.steering.sequence, event.steering]));
   const inputs = state.events.filter((event) => event.event_type === "user_input" || (event.event_type === "steer_received" && event.steering && !applied.has(event.steering.sequence)));
-  if (!inputs.length) {
-    const internal = state.turn.purpose === "companion_reflection";
-    target.append(section(internal ? "\u8f6e\u6b21\u8f93\u5165" : "\u7528\u6237\u8f93\u5165", internal ? "\u7cfb\u7edf\u89e6\u53d1\uff0c\u65e0\u65b0\u7528\u6237\u8f93\u5165" : "\u672a\u8bb0\u5f55"));
-  }
-  for (const [index, event] of inputs.entries()) {
-    const steering = event.event_type === "user_input" ? event.steering : checkpoints.get(event.steering?.sequence) || event.steering;
-    const card = section(steering ? `\u8865\u5145\u8f93\u5165 ${steering.sequence - 1}` : "\u7528\u6237\u8f93\u5165");
-    card.classList.add("input-record");
-    card.dataset.recordKey = steering ? `input:steer:${steering.sequence}` : `input:${event.event_ref || index}`;
-    if (steering) {
-      const timing = node("div", "event-meta");
-      timing.append(badge(steering.status), node("span", "", `\u63a5\u6536 ${date(steering.received_at)}`));
-      if (steering.applied_at) timing.append(node("span", "", `\u5e94\u7528 ${date(steering.applied_at)}`));
-      if (steering.reason) timing.append(node("span", "", steering.reason));
-      card.append(timing);
-    }
-    card.append(SessionContent.message(event.message || { speaker: state.turn.user_name, content: eventPreview(event) ?? "\u672a\u8bb0\u5f55", quotes: [], mentions: [], truncated: false }));
-    appendImages(card, event);
-    const more = node("details", "raw-details");
-    const fullInput = eventButton(event.event_ref, "\u67e5\u770b\u5b8c\u6574\u8f93\u5165", "content");
-    fullInput.dataset.focusKey = `${card.dataset.recordKey}|content`;
-    more.append(node("summary", "", "\u8f93\u5165\u8bb0\u5f55"), fullInput);
-    card.append(more);
-    target.append(card);
-  }
+  const rows = inputs.map((event, index) => ({
+    sequence: event.sequence, kind: "flow-input",
+    card: () => inputCard(event, index, event.event_type === "user_input" ? event.steering : checkpoints.get(event.steering?.sequence) || event.steering),
+  }));
+  for (const entry of timelineCalls(false)) rows.push({ ...entry, kind: "flow-call" });
   const outputs = state.inspection.outputs || [];
-  if (!outputs.length) {
-    const message = state.turn.purpose === "companion_reflection" ? "\u5185\u90e8\u590d\u76d8\u4e0d\u76f4\u63a5\u53d1\u9001\u6d88\u606f\uff1b\u8054\u7cfb\u63d0\u6848\u4e0e\u5bbf\u4e3b\u95e8\u7981\u89c1\u56de\u5e94\u51b3\u7b56\u3002" : state.turn.status === "silent" ? "\u672c\u8f6e\u4e3b\u52a8\u6c89\u9ed8" : state.turn.status === "running" ? "\u6b63\u5728\u751f\u6210\uff0c\u5c1a\u65e0\u786e\u8ba4\u56de\u590d" : "\u65e0\u5df2\u786e\u8ba4\u56de\u590d";
-    target.append(section("\u56de\u590d", message));
-  }
   for (const [index, output] of outputs.entries()) {
     const event = { ...eventByRef(output.event_ref), ...output };
-    target.append(deliveryCard(event, `output:${output.event_ref || index}`));
+    rows.push({ sequence: event.sequence, kind: "flow-output", card: () => deliveryCard(event, `output:${output.event_ref || index}`) });
   }
+  rows.sort((a, b) => (a.sequence ?? Infinity) - (b.sequence ?? Infinity));
+  const flow = node("div", "conversation-flow");
+  if (!inputs.length) {
+    const internal = state.turn.purpose === "companion_reflection";
+    flow.append(section(internal ? "\u8f6e\u6b21\u8f93\u5165" : "\u7528\u6237\u8f93\u5165", internal ? "\u7cfb\u7edf\u89e6\u53d1\uff0c\u65e0\u65b0\u7528\u6237\u8f93\u5165" : "\u672a\u8bb0\u5f55"));
+  }
+  let unknownOrder = false;
+  for (const row of rows) {
+    if (row.sequence == null && !unknownOrder) {
+      flow.append(node("p", "flow-gap muted", "\u4ee5\u4e0b\u9879\u76ee\u7684\u539f\u59cb\u4e8b\u4ef6\u987a\u5e8f\u672a\u8bb0\u5f55"));
+      unknownOrder = true;
+    }
+    const step = node("div", `flow-step ${row.kind}`);
+    step.append(row.card());
+    flow.append(step);
+  }
+  if (!outputs.length) {
+    const message = state.turn.purpose === "companion_reflection" ? "\u5185\u90e8\u590d\u76d8\u4e0d\u76f4\u63a5\u53d1\u9001\u6d88\u606f\uff1b\u8054\u7cfb\u63d0\u6848\u4e0e\u5bbf\u4e3b\u95e8\u7981\u89c1\u56de\u5e94\u51b3\u7b56\u3002" : state.turn.status === "silent" ? "\u672c\u8f6e\u4e3b\u52a8\u6c89\u9ed8" : state.turn.status === "running" ? "\u6b63\u5728\u751f\u6210\uff0c\u5c1a\u65e0\u786e\u8ba4\u56de\u590d" : "\u65e0\u5df2\u786e\u8ba4\u56de\u590d";
+    flow.append(section("\u56de\u590d", message));
+  }
+  target.append(flow);
   const advanced = node("details", "raw-details");
-  advanced.append(node("summary", "", "高级轮次信息"), node("pre", "code", text(state.inspection.turn)));
+  advanced.append(node("summary", "", "\u9ad8\u7ea7\u8f6e\u6b21\u4fe1\u606f"), node("pre", "code", text(state.inspection.turn)));
   target.append(advanced);
 }
 
@@ -941,13 +993,13 @@ function refreshPanels() {
     for (let parent = item; parent; parent = parent.parentElement) {
       if (parent.dataset.recordKey) records.push(parent.dataset.recordKey);
     }
-    return [item.closest(".view, #session-detail, #turn-header")?.id, ...records.reverse(),
+    return [item.closest(".view, #session-detail, #turn-header, #turn-overview")?.id, ...records.reverse(),
       item.dataset.detailKey || (item.classList.contains("usage-details") ? "usage" : item.querySelector("summary")?.textContent),
     ].join("|");
   };
   const opened = new Set([...document.querySelectorAll(".workspace details[open], #session-detail details[open]")].map(detailKey));
   const focused = document.activeElement;
-  const focusKey = focused?.dataset.focusKey;
+  const focusKey = focused?.dataset.focusKey ? `${detailKey(focused)}|${focused.dataset.focusKey}` : null;
   const focusedDetail = focused?.tagName === "SUMMARY" ? detailKey(focused.parentElement) : null;
   const scrollPositions = [...document.querySelectorAll(".workspace .scroll, .inspector, .context-popover, #session-dialog .modal-body")].map((item) => [item, item.scrollTop, item.scrollLeft]);
   const pageScroll = { top: window.scrollY, left: window.scrollX, behavior: "instant" };
@@ -958,7 +1010,7 @@ function refreshPanels() {
   }
   if (focusKey) {
     [...document.querySelectorAll(".workspace [data-focus-key], #session-detail [data-focus-key]")]
-      .find((item) => item.dataset.focusKey === focusKey)?.focus({ preventScroll: true });
+      .find((item) => `${detailKey(item)}|${item.dataset.focusKey}` === focusKey)?.focus({ preventScroll: true });
   }
   for (const [item, top, left] of scrollPositions) {
     item.scrollTop = top;
@@ -1185,6 +1237,14 @@ for (const [index, tab] of tabs.entries()) {
     event.preventDefault(); selectTab(tabs[next]); tabs[next].focus();
   });
 }
+$("overview-toggle").addEventListener("click", () => {
+  const inspector = document.querySelector(".inspector");
+  const open = inspector.dataset.overviewOpen !== "true";
+  inspector.dataset.overviewOpen = String(open);
+  $("overview-toggle").setAttribute("aria-expanded", String(open));
+  $("overview-toggle").textContent = open ? "\u6536\u8d77\u6982\u89c8" : "\u8fd0\u884c\u6982\u89c8";
+  if (open) $("turn-overview").scrollIntoView({ block: "nearest" });
+});
 $('scope-select').addEventListener("change", () => {
   ++state.scopeLoad;
   beginNavigation();
