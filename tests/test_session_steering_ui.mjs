@@ -55,6 +55,7 @@ function page() {
     }
     get childNodes() { return this.children; }
     get firstElementChild() { return this.children[0] || null; }
+    get lastElementChild() { return this.children.at(-1) || null; }
     get textContent() { return (this.ownText || "") + this.children.map((child) => child.textContent).join(""); }
     set textContent(value) { this.ownText = String(value); this.replaceChildren(); }
     append(...children) {
@@ -63,6 +64,19 @@ function page() {
         this.children.push(child);
         child.parentElement = this;
       }
+    }
+    insertBefore(child, reference) {
+      if (child === reference) return child;
+      if (reference !== null && !this.children.includes(reference)) throw new Error("Reference is not a child");
+      if (child.parentElement) child.parentElement.children = child.parentElement.children.filter((item) => item !== child);
+      const index = reference === null ? this.children.length : this.children.indexOf(reference);
+      this.children.splice(index, 0, child);
+      child.parentElement = this;
+      return child;
+    }
+    prepend(...children) {
+      const reference = this.firstElementChild;
+      for (const child of children) this.insertBefore(child, reference);
     }
     replaceChildren(...children) {
       for (const child of this.children) child.parentElement = null;
@@ -87,6 +101,7 @@ function page() {
   document.URL = "https://manage.example/api/llm-chat/sessions/page";
   document.body = new Element("body");
   document.createElement = (tag) => new Element(tag);
+  document.createElementNS = (_namespace, tag) => new Element(tag);
   document.createTextNode = (value) => {
     const element = new Element("text");
     element.textContent = value;

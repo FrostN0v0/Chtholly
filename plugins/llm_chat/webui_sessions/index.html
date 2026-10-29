@@ -38,32 +38,37 @@
         </details>
       </div>
     </div>
-    <main id="sessions-workspace" class="workspace" data-mobile-view="detail">
-      <section class="panel turn-panel" aria-label="&#36718;&#27425;&#21015;&#34920;">
+    <main id="sessions-workspace" class="workspace" data-view="detail">
+      <section class="panel turn-panel" aria-label="&#35843;&#29992;&#35760;&#24405;">
         <div class="panel-head">
-          <h2>&#36718;&#27425; <span id="turn-count" class="muted">0</span></h2>
+          <h2>&#35843;&#29992;&#35760;&#24405; <span id="turn-count" class="muted">0</span></h2>
           <button id="turn-order-button" class="quiet-button" type="button" aria-pressed="true">&#26368;&#26032;&#22312;&#19978;</button>
         </div>
-        <nav id="turn-list" class="scroll list" aria-label="&#36873;&#25321;&#36718;&#27425;"></nav>
+        <nav id="turn-list" class="scroll list" aria-label="&#36873;&#25321;&#35843;&#29992;&#35760;&#24405;"></nav>
       </section>
       <section class="panel inspector" aria-label="&#36718;&#27425;&#24037;&#20316;&#21306;" data-overview-open="false">
-        <button id="back-to-turns" class="back-button" type="button">&#8592; &#36718;&#27425;&#21015;&#34920;</button>
-        <div id="turn-header" class="turn-header">请选择一个轮次。</div>
-        <div class="inspector-layout">
-          <div class="inspector-main">
-            <div class="inspector-navigation">
+        <button id="back-to-turns" class="back-button" type="button">&#8592; &#35843;&#29992;&#35760;&#24405;</button>
+        <div class="detail-heading">
+          <div id="turn-header" class="turn-header">&#35831;&#36873;&#25321;&#19968;&#26465;&#35760;&#24405;&#12290;</div>
+          <div class="inspector-navigation">
+            <details id="inspection-menu" class="inspection-menu">
+              <summary id="inspection-label">&#23545;&#35805;&#35760;&#24405;</summary>
               <div class="tabs" role="tablist" aria-label="&#26816;&#26597;&#20869;&#23481;">
-                <button id="tab-io" class="tab is-active" role="tab" aria-selected="true" aria-controls="io-view" data-tab="io" type="button">&#23545;&#35805;</button>
-                <button id="tab-timeline" class="tab" role="tab" aria-selected="false" aria-controls="timeline-view" data-tab="timeline" tabindex="-1" type="button">&#35843;&#29992;</button>
+                <button id="tab-io" class="tab is-active" role="tab" aria-selected="true" aria-controls="io-view" data-tab="io" type="button">&#23545;&#35805;&#35760;&#24405;</button>
+                <button id="tab-timeline" class="tab" role="tab" aria-selected="false" aria-controls="timeline-view" data-tab="timeline" tabindex="-1" type="button">&#35831;&#27714;&#26126;&#32454;</button>
                 <button id="tab-context" class="tab" role="tab" aria-selected="false" aria-controls="context-view" data-tab="context" tabindex="-1" type="button">&#19978;&#19979;&#25991;</button>
                 <button id="tab-relationship" class="tab" role="tab" aria-selected="false" aria-controls="relationship-view" data-tab="relationship" tabindex="-1" type="button">&#20851;&#31995;</button>
                 <button id="tab-decision" class="tab" role="tab" aria-selected="false" aria-controls="decision-view" data-tab="decision" tabindex="-1" type="button">&#22238;&#24212;&#20915;&#23450;</button>
               </div>
-              <div class="inspector-actions">
-                <button id="overview-toggle" class="quiet-button overview-toggle" type="button" aria-controls="turn-overview" aria-expanded="false" disabled>&#36816;&#34892;&#27010;&#35272;</button>
-                <button id="collapse-details-button" class="collapse-button" type="button" aria-label="&#25240;&#21472;&#26412;&#36718;&#20840;&#37096;&#35814;&#24773;" disabled>&#20840;&#37096;&#25240;&#21472;</button>
-              </div>
+            </details>
+            <div class="inspector-actions">
+              <button id="overview-toggle" class="quiet-button overview-toggle" type="button" aria-controls="turn-overview" aria-expanded="false" disabled>&#20449;&#24687;</button>
+              <button id="collapse-details-button" class="collapse-button" type="button" aria-label="&#25240;&#21472;&#26412;&#36718;&#20840;&#37096;&#35814;&#24773;" disabled>&#20840;&#37096;&#25240;&#21472;</button>
             </div>
+          </div>
+        </div>
+        <div class="inspector-layout">
+          <div class="inspector-main">
             <div class="scroll inspector-body">
               <div id="io-view" class="view" role="tabpanel" aria-labelledby="tab-io" tabindex="0"></div>
               <div id="timeline-view" class="view" role="tabpanel" aria-labelledby="tab-timeline" tabindex="0" hidden></div>
