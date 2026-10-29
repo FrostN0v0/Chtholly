@@ -26,6 +26,8 @@ _ASSET_FILES = {
     "companion.css": "text/css; charset=utf-8",
     "companion.js": "text/javascript; charset=utf-8",
     "navigation.js": "text/javascript; charset=utf-8",
+    "activity.css": "text/css; charset=utf-8",
+    "activity.js": "text/javascript; charset=utf-8",
 }
 _PAGE_HEADERS = {
     "Cache-Control": "no-store",
@@ -94,8 +96,8 @@ def create_agent_sessions_router(
             document = (asset_dir / "index.html").read_text(encoding="utf-8")
             stylesheet, script = themed_assets(
                 asset_dir,
-                script_names=("content.js", "charts.js", "companion.js", "navigation.js", "app.js"),
-                style_names=("app.css", "content.css", "charts.css", "companion.css"),
+                script_names=("content.js", "charts.js", "companion.js", "navigation.js", "activity.js", "app.js"),
+                style_names=("app.css", "content.css", "charts.css", "companion.css", "activity.css"),
             )
         except (OSError, UnicodeError):
             return JSONResponse(
@@ -133,9 +135,10 @@ def create_agent_sessions_router(
     async def sessions(
         scope_ref: str,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        purpose: Annotated[str, Query(max_length=32)] = "",
     ) -> dict[str, object] | JSONResponse:
         try:
-            items = await service.list_sessions(scope_ref, limit)
+            items = await service.list_sessions(scope_ref, limit, purpose=purpose)
         except AgentAdminError as exc:
             return _error_response(exc)
         return {"success": True, "items": items}
@@ -183,10 +186,19 @@ def create_agent_sessions_router(
     @router.get("/sessions/{session_ref}/turns", response_model=None)
     async def turns(
         session_ref: str,
-        limit: Annotated[int, Query(ge=1, le=1000)] = 200,
+        limit: Annotated[int | None, Query(ge=1, le=1000)] = None,
+        view: Annotated[str, Query(max_length=32)] = "",
+        cursor: Annotated[str, Query(max_length=1500)] = "",
     ) -> dict[str, object] | JSONResponse:
         try:
-            items = await service.list_turns(session_ref, limit)
+            if view == "activity":
+                return {
+                    "success": True,
+                    **await service.list_activity(session_ref, limit=50 if limit is None else limit, cursor=cursor),
+                }
+            if view or cursor:
+                raise AgentAdminError("Unknown turns view", code="invalid_view")
+            items = await service.list_turns(session_ref, 200 if limit is None else limit)
         except AgentAdminError as exc:
             return _error_response(exc)
         return {"success": True, "items": items}

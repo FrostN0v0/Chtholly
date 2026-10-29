@@ -222,8 +222,9 @@ def _preview_source(event: AgentEvent, payload: Mapping[str, JSONType]) -> JSONT
 
 
 _MESSAGE_CONTENT_CHARS = 2400
-_MESSAGE_QUOTE_CHARS = 500
-_MESSAGE_MAX_QUOTES = 8
+_MESSAGE_QUOTE_CHARS = 2400
+_MESSAGE_MAX_FORWARD_NODES = 200
+_MESSAGE_FORWARD_CHARS = 32000
 _MESSAGE_MAX_MENTIONS = 10
 _MESSAGE_MAX_LIST_ITEMS = 12
 
@@ -285,35 +286,63 @@ def _human_message_value(value: object, state: list[bool], *, depth: int = 0) ->
     return ""
 
 
-def _message_quote(value: object, state: list[bool]) -> dict[str, object] | None:
+def _message_quote(
+    value: object,
+    state: list[bool],
+    *,
+    source: str,
+    images: Sequence[Mapping[str, object]],
+    limit: int = _MESSAGE_QUOTE_CHARS,
+    structured: bool = False,
+) -> dict[str, object] | None:
     mapping = _decode_message_mapping(value)
     if mapping is None:
-        content = _human_message_value(value, state)
-        return (
-            {"speaker": None, "role": "unknown", "content": _clip_message_text(content, _MESSAGE_QUOTE_CHARS, state)}
-            if content
-            else None
-        )
+        return None
     speaker = _display_text(mapping.get("speaker"))
     role = _display_text(mapping.get("speaker_role")) or _display_text(mapping.get("role"))
     raw_content = mapping.get("content")
-    nested = _decode_message_mapping(raw_content)
+    nested = None if structured else _decode_message_mapping(raw_content)
     if nested is not None and "content" in nested:
         mapping = nested
         raw_content = mapping.get("content")
-    content = _human_message_value(raw_content, state)
-    if not content:
+    local_state = [False]
+    content = _human_message_value(raw_content, local_state)
+    raw_images = mapping.get("images")
+    positions = (
+        {
+            image["index"]
+            for image in raw_images[:MAX_INPUT_AUDIT_ATTACHMENTS]
+            if isinstance(image, Mapping) and type(image.get("index")) is int and image["index"] > 0
+        }
+        if isinstance(raw_images, list)
+        else set()
+    )
+    captured = [image for image in images if image.get("source") == source and image.get("index") in positions]
+    image_count = min(len(raw_images), MAX_INPUT_AUDIT_ATTACHMENTS) if isinstance(raw_images, list) else 0
+    if not content and not image_count:
         return None
     speaker = speaker or _display_text(mapping.get("speaker"))
-    role = role or _display_text(mapping.get("speaker_role")) or _display_text(mapping.get("role")) or "unknown"
-    return {
+    role = role or _display_text(mapping.get("speaker_role")) or _display_text(mapping.get("role"))
+    content = _clip_message_text(content, limit, local_state)
+    state[0] = state[0] or local_state[0]
+    result: dict[str, object] = {
         "speaker": speaker,
-        "role": role,
-        "content": _clip_message_text(content, _MESSAGE_QUOTE_CHARS, state),
+        "role": "participant" if role == "user" else role if role in {"assistant", "participant"} else "unknown",
+        "content": content,
     }
+    if image_count:
+        result.update(images=captured, image_count=image_count)
+    if local_state[0]:
+        result["truncated"] = True
+    return result
 
 
-def _message_projection(value: object, *, structured: bool = False) -> dict[str, object] | None:
+def _message_projection(
+    value: object,
+    *,
+    structured: bool = False,
+    images: Sequence[Mapping[str, object]] = (),
+) -> dict[str, object] | None:
     """Project serialized user input without exposing platform metadata."""
     state = [False]
     mapping = _decode_message_mapping(value)
@@ -321,12 +350,15 @@ def _message_projection(value: object, *, structured: bool = False) -> dict[str,
         content = _human_message_value(value, state)
         if not content and isinstance(value, str):
             content = value
-        if not content:
+        if not content and not images:
             return None
         return {
             "speaker": None,
+            "role": "participant",
             "content": _clip_message_text(content, _MESSAGE_CONTENT_CHARS, state),
-            "quotes": [],
+            "reply_to": None,
+            "forwarded_messages": [],
+            "images": [image for image in images if image.get("source") not in {"forward", "quoted"}],
             "mentions": [],
             "truncated": state[0],
         }
@@ -339,23 +371,34 @@ def _message_projection(value: object, *, structured: bool = False) -> dict[str,
     content = _clip_message_text(_human_message_value(raw_content, state), _MESSAGE_CONTENT_CHARS, state)
     speaker = _display_text(outer.get("speaker")) or _display_text(mapping.get("speaker"))
 
-    raw_quotes: list[object] = []
-    for source in (outer,) if outer is mapping else (outer, mapping):
-        reply = source.get("reply_to")
-        if isinstance(reply, Mapping):
-            raw_quotes.append(reply)
+    sources = (outer,) if outer is mapping else (outer, mapping)
+    reply = next((source["reply_to"] for source in sources if isinstance(source.get("reply_to"), Mapping)), None)
+    reply_to = _message_quote(reply, state, source="quoted", images=images, structured=structured)
+    forwarded: list[dict[str, object]] = []
+    remaining = _MESSAGE_FORWARD_CHARS
+    for source in sources:
         candidate = source.get("forwarded_messages")
-        if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes, bytearray)):
-            raw_quotes.extend(candidate)
-    quotes: list[dict[str, object]] = []
-    for raw_quote in raw_quotes:
-        if len(quotes) >= _MESSAGE_MAX_QUOTES:
-            state[0] = True
-            break
-        quote = _message_quote(raw_quote, state)
-        if quote is None:
+        if not isinstance(candidate, list):
             continue
-        quotes.append(quote)
+        for node_index, raw_message in enumerate(candidate):
+            if (
+                node_index >= _MESSAGE_MAX_FORWARD_NODES
+                or len(forwarded) >= _MESSAGE_MAX_FORWARD_NODES
+                or remaining <= 0
+            ):
+                state[0] = True
+                break
+            message = _message_quote(
+                raw_message,
+                state,
+                source="forward",
+                images=images,
+                limit=min(_MESSAGE_QUOTE_CHARS, remaining),
+                structured=structured,
+            )
+            if message is not None:
+                remaining -= len(cast(str, message["content"]))
+                forwarded.append(message)
 
     raw_mentions: list[object] = []
     for source in (outer,) if outer is mapping else (outer, mapping):
@@ -382,8 +425,11 @@ def _message_projection(value: object, *, structured: bool = False) -> dict[str,
         mentions.append({"name": name})
     return {
         "speaker": speaker,
+        "role": "participant",
         "content": content,
-        "quotes": quotes,
+        "reply_to": reply_to,
+        "forwarded_messages": forwarded,
+        "images": [image for image in images if image.get("source") not in {"forward", "quoted"}],
         "mentions": mentions,
         "truncated": state[0],
     }
@@ -397,17 +443,17 @@ def _unwrap_user_turn(value: str, *, structured: bool = False) -> str:
     content = cast(str, projection["content"])
     speaker = projection.get("speaker")
     text = f"{speaker}\uff1a{content}" if isinstance(speaker, str) and speaker else content
-    quotes = projection.get("quotes")
-    if isinstance(quotes, list):
-        for quote in quotes:
-            if not isinstance(quote, Mapping):
-                continue
-            quote_content = quote.get("content")
-            if not isinstance(quote_content, str) or not quote_content:
-                continue
-            quote_speaker = quote.get("speaker")
-            label = quote_speaker if isinstance(quote_speaker, str) and quote_speaker else "\u672a\u77e5\u6765\u6e90"
-            text += f"\n[\u5f15\u7528 {label}] {quote_content}"
+    reply = projection.get("reply_to")
+    quoted = ([reply] if isinstance(reply, Mapping) else []) + cast(
+        list[dict[str, object]], projection["forwarded_messages"]
+    )
+    for item in quoted:
+        quote_content = item.get("content")
+        if not isinstance(quote_content, str) or not quote_content:
+            continue
+        quote_speaker = item.get("speaker")
+        label = quote_speaker if isinstance(quote_speaker, str) and quote_speaker else "\u672a\u77e5\u6765\u6e90"
+        text += f"\n[\u5f15\u7528 {label}] {quote_content}"
     mentions = projection.get("mentions")
     if isinstance(mentions, list):
         names = [
@@ -862,6 +908,7 @@ def event_images(
                 {
                     "name": label,
                     "source": source,
+                    "index": index if type(index) is int and index > 0 else None,
                     "speaker_role": raw.get("speaker_role", "unknown"),
                     "message_context": raw.get("message_context"),
                     "observation": raw.get("observation", "unobserved"),
@@ -907,8 +954,24 @@ def serialize_event_view(event: AgentEvent, payload: Mapping[str, JSONType]) -> 
     }
     if event.event_type == "user_input":
         view["message"] = _message_projection(
-            payload.get("content"), structured=payload.get("input_format") == "structured_user_turn"
+            payload.get("content"),
+            structured=payload.get("input_format") == "structured_user_turn",
+            images=cast(list[Mapping[str, object]], view["images"]),
         )
+        author = payload.get("host_author")
+        message = view["message"]
+        if isinstance(message, dict) and not message.get("speaker"):
+            message["speaker"] = _display_text(payload.get("speaker"))
+        if (
+            isinstance(message, dict)
+            and isinstance(author, Mapping)
+            and type(author.get("version")) is int
+            and author["version"] == 1
+        ):
+            if isinstance(author.get("display_name"), str):
+                message["speaker"] = author["display_name"]
+            if isinstance(author.get("speaker_id"), str):
+                message["speaker_id"] = author["speaker_id"]
         sequence = payload.get("steer_sequence")
         if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 2:
             view["title"] = "\u8865\u5145\u8f93\u5165"

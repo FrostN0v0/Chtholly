@@ -13,8 +13,9 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from .models import AgentTurn, AgentEvent
 from .agent_events import load_event_payload
-from .agent_event_view import event_images, event_preview, event_evidence
+from .agent_event_view import event_images, event_preview, event_evidence, serialize_event_view
 from .core.model_audit import normalize_usage
+from .agent_attachments import MAX_INPUT_AUDIT_ATTACHMENTS
 
 _TOKEN_FIELDS = (
     "input_tokens",
@@ -565,11 +566,153 @@ def project_tool_calls(events: Sequence[AgentEvent], *, turn_status: str = "runn
     return calls
 
 
+def _message_owner(
+    message: Mapping[str, object], event_ref: str, state: dict[str, int], *, depth: int = 0
+) -> dict[str, object]:
+    """Keep bounded source attachments under their actual authenticated owner."""
+    state["nodes"] += 1
+    if depth > 16 or state["nodes"] > 1024:
+        return {
+            "speaker": None,
+            "role": "unknown",
+            "content": "[显示已截断]",
+            "reply_to": None,
+            "forwarded_messages": [],
+            "images": [],
+            "truncated": True,
+            "event_ref": event_ref,
+        }
+    content = message.get("content")
+    text = content if isinstance(content, str) else ""
+    truncated = message.get("truncated") is True or len(text) > state["chars"]
+    text = text[: state["chars"]]
+    state["chars"] -= len(text)
+    speaker = message.get("speaker")
+    role = message.get("role")
+    images = message.get("images")
+    result: dict[str, object] = {
+        "speaker": speaker[:160] if isinstance(speaker, str) and speaker else None,
+        "role": role if isinstance(role, str) and role in {"assistant", "participant"} else "unknown",
+        "content": text,
+        "event_ref": event_ref,
+        "images": [
+            dict(image, event_ref=event_ref)
+            for image in images[:MAX_INPUT_AUDIT_ATTACHMENTS]
+            if isinstance(image, Mapping)
+        ]
+        if isinstance(images, list)
+        else [],
+        "reply_to": None,
+        "forwarded_messages": [],
+        "truncated": truncated,
+    }
+    speaker_id = message.get("speaker_id")
+    if isinstance(speaker_id, str):
+        result["speaker_id"] = speaker_id
+    reply = message.get("reply_to")
+    if isinstance(reply, Mapping):
+        result["reply_to"] = _message_owner(reply, event_ref, state, depth=depth + 1)
+    forwarded = message.get("forwarded_messages")
+    children: list[dict[str, object]] = []
+    if isinstance(forwarded, list):
+        for child in forwarded:
+            if state["nodes"] >= 1024:
+                result["truncated"] = True
+                break
+            if isinstance(child, Mapping):
+                children.append(_message_owner(child, event_ref, state, depth=depth + 1))
+    result["forwarded_messages"] = children
+    return result
+
+
+def _confirmed_message(
+    value: Mapping[str, object],
+    event: AgentEvent,
+    images: Sequence[Mapping[str, object]],
+    inputs: Mapping[tuple[int, int], Sequence[AgentEvent]],
+    state: dict[str, int],
+    *,
+    depth: int = 0,
+) -> dict[str, object]:
+    """Project the private sent-element snapshot, never protocol IDs or URLs."""
+    state["nodes"] += 1
+    if depth > 16 or state["nodes"] > 1024:
+        return {
+            "speaker": None,
+            "role": "unknown",
+            "content": "[显示已截断]",
+            "reply_to": None,
+            "forwarded_messages": [],
+            "images": [],
+            "truncated": True,
+            "event_ref": event.event_ref,
+        }
+    source_sequence = value.get("reply_to_sequence")
+    if (
+        depth > 0
+        and type(source_sequence) is int
+        and type(event.turn_id) is int
+        and type(event.sequence) is int
+        and 0 < source_sequence < event.sequence
+    ):
+        candidates = inputs.get((event.turn_id, source_sequence), ())
+        if len(candidates) == 1:
+            source = candidates[0]
+            source_payload = load_event_payload(source)
+            source_message = serialize_event_view(source, source_payload).get("message")
+            if isinstance(source_message, Mapping):
+                return _message_owner(source_message, source.event_ref, state, depth=depth)
+    content = value.get("content")
+    text = content if isinstance(content, str) else ""
+    if type(source_sequence) is int and not text:
+        text = "[引用原消息未记录]"
+    truncated = value.get("truncated") is True or len(text) > state["chars"]
+    text = text[: state["chars"]]
+    state["chars"] -= len(text)
+    indexes = value.get("image_indexes")
+    positions = (
+        {index for index in indexes[:1024] if type(index) is int and index > 0} if isinstance(indexes, list) else set()
+    )
+    owned_images = [dict(image, event_ref=event.event_ref) for image in images if image.get("index") in positions]
+    if positions - {image.get("index") for image in owned_images}:
+        truncated = True
+    speaker = value.get("speaker")
+    role = value.get("role")
+    result: dict[str, object] = {
+        "speaker": speaker[:160] if isinstance(speaker, str) and speaker else None,
+        "role": role if isinstance(role, str) and role in {"assistant", "participant"} else "unknown",
+        "content": text,
+        "reply_to": None,
+        "forwarded_messages": [],
+        "images": owned_images,
+        "truncated": truncated,
+        "event_ref": event.event_ref,
+    }
+    reply = value.get("reply_to")
+    if isinstance(reply, Mapping):
+        result["reply_to"] = _confirmed_message(reply, event, images, inputs, state, depth=depth + 1)
+    forwarded = value.get("forwarded_messages")
+    children: list[dict[str, object]] = []
+    if isinstance(forwarded, list):
+        for child in forwarded:
+            if state["nodes"] >= 1024:
+                result["truncated"] = True
+                break
+            if isinstance(child, Mapping):
+                children.append(_confirmed_message(child, event, images, inputs, state, depth=depth + 1))
+    result["forwarded_messages"] = children
+    return result
+
+
 def project_outputs(events: Sequence[AgentEvent]) -> list[dict[str, object]]:
     """Prefer receipts, including a confirmed prefix when the rest of a turn failed."""
     ordered = sorted(events, key=lambda event: event.sequence or 0)
     audited = any(event.event_type in {"turn_timing", "message_delivery"} for event in ordered)
     outputs: list[dict[str, object]] = []
+    inputs: dict[tuple[int, int], list[AgentEvent]] = {}
+    for source in ordered:
+        if source.event_type == "user_input" and type(source.turn_id) is int and type(source.sequence) is int:
+            inputs.setdefault((source.turn_id, source.sequence), []).append(source)
     for event in ordered:
         confirmed = event.event_type == "message_delivery" and event.status == event.effect == "confirmed"
         if audited and not confirmed:
@@ -585,6 +728,20 @@ def project_outputs(events: Sequence[AgentEvent]) -> list[dict[str, object]]:
             continue
         content = payload.get("content")
         media = payload.get("media")
+        captured = payload.get("message") if confirmed else None
+        if isinstance(captured, Mapping):
+            message = _confirmed_message(captured, event, images, inputs, {"nodes": 0, "chars": 50_000})
+        else:
+            message = {
+                "speaker": None,
+                "role": "assistant",
+                "content": content if isinstance(content, str) else "",
+                "reply_to": None,
+                "forwarded_messages": [],
+                "images": images,
+                "truncated": payload.get("capture_status") == "partial",
+                "event_ref": event.event_ref,
+            }
         outputs.append(
             {
                 "event_ref": event.event_ref,
@@ -595,9 +752,11 @@ def project_outputs(events: Sequence[AgentEvent]) -> list[dict[str, object]]:
                 "effect": event.effect,
                 "model_visible": False if confirmed else event.model_visible,
                 "source": "message_delivery" if confirmed else "legacy_incomplete",
-                "content": content if isinstance(content, str) else "",
-                "preview": event_preview(event, payload),
+                "content": message["content"],
                 "images": images,
+                "message": message,
+                "structure_status": "recorded" if isinstance(captured, Mapping) else "not_recorded",
+                "preview": event_preview(event, payload),
                 "media": [
                     {key: value[key] for key in ("kind", "label", "capture_status") if isinstance(value.get(key), str)}
                     for value in media

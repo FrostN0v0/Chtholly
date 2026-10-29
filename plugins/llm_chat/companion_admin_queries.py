@@ -9,7 +9,7 @@ import binascii
 from datetime import UTC, datetime
 from collections.abc import Mapping, Sequence
 
-from sqlalchemy import JSON, or_, and_, case, func, select, type_coerce
+from sqlalchemy import JSON, or_, and_, case, func, select, tuple_, type_coerce
 from entari_plugin_database import get_session
 
 from .models import AgentTurn, ChatScope, AgentEvent, ContextSession
@@ -495,7 +495,13 @@ def _evidence_pairs(state: object, proposal: object, contacts: Sequence[Companio
     return pairs
 
 
-async def _evidence_links(db: Any, review: CompanionReview, pairs: set[tuple[str, int]]) -> list[dict[str, object]]:
+async def _evidence_links(
+    db: Any,
+    review: CompanionReview,
+    pairs: set[tuple[str, int]],
+    *,
+    source_session_id: int | None = None,
+) -> list[dict[str, object]]:
     if not pairs:
         return []
     rows = (
@@ -520,7 +526,9 @@ async def _evidence_links(db: Any, review: CompanionReview, pairs: set[tuple[str
             .where(
                 CompanionChatEvidence.scope_id == review.scope_id,
                 CompanionChatEvidence.persona_key == review.persona_key,
-                CompanionChatEvidence.turn_id.in_({turn_id for _, turn_id in pairs}),
+                tuple_(CompanionChatEvidence.member_ref, CompanionChatEvidence.turn_id).in_(sorted(pairs)),
+                ContextSession.id == source_session_id if source_session_id is not None else True,
+                AgentTurn.finished_at <= review.started_at if source_session_id is not None else True,
                 ContextSession.scope_id == review.scope_id,
                 or_(
                     and_(ContextSession.purpose == "chat", AgentTurn.trigger_kind == "message"),

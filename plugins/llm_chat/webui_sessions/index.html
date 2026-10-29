@@ -14,10 +14,6 @@
         <label for="scope-select">&#39057;&#36947;</label>
         <select id="scope-select" aria-label="&#36873;&#25321;&#32842;&#22825;&#33539;&#22260;"></select>
       </div>
-      <div class="context-picker purpose-picker">
-        <label for="purpose-select">&#29992;&#36884;</label>
-        <select id="purpose-select" aria-label="&#25353;&#29992;&#36884;&#36807;&#28388;"><option value="">&#20840;&#37096;&#29992;&#36884;</option><option value="chat">&#26222;&#36890;&#32842;&#22825;</option><option value="companion">&#20027;&#21160;&#32852;&#31995;</option><option value="reminder">&#25552;&#37266;</option><option value="companion_reflection">&#22797;&#30424;</option></select>
-      </div>
       <div class="context-actions">
         <span id="status" role="status" aria-live="polite">正在连接…</span>
         <span id="auto-refresh" class="is-hidden">自动刷新中</span>
@@ -39,12 +35,12 @@
           <h2>&#20250;&#35805;&#35760;&#24405; <span id="session-count" class="muted">0</span></h2>
           <button id="turn-order-button" class="quiet-button" type="button" aria-pressed="true">&#26368;&#26032;&#22312;&#19978;</button>
         </div>
-        <nav id="turn-list" class="scroll list session-tree" aria-label="&#20250;&#35805;&#19982;&#36718;&#27425;"></nav>
+        <nav id="turn-list" class="scroll list session-tree" aria-label="&#26222;&#36890;&#20250;&#35805;"></nav>
       </section>
       <section class="panel inspector" aria-label="&#36718;&#27425;&#24037;&#20316;&#21306;" data-overview-open="false">
         <button id="back-to-turns" class="back-button" type="button">&#8592; &#20250;&#35805;&#35760;&#24405;</button>
         <div class="detail-heading">
-          <div id="turn-header" class="turn-header">&#35831;&#36873;&#25321;&#19968;&#26465;&#35760;&#24405;&#12290;</div>
+          <div id="turn-header" class="turn-header">&#35831;&#36873;&#25321;&#19968;&#20010;&#20250;&#35805;&#12290;</div>
           <div class="inspector-navigation">
             <details id="inspection-menu" class="inspection-menu">
               <summary id="inspection-label">&#23545;&#35805;&#35760;&#24405;</summary>
@@ -78,7 +74,13 @@
   <dialog id="session-dialog" class="modal modal-session" aria-labelledby="session-title">
     <form method="dialog" class="modal-card">
       <header class="modal-head"><div><p class="eyebrow">&#39057;&#36947;&#20449;&#24687;</p><h2 id="session-title">&#39057;&#36947;&#20449;&#24687;</h2></div><button type="submit" aria-label="&#20851;&#38381;&#39057;&#36947;&#20449;&#24687;">&#20851;&#38381;</button></header>
-      <div class="modal-body"><div id="scope-meta" class="muted"></div><div id="scope-overview"></div><div id="session-detail" class="session-detail"></div></div>
+      <div class="modal-body"><div id="scope-meta" class="muted"></div><div id="scope-overview"></div><div id="scope-review-history"></div><div id="session-detail" class="session-detail"></div></div>
+    </form>
+  </dialog>
+  <dialog id="native-dialog" class="modal modal-wide" aria-labelledby="native-title">
+    <form method="dialog" class="modal-card">
+      <header class="modal-head"><h2 id="native-title">&#21407;&#29983;&#36718;&#27425;&#35777;&#25454;</h2><button type="submit">&#20851;&#38381;</button></header>
+      <div id="native-body" class="modal-body"></div>
     </form>
   </dialog>
   <dialog id="payload-dialog" class="modal modal-wide" aria-labelledby="payload-title">

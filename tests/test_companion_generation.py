@@ -246,6 +246,48 @@ async def test_default_reflection_keeps_full_state_and_stable_persona_baseline_w
 
 
 @pytest.mark.asyncio
+async def test_reflection_origin_survives_ordinary_rollover_during_provider_call(companion_db, monkeypatch):
+    from plugins.llm_chat import personality, session_manager
+    from plugins.llm_chat.context_builder import build_baseline_fingerprint
+
+    native_scope = await scope(companion_db)
+    await enable_member(companion_db, native_scope)
+    ordinary = await session_manager.get_active_session(native_scope.id)
+    assert ordinary is not None
+    persona = await personality.resolve_scope_persona(config(), native_scope.id)
+    await personality.remember_session_persona(ordinary.id, persona)
+    baseline = build_baseline_fingerprint(model_name="test-model", persona=persona.baseline_text, tool_schemas=())
+    claim = await store.claim_review(native_scope.id, "alpha", now=NOW)
+    assert claim is not None
+    snapshot = await store.load_reflection(claim, now=NOW)
+
+    async def provider(payload):
+        replacement = await session_manager.rollover_session(
+            native_scope, ordinary, baseline, reason="manual_new", handoff_json="{}", carry_handoff=False
+        )
+        await personality.remember_session_persona(replacement.id, persona)
+        return response(ReflectionProposal(life=LifeState(), review_after_minutes=60).model_dump_json())
+
+    requests = install_provider(monkeypatch, [provider])
+    await run_reflection(
+        config=config(), scope=native_scope, claim=claim, snapshot=snapshot, limits=companion_limits(config()), now=NOW
+    )
+    active = await session_manager.get_active_session(native_scope.id)
+    assert active is not None
+    assert active.session_ref != ordinary.session_ref
+    starts = [
+        row
+        for row in await native_rows(companion_db, AgentEvent)
+        if row.event_type == "companion_reflection" and row.status == "started"
+    ]
+    assert len(starts) == 1
+    assert json.loads(starts[0].payload_json)["source_session_ref"] == ordinary.session_ref
+    assert not starts[0].model_visible
+    assert ordinary.session_ref not in json.dumps(requests)
+    assert active.session_ref not in json.dumps(requests)
+
+
+@pytest.mark.asyncio
 async def test_default_reflection_provider_failure_preserves_life_rearms_and_finishes_audit_without_retry(
     companion_db,
     native_transport,

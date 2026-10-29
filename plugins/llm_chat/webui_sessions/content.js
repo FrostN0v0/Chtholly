@@ -589,14 +589,11 @@
     const body = create("div", "invocation-body");
     const prepared = parseCompleteJson(value);
     if (structuredUser && isPlainObject(prepared) && typeof prepared.content === "string") {
-      const quote = prepared.reply_to;
       body.append(message({
+        ...prepared,
         speaker: typeof prepared.speaker === "string" ? prepared.speaker : null,
-        content: prepared.content,
         mentions: Array.isArray(prepared.mentioned_participants)
           ? prepared.mentioned_participants.map((item) => ({ name: item?.display_name })) : [],
-        quotes: isPlainObject(quote) && typeof quote.content === "string"
-          ? [{ speaker: quote.speaker, role: quote.speaker_role, content: quote.content }] : [],
       }), invocationSource(prepared, "\u6d88\u606f\u539f\u59cb\u6570\u636e"));
     } else if (typeof prepared === "string") {
       body.append(markdown(prepared));
@@ -664,15 +661,96 @@
     return root;
   }
 
-  function message(record) {
+  function messageRole(record, fallback = "unknown") {
+    const role = record?.role || record?.speaker_role;
+    return typeof role === "string" && role !== "unknown" ? role : fallback;
+  }
+
+  function messageClass(role) {
+    return role === "assistant" ? "message-right message-bot"
+      : ["system", "developer", "tool"].includes(role) ? "message-left message-system"
+        : ["user", "participant"].includes(role) ? "message-left message-participant" : "message-left message-unknown";
+  }
+
+  function avatar(speaker, role) {
+    const name = typeof speaker === "string" ? speaker : "";
+    const item = create("span", "message-avatar", Array.from(name.trim())[0]?.toLocaleUpperCase() || "?");
+    item.setAttribute("aria-hidden", "true");
+    let tone = 0;
+    for (const character of name) tone = (tone * 31 + character.codePointAt(0)) >>> 0;
+    item.dataset.tone = String(tone % 4);
+    item.dataset.role = role || "unknown";
+    return item;
+  }
+
+  function replyPreview(record, legacy, options, depth) {
+    const preview = create("details", "message-reply-preview");
+    preview.dataset.recordKey = "reply-target";
+    preview.dataset.detailKey = "reply-target";
+    const speaker = typeof record?.speaker === "string" && record.speaker ? record.speaker : "\u53d1\u8a00\u4eba\u672a\u8bb0\u5f55";
+    const summary = create("summary", "message-reply-summary");
+    summary.append(create("span", "message-reply-speaker", `${legacy ? "\u5f15\u7528" : "\u56de\u590d"} ${speaker}`));
+    const excerpt = record?.content || (record?.image_count || record?.images?.length ? "[\u56fe\u7247]" : record?.forwarded_messages?.length ? "[\u804a\u5929\u8bb0\u5f55]" : "\u5185\u5bb9\u672a\u8bb0\u5f55");
+    summary.append(create("span", "message-reply-text", shortText(excerpt, 100)));
+    if (record?.truncated) summary.append(create("span", "content-truncated-badge", "\u5f15\u7528\u5df2\u622a\u65ad"));
+    const body = create("div", "message-reply-body");
+    if (depth >= MAX_DEPTH) body.append(create("span", "content-truncated-badge", "\u5d4c\u5957\u5f15\u7528\u8fc7\u6df1"));
+    else body.append(message({ ...record, speaker: null, truncated: false }, options, depth + 1));
+    preview.append(summary, body);
+    return preview;
+  }
+
+  function forwardCard(records, options, depth) {
+    const card = create("details", "message-forward");
+    card.dataset.detailKey = "forwarded-messages";
+    const summary = create("summary", "message-forward-summary");
+    summary.append(create("strong", "message-forward-title", "\u804a\u5929\u8bb0\u5f55"), create("span", "message-forward-count", `${records.length} \u6761`));
+    const preview = create("span", "message-forward-preview");
+    for (const record of records.slice(0, 3)) {
+      const speaker = typeof record?.speaker === "string" && record.speaker ? `${record.speaker}\uff1a` : "";
+      const text = record?.content || (record?.image_count || record?.images?.length ? "[\u56fe\u7247]" : record?.forwarded_messages?.length ? "[\u804a\u5929\u8bb0\u5f55]" : "\u5185\u5bb9\u672a\u8bb0\u5f55");
+      preview.append(create("span", "", `${speaker}${shortText(text, 90)}`));
+    }
+    summary.append(preview);
+    const body = create("div", "message-forward-body");
+    if (depth >= MAX_DEPTH) body.append(create("p", "partial-notice", "\u5d4c\u5957\u804a\u5929\u8bb0\u5f55\u8fc7\u6df1"));
+    else for (const [index, record] of records.entries()) {
+      const role = messageRole(record);
+      const speaker = typeof record?.speaker === "string" && record.speaker ? record.speaker : "\u53d1\u8a00\u4eba\u672a\u8bb0\u5f55";
+      const row = create("article", `message-row forwarded-message ${messageClass(role)}`);
+      row.dataset.recordKey = `forward:${index}`;
+      const column = create("div", "message-column");
+      const header = create("header", "message-header");
+      header.append(create("strong", "message-speaker", speaker));
+      const bubble = create("div", "message-bubble");
+      bubble.append(message({ ...record, speaker: null }, options, depth + 1));
+      column.append(header, bubble);
+      row.append(avatar(speaker, role), column);
+      body.append(row);
+    }
+    card.append(summary, body);
+    return card;
+  }
+
+  function message(record, options = {}, depth = 0) {
     const root = create("article", "content-message");
     const header = create("header", "content-message-head");
     if (record && record.speaker !== null && record.speaker !== undefined && record.speaker !== "") header.append(create("span", "content-message-speaker", displayScalar(record.speaker)));
     if (record?.truncated) header.append(create("span", "content-truncated-badge", "\u5185\u5bb9\u5df2\u622a\u65ad"));
     if (header.childNodes.length) root.append(header);
+    if (isPlainObject(record?.reply_to)) root.append(replyPreview(record.reply_to, false, options, depth));
+    if (!Object.hasOwn(record || {}, "reply_to") && !Object.hasOwn(record || {}, "forwarded_messages")) {
+      for (const [index, quote] of (Array.isArray(record?.quotes) ? record.quotes : []).entries()) {
+        const preview = replyPreview(quote, true, options, depth);
+        preview.dataset.recordKey = `legacy-quote:${index}`;
+        root.append(preview);
+      }
+    }
     const body = create("div", "content-message-body");
-    body.append(markdown(record?.content == null ? "" : String(record.content)));
+    if (record?.content != null && String(record.content)) body.append(markdown(String(record.content)));
     root.append(body);
+    options.renderImages?.(body, record);
+    if (record?.image_count && !record.images?.length) body.append(create("span", "message-image-count", `${record.image_count} \u5f20\u56fe\u7247`));
     const mentions = Array.isArray(record?.mentions) ? record.mentions : [];
     const names = mentions.map((item) => (isObject(item) ? item.name : item)).filter((name) => name !== null && name !== undefined && String(name) !== "");
     if (names.length) {
@@ -681,23 +759,10 @@
       for (const name of names) mentionBox.append(create("span", "content-mention", `@${String(name)}`));
       root.append(mentionBox);
     }
-    const quotes = Array.isArray(record?.quotes) ? record.quotes : [];
-    if (quotes.length) {
-      const quoteGroup = create("section", "content-quotes");
-      quoteGroup.append(create("h4", "content-quotes-title", "\u5f15\u7528\u4e0a\u4e0b\u6587"));
-      for (const quote of quotes) {
-        const item = create("blockquote", "content-message-quote");
-        const quoteHead = create("div", "content-quote-head");
-        if (quote?.role) quoteHead.append(create("span", "content-role", roleLabel(quote.role)));
-        if (quote?.speaker) quoteHead.append(create("span", "content-speaker", displayScalar(quote.speaker)));
-        if (quoteHead.childNodes.length) item.append(quoteHead);
-        item.append(markdown(quote?.content == null ? "" : String(quote.content)));
-        quoteGroup.append(item);
-      }
-      root.append(quoteGroup);
-    }
+    const forwarded = record?.forwarded_messages;
+    if (Array.isArray(forwarded) && forwarded.length) root.append(forwardCard(forwarded, options, depth));
     return root;
   }
 
-  global.SessionContent = Object.freeze({ message, value, markdown, invocation, copyText });
+  global.SessionContent = Object.freeze({ message, messageRole, messageClass, avatar, value, markdown, invocation, copyText });
 })(window);

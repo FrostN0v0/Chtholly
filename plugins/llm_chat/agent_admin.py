@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from dataclasses import dataclass
 
-from sqlalchemy import JSON, case, select, type_coerce
+from sqlalchemy import JSON, case, func, select, type_coerce
 from entari_plugin_database import get_session
 from entari_plugin_llm.config import get_model_config
 
@@ -30,6 +30,7 @@ from .session_manager import (
 )
 from .agent_event_view import serialize_event_view, project_relationship_views
 from .core.personality import ResolvedPersona
+from .session_activity import conversation_activity
 from .agent_attachments import (
     is_agent_attachment,
     resolve_agent_attachment,
@@ -54,6 +55,7 @@ from .relationships.identity import resolve_relationship_owner
 from .companion_admin_queries import companion_reviews, companion_review_detail
 from .companion_admin_overview import companion_overview
 from .companion_admin_projection import CompanionAdminError, project_companion
+from .session_activity_companion import review_activity_sources
 
 
 class AgentAdminError(ValueError):
@@ -103,17 +105,19 @@ class AgentAdminService:
             for scope in scopes
         ]
 
-    async def list_sessions(self, scope_ref: str, limit: int = 100) -> list[dict[str, object]]:
+    async def list_sessions(self, scope_ref: str, limit: int = 100, *, purpose: str = "") -> list[dict[str, object]]:
+        if purpose and purpose not in {"chat", "reminder", "companion", "companion_reflection"}:
+            raise AgentAdminError("Unknown context session purpose", code="invalid_purpose")
         scope = await self._scope(scope_ref)
+        statement = select(ContextSession).where(ContextSession.scope_id == scope.id)
+        if purpose:
+            statement = statement.where(ContextSession.purpose == purpose)
+            if purpose == "chat":
+                statement = statement.where(ContextSession.reminder_task_ref == "")
         async with get_session() as db:
             sessions = list(
                 (
-                    await db.scalars(
-                        select(ContextSession)
-                        .where(ContextSession.scope_id == scope.id)
-                        .order_by(ContextSession.sequence.desc())
-                        .limit(max(1, min(500, limit)))
-                    )
+                    await db.scalars(statement.order_by(ContextSession.sequence.desc()).limit(max(1, min(500, limit))))
                 ).all()
             )
         return [await self._session_summary(item) for item in sessions]
@@ -128,7 +132,7 @@ class AgentAdminService:
         self, scope_ref: str, *, limit: int = 30, cursor: str = "", persona_key: str = "", status: str = ""
     ) -> dict[str, object]:
         try:
-            return await companion_reviews(
+            page = await companion_reviews(
                 scope_ref,
                 limit=limit,
                 cursor=cursor,
@@ -136,6 +140,20 @@ class AgentAdminService:
                 status=status,
                 session_factory=get_session,
             )
+            async with get_session() as db:
+                event_max, turn_max = (
+                    await db.execute(
+                        select(
+                            select(func.coalesce(func.max(AgentEvent.id), 0)).scalar_subquery(),
+                            select(func.coalesce(func.max(AgentTurn.id), 0)).scalar_subquery(),
+                        )
+                    )
+                ).one()
+                for item in page["items"]:
+                    refs = await review_activity_sources(db, item["review_ref"], event_max=event_max, turn_max=turn_max)
+                    item["activity_session_refs"] = refs
+                    item["activity_association"] = "assigned" if refs else "unassigned"
+            return page
         except CompanionAdminError as exc:
             raise AgentAdminError(str(exc), code=exc.code, status=exc.status) from exc
 
@@ -195,6 +213,28 @@ class AgentAdminService:
             {**self._serialize_turn(turn), "purpose": context_session.purpose, **summaries[turn.id], **affect[turn.id]}
             for turn in turns
         ]
+
+    async def list_activity(self, session_ref: str, *, limit: int = 50, cursor: str = "") -> dict[str, object]:
+        context_session = await self._session(session_ref)
+        try:
+            page = await conversation_activity(context_session, limit=limit, cursor=cursor, session_factory=get_session)
+        except CompanionAdminError as exc:
+            raise AgentAdminError(str(exc), code=exc.code, status=exc.status) from exc
+        natives = page.pop("_turns")
+        turns = [turn for turn, _ in natives.values()]
+        summaries = await turn_list_summaries(turns)
+        affect = await self._turn_relationship_summaries(turns)
+        for item in page["items"]:
+            turn_id = item.pop("_turn_id", None)
+            if turn_id is not None:
+                turn, session = natives[turn_id]
+                item["turn"] = {
+                    **self._serialize_turn(turn),
+                    "purpose": session.purpose,
+                    **summaries[turn.id],
+                    **affect[turn.id],
+                }
+        return page
 
     async def list_events(self, turn_ref: str) -> list[dict[str, object]]:
         turn = await self._turn(turn_ref)

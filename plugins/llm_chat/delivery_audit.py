@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from contextvars import ContextVar
-from collections.abc import Callable, Iterator, Awaitable
+from collections.abc import Mapping, Callable, Iterator, Awaitable
 
 from arclet.entari import Session, MessageChain
 from arclet.letoderea import Scope
@@ -122,12 +122,41 @@ class DeliveryAudit:
             created_at=draft.created_at,
         )
 
+    def _reply_to_sequence(self, message_id: str) -> int | None:
+        """Bind an exact live source, never a name/time/nearest-input guess."""
+        matches = [
+            event.sequence
+            for event in self.recorder.events
+            if event.event_type == "user_input"
+            and isinstance(author := event.payload.get("host_author"), Mapping)
+            and type(author.get("version")) is int
+            and author.get("version") == 1
+            and author.get("source_message_id") == message_id
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            return None
+        source = getattr(self.session.event, "message", None)
+        if source is None or getattr(source, "id", None) != message_id:
+            return None
+        # Legacy native root input has no platform ID in its payload. The
+        # explicit equality above authorizes only that original, unsteered input.
+        roots = [
+            event.sequence
+            for event in self.recorder.events
+            if event.event_type == "user_input"
+            and "host_author" not in event.payload
+            and "steer_sequence" not in event.payload
+        ]
+        return roots[0] if len(roots) == 1 else None
+
     def enqueue(
         self, message: MessageChain, confirmed_at: datetime, elapsed: int, execution_ref: str
     ) -> asyncio.Task[None]:
         # Snapshot immutable text/source strings while the actual sent chain is
         # still at the receipt boundary. No storage or network I/O is done here.
-        projection = _Projection(self.session)
+        projection = _Projection(self.session, self._reply_to_sequence)
         try:
             projection.walk(message.content)
             content = projection.content()
@@ -135,7 +164,9 @@ class DeliveryAudit:
             self._warn(f"delivery projection failed: {type(exc).__name__}")
             projection = _Projection(self.session)
             projection.partial = True
+            projection.message.truncated = True
             content = "[已确认发送，内容捕获失败]"
+            projection.message.parts.append(content)
         task = asyncio.create_task(self._capture_guarded(projection, content, confirmed_at, elapsed, execution_ref))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -208,6 +239,7 @@ class DeliveryAudit:
                     projection.partial = True
                 payload: dict[str, object] = {
                     "content": content,
+                    "message": projection.structure(),
                     "attachments": attachments,
                     "received_at" if self.timing_source == "received_to_confirmed_delivery" else "triggered_at": _iso(
                         self.received_at

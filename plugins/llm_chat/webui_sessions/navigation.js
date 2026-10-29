@@ -1,169 +1,145 @@
 "use strict";
 
 (function defineSessionTree(global) {
-  const PURPOSES = ["chat", "companion", "reminder", "companion_reflection"];
-
   function create(hooks) {
-    const { node, button, date, label, purposeLabel, personaName, request, showError, renderTurn, selectSession, selectReview } = hooks;
-    let current = null;
-    let root = null;
-    let previousSession = "";
-    let previousPurpose = "";
-    let scopeRef = "";
-    let generation = 0;
-    let controller = null;
-    let unlinked = { items: [], cursor: "", previous: [], next: null, loaded: false, busy: false, error: "" };
-
-    function cancel() {
-      ++generation;
-      controller?.abort();
-      controller = null;
-      unlinked.busy = false;
-      renderUnlinked();
-    }
-    async function readUnlinked(cursor = unlinked.cursor, direction = "refresh") {
-      if (!scopeRef || unlinked.busy) return;
-      cancel();
-      const version = generation;
-      const activeScope = scopeRef;
-      controller = new AbortController();
-      unlinked.busy = true;
-      unlinked.error = "";
-      renderUnlinked();
-      try {
-        const query = new URLSearchParams({ limit: "30", cursor });
-        const page = await request(`/scopes/${encodeURIComponent(activeScope)}/companion/reviews?${query}`, { signal: controller.signal });
-        if (version !== generation || activeScope !== scopeRef) return;
-        if (direction === "next") unlinked.previous.push(unlinked.cursor);
-        if (direction === "previous") unlinked.previous.pop();
-        unlinked.cursor = cursor;
-        unlinked.items = (page.items || []).filter((item) => !item.native_turn);
-        unlinked.next = page.next_cursor || null;
-        unlinked.loaded = true;
-      } catch (error) {
-        if (version !== generation || error?.name === "AbortError") return;
-        unlinked.error = error.message;
-      } finally {
-        if (version === generation) { unlinked.busy = false; renderUnlinked(); }
-      }
-    }
-    function renderUnlinked() {
-      const target = root?.querySelector(".unlinked-reviews-body");
-      if (!target) return;
+    const { node, button, date, label, personaName, selectSession } = hooks;
+    function render(target, data) {
+      const focused = target.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
+      const scroll = target.scrollTop;
       target.replaceChildren();
-      if (unlinked.error) target.append(node("p", "error", unlinked.error));
-      if (!unlinked.loaded) target.append(node("p", "muted", unlinked.busy ? "\u6b63\u5728\u8bfb\u53d6\u2026" : "\u8bfb\u53d6\u6ca1\u6709\u5173\u8054\u6a21\u578b\u8f6e\u6b21\u7684\u590d\u76d8\u8bb0\u5f55"));
-      else if (!unlinked.items.length) target.append(node("p", "muted", unlinked.next || unlinked.previous.length
-        ? "\u672c\u9875\u6ca1\u6709\u672a\u5173\u8054\u590d\u76d8\uff1b\u53ef\u7ee7\u7eed\u67e5\u770b\u5176\u4ed6\u9875"
-        : "\u6ca1\u6709\u672a\u5173\u8054\u8f6e\u6b21\u7684\u590d\u76d8"));
-      for (const review of unlinked.items) {
-        const item = button("", () => selectReview(review.review_ref), "list-item unlinked-review");
-        item.dataset.focusKey = `review:${review.review_ref}`;
-        item.classList.toggle("is-active", current?.reviewRef === review.review_ref);
-        item.setAttribute("aria-current", String(current?.reviewRef === review.review_ref));
+      if (!data.scope) { target.append(node("p", "empty", "\u8bf7\u9009\u62e9\u9891\u9053")); return; }
+      const sessions = data.sessions.filter((session) => (session.purpose || "chat") === "chat" && !session.reminder_task_ref)
+        .sort((a, b) => data.newestFirst ? b.sequence - a.sequence : a.sequence - b.sequence);
+      for (const session of sessions) {
+        const item = button("", () => selectSession(session), "list-item session-entry");
+        item.dataset.focusKey = `session:${session.session_ref}`;
+        item.dataset.recordKey = session.session_ref;
+        const selected = session.session_ref === data.session?.session_ref;
+        item.classList.toggle("is-active", selected);
+        item.setAttribute("aria-current", String(selected));
         const heading = node("div", "item-heading");
-        heading.append(node("strong", "", review.persona_key || "\u4eba\u683c\u672a\u8bb0\u5f55"), node("span", "badge", label(review.status)));
-        item.append(heading, node("p", "snippet", review.reason || "\u672a\u5173\u8054\u6a21\u578b\u8f6e\u6b21\uff0c\u7ed3\u679c\u4ee5\u590d\u76d8\u8bb0\u5f55\u4e3a\u51c6"), node("span", "muted", date(review.started_at)));
+        heading.append(node("strong", "", `#${session.sequence} \u00b7 ${personaName(session.persona)}`), node("span", "badge", label(session.status)));
+        item.append(heading, node("p", "muted", date(session.created_at)), node("span", "muted", `${session.turn_count ?? "?"} \u8f6e\u5bf9\u8bdd`));
         target.append(item);
       }
-      const controls = node("div", "actions tree-pagination");
-      const previous = button("\u4e0a\u4e00\u9875", () => readUnlinked(unlinked.previous.at(-1), "previous"));
-      const next = button("\u4e0b\u4e00\u9875", () => readUnlinked(unlinked.next, "next"));
-      previous.disabled = unlinked.busy || !unlinked.previous.length;
-      next.disabled = unlinked.busy || !unlinked.next;
-      const refresh = button(unlinked.loaded ? "\u5237\u65b0" : "\u8bfb\u53d6", () => readUnlinked());
-      refresh.disabled = unlinked.busy;
-      controls.append(previous, node("span", "muted", `\u590d\u76d8\u8bb0\u5f55\u7b2c ${unlinked.previous.length + 1} \u9875`), next, refresh);
-      target.append(controls);
+      if (!sessions.length) target.append(node("p", "empty", "\u6682\u65e0\u666e\u901a\u4f1a\u8bdd"));
+      if (focused) [...target.querySelectorAll("[data-focus-key]")].find((item) => item.dataset.focusKey === focused)?.focus({ preventScroll: true });
+      target.scrollTop = scroll;
     }
-    function render(target, data) {
-      if (scopeRef !== (data.scope?.scope_ref || "")) {
-        cancel();
-        scopeRef = data.scope?.scope_ref || "";
-        previousSession = "";
-        unlinked = { items: [], cursor: "", previous: [], next: null, loaded: false, busy: false, error: "" };
-        target.replaceChildren();
-      }
-      const opened = new Set([...target.querySelectorAll("details[open]")].map((item) => item.dataset.treeKey));
-      const hadGroups = Boolean(target.querySelector(".session-tree-group"));
-      const selectedRef = data.session?.session_ref || "";
-      const selectionChanged = previousSession !== selectedRef;
-      const filterChanged = previousPurpose !== data.purpose;
-      const focusKey = target.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
-      const scrollTop = target.scrollTop;
-      current = data;
-      root = target;
-      previousPurpose = data.purpose;
-      target.replaceChildren();
-      if (!scopeRef) { target.append(node("p", "empty", "\u8bf7\u9009\u62e9\u9891\u9053")); return; }
-      const purposes = [...new Set([...PURPOSES, ...data.sessions.map((session) => session.purpose || "chat")])];
-      const visible = purposes.filter((purpose) => !data.purpose || purpose === data.purpose);
-      for (const purpose of visible) {
-        const sessions = data.sessions.filter((session) => (session.purpose || "chat") === purpose)
-          .sort((a, b) => data.newestFirst ? b.sequence - a.sequence : a.sequence - b.sequence);
-        if (!sessions.length && purpose !== "companion_reflection") continue;
-        const group = node("details", "session-tree-group");
-        group.dataset.treeKey = purpose;
-        group.dataset.recordKey = `purpose:${purpose}`;
-        group.dataset.detailKey = "tree-group";
-        group.open = opened.has(purpose) || (selectionChanged && purpose === data.session?.purpose)
-          || (filterChanged && purpose === data.purpose) || (!hadGroups && (purpose === "chat" || Boolean(data.purpose)));
-        const heading = node("summary", "session-tree-heading");
-        heading.dataset.focusKey = `purpose:${purpose}`;
-        heading.append(node("strong", "", purposeLabel(purpose)), node("span", "muted", `${sessions.length} \u4e2a\u4f1a\u8bdd`));
-        group.append(heading);
-        for (const session of sessions) {
-          const selected = session.session_ref === selectedRef;
-          const branch = node("details", "session-tree-branch");
-          branch.dataset.treeKey = session.session_ref;
-          branch.dataset.recordKey = session.session_ref;
-          branch.dataset.detailKey = "tree-session";
-          branch.open = selected && (selectionChanged || opened.has(session.session_ref));
-          const summary = node("summary", "session-tree-session");
-          summary.dataset.focusKey = `session:${session.session_ref}`;
-          summary.append(node("strong", "", `#${session.sequence} \u00b7 ${personaName(session.persona)}`), node("span", "badge", label(session.status)), node("span", "muted", date(session.created_at)));
-          summary.addEventListener("click", (event) => {
-            if (selected) return;
-            event.preventDefault();
-            selectSession(session).catch(showError);
-          });
-          branch.append(summary);
-          if (selected) {
-            const turns = [...data.turns].sort((a, b) => data.newestFirst ? b.sequence - a.sequence : a.sequence - b.sequence);
-            const entries = node("div", "session-tree-turns");
-            if (!turns.length) entries.append(node("p", "muted", data.loading ? "\u6b63\u5728\u8bfb\u53d6\u8f6e\u6b21\u2026" : "\u6682\u65e0\u8f6e\u6b21"));
-            for (const turn of turns) entries.append(renderTurn(turn));
-            branch.append(entries);
-          }
-          group.append(branch);
-        }
-        if (purpose === "companion_reflection") {
-          const missing = node("details", "unlinked-reviews");
-          missing.dataset.treeKey = "unlinked-reviews";
-          missing.dataset.recordKey = "unlinked-reviews";
-          missing.dataset.detailKey = "tree-unlinked";
-          missing.open = opened.has("unlinked-reviews");
-          const summary = node("summary", "session-tree-session", "\u672a\u5173\u8054\u8f6e\u6b21\u7684\u590d\u76d8");
-          summary.dataset.focusKey = "unlinked-reviews";
-          missing.append(summary, node("div", "unlinked-reviews-body"));
-          missing.addEventListener("toggle", () => { if (missing.open && !unlinked.loaded && !unlinked.busy) readUnlinked().catch(showError); });
-          group.append(missing);
-        }
-        target.append(group);
-      }
-      if (!target.children.length) target.append(node("p", "empty", "\u5f53\u524d\u7b5b\u9009\u6ca1\u6709\u4f1a\u8bdd"));
-      previousSession = selectedRef;
-      renderUnlinked();
-      if (focusKey) [...target.querySelectorAll("[data-focus-key]")].find((item) => item.dataset.focusKey === focusKey)?.focus({ preventScroll: true });
-      target.scrollTop = scrollTop;
-    }
-    return Object.freeze({
-      render, cancel,
-      refresh() {
-        unlinked.loaded = false;
-        if (root?.querySelector(".unlinked-reviews[open]")) return readUnlinked();
-      },
-    });
+    return Object.freeze({ render });
   }
-  global.SessionTree = Object.freeze({ create });
+  function createReviewArchive(hooks) {
+    const { node, button, disclosure, badge, date, request, loadReview, loadBundle, renderReview, showError } = hooks;
+    let scopeRef = "";
+    let target = null;
+    let root = null;
+    let listing = null;
+    let controls = null;
+    let controller = new AbortController();
+    let version = 0;
+    let busy = false;
+    let loaded = false;
+    let cursor = "";
+    let next = null;
+    let previous = [];
+    let items = [];
+    let error = "";
+    const rows = new Map();
+
+    function cancel() {
+      ++version; controller.abort(); controller = new AbortController(); busy = false;
+      for (const row of rows.values()) row.pending = false;
+      renderControls();
+    }
+    async function expand(row) {
+      if (row.pending || row.loaded) return;
+      const generation = version;
+      const signal = controller.signal;
+      row.pending = true;
+      row.body.replaceChildren(node("p", "muted", "\u6b63\u5728\u8bfb\u53d6\u5386\u53f2\u8bb0\u5f55\u2026"));
+      try {
+        const review = await loadReview(scopeRef, row.item.review_ref, signal);
+        if (generation !== version) return;
+        row.review = review;
+        row.body.replaceChildren(renderReview(review, null));
+        if (review.native_turn?.turn_ref) {
+          const bundle = await loadBundle(review.native_turn.turn_ref, signal);
+          if (generation !== version) return;
+          row.body.replaceChildren(renderReview(review, null, bundle));
+        }
+        row.loaded = true;
+      } catch (error) {
+        if (generation === version && error?.name !== "AbortError") row.body.append(node("p", "error", error.message), button("\u91cd\u8bd5", () => expand(row)));
+      } finally { if (generation === version) row.pending = false; }
+    }
+    function renderControls() {
+      if (!controls) return;
+      const focus = controls.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
+      controls.replaceChildren();
+      const before = button("\u4e0a\u4e00\u9875", () => load(previous.at(-1), "previous"));
+      const after = button("\u4e0b\u4e00\u9875", () => load(next, "next"));
+      const refresh = button("\u5237\u65b0\u5386\u53f2", () => load(cursor));
+      before.dataset.focusKey = "archive:previous"; after.dataset.focusKey = "archive:next"; refresh.dataset.focusKey = "archive:refresh";
+      before.disabled = busy || !previous.length; after.disabled = busy || !next; refresh.disabled = busy;
+      controls.append(before, node("span", "muted", `\u7b2c ${previous.length + 1} \u9875`), after, refresh);
+      if (error) controls.append(node("p", "error", error));
+      if (focus) [...controls.querySelectorAll("[data-focus-key]")].find((item) => item.dataset.focusKey === focus)?.focus({ preventScroll: true });
+    }
+    function renderItems() {
+      listing.replaceChildren();
+      for (const item of items) {
+        let row = rows.get(item.review_ref);
+        if (!row) {
+          const root = node("details", "review-history-item");
+          root.dataset.recordKey = item.review_ref;
+          const heading = node("summary");
+          heading.dataset.focusKey = `archive:${item.review_ref}`;
+          heading.append(node("strong", "", item.decision_summary || item.reason || "\u672a\u5f52\u5c5e\u5386\u53f2\u590d\u76d8"), badge(item.status), node("span", "muted", date(item.started_at)));
+          const body = node("div", "review-history-detail");
+          row = { item, root, body, pending: false, loaded: false };
+          root.append(heading, body);
+          root.addEventListener("toggle", () => { if (root.open) expand(row).catch(showError); });
+          rows.set(item.review_ref, row);
+        }
+        listing.append(row.root);
+      }
+      if (!items.length) listing.append(node("p", "archive-state", busy ? "\u6b63\u5728\u8bfb\u53d6\u2026" : "\u672c\u9875\u65e0\u672a\u5f52\u5c5e\u8bb0\u5f55"));
+    }
+    async function load(value = cursor, direction = "refresh") {
+      if (!scopeRef || busy || document.hidden) return;
+      const generation = version;
+      const scope = scopeRef;
+      busy = true; error = ""; renderControls();
+      try {
+        const query = new URLSearchParams({ limit: "30", ...(value ? { cursor: value } : {}) });
+        const result = await request(`/scopes/${encodeURIComponent(scope)}/companion/reviews?${query}`, { signal: controller.signal });
+        if (generation !== version || scope !== scopeRef) return;
+        if (direction === "next") previous.push(cursor);
+        else if (direction === "previous") previous.pop();
+        cursor = value || "";
+        next = result.next_cursor || null;
+        items = (result.items || []).filter((item) => item.activity_association === "unassigned");
+        loaded = true;
+        renderItems();
+      } catch (failure) { if (generation === version && failure?.name !== "AbortError") error = failure.message; }
+      finally { if (generation === version) { busy = false; renderControls(); } }
+    }
+    function open(element, scope) {
+      if (target !== element || scopeRef !== scope) {
+        cancel(); target = element; scopeRef = scope; rows.clear();
+        loaded = false; cursor = ""; next = null; previous = []; items = []; error = "";
+        const panel = disclosure("\u672a\u5f52\u5c5e\u4f1a\u8bdd\u7684\u5386\u53f2\u590d\u76d8", "");
+        root = panel.item;
+        listing = node("div", "review-history-list"); controls = node("div", "actions review-history-controls");
+        panel.content.append(listing, controls);
+        root.addEventListener("toggle", () => { if (root.open && !loaded) load().catch(showError); });
+        target.replaceChildren(root);
+      }
+      if (root.open && !loaded) load().catch(showError);
+      for (const row of rows.values()) if (row.root.open) expand(row).catch(showError);
+      renderControls();
+    }
+    return Object.freeze({ open, cancel });
+  }
+  global.SessionTree = Object.freeze({ create, createReviewArchive });
 })(window);

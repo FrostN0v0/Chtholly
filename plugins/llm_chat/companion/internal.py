@@ -24,11 +24,11 @@ from ..config import LLMChatConfig
 from ..models import ChatScope
 from .context import mode_baseline
 from .persistence import session
-from ..personality import persona_scope_lock, resolve_scope_persona, remember_session_persona
+from ..personality import session_persona, persona_scope_lock, resolve_scope_persona, remember_session_persona
 from .observations import reflection_input
 from ..agent_events import persist_agent_events
 from ..context_builder import build_baseline_fingerprint
-from ..session_manager import start_turn, finish_turn, rollover_session, ensure_active_session
+from ..session_manager import start_turn, finish_turn, rollover_session, get_active_session, ensure_active_session
 from ..core.agent_trace import AgentTurnRecorder
 from .scope_kind_models import CompanionScopeKind
 from ..core.context_snapshot import build_context_snapshot
@@ -114,6 +114,13 @@ async def run_reflection(
             persona = await resolve_scope_persona(config, scope.id)
             if persona.key != claim.persona_key:
                 raise CompanionConflict("Reflection persona is no longer selected")
+            ordinary = await get_active_session(scope.id)
+            ordinary_persona = await session_persona(ordinary.id) if ordinary is not None else None
+            source_session_ref = (
+                ordinary.session_ref
+                if ordinary is not None and ordinary_persona is not None and ordinary_persona.get("key") == persona.key
+                else None
+            )
             baseline = mode_baseline(
                 build_baseline_fingerprint(
                     model_name=model_name,
@@ -165,6 +172,7 @@ async def run_reflection(
                 "mode_revision": claim.mode_revision,
                 "context_revision": claim.context_revision,
                 "life_version": claim.life_version,
+                "source_session_ref": source_session_ref,
             },
         )
         recorder.append(

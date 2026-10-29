@@ -42,11 +42,11 @@ if not hasattr(EntariConfig, "instance"):
         EntariConfig, "instance", EntariConfig.load(Path(__file__).resolve().parents[1] / "entari.full.example.yml")
     )
 
-from plugins.llm_chat import delivery_audit, context_builder
+from plugins.llm_chat import delivery_audit, context_builder, session_inspection
 from plugins.llm_chat.models import AgentTurn, AgentEvent
 from plugins.llm_chat.core.tool_trace import llm_chat_tool_execution_scope
 from plugins.llm_chat.core.agent_trace import AgentTurnRecorder
-from plugins.llm_chat.agent_attachments import resolve_agent_attachment
+from plugins.llm_chat.agent_attachments import store_agent_attachment, resolve_agent_attachment
 
 _PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=")
 
@@ -94,6 +94,15 @@ async def transport(monkeypatch):
 
 def _deliveries(recorder):
     return [event for event in recorder.events if event.event_type == "message_delivery"]
+
+
+def _event_rows(recorder, turn_id=1):
+    rows = []
+    for event in recorder.events:
+        values = asdict(event)
+        values["payload_json"] = json.dumps(values.pop("payload"))
+        rows.append(AgentEvent(turn_id=turn_id, event_ref=f"event-{turn_id}-{event.sequence}", **values))
+    return rows
 
 
 @pytest.mark.asyncio
@@ -368,13 +377,23 @@ async def test_projection_keeps_forward_order_and_never_labels_quote_images_as_s
         await transport.session.send(payload)
         await audit.drain()
     event = _deliveries(recorder)[0]
-    text = event.payload["content"]
-    assert text.index("quoted content") < text.index("first child") < text.index("second child")
-    assert "@Alice" in text
-    assert "Bob: " in text
+    message = event.payload["message"]
+    assert event.payload["content"] == "[语音][文件][视频]"
+    assert message["reply_to"]["content"] == "[引用图片未记录]quoted content"
+    first, second = message["forwarded_messages"]
+    assert (first["speaker"], first["role"], first["content"]) == ("Bob", "participant", "first child@Alice")
+    text = second["content"]
+    assert text.startswith("second child")
     assert "https://example.org/docs" in text
     assert "https://example.org/guide" in text
     assert "https://example.com/private?token=[REDACTED]" in text
+    assert message["image_indexes"] == []
+    assert message["reply_to"]["image_indexes"] == []
+    assert second["image_indexes"] == [1]
+    output = session_inspection.project_outputs(_event_rows(recorder))[0]["message"]
+    assert output["images"] == []
+    assert output["reply_to"]["images"] == []
+    assert output["forwarded_messages"][1]["images"][0]["index"] == 1
     assert len(event.payload["attachments"]) == 1
     assert event.payload["attachments"][0]["index"] == 1
     assert {item["kind"] for item in event.payload["media"]} == {"audio", "file", "video"}
@@ -511,3 +530,330 @@ async def test_private_url_receipt_never_opens_an_audit_network_client(transport
     assert delivery.payload["media"][0]["capture_status"] == "failed"
     assert opened == []
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("structured", [False, True])
+async def test_native_root_quote_binds_only_exact_input_and_keeps_source_image_owner(transport, tmp_path, structured):
+    attachment = store_agent_attachment(_PNG, kind="input", source="direct", index=1, root=tmp_path)
+    recorder = AgentTurnRecorder()
+    original = "original root input"
+    content = (
+        json.dumps({"speaker": "Alice", "content": original, "images": [{"index": 1}]}) if structured else original
+    )
+    recorder.record_user_input(
+        content, user_name="Alice", fresh_context=True, attachments=[attachment], structured=structured
+    )
+    source_sequence = recorder.events[0].sequence
+    with delivery_audit.delivery_audit_scope(transport.session, lambda _: None, attachment_root=tmp_path) as audit:
+        audit.bind(recorder)
+        await transport.session.send(MessageChain([Quote("incoming-1"), Text("actual reply body")]))
+        await audit.drain()
+    delivery = _deliveries(recorder)[0]
+    assert delivery.payload["message"]["reply_to"]["reply_to_sequence"] == source_sequence
+    assert delivery.payload["attachments"] == []
+    assert delivery.payload["content"] == "actual reply body"
+    rows = _event_rows(recorder)
+    source = next(event for event in rows if event.sequence == source_sequence)
+    projected = session_inspection.project_outputs(rows)[0]
+    output = projected["message"]
+    assert (output["content"], output["role"], output["images"]) == ("actual reply body", "assistant", [])
+    assert projected["structure_status"] == "recorded"
+    reply = output["reply_to"]
+    assert (reply["content"], reply["speaker"], reply["role"]) == (original, "Alice", "participant")
+    assert reply["event_ref"] == source.event_ref
+    image = reply["images"][0]
+    assert image["event_ref"] == source.event_ref
+    assert (
+        image["url"] == f"/api/llm-chat/sessions/events/{source.event_ref}/attachments/{attachment['attachment_ref']}"
+    )
+    assert f"/events/{output['event_ref']}/" not in image["url"]
+    assert "incoming-1" not in json.dumps(delivery.payload)
+    assert len(transport.state.wire) == 1
+
+
+@pytest.mark.asyncio
+async def test_native_companion_quote_keeps_exact_accepted_participant_not_root(transport, tmp_path):
+    recorder = AgentTurnRecorder()
+    for source_id, speaker, speaker_id, text in (
+        ("incoming-1", "Alice", "m_alice", "root must not be substituted"),
+        ("accepted-companion-message", "Bob", "m_bob", "Bob's exact accepted input"),
+    ):
+        recorder.append(
+            "user_input",
+            role="user",
+            payload={
+                "content": json.dumps({"speaker": "untrusted name", "content": text}),
+                "speaker": speaker,
+                "input_format": "structured_user_turn",
+                "host_author": {
+                    "version": 1,
+                    "source_message_id": source_id,
+                    "display_name": speaker,
+                    "speaker_id": speaker_id,
+                },
+            },
+        )
+    bob_sequence = recorder.events[1].sequence
+    with delivery_audit.delivery_audit_scope(transport.session, lambda _: None, attachment_root=tmp_path) as audit:
+        audit.bind(recorder)
+        await transport.session.send(MessageChain([Quote("accepted-companion-message"), Text("reply to Bob")]))
+        # This later input cannot change a source snapshot already taken at SendResponse.
+        recorder.record_user_input("later nearby input", user_name="Bob", fresh_context=False)
+        await audit.drain()
+    delivery = _deliveries(recorder)[0]
+    assert delivery.payload["message"]["reply_to"]["reply_to_sequence"] == bob_sequence
+    rows = _event_rows(recorder)
+    output = session_inspection.project_outputs(rows)[0]["message"]
+    reply = output["reply_to"]
+    assert (reply["speaker"], reply["speaker_id"], reply["content"], reply["role"]) == (
+        "Bob",
+        "m_bob",
+        "Bob's exact accepted input",
+        "participant",
+    )
+    assert reply["event_ref"] == next(event.event_ref for event in rows if event.sequence == bob_sequence)
+    assert all(raw not in json.dumps(delivery.payload) for raw in ("accepted-companion-message", "incoming-1"))
+    assert len(transport.state.wire) == 1
+
+
+@pytest.mark.asyncio
+async def test_native_unknown_quote_never_guesses_root_or_nearby_author(transport, tmp_path):
+    recorder = AgentTurnRecorder()
+    recorder.record_user_input("root original", user_name="Alice", fresh_context=True)
+    recorder.append(
+        "user_input",
+        role="user",
+        payload={"content": "nearby same author", "speaker": "Alice", "steer_sequence": 2},
+    )
+    with delivery_audit.delivery_audit_scope(transport.session, lambda _: None, attachment_root=tmp_path) as audit:
+        audit.bind(recorder)
+        await transport.session.send(MessageChain([Quote("unknown-private-id"), Text("own body")]))
+        await audit.drain()
+    delivery = _deliveries(recorder)[0]
+    assert "reply_to_sequence" not in delivery.payload["message"]["reply_to"]
+    output = session_inspection.project_outputs(_event_rows(recorder))[0]["message"]
+    assert output["content"] == "own body"
+    reply = output["reply_to"]
+    assert (reply["content"], reply["speaker"], reply["role"], reply["images"]) == (
+        "[引用原消息未记录]",
+        None,
+        "unknown",
+        [],
+    )
+    assert reply["event_ref"] == output["event_ref"]
+    assert "unknown-private-id" not in json.dumps(delivery.payload)
+
+
+@pytest.mark.asyncio
+async def test_native_nested_forward_keeps_authors_roles_order_and_actual_media_ownership(
+    transport, tmp_path, monkeypatch
+):
+    async def forbidden_download(*_args, **_kwargs):
+        raise AssertionError("admin structure capture must not download quote or forward archives")
+
+    monkeypatch.setattr(Session, "download", forbidden_download)
+    monkeypatch.setattr(delivery_audit, "_fetch_public_direct_image", forbidden_download)
+    recorder = AgentTurnRecorder()
+    chain = MessageChain(
+        [
+            Text("own outer body"),
+            Quote(
+                "unknown",
+                content=[
+                    Author("quoted-author", name="Quoted"),
+                    Text("inline original"),
+                    Image.of(url="https://example.org/quoted.png"),
+                ],
+            ),
+            Message(
+                forward=True,
+                content=[
+                    Message(
+                        content=[
+                            Author("bob-private-id", name="Bob"),
+                            Text("first"),
+                            Audio.of(url="file:///secret.wav"),
+                        ]
+                    ),
+                    Message(
+                        content=[
+                            Author(transport.account.self_id, name="Sent Bot"),
+                            Text("second"),
+                            Image.of(raw=_PNG),
+                            Message(
+                                forward=True,
+                                content=[
+                                    Message(
+                                        content=[
+                                            Author("carol-private-id", name="Carol"),
+                                            Text("third"),
+                                            Image.of(raw=_PNG),
+                                            File.of(url="internal:secret"),
+                                        ]
+                                    ),
+                                ],
+                            ),
+                        ]
+                    ),
+                ],
+            ),
+            Message("opaque-forward-private-id", forward=True),
+            Image.of(raw=_PNG),
+        ]
+    )
+    with delivery_audit.delivery_audit_scope(transport.session, lambda _: None, attachment_root=tmp_path) as audit:
+        audit.bind(recorder)
+        await transport.session.send(chain)
+        await audit.drain()
+    delivery = _deliveries(recorder)[0]
+    assert [image["index"] for image in delivery.payload["attachments"]] == [1, 2, 3]
+    output = session_inspection.project_outputs(_event_rows(recorder))[0]["message"]
+    assert output["content"] == "own outer body[图片 3]"
+    assert [image["index"] for image in output["images"]] == [3]
+    first, second, opaque = output["forwarded_messages"]
+    assert (first["speaker"], first["role"], first["content"]) == ("Bob", "participant", "first[语音]")
+    assert (second["speaker"], second["role"], second["content"]) == ("Sent Bot", "assistant", "second[图片 1]")
+    assert [image["index"] for image in second["images"]] == [1]
+    nested = second["forwarded_messages"][0]["forwarded_messages"][0]
+    assert (nested["speaker"], nested["role"], nested["content"]) == ("Carol", "participant", "third[图片 2][文件]")
+    assert [image["index"] for image in nested["images"]] == [2]
+    assert opaque["content"] == "[合并转发内容未记录]"
+    assert output["reply_to"]["content"] == "inline original[引用图片未记录]"
+    assert output["reply_to"]["speaker"] == "Quoted"
+    assert output["reply_to"]["images"] == []
+    for image in output["images"] + second["images"] + nested["images"]:
+        assert image["event_ref"] == output["event_ref"]
+        assert f"/events/{output['event_ref']}/attachments/output_" in image["url"]
+    assert all(not event.model_visible for event in recorder.events)
+    assert {media["kind"] for media in delivery.payload["media"]} == {"audio", "file"}
+    serialized = json.dumps(delivery.payload)
+    assert all(
+        secret not in serialized
+        for secret in (
+            "bob-private-id",
+            "carol-private-id",
+            "opaque-forward-private-id",
+            "quoted-author",
+            "https://example.org/quoted.png",
+            "file://",
+            "internal:",
+            "base64",
+        )
+    )
+    assert len(transport.state.wire) == 1
+
+
+@pytest.mark.parametrize(
+    ("source_turn", "source_sequence", "source_type"),
+    [(2, 1, "user_input"), (1, 5, "user_input"), (1, 1, "assistant_output"), (None, 1, "user_input")],
+)
+def test_persisted_reply_sequence_only_resolves_earlier_input_in_same_turn(source_turn, source_sequence, source_type):
+    source = AgentEvent(
+        turn_id=source_turn,
+        sequence=source_sequence,
+        event_ref="not-the-source",
+        event_type=source_type,
+        payload_json=json.dumps({"content": "must never be guessed", "speaker": "Alice"}),
+    )
+    delivery = AgentEvent(
+        turn_id=1,
+        sequence=4,
+        event_ref="delivery",
+        event_type="message_delivery",
+        status="confirmed",
+        effect="confirmed",
+        payload_json=json.dumps(
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "own body",
+                    "reply_to": {"reply_to_sequence": source_sequence},
+                }
+            }
+        ),
+    )
+    output = session_inspection.project_outputs([source, delivery])[0]["message"]
+    assert output["content"] == "own body"
+    assert output["reply_to"]["content"] == "[引用原消息未记录]"
+    assert output["reply_to"]["event_ref"] == "delivery"
+
+
+def test_old_confirmed_delivery_missing_structure_stays_explicitly_unrecorded():
+    delivery = AgentEvent(
+        turn_id=1,
+        sequence=2,
+        event_ref="old-delivery",
+        event_type="message_delivery",
+        status="confirmed",
+        effect="confirmed",
+        payload_json=json.dumps({"content": "old flattened content", "capture_status": "complete"}),
+    )
+    output = session_inspection.project_outputs([delivery])[0]
+    assert output["source"] == "message_delivery"
+    assert output["structure_status"] == "not_recorded"
+    assert output["capture_status"] == "complete"
+    assert output["content"] == "old flattened content"
+    assert output["message"]["reply_to"] is None
+    assert output["message"]["forwarded_messages"] == output["message"]["images"] == []
+
+
+@pytest.mark.asyncio
+async def test_prebind_quote_without_recorded_source_does_not_gain_guessed_link_later(transport, tmp_path):
+    recorder = AgentTurnRecorder()
+    recorder.record_user_input("root recorded after receipt boundary", user_name="Alice", fresh_context=True)
+    with delivery_audit.delivery_audit_scope(transport.session, lambda _: None, attachment_root=tmp_path) as audit:
+        await transport.session.send(MessageChain([Quote("incoming-1"), Text("prebind receipt")]))
+        await audit.drain()
+        audit.bind(recorder)
+    delivery = _deliveries(recorder)[0]
+    assert "reply_to_sequence" not in delivery.payload["message"]["reply_to"]
+    output = session_inspection.project_outputs(_event_rows(recorder))[0]["message"]
+    assert output["reply_to"]["content"] == "[引用原消息未记录]"
+    assert output["reply_to"]["speaker"] is None
+
+
+@pytest.mark.asyncio
+async def test_private_sent_structure_keeps_text_element_and_depth_bounds(transport):
+    projection = delivery_audit._Projection(transport.session)
+    projection.walk([Text("文" * 1000)] * 1100)
+    assert len(projection.content()) == 50_000
+    assert projection.structure()["truncated"] is True
+    assert projection.partial
+    nested: Text | Message = Text("beyond depth limit")
+    for _ in range(20):
+        nested = Message(content=[nested])
+    deep = delivery_audit._Projection(transport.session)
+    deep.walk([nested])
+    assert deep.partial
+    assert "beyond depth limit" not in json.dumps(deep.structure())
+
+
+def test_output_structure_uses_only_receipt_authorized_indexed_images():
+    delivery = AgentEvent(
+        turn_id=1,
+        sequence=1,
+        event_ref="delivery-owner",
+        event_type="message_delivery",
+        status="confirmed",
+        effect="confirmed",
+        payload_json=json.dumps(
+            {
+                "content": "[图片 1]",
+                "message": {
+                    "content": "[图片 1]",
+                    "role": "assistant",
+                    "image_indexes": [1],
+                    "event_ref": "wrong-owner",
+                    "speaker_id": "not-host-recorded",
+                    "images": [{"url": "https://unowned.invalid/private.png"}],
+                },
+            }
+        ),
+    )
+    output = session_inspection.project_outputs([delivery])[0]["message"]
+    assert output["images"] == []
+    assert output["truncated"] is True
+    assert output["event_ref"] == "delivery-owner"
+    assert "speaker_id" not in output
+    assert "unowned.invalid" not in json.dumps(output)

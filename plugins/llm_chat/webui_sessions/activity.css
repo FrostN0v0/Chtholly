@@ -1,0 +1,43 @@
+.activity-controls { padding: 0 0 12px; margin-bottom: 6px; border-bottom: 1px solid var(--border); }
+.activity-controls button, .activity-turn-body > button, .activity-disclosure > .disclosure-content > button { min-height: 28px; padding: 3px 8px; font-size: 12px; }
+.activity-controls > .error, .activity-controls > p { flex-basis: 100%; }
+.activity-feed { display: grid; gap: 14px; min-width: 0; overflow-anchor: none; }
+.activity-item { min-width: 0; }
+.activity-turn-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin-bottom: 6px; padding-top: 6px; border-top: 1px solid var(--border); font-size: 11px; }
+.activity-turn-heading > button { margin-left: auto; }
+.activity-turn-body, .activity-reminder-state { min-width: 0; }
+.activity-turn-body > * + *, .activity-reminder-state > * + * { margin-top: 10px; }
+.activity-feed > .activity-item:first-child .activity-turn-heading { border-top: 0; }
+.activity-disclosure > .disclosure-summary { width: 100%; min-height: 30px; padding: 3px 0; }
+.activity-disclosure > .disclosure-summary > .disclosure-heading { flex: 1 1 auto; }
+.activity-disclosure > .disclosure-summary > .activity-record-time { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11px; }
+.activity-disclosure > .disclosure-summary .disclosure-title { font-size: 13px; }
+.activity-disclosure > .disclosure-content { margin-bottom: 12px; }
+.activity-feed .conversation-flow { gap: 11px; }
+.activity-feed .conversation-flow > .record-card { margin: 0 0 0 43px; }
+.activity-feed .activity-preparation .input-record { padding-left: 0; }
+.activity-reminder-meta, .activity-loading { font-size: 12px; }
+.companion-inspection .companion-decision-summary { padding: 7px 10px; font-size: 14px; line-height: 1.6; }
+.companion-proposed-contact, .companion-actual-contact { display: grid; gap: 6px; min-width: 0; font-size: 13px; }
+.companion-proposed-contact > strong, .companion-actual-contact > h4 { font-size: 12px; font-weight: 600; }
+.companion-contact-decision { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: 12px; }
+.companion-inspection .companion-contact { gap: 5px; padding-top: 7px; font-size: 12px; }
+.companion-inspection .partial-notice { margin-bottom: 0; padding: 5px 8px; }
+#native-body { display: grid; gap: 16px; }
+#native-body > button { justify-self: start; }
+#scope-review-history { margin-top: 16px; }
+.review-history-list { display: grid; gap: 8px; margin-top: 12px; }
+.review-history-item { padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
+.review-history-item > summary { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; list-style: none; }
+.review-history-item > summary strong { flex: 1; min-width: 0; font-size: 13px; }
+.review-history-item > .review-history-detail { margin-top: 12px; }
+.review-history-controls { margin-top: 12px; }
+@media (max-width: 520px) {
+  .context-bar > .context-picker { grid-column: 1 / -1; }
+  .activity-feed { gap: 12px; }
+  .activity-feed .conversation-flow > .record-card { margin-left: 35px; }
+  .activity-disclosure > .disclosure-summary { flex-wrap: wrap; gap: 4px 8px; }
+  .activity-disclosure > .disclosure-summary > .activity-record-time { flex-basis: 100%; }
+  .activity-turn-heading > .muted { max-width: calc(100% - 80px); }
+  .activity-disclosure > .disclosure-content { padding-left: 8px; margin-left: 3px; }
+}

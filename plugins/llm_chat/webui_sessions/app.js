@@ -35,13 +35,11 @@ const labels = {
 };
 const $ = (id) => document.getElementById(id);
 const state = {
-  scopes: [], scope: null, sessions: [], session: null, detail: null, turns: [], turn: null,
-  inspection: null, events: [], navigation: 0, scopeLoad: 0, sessionLoad: 0,
+  scopes: [], scope: null, sessions: [], session: null, detail: null, turn: null,
+  inspection: null, inspectedActivity: null, events: [], navigation: 0, scopeLoad: 0, sessionLoad: 0,
   pollTimer: null, pollBusy: false, payload: null, action: null, actionBusy: false,
-  newestFirst: true, purposeFilter: "", sessionLoading: false,
+  newestFirst: true, sessionLoading: false, tabScroll: {},
   channel: null, channelLoad: 0, channelLoading: false, channelError: "",
-  selectedReview: "", review: null, reviewError: "",
-  reviewPollRemaining: 0, scopePollRemaining: 20,
 };
 
 function node(tag, className = "", text = "") {
@@ -67,9 +65,6 @@ function short(value, limit = 140) {
 function label(value) { return labels[value] || value || "未知"; }
 const purposeLabels = { chat: "\u666e\u901a\u804a\u5929", reminder: "\u63d0\u9192", companion: "\u4e3b\u52a8\u8054\u7cfb", companion_reflection: "\u590d\u76d8" };
 function purposeLabel(value) { return purposeLabels[value] || value || "\u7528\u9014\u672a\u8bb0\u5f55"; }
-function turnSpeaker(turn) {
-  return turn.purpose === "companion_reflection" ? "\u5185\u90e8\u590d\u76d8" : turn.user_name || "\u7528\u6237";
-}
 function date(value) {
   if (!value) return "时间未记录";
   const source = /(?:Z|[+-]\d\d:\d\d)$/i.test(value) ? value : `${value}Z`;
@@ -124,6 +119,7 @@ let bridgeReady = !inFrame;
 let pageActive = true;
 let pageController = new AbortController();
 let navigationController = new AbortController();
+let evidenceController = null;
 
 function abortError() { return new DOMException("读取已停止", "AbortError"); }
 function apiUrl(path) {
@@ -217,6 +213,10 @@ function beginNavigation() {
   ++state.navigation;
   navigationController.abort();
   navigationController = new AbortController();
+  activity.cancel();
+  reviewArchive.cancel();
+  evidenceController?.abort();
+  if ($("native-dialog").open) $("native-dialog").close();
   disposePayload();
   if ($("payload-dialog").open) $("payload-dialog").close();
   disposeAttachments();
@@ -262,28 +262,23 @@ function usageDetails(usage) {
   return item;
 }
 function personaName(persona) { return persona?.name || "人格未记录"; }
-function eventByRef(ref) { return state.events.find((event) => event.event_ref === ref); }
+function selectedBundle() { return { inspection: state.inspection, events: state.events }; }
+function eventByRef(ref, bundle = selectedBundle()) { return bundle.events.find((event) => event.event_ref === ref); }
 function eventTitle(event) { return event?.title || event?.tool || label(event?.event_type); }
 function eventPreview(event) { return typeof event?.preview === "string" ? event.preview : event?.preview?.text; }
-function eventButton(ref, title, path = "") {
-  const item = button(title, () => openPayload(ref, title, path));
+function eventButton(ref, title, path = "", bundle = selectedBundle()) {
+  const item = button(title, () => openPayload(ref, title, path, bundle));
   item.dataset.focusKey = `${ref}|${path}|${title}`;
   item.disabled = !ref;
   if (!ref) item.title = "本轮未记录对应负载";
   return item;
 }
 
-const relationshipAxes = {
-  affection: "\u597d\u611f", trust: "\u4fe1\u4efb", dependence: "\u4f9d\u8d56", resentment: "\u6028\u5ff5", familiarity: "\u719f\u6089\u5ea6",
-};
 const actualOutcomeLabels = {
   silent: "\u81ea\u4e3b\u6c89\u9ed8", refusal: "\u5df2\u9001\u8fbe\u62d2\u7edd", media_only: "\u4ec5\u5a92\u4f53", text: "\u6587\u5b57\u56de\u590d", mixed: "\u6587\u5b57\u4e0e\u5a92\u4f53", unknown: "\u56de\u5e94\u9001\u8fbe\u672a\u8bb0\u5f55",
 };
 function affectNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "\u672a\u8bb0\u5f55";
-}
-function axisDelta(value) {
-  return typeof value === "number" && Number.isFinite(value) ? `${value > 0 ? "+" : ""}${affectNumber(value)}` : "\u672a\u8bb0\u5f55";
 }
 function evaluationStatus(value) {
   return ({ pending: "\u8bc4\u4f30\u6392\u961f\u4e2d", running: "\u8bc4\u4f30\u8fd0\u884c\u4e2d", succeeded: "\u8bc4\u4f30\u5df2\u5b8c\u6210", failed: "\u8bc4\u4f30\u5931\u8d25" })[value] || label(value);
@@ -308,17 +303,10 @@ function affectIndicators(view, turnStatus) {
   return row;
 }
 async function selectEvidenceTurn(evidence) {
-  if (!evidence?.turn_ref || !evidence.session_ref) return;
-  if (state.session?.session_ref !== evidence.session_ref) {
-    const generation = state.navigation;
-    const result = await request(`/sessions/${encodeURIComponent(evidence.session_ref)}`);
-    if (generation !== state.navigation) return;
-    if (!state.sessions.some((session) => session.session_ref === evidence.session_ref)) state.sessions.push(result.item);
-    if (state.purposeFilter && state.purposeFilter !== (result.item.purpose || "chat")) state.purposeFilter = "";
-    $("purpose-select").value = state.purposeFilter;
-    if (!await selectSession(result.item, evidence.turn_ref, { showDetail: true })) return;
-  } else if (!await selectTurn(state.turns.find((turn) => turn.turn_ref === evidence.turn_ref) || evidence)) return;
+  if (!evidence?.turn_ref) return;
   selectTab($("tab-io"));
+  if (await activity.reveal(evidence.turn_ref)) return;
+  await openNativeEvidence(evidence.turn_ref);
 }
 function evidenceLinks(ids, recordKey) {
   const row = node("div", "actions evidence-links");
@@ -435,12 +423,9 @@ async function loadScopes() {
   if (oldScope !== state.scope?.scope_ref) { state.sessions = []; state.session = null; state.channel = null; }
   $("scope-select").value = state.scope?.scope_ref || "";
   renderScope();
-  const selectedReview = oldScope === state.scope?.scope_ref ? state.selectedReview : "";
   if (!await loadSessions(state.session?.session_ref) || generation !== state.scopeLoad) return;
-  if (selectedReview && previousView === "detail") await selectReview(selectedReview);
   if (oldScope === state.scope?.scope_ref && previousView === "list") $("sessions-workspace").dataset.view = "list";
   await loadChannelOverview();
-  await sessionTree.refresh();
   if (generation === state.scopeLoad) status(state.scopes.length ? "\u5df2\u540c\u6b65" : "\u6682\u65e0\u804a\u5929\u8303\u56f4");
 }
 function renderScope() {
@@ -488,90 +473,78 @@ async function loadChannelOverview() {
     if (generation === state.channelLoad && scope === state.scope && error?.name !== "AbortError") state.channelError = error.message;
   } finally {
     if (generation === state.channelLoad && scope === state.scope) {
-      state.channelLoading = false; renderChannelOverview(); state.scopePollRemaining = 20; startPolling();
+      state.channelLoading = false; renderChannelOverview(); startPolling();
     }
   }
 }
-async function selectReview(reviewRef) {
-  if (!state.scope || !reviewRef) return;
-  stopPolling();
-  ++state.sessionLoad;
-  const generation = beginNavigation();
-  const scope = state.scope;
-  state.selectedReview = reviewRef;
-  state.review = null;
-  state.reviewError = "";
-  state.reviewPollRemaining = 20;
-  state.turn = null;
-  state.inspection = null;
-  state.events = [];
-  $("sessions-workspace").dataset.view = "detail";
-  document.querySelector(".inspector").scrollTop = 0;
-  renderTurns(); renderWorkspace();
+async function openNativeEvidence(turnRef) {
+  evidenceController?.abort();
+  const controller = new AbortController();
+  evidenceController = controller;
+  $("native-title").textContent = "\u539f\u751f\u8f6e\u6b21\u8bc1\u636e";
+  $("native-body").replaceChildren(node("p", "muted", "\u6b63\u5728\u8bfb\u53d6\u2026"));
+  if (!$("native-dialog").open) $("native-dialog").showModal();
   try {
-    const result = await request(`/scopes/${encodeURIComponent(scope.scope_ref)}/companion/reviews/${encodeURIComponent(reviewRef)}`);
-    if (generation !== state.navigation || scope !== state.scope) return;
-    if (result.item.native_turn?.turn_ref && result.item.native_turn?.session_ref) {
-      await selectEvidenceTurn(result.item.native_turn);
-      return;
-    }
-    state.review = result.item;
+    const bundle = await activity.bundle(turnRef, controller.signal);
+    if (controller.signal.aborted) return;
+    $("native-body").replaceChildren(renderNativeFlow(bundle, { includeReview: false }));
+    const choose = button("\u68c0\u67e5\u4e0a\u4e0b\u6587\u4e0e\u5173\u7cfb", () => {
+      inspectBundle(bundle); $("native-dialog").close(); selectTab($("tab-context"));
+    });
+    $("native-body").prepend(choose, node("p", "muted", bundle.inspection.turn.turn_ref));
   } catch (error) {
-    if (generation === state.navigation && error?.name !== "AbortError") state.reviewError = error.message;
-  } finally {
-    if (generation === state.navigation) { renderWorkspace(); startPolling(); }
+    if (error?.name !== "AbortError") $("native-body").replaceChildren(node("p", "error", error.message), button("\u91cd\u8bd5", () => openNativeEvidence(turnRef)));
   }
 }
 
 async function loadSessions(preferredRef = "") {
   stopPolling();
   const generation = ++state.sessionLoad;
-  renderSessions(); renderTurns();
   const scope = state.scope;
-  const result = scope ? await request(`/scopes/${encodeURIComponent(scope.scope_ref)}/sessions?limit=500`) : { items: [] };
+  const result = scope ? await request(`/scopes/${encodeURIComponent(scope.scope_ref)}/sessions?limit=500&purpose=chat`) : { items: [] };
   if (generation !== state.sessionLoad || scope !== state.scope) return false;
-  state.sessions = result.items || [];
-  const visible = state.sessions.filter((item) => !state.purposeFilter || (item.purpose || "chat") === state.purposeFilter);
-  const selected = visible.find((item) => item.session_ref === preferredRef)
-    || visible.find((item) => item.status === "active") || visible[0] || null;
-  const turnRef = selected?.session_ref === state.session?.session_ref ? state.turn?.turn_ref : "";
-  return selectSession(selected, turnRef, { showDetail: Boolean(turnRef) && $("sessions-workspace").dataset.view === "detail" });
+  state.sessions = (result.items || []).filter((item) => (item.purpose || "chat") === "chat" && !item.reminder_task_ref);
+  const selected = state.sessions.find((item) => item.session_ref === preferredRef)
+    || state.sessions.find((item) => item.status === "active") || state.sessions[0] || null;
+  if (selected && selected.session_ref === state.session?.session_ref) {
+    state.session = selected;
+    const navigation = state.navigation;
+    const [detail] = await Promise.all([request(`/sessions/${encodeURIComponent(selected.session_ref)}`), activity.refresh()]);
+    if (navigation !== state.navigation || scope !== state.scope) return false;
+    state.detail = detail.item;
+    refreshPanels(); startPolling();
+    return true;
+  }
+  return selectSession(selected);
 }
-function renderSessions() {
-  const count = state.sessions.filter((session) => !state.purposeFilter || (session.purpose || "chat") === state.purposeFilter).length;
-  $("session-count").textContent = `(${count})`;
-}
-async function selectSession(session, preferredTurnRef = "", { showDetail = false } = {}) {
+function renderSessions() { $("session-count").textContent = `(${state.sessions.length})`; }
+async function selectSession(session) {
+  if (session && session.session_ref === state.session?.session_ref && state.detail) {
+    $("sessions-workspace").dataset.view = "detail";
+    activity.resume(); startPolling();
+    return true;
+  }
   stopPolling();
   ++state.sessionLoad;
   const generation = beginNavigation();
   state.session = session;
-  state.detail = null;
-  state.turn = null;
-  state.turns = [];
-  state.inspection = null;
-  state.events = [];
-  state.selectedReview = "";
-  state.review = null;
-  state.reviewError = "";
+  state.detail = null; state.turn = null; state.inspection = null; state.inspectedActivity = null; state.events = [];
   state.sessionLoading = Boolean(session);
-  if (!showDetail) $("sessions-workspace").dataset.view = "list";
+  state.tabScroll = {};
+  delete document.querySelector(".inspector").dataset.activeTab;
+  $("sessions-workspace").dataset.view = session ? "detail" : "list";
+  selectTab($("tab-io"));
   renderSessions(); renderScope(); renderSession(); renderTurns(); renderWorkspace();
-  if (!session) return true;
-  const ref = encodeURIComponent(session.session_ref);
+  const feed = activity.open($("io-view"), session);
+  if (!session) { await feed; return true; }
   try {
-    const [detail, turns] = await Promise.all([request(`/sessions/${ref}`), request(`/sessions/${ref}/turns?limit=1000`)]);
+    const [detail] = await Promise.all([request(`/sessions/${encodeURIComponent(session.session_ref)}`), feed]);
     if (generation !== state.navigation) return false;
     state.detail = detail.item;
-    state.turns = turns.items || [];
-    if (!showDetail && preferredTurnRef) state.turn = state.turns.find((turn) => turn.turn_ref === preferredTurnRef) || null;
-    state.sessionLoading = false;
-    renderSession(); renderTurns();
-    if (showDetail && preferredTurnRef) return await selectTurn(state.turns.find((turn) => turn.turn_ref === preferredTurnRef) || { turn_ref: preferredTurnRef });
-    if (showDetail && state.turns.length) return await selectTurn(state.turns.reduce((latest, turn) => turn.sequence > latest.sequence ? turn : latest));
+    renderSession(); renderWorkspace();
     return true;
   } finally {
-    if (state.session === session) { state.sessionLoading = false; renderTurns(); startPolling(); }
+    if (generation === state.navigation) { state.sessionLoading = false; renderTurns(); startPolling(); }
   }
 }
 function renderSession() {
@@ -603,65 +576,22 @@ function renderSession() {
   if (!detail.anchors?.length) anchors.content.append(node("p", "muted", "\u6682\u65e0\u56fa\u5b9a\u4e8b\u4ef6"));
   container.append(anchors.item, rawDetails("\u539f\u59cb\u4f1a\u8bdd\u6570\u636e", detail));
 }
-function turnListItem(turn) {
-  const item = button("", () => selectTurn(turn), "list-item");
-  item.dataset.focusKey = turn.turn_ref;
-  item.classList.toggle("is-active", turn.turn_ref === state.turn?.turn_ref);
-  item.setAttribute("aria-current", String(turn.turn_ref === state.turn?.turn_ref));
-  const heading = node("div", "item-heading");
-  const statusBadge = badge(turn.status);
-  if (turn.purpose === "companion_reflection") statusBadge.textContent = `\u6a21\u578b ${label(turn.status)}`;
-  heading.append(node("strong", "", turnSpeaker(turn)), statusBadge);
-  const missingInput = turn.purpose === "companion_reflection" ? "\u67e5\u770b\u590d\u76d8\u7ed3\u8bba\u4e0e\u7ed3\u679c" : "\u7528\u6237\u8f93\u5165\u6458\u8981\u672a\u8bb0\u5f55";
-  item.append(heading, node("p", "snippet", turn.input_preview == null ? missingInput : short(turn.input_preview, 180)));
-  const meta = node("div", "turn-list-meta");
-  const timing = node("span", "", compactDuration(turn));
-  timing.title = turnDuration(turn);
-  meta.append(node("span", "", `#${turn.sequence} \xb7 ${date(turn.created_at)}`), timing);
-  if (turn.input_count > 1) meta.append(node("span", "", `${turn.input_count - 1} \u6761\u8865\u5145\u8f93\u5165`));
-  item.append(meta);
-  const evaluation = turn.relationship_evaluation;
-  const changes = Object.entries(evaluation?.changes || {}).filter(([, change]) => typeof change.delta === "number" && change.delta !== 0);
-  if (changes.length) item.append(node("p", "muted batch-summary", `\u6279\u6b21\uff1a${changes.map(([key, change]) => `${relationshipAxes[key] || key} ${axisDelta(change.delta)}`).join(" \xb7 ")}`));
-  else if (["failed", "pending", "running"].includes(evaluation?.status)) item.append(node("p", "muted batch-summary", evaluationStatus(evaluation.status)));
-  return item;
+function inspectBundle(bundle) {
+  state.inspection = bundle.inspection;
+  state.inspectedActivity = bundle.activity || null;
+  state.events = bundle.events;
+  state.turn = bundle.inspection.turn;
+  refreshPanels();
 }
 function renderTurns() {
   $("turn-order-button").textContent = state.newestFirst ? "\u6700\u65b0\u5728\u4e0a" : "\u6700\u65e9\u5728\u4e0a";
   $("turn-order-button").setAttribute("aria-pressed", String(state.newestFirst));
-  sessionTree.render($("turn-list"), {
-    scope: state.scope, sessions: state.sessions, session: state.session, turns: state.turns,
-    purpose: state.purposeFilter, newestFirst: state.newestFirst, reviewRef: state.selectedReview, loading: state.sessionLoading,
-  });
+  sessionTree.render($("turn-list"), { scope: state.scope, sessions: state.sessions, session: state.session, newestFirst: state.newestFirst });
 }
-async function fetchTurn(turnRef) {
+async function fetchTurn(turnRef, options = {}) {
   const ref = encodeURIComponent(turnRef);
-  const [inspection, events] = await Promise.all([request(`/turns/${ref}/inspection`), request(`/turns/${ref}/events`)]);
+  const [inspection, events] = await Promise.all([request(`/turns/${ref}/inspection`, options), request(`/turns/${ref}/events`, options)]);
   return { inspection: inspection.item, events: events.items || [] };
-}
-async function selectTurn(turn) {
-  stopPolling();
-  ++state.sessionLoad;
-  const generation = beginNavigation();
-  state.turn = turn;
-  state.selectedReview = "";
-  state.review = null;
-  state.reviewError = "";
-  state.inspection = null;
-  state.events = [];
-  $("sessions-workspace").dataset.view = "detail";
-  document.querySelector(".inspector-body").scrollTop = 0;
-  document.querySelector(".inspector").scrollTop = 0;
-  renderTurns(); renderWorkspace();
-  const result = await fetchTurn(turn.turn_ref);
-  if (generation !== state.navigation) return false;
-  state.inspection = result.inspection;
-  state.events = result.events;
-  state.turn = result.inspection.turn;
-  state.reviewPollRemaining = state.turn.purpose === "companion_reflection" ? 20 : 0;
-  renderTurns(); renderWorkspace();
-  startPolling();
-  return true;
 }
 function renderOverview(inspection) {
   const target = $("turn-overview");
@@ -673,8 +603,12 @@ function renderOverview(inspection) {
   const facts = node("dl", "fields overview-facts");
   const models = [...new Set((inspection.model_calls || []).map((call) => call.model).filter(Boolean))];
   const confirmed = (inspection.outputs || []).filter((output) => output.source === "message_delivery");
+  const destination = state.inspectedActivity?.destination || state.inspectedActivity?.reminder?.destination;
+  const channel = destination?.is_source_scope === false
+    ? destination.type === "dm" ? `\u79c1\u804a ${destination.platform_user_id || ""}\uff08\u975e\u672c\u9891\u9053\uff09` : `\u5176\u4ed6\u9891\u9053 ${destination.channel_id || ""}`
+    : state.scope?.channel_name || state.scope?.display_name || "\u672a\u8bb0\u5f55";
   for (const [title, value, explanation] of [
-    ["\u9891\u9053", state.scope?.channel_name || state.scope?.display_name || "\u672a\u8bb0\u5f55"],
+    ["\u9891\u9053 / \u76ee\u7684\u5730", channel],
     ["\u65f6\u95f4", date(inspection.turn.created_at)],
     ["\u6a21\u578b", models.join(" / ") || inspection.turn.model || "\u672a\u8bb0\u5f55"],
     ["\u89d2\u8272", personaName(inspection.persona)],
@@ -703,7 +637,7 @@ function renderOverview(inspection) {
   const replacements = state.events.filter((event) => event.event_type === "steer_checkpoint"
     && event.details?.some((detail) => detail.label === "status" && detail.value === "candidate_replaced")).length;
   more.append(node("p", "muted", replacements
-    ? `\u5df2\u8bb0\u5f55 ${replacements} \u6b21\u5019\u9009\u66ff\u6362\uff08\u4e0d\u4ee3\u8868\u5168\u90e8\u66ff\u6362\uff09`
+    ? `\u5df2\u8bb0\u5f55 ${replacements} \u6b21\u5019\u9009\u66ff\u6362`
     : "\u672a\u89c1\u5019\u9009\u66ff\u6362\u8bb0\u5f55"));
   more.append(rawDetails("\u8f6e\u6b21\u539f\u59cb\u6570\u636e", inspection.turn));
   overview.append(more);
@@ -711,56 +645,33 @@ function renderOverview(inspection) {
 }
 function renderWorkspace() {
   const header = $("turn-header");
-  header.replaceChildren();
-  $("turn-overview").replaceChildren();
-  const reflection = state.turn?.purpose === "companion_reflection" || Boolean(state.selectedReview);
-  $("tab-io").textContent = reflection ? "\u590d\u76d8\u7ed3\u679c" : "\u5bf9\u8bdd\u8bb0\u5f55";
-  $("tab-relationship").hidden = reflection;
-  $("tab-timeline").hidden = Boolean(state.selectedReview);
-  $("tab-context").hidden = Boolean(state.selectedReview);
-  const selectedTab = tabs.find((tab) => tab.getAttribute("aria-selected") === "true");
-  if (selectedTab?.hidden) selectTab($("tab-io"));
-  else $("inspection-label").textContent = (selectedTab || $("tab-io")).textContent;
-  if (state.selectedReview) {
-    header.append(node("h2", "", "\u590d\u76d8\u7ed3\u679c"), node("p", "turn-identifier", state.selectedReview));
-    for (const id of ["timeline-view", "context-view", "relationship-view"]) $(id).replaceChildren();
-    const body = $("io-view");
-    body.replaceChildren();
-    if (state.review) {
-      body.append(companionRenderer.review(state.review, null));
-      const overview = node("section", "overview-section");
-      overview.append(badge(state.review.status), node("p", "muted", "\u672a\u5173\u8054\u6a21\u578b\u8f6e\u6b21"));
-      overview.append(node("p", "", date(state.review.started_at)), node("p", "muted", `${state.review.persona_key || "\u4eba\u683c\u672a\u8bb0\u5f55"} \u00b7 ${duration(state.review.duration_ms)}`));
-      $("turn-overview").append(overview);
-    } else body.append(node("p", state.reviewError ? "error" : "muted", state.reviewError || "\u6b63\u5728\u8bfb\u53d6\u590d\u76d8\u2026"));
-    $("collapse-details-button").disabled = !state.review;
-    $("overview-toggle").disabled = !state.review;
-    return;
-  }
-  $("collapse-details-button").disabled = !state.inspection;
+  header.replaceChildren(node("h2", "", state.session ? `\u4f1a\u8bdd #${state.session.sequence}` : "\u5bf9\u8bdd\u8bb0\u5f55"));
+  $("tab-io").textContent = "\u5bf9\u8bdd\u8bb0\u5f55";
+  $("collapse-details-button").disabled = !state.session;
   $("overview-toggle").disabled = !state.inspection;
+  const selectedTab = tabs.find((tab) => tab.getAttribute("aria-selected") === "true");
+  $("inspection-label").textContent = (selectedTab || $("tab-io")).textContent;
   if (!state.inspection) {
-    header.append(node("p", "", state.turn ? "\u6b63\u5728\u8bfb\u53d6\u8f6e\u6b21\u2026" : "\u8bf7\u9009\u62e9\u4e00\u4e2a\u8f6e\u6b21\u3002"));
-    for (const id of ["timeline-view", "context-view", "io-view", "relationship-view", "turn-overview"]) empty($(id), state.turn ? "\u6b63\u5728\u8bfb\u53d6\u8f6e\u6b21\u2026" : "\u8bf7\u9009\u62e9\u4e00\u4e2a\u8f6e\u6b21\u3002");
+    $("turn-overview").replaceChildren();
+    for (const id of ["timeline-view", "context-view", "relationship-view"]) empty($(id), "\u8bf7\u5728\u5bf9\u8bdd\u4e2d\u9009\u62e9\u8981\u68c0\u67e5\u7684\u8f6e\u6b21\u3002");
     return;
   }
-  const inspection = state.inspection;
-  header.append(node("h2", "", reflection ? "\u590d\u76d8\u8be6\u60c5" : "\u8c03\u7528\u8be6\u60c5"), node("p", "turn-identifier", inspection.turn.turn_ref));
-  renderOverview(inspection);
-  renderTimeline(); renderContext(); renderIO();
+  header.append(node("p", "turn-identifier", `\u68c0\u67e5\u8f6e\u6b21 ${state.turn.turn_ref}`));
+  renderOverview(state.inspection);
+  renderTimeline(); renderContext();
   $("relationship-view").replaceChildren(relationshipPanel());
 }
-function callPanel(title, preview, ref, { path = "", mode = "result", folded = false } = {}) {
+function callPanel(title, preview, ref, { path = "", mode = "result", folded = false, bundle = selectedBundle() } = {}) {
   const panel = node(folded ? "details" : "div", "call-panel");
   if (folded) panel.dataset.detailKey = "request-messages";
   const heading = node(folded ? "summary" : "div", "call-panel-heading");
-  heading.append(node("h4", "", title), eventButton(ref, "\u5b8c\u6574\u8bb0\u5f55", path));
+  heading.append(node("h4", "", title), eventButton(ref, "\u5b8c\u6574\u8bb0\u5f55", path, bundle));
   const display = preview?.kind === "messages" ? preview.items : preview?.kind === "value" ? preview.value : preview;
   const value = !ref ? "\u672c\u8f6e\u672a\u8bb0\u5f55" : display ?? "\u6458\u8981\u672a\u8bb0\u5f55";
   const body = SessionContent.invocation(value, mode);
   body.dataset.detailKey = title;
   panel.append(heading, body);
-  if (preview?.truncated) panel.append(node("p", "partial-notice", "\u6458\u8981\u5df2\u622a\u65ad\uff0c\u5b8c\u6574\u5185\u5bb9\u53ef\u6309\u9700\u67e5\u770b"));
+  if (preview?.truncated) panel.append(node("p", "partial-notice", "\u6458\u8981\u5df2\u622a\u65ad"));
   return panel;
 }
 function traceIcon(kind) {
@@ -782,7 +693,7 @@ function traceIcon(kind) {
   icon.append(path);
   return icon;
 }
-function modelCard(call, index) {
+function modelCard(call, index, bundle = selectedBundle()) {
   const { item, summary, content } = disclosure(call.model || `\u6a21\u578b\u8bf7\u6c42 ${index + 1}`, "", "record-card model-record");
   summary.prepend(traceIcon("model"));
   item.dataset.recordKey = `model:${call.request_id || call.request_event_ref || call.response_event_ref || index}`;
@@ -793,13 +704,13 @@ function modelCard(call, index) {
   if (call.usage) meta.append(node("span", "record-usage", `\u2191${compactTokens(call.usage.input_tokens)} \u2193${compactTokens(call.usage.output_tokens)}`));
   summary.append(meta);
   content.append(
-    callPanel("\u6a21\u578b\u8f93\u51fa", call.output_display ?? call.output_preview, call.response_event_ref, { mode: "model" }),
-    callPanel("\u8bf7\u6c42\u6d88\u606f", call.input_display ?? call.input_preview, call.request_event_ref, { mode: "model", folded: true }),
+    callPanel("\u6a21\u578b\u8f93\u51fa", call.output_display ?? call.output_preview, call.response_event_ref, { mode: "model", bundle }),
+    callPanel("\u8bf7\u6c42\u6d88\u606f", call.input_display ?? call.input_preview, call.request_event_ref, { mode: "model", folded: true, bundle }),
     rawDetails("\u8bf7\u6c42\u4fe1\u606f", { request_id: call.request_id, request_event_ref: call.request_event_ref, response_event_ref: call.response_event_ref, attempt: call.attempt, capture_status: call.capture_status, usage: call.usage }),
   );
   return item;
 }
-function toolCard(call, index, includeDeliveries = true) {
+function toolCard(call, index, includeDeliveries = true, bundle = selectedBundle()) {
   const deliveries = call.deliveries || [];
   const { item, summary, content } = disclosure(call.tool_name || "\u5de5\u5177\u540d\u672a\u8bb0\u5f55", "", "record-card tool-record");
   summary.prepend(traceIcon("tool"));
@@ -809,26 +720,25 @@ function toolCard(call, index, includeDeliveries = true) {
   if (call.status !== "succeeded") meta.append(badge(call.status));
   meta.append(node("span", "record-duration", duration(call.duration_ms)));
   summary.append(meta);
-  if (includeDeliveries) for (const delivery of deliveries) content.append(deliveryCard(delivery, `tool-delivery:${delivery.event_ref}`));
-  if (call.delivery_source === "legacy_incomplete") content.append(node("p", "muted", "旧记录没有独立送达凭据；未留存的历史输出图片无法还原，不重新渲染历史 Markdown。"));
+  if (includeDeliveries) for (const delivery of deliveries) content.append(deliveryCard(delivery, `tool-delivery:${delivery.event_ref}`, bundle));
+  if (call.delivery_source === "legacy_incomplete") content.append(node("p", "muted", "\u65e7\u8bb0\u5f55\u7f3a\u5c11\u72ec\u7acb\u9001\u8fbe\u51ed\u636e"));
   const panels = node("div", "call-panels");
-  const argumentsPanel = callPanel("\u53c2\u6570", call.arguments_display ?? call.arguments_preview, call.call_event_ref, { path: call.arguments_path || "", mode: "arguments" });
-  const resultPanel = callPanel("\u7ed3\u679c", call.result_display ?? call.result_preview, call.result_event_ref, { path: call.result_path || "" });
+  const argumentsPanel = callPanel("\u53c2\u6570", call.arguments_display ?? call.arguments_preview, call.call_event_ref, { path: call.arguments_path || "", mode: "arguments", bundle });
+  const resultPanel = callPanel("\u7ed3\u679c", call.result_display ?? call.result_preview, call.result_event_ref, { path: call.result_path || "", bundle });
   if (!["complete", "captured"].includes(call.arguments_capture_status)) argumentsPanel.append(node("p", "muted", label(call.arguments_capture_status || "not_recorded")));
   if (!["complete", "captured"].includes(call.result_capture_status)) resultPanel.append(node("p", "muted", label(call.result_capture_status || "not_recorded")));
   panels.append(argumentsPanel, resultPanel);
   content.append(panels);
-  if (call.images?.length) content.append(node("p", "muted", "工具附件（可能含输入 / 参考图，不等同于已送达图片）"));
+  if (call.images?.length) content.append(node("h4", "", "\u5de5\u5177\u9644\u4ef6"));
   appendImages(content, { event_ref: call.result_event_ref, images: call.images });
   content.append(rawDetails("\u6267\u884c\u8bb0\u5f55", { effect: call.effect, evidence: call.evidence, execution_ref: call.execution_ref, call_event_ref: call.call_event_ref, result_event_ref: call.result_event_ref }));
   return item;
 }
-function timelineCalls(includeDeliveries = true) {
-  const inspection = state.inspection;
+function timelineCalls(includeDeliveries = true, bundle = selectedBundle()) {
   return [
-    ...(inspection.model_calls || []).map((call, index) => ({ ref: call.request_event_ref || call.response_event_ref, card: () => modelCard(call, index) })),
-    ...(inspection.tool_calls || []).map((call, index) => ({ ref: call.call_event_ref || call.result_event_ref, tool: call, card: () => toolCard(call, index, includeDeliveries) })),
-  ].map((entry) => ({ ...entry, sequence: eventByRef(entry.ref)?.sequence }));
+    ...(bundle.inspection.model_calls || []).map((call, index) => ({ ref: call.request_event_ref || call.response_event_ref, card: () => modelCard(call, index, bundle) })),
+    ...(bundle.inspection.tool_calls || []).map((call, index) => ({ ref: call.call_event_ref || call.result_event_ref, tool: call, card: () => toolCard(call, index, includeDeliveries, bundle) })),
+  ].map((entry) => ({ ...entry, sequence: eventByRef(entry.ref, bundle)?.sequence }));
 }
 function renderTimeline() {
   const target = $("timeline-view");
@@ -838,7 +748,7 @@ function renderTimeline() {
   const overview = node("div", "timeline-overview");
   overview.append(node("h3", "", "\u6267\u884c\u987a\u5e8f"), node("p", "muted", `${number(inspection.turn.model_call_count)} \u6b21\u8bf7\u6c42 \xb7 ${number(inspection.turn.tool_call_count)} \u6b21\u5de5\u5177\u8c03\u7528`));
   target.append(overview);
-  if (!calls.length) target.append(node("p", "empty", "\u672c\u8f6e\u672a\u8bb0\u5f55\u6a21\u578b\u8bf7\u6c42\u6216\u5de5\u5177\u8c03\u7528\uff1b\u4e0d\u4ee5\u751f\u6210\u5c1d\u8bd5\u63a8\u65ad\u5b9e\u9645\u8bf7\u6c42\u3002"));
+  if (!calls.length) target.append(node("p", "empty", "\u672c\u8f6e\u672a\u8bb0\u5f55\u6a21\u578b\u8bf7\u6c42\u6216\u5de5\u5177\u8c03\u7528"));
   for (const call of calls) target.append(call.card());
   const audit = node("details", "audit-list");
   audit.append(node("summary", "", `原始审计事件（${state.events.length}）`));
@@ -853,17 +763,14 @@ function renderContext() {
   const target = $("context-view");
   target.replaceChildren();
   const context = state.inspection.context;
-  if (!context?.captured) return empty(target, "本轮未记录上下文注入快照。旧审计记录无法还原实际请求，不使用当前配置代替。");
+  if (!context?.captured) return empty(target, "\u672c\u8f6e\u672a\u8bb0\u5f55\u4e0a\u4e0b\u6587\u6ce8\u5165\u5feb\u7167");
   const ref = context.event_ref;
   const overview = section("\u672c\u8f6e\u4e0a\u4e0b\u6587");
-  const note = node("details", "raw-details");
-  note.append(node("summary", "", "\u5feb\u7167\u8bf4\u660e"), node("p", "muted", "\u6765\u81ea\u672c\u8f6e\u751f\u6210\u524d\u7684\u5386\u53f2\u5feb\u7167\uff0c\u4e0d\u968f\u5f53\u524d\u914d\u7f6e\u53d8\u5316\u3002"));
-  overview.append(note);
   const links = node("div", "actions snapshot-links");
   for (const [path, title] of [["persona", "本轮人格快照"], ["system", "完整系统指令"], ["messages", "实际选中消息"], ["", "完整快照"]]) links.append(eventButton(ref, title, path));
   overview.append(node("p", "", `${personaName(state.inspection.persona)} · ${label(context.capture_status || "not_recorded")}`), links);
   target.append(overview);
-  const budgets = disclosure("上下文预算", "输入上限、预留额度与实际估算");
+  const budgets = disclosure("\u4e0a\u4e0b\u6587\u9884\u7b97");
   const values = context.budgets;
   if (values && Object.keys(values).length) {
     const list = node("dl", "fields");
@@ -876,7 +783,7 @@ function renderContext() {
   } else budgets.content.append(node("p", "muted", "本轮未记录"));
   budgets.content.append(eventButton(ref, "预算原始记录", "budgets"));
   target.append(budgets.item);
-  const selection = disclosure("历史选择", "选中与排除的轮次证据，不以当前历史重算");
+  const selection = disclosure("\u5386\u53f2\u9009\u62e9");
   selection.content.append(SessionContent.value(context.selection ?? "\u672a\u8bb0\u5f55"), eventButton(ref, "\u5b8c\u6574\u9009\u62e9\u8bb0\u5f55", "selection"));
   target.append(selection.item);
   const blockCount = Array.isArray(context.blocks) ? `${context.blocks.length} 个命名块` : "命名块未记录";
@@ -963,7 +870,7 @@ async function loadAttachment(entry) {
   for (const [thumb, img] of entry.consumers) if (thumb.isConnected) renderAttachment(entry, thumb, img);
 }
 function pumpAttachments() {
-  while (pageActive && attachmentLoads < 4 && attachmentQueue.size) {
+  while (pageActive && !document.hidden && attachmentLoads < 4 && attachmentQueue.size) {
     const entry = attachmentQueue.values().next().value;
     attachmentQueue.delete(entry);
     if (attachmentCache.get(entry.path) !== entry || entry.loading || entry.url || entry.error) continue;
@@ -1026,12 +933,19 @@ function appendImages(target, event) {
   }
   target.append(grid);
 }
-function messageRecord(speaker, timestamp, className, recordKey) {
-  const item = node("article", `message-row ${className}`);
+function appendMessageImages(target, record, fallbackRef) {
+  const groups = new Map();
+  for (const image of record?.images || []) {
+    const ref = image.event_ref || record.event_ref || fallbackRef;
+    if (!groups.has(ref)) groups.set(ref, []);
+    groups.get(ref).push(image);
+  }
+  for (const [event_ref, images] of groups) appendImages(target, { event_ref, images });
+}
+function messageRecord(speaker, timestamp, className, recordKey, role) {
+  const item = node("article", `message-row ${className} ${SessionContent.messageClass(role)}`);
   item.dataset.recordKey = recordKey;
-  const avatar = node("span", "message-avatar", className.includes("delivery-record") ? "" : Array.from(speaker)[0] || "?");
-  if (className.includes("delivery-record")) avatar.append(traceIcon("model"));
-  avatar.setAttribute("aria-hidden", "true");
+  const avatar = SessionContent.avatar(speaker, role);
   const column = node("div", "message-column");
   const header = node("header", "message-header");
   header.append(node("strong", "message-speaker", speaker));
@@ -1057,28 +971,36 @@ function messageRecord(speaker, timestamp, className, recordKey) {
   item.append(avatar, column);
   return { item, header, body, menu };
 }
-function deliveryCard(output, recordKey) {
+function deliveryCard(output, recordKey, bundle = selectedBundle()) {
   const confirmed = output.source === "message_delivery";
   const legacyTool = !confirmed && output.event_type === "tool_result";
-  const { item, header, body, menu } = messageRecord(state.inspection.persona?.name || "Bot", output.confirmed_at || output.created_at, "delivery-record", recordKey);
+  const message = output.message || output;
+  const speaker = message.speaker || bundle.inspection.persona?.name || "Bot";
+  const role = SessionContent.messageRole(message, "assistant");
+  const { item, header, body, menu } = messageRecord(speaker, output.confirmed_at || output.created_at, "delivery-record", recordKey, role);
   if (!confirmed) {
     item.classList.add("legacy-output");
     header.insertBefore(node("span", "message-status", legacyTool ? "\u5386\u53f2\u5de5\u5177\u9644\u4ef6" : "\u5386\u53f2\u6458\u8981\uff0c\u9001\u8fbe\u672a\u77e5"), header.lastElementChild);
   }
-  const content = typeof output.content === "string" && output.content ? output.content : confirmed ? "" : eventPreview(output);
-  if (content) body.append(SessionContent.markdown(content));
-  appendImages(body, output);
+  const content = typeof message.content === "string" && message.content ? message.content : confirmed ? "" : eventPreview(output);
+  if (content || message.reply_to || message.forwarded_messages?.length || message.images?.length) {
+    body.append(SessionContent.message({ ...message, content, speaker: null }, {
+      renderImages: (target, record) => appendMessageImages(target, record, output.event_ref),
+    }));
+  }
   for (const media of output.media || []) body.append(node("p", "muted", `${media.label || media.kind || "\u5a92\u4f53"} \xb7 ${label(media.capture_status)}`));
   if (confirmed) {
     menu.append(node("p", "muted", `\u5df2\u786e\u8ba4\u9001\u8fbe \xb7 ${date(output.confirmed_at)}`));
     if (!["captured", "complete"].includes(output.capture_status)) header.insertBefore(badge(output.capture_status || "not_recorded"), header.lastElementChild);
-  } else menu.append(node("p", "muted", "\u4ec5\u6709\u65e7\u7248\u6458\u8981\u6216\u5de5\u5177\u6548\u679c\uff0c\u6ca1\u6709\u72ec\u7acb\u9001\u8fbe\u51ed\u636e\uff1b\u751f\u6210\u6210\u529f\u4e0d\u4ee3\u8868\u53d1\u9001\u6210\u529f\u3002"));
-  menu.append(eventButton(output.event_ref, "\u5b8c\u6574\u8bb0\u5f55"), rawDetails("\u5143\u6570\u636e", output));
+  } else menu.append(node("p", "partial-notice", "\u5386\u53f2\u9001\u8fbe\u51ed\u636e\u672a\u8bb0\u5f55"));
+  if (output.event_ref) menu.append(eventButton(output.event_ref, "\u5b8c\u6574\u8bb0\u5f55", "", bundle));
   return item;
 }
-function inputCard(event, index, steering) {
+function inputCard(event, index, steering, bundle = selectedBundle(), host = false) {
   const key = steering ? `input:steer:${steering.sequence}` : `input:${event.event_ref || index}`;
-  const { item, header, body, menu } = messageRecord(event.message?.speaker || "\u53d1\u8a00\u4eba\u672a\u8bb0\u5f55", steering?.received_at || event.created_at, "input-record", key);
+  const role = SessionContent.messageRole(event.message, host ? "system" : "participant");
+  const speaker = event.message?.speaker || (host ? "\u5bbf\u4e3b\u89e6\u53d1" : "\u53d1\u8a00\u4eba\u672a\u8bb0\u5f55");
+  const { item, header, body, menu } = messageRecord(speaker, steering?.received_at || event.created_at, "input-record", key, role);
   if (steering) {
     if (steering.status !== "applied") header.insertBefore(badge(steering.status), header.lastElementChild);
     const timing = node("div", "event-meta");
@@ -1087,87 +1009,66 @@ function inputCard(event, index, steering) {
     if (steering.reason) timing.append(node("span", "", steering.reason));
     menu.append(timing);
   }
-  const message = event.message || { content: eventPreview(event) ?? "\u672a\u8bb0\u5f55", quotes: [], mentions: [], truncated: false };
-  const rendered = SessionContent.message({ ...message, speaker: null });
-  const quoteGroup = rendered.querySelector(".content-quotes");
-  if (quoteGroup) {
-    const quotes = node("details", "message-quotes");
-    quotes.dataset.detailKey = "quotes";
-    const first = message.quotes[0];
-    quotes.append(node("summary", "", `\u5f15\u7528 ${first.speaker || "\u672a\u77e5\u4f5c\u8005"}\uff1a${short(first.content, 90)}${message.quotes.length > 1 ? ` \xb7 ${message.quotes.length} \u6761` : ""}`), quoteGroup);
-    rendered.prepend(quotes);
-  }
+  const message = event.message || { content: eventPreview(event) ?? "\u672a\u8bb0\u5f55", mentions: [], truncated: false };
+  const rendered = SessionContent.message({ ...message, speaker: null }, {
+    renderImages: (target, record) => appendMessageImages(target, record, event.event_ref),
+  });
   body.append(rendered);
-  appendImages(body, event);
-  const fullInput = eventButton(event.event_ref, "\u67e5\u770b\u5b8c\u6574\u8f93\u5165", "content");
-  fullInput.dataset.focusKey = `${key}|content`;
-  menu.append(fullInput);
+  if (!Object.hasOwn(message, "images")) appendImages(body, event);
+  if (event.event_ref) {
+    const fullInput = eventButton(event.event_ref, "\u67e5\u770b\u5b8c\u6574\u8f93\u5165", "content", bundle);
+    fullInput.dataset.focusKey = `${key}|content`;
+    menu.append(fullInput);
+  }
   return item;
 }
-function renderIO() {
-  const target = $("io-view");
-  if (state.turn.purpose === "companion_reflection") {
-    const flow = node("div", "conversation-flow");
-    flow.append(companionRenderer.review(state.inspection.companion?.review, state.inspection.companion?.reflection));
-    const calls = node("div", "trace-group");
-    for (const entry of timelineCalls(false).sort((a, b) => (a.sequence ?? Infinity) - (b.sequence ?? Infinity))) calls.append(entry.card());
-    flow.append(calls);
-    target.replaceChildren(flow);
-    return;
-  }
-  const applied = new Set(state.events.filter((event) => event.event_type === "user_input" && event.steering).map((event) => event.steering.sequence));
-  const checkpoints = new Map(state.events.filter((event) => event.event_type === "steer_checkpoint" && event.steering).map((event) => [event.steering.sequence, event.steering]));
-  const inputs = state.events.filter((event) => event.event_type === "user_input" || (event.event_type === "steer_received" && event.steering && !applied.has(event.steering.sequence)));
-  const rows = inputs.map((event, index) => ({
+function renderNativeFlow(bundle, { background = false, includeReview = true, destination = "" } = {}) {
+  const { inspection, events } = bundle;
+  const turn = inspection.turn;
+  const flow = node("div", "conversation-flow");
+  flow.dataset.recordKey = turn.turn_ref;
+  if (destination) flow.append(node("p", "partial-notice", destination));
+  const reflection = turn.purpose === "companion_reflection";
+  if (reflection && includeReview) flow.append(companionRenderer.review(inspection.companion?.review, inspection.companion?.reflection, bundle));
+  const applied = new Set(events.filter((event) => event.event_type === "user_input" && event.steering).map((event) => event.steering.sequence));
+  const checkpoints = new Map(events.filter((event) => event.event_type === "steer_checkpoint" && event.steering).map((event) => [event.steering.sequence, event.steering]));
+  const inputs = events.filter((event) => event.event_type === "user_input" || (event.event_type === "steer_received" && event.steering && !applied.has(event.steering.sequence)));
+  const rows = reflection ? [] : inputs.map((event, index) => ({
     sequence: event.sequence, kind: "input",
-    card: () => inputCard(event, index, event.event_type === "user_input" ? event.steering : checkpoints.get(event.steering?.sequence) || event.steering),
+    card: () => inputCard(event, index, event.event_type === "user_input" ? event.steering : checkpoints.get(event.steering?.sequence) || event.steering, bundle, background || (turn.trigger_kind && turn.trigger_kind !== "message")),
   }));
-  const outputs = state.inspection.outputs || [];
-  const confirmedExecutions = new Set(outputs.filter((output) => output.source === "message_delivery" && output.execution_ref).map((output) => output.execution_ref));
-  for (const entry of timelineCalls(false)) {
-    if (entry.tool?.tool_name === "send_msg" && entry.tool.status === "succeeded" && confirmedExecutions.has(entry.tool.execution_ref)) continue;
-    rows.push({ ...entry, kind: "call" });
+  const outputs = inspection.outputs || [];
+  const confirmedRefs = new Set(outputs.filter((output) => output.source === "message_delivery" && output.event_ref).map((output) => output.event_ref));
+  for (const entry of timelineCalls(false, bundle)) {
+    const tool = entry.tool;
+    const representedSend = tool?.status === "succeeded" && /^send_/.test(tool.tool_name || "")
+      && tool.deliveries?.some((delivery) => delivery.source === "message_delivery" && confirmedRefs.has(delivery.event_ref));
+    if (!representedSend) rows.push({ ...entry, kind: "call" });
   }
   for (const [index, output] of outputs.entries()) {
-    const event = { ...eventByRef(output.event_ref), ...output };
-    rows.push({ sequence: event.sequence, kind: "output", card: () => deliveryCard(event, `output:${output.event_ref || index}`) });
+    const event = { ...eventByRef(output.event_ref, bundle), ...output };
+    rows.push({ sequence: event.sequence, kind: output.source === "message_delivery" ? "output" : "legacy", card: () => deliveryCard(event, `output:${output.event_ref || index}`, bundle) });
   }
   rows.sort((a, b) => (a.sequence ?? Infinity) - (b.sequence ?? Infinity));
-  const flow = node("div", "conversation-flow");
-  if (!inputs.length) flow.append(node("p", "muted", "\u7528\u6237\u8f93\u5165\u672a\u8bb0\u5f55"));
-  let group = null;
-  let groupKind = null;
   let unknownOrder = false;
   for (const row of rows) {
     if (row.sequence == null && !unknownOrder) {
-      flow.append(node("p", "flow-gap muted", "\u4ee5\u4e0b\u8bb0\u5f55\u7684\u539f\u59cb\u987a\u5e8f\u672a\u77e5"));
+      flow.append(node("p", "flow-gap partial-notice", "\u4ee5\u4e0b\u8bb0\u5f55\u7684\u539f\u59cb\u987a\u5e8f\u672a\u77e5"));
       unknownOrder = true;
-      group = null;
-      groupKind = null;
     }
-    if (row.kind === "call" || row.kind === "input") {
-      if (!group || groupKind !== row.kind) {
-        groupKind = row.kind;
-        group = node("div", row.kind === "call" ? "trace-group" : "input-group");
-        if (row.kind === "input") {
-          const heading = node("div", "input-group-heading");
-          heading.append(traceIcon("context"), node("strong", "", "\u5bf9\u8bdd\u8f93\u5165"));
-          group.append(heading);
-        }
-        flow.append(group);
-      }
-      group.append(row.card());
-    } else {
-      group = null;
-      groupKind = null;
-      flow.append(row.card());
-    }
+    if ((row.kind === "input" && (background || (turn.trigger_kind && turn.trigger_kind !== "message"))) || row.kind === "legacy") {
+      const panel = disclosure(row.kind === "input" ? "\u5bbf\u4e3b\u89e6\u53d1\u4e0e\u51c6\u5907\u8f93\u5165" : "\u5386\u53f2\u6458\u8981\uff08\u9001\u8fbe\u672a\u77e5\uff09", "", "record-card activity-preparation");
+      panel.item.dataset.recordKey = `${turn.turn_ref}:${row.kind}:${row.sequence ?? flow.children.length}`;
+      panel.content.append(row.card());
+      flow.append(panel.item);
+    } else flow.append(row.card());
   }
-  if (!outputs.length) {
-    const message = state.turn.status === "silent" ? "\u672c\u8f6e\u4e3b\u52a8\u6c89\u9ed8" : state.turn.status === "running" ? "\u6b63\u5728\u751f\u6210\u2026" : "\u65e0\u5df2\u786e\u8ba4\u56de\u590d";
-    flow.append(node("p", "flow-gap muted", message));
+  if (!reflection && !inputs.length) flow.prepend(node("p", "partial-notice", background ? "\u5bbf\u4e3b\u89e6\u53d1\u8f93\u5165\u672a\u8bb0\u5f55" : "\u7528\u6237\u8f93\u5165\u672a\u8bb0\u5f55"));
+  if (!reflection && !outputs.some((output) => output.source === "message_delivery")) {
+    const message = turn.status === "silent" ? "\u672c\u8f6e\u4e3b\u52a8\u6c89\u9ed8" : turn.status === "running" ? "\u6b63\u5728\u751f\u6210\uff0c\u5c1a\u65e0\u786e\u8ba4\u9001\u8fbe" : "\u65e0\u5df2\u786e\u8ba4\u56de\u590d";
+    flow.append(node("p", "flow-gap conversation-status", message));
   }
-  target.replaceChildren(flow);
+  return flow;
 }
 
 function refreshPanels() {
@@ -1216,97 +1117,36 @@ function stopPolling() {
 }
 function startPolling() {
   stopPolling();
-  if (document.hidden || !pageActive) return;
-  const evaluation = state.inspection?.relationship_evaluation;
-  const awaitingAffect = ["pending", "running", "failed"].includes(evaluation?.status)
-    || (!evaluation && state.inspection?.relationship && ["completed", "silent", "declined"].includes(state.turn?.status));
-  const review = state.selectedReview ? state.review : state.inspection?.companion?.review;
-  const awaitingReview = state.reviewPollRemaining > 0 && (review?.status === "active"
-    || review?.contacts?.some((contact) => contact.status === "active")
-    || (!review?.contacts?.length && ["queued", "reserved"].includes(review?.decision?.status))
-    || (review?.transaction_committed === true && !review.decision));
-  if (state.turn?.status === "running" || awaitingAffect || awaitingReview) {
-    $("auto-refresh").classList.remove("is-hidden");
-    state.pollTimer = setTimeout(state.selectedReview ? pollReview : pollTurn, 3000);
-    return;
-  }
-  const due = state.channel?.mode?.mode === "companion" ? Date.parse(state.channel.mode.next_review_at) : NaN;
-  if ($("sessions-workspace").dataset.view === "list" && state.scopePollRemaining > 0 && Number.isFinite(due)) {
-    $("auto-refresh").classList.remove("is-hidden");
-    state.pollTimer = setTimeout(pollScope, Math.max(10000, Math.min(86400000, due - Date.now() + 3000)));
-  }
+  if (document.hidden || !pageActive || !state.scope) return;
+  $("auto-refresh").classList.remove("is-hidden");
+  state.pollTimer = setTimeout(pollActivity, state.turn?.status === "running" ? 3000 : 10000);
 }
-async function pollReview() {
+async function pollActivity() {
   if (state.pollBusy) { startPolling(); return; }
-  const generation = state.navigation;
-  const ref = state.selectedReview;
-  if (!ref || !state.scope || document.hidden) return stopPolling();
-  state.pollBusy = true;
-  --state.reviewPollRemaining;
-  try {
-    const result = await request(`/scopes/${encodeURIComponent(state.scope.scope_ref)}/companion/reviews/${encodeURIComponent(ref)}`);
-    if (generation !== state.navigation) return;
-    if (result.item.native_turn?.turn_ref && result.item.native_turn?.session_ref) await selectEvidenceTurn(result.item.native_turn);
-    else { state.review = result.item; refreshPanels(); }
-  } catch (error) { showError(error); }
-  finally { state.pollBusy = false; if (generation === state.navigation) startPolling(); }
-}
-async function pollScope() {
-  if (state.pollBusy) { startPolling(); return; }
+  if (!state.scope || document.hidden || !pageActive) return stopPolling();
   const generation = state.navigation;
   const scope = state.scope;
-  const session = state.session;
-  if (!scope || document.hidden || $("sessions-workspace").dataset.view !== "list") return stopPolling();
   state.pollBusy = true;
-  --state.scopePollRemaining;
   try {
-    const path = `/scopes/${encodeURIComponent(scope.scope_ref)}`;
-    const [sessions, channel, turns] = await Promise.all([
-      request(`${path}/sessions?limit=500`), request(`${path}/companion`),
-      session ? request(`/sessions/${encodeURIComponent(session.session_ref)}/turns?limit=1000`) : Promise.resolve(null),
-    ]);
-    if (generation !== state.navigation || scope !== state.scope) return;
-    state.sessions = sessions.items || [];
-    if (session && !state.sessions.some((item) => item.session_ref === session.session_ref)) state.sessions.push(session);
-    state.channel = channel.item;
-    if (turns) state.turns = turns.items || [];
-    renderSessions(); renderTurns();
-    if (!$("session-dialog").open) renderChannelOverview();
+    if ($("sessions-workspace").dataset.view === "detail" && state.session) await activity.refresh();
+    else {
+      const result = await request(`/scopes/${encodeURIComponent(scope.scope_ref)}/sessions?limit=500&purpose=chat`);
+      if (generation !== state.navigation || scope !== state.scope) return;
+      state.sessions = (result.items || []).filter((item) => (item.purpose || "chat") === "chat" && !item.reminder_task_ref);
+      renderSessions(); renderTurns();
+    }
   } catch (error) { showError(error); }
   finally { state.pollBusy = false; if (generation === state.navigation) startPolling(); }
-}
-async function pollTurn() {
-  if (state.pollBusy) { startPolling(); return; }
-  const generation = state.navigation;
-  const turnRef = state.turn?.turn_ref;
-  const sessionRef = state.session?.session_ref;
-  if (!turnRef || !sessionRef || document.hidden) return stopPolling();
-  state.pollBusy = true;
-  if (state.turn?.purpose === "companion_reflection" && state.turn.status !== "running" && state.reviewPollRemaining > 0) --state.reviewPollRemaining;
-  try {
-    const [result, turns, detail] = await Promise.all([
-      fetchTurn(turnRef), request(`/sessions/${encodeURIComponent(sessionRef)}/turns?limit=1000`), request(`/sessions/${encodeURIComponent(sessionRef)}`),
-    ]);
-    if (generation !== state.navigation) return;
-    state.inspection = result.inspection; state.events = result.events; state.turn = result.inspection.turn;
-    state.turns = turns.items || []; state.detail = detail.item;
-    refreshPanels();
-    if (state.turn.status !== "running") status(`本轮${label(state.turn.status)}`);
-  } catch (error) { showError(error); }
-  finally {
-    state.pollBusy = false;
-    if (generation === state.navigation) startPolling();
-  }
 }
 
 function disposePayload() {
   if (state.payload) { state.payload.all = false; state.payload.controller?.abort(); }
   state.payload = null;
 }
-function openPayload(ref, title, path = "") {
+function openPayload(ref, title, path = "", bundle = selectedBundle()) {
   if (!ref) return;
   disposePayload();
-  state.payload = { ref, title, path, text: "", next: 0, total: null, loaded: 0, busy: false, all: false, controller: null, hasPage: false, source: false };
+  state.payload = { ref, title, path, bundle, text: "", next: 0, total: null, loaded: 0, busy: false, all: false, controller: null, hasPage: false, source: false };
   $("payload-title").textContent = title;
   $("payload-path").value = path;
   $("payload-error").textContent = "";
@@ -1314,7 +1154,7 @@ function openPayload(ref, title, path = "") {
   $("payload-reader").replaceChildren(node("p", "empty", "\u6b63\u5728\u8bfb\u53d6\u2026"));
   setPayloadMode(false);
   $("pin-event-button").textContent = "固定事件";
-  $("pin-event-button").disabled = !state.scope || eventByRef(ref)?.model_visible === false;
+  $("pin-event-button").disabled = !state.scope || eventByRef(ref, bundle)?.model_visible === false || !bundle.events.some((event) => event.event_ref === ref);
   if (!$("payload-dialog").open) $("payload-dialog").showModal();
   loadPayloadPage().catch(payloadError);
 }
@@ -1333,8 +1173,8 @@ function renderPayloadContent() {
   try { value = JSON.parse(payload.text); } catch { /* Incomplete pages stay explicitly partial. */ }
   const target = $("payload-reader");
   target.replaceChildren();
-  if (payload.next !== null) target.append(node("p", "partial-notice", "\u4ec5\u663e\u793a\u5df2\u52a0\u8f7d\u90e8\u5206 \xb7 \u53ef\u7ee7\u7eed\u52a0\u8f7d"));
-  const kind = eventByRef(payload.ref)?.event_type;
+  if (payload.next !== null) target.append(node("p", "partial-notice", "\u5185\u5bb9\u672a\u5b8c\u5168\u52a0\u8f7d"));
+  const kind = eventByRef(payload.ref, payload.bundle)?.event_type;
   const mode = ["model_request", "model_response"].includes(kind) ? "model" : kind === "assistant_tool_call" ? "arguments" : "result";
   target.append(SessionContent.invocation(value, mode));
 }
@@ -1443,10 +1283,18 @@ function confirmUnpin(anchor) {
   } });
 }
 
-const companionRenderer = SessionCompanion.create({ node, button, disclosure, date, number, duration, eventButton, selectEvidenceTurn });
-const sessionTree = SessionTree.create({
-  node, button, date, label, purposeLabel, personaName, request, showError,
-  renderTurn: turnListItem, selectSession, selectReview,
+const companionRenderer = SessionCompanion.create({ node, button, disclosure, date, number, eventButton, selectEvidenceTurn, openNative: openNativeEvidence });
+const sessionTree = SessionTree.create({ node, button, date, label, personaName, selectSession });
+const activity = SessionActivity.create({
+  node, button, disclosure, badge, date, request, fetchTurn, showError,
+  renderNative: renderNativeFlow, renderReview: (item, fallback, bundle) => companionRenderer.review(item, fallback, bundle),
+  inspect: inspectBundle, evidence: selectEvidenceTurn,
+  changed(bundle) { if (state.turn?.turn_ref === bundle.inspection.turn.turn_ref) inspectBundle(bundle); },
+});
+const reviewArchive = SessionTree.createReviewArchive({
+  node, button, disclosure, badge, date, request, showError,
+  loadReview: activity.review, loadBundle: activity.bundle,
+  renderReview: (item, fallback, bundle) => companionRenderer.review(item, fallback, bundle),
 });
 
 const tabs = [...document.querySelectorAll("[role=tab]")];
@@ -1458,8 +1306,11 @@ function selectTab(selected) {
     tab.classList.toggle("is-active", active);
     $(`${tab.dataset.tab}-view`).hidden = !active;
   }
-  document.querySelector(".inspector-body").scrollTop = 0;
-  document.querySelector(".inspector").scrollTop = 0;
+  const scroller = document.querySelector(".inspector");
+  const oldView = scroller.dataset.activeTab;
+  if (oldView) state.tabScroll[oldView] = scroller.scrollTop;
+  scroller.dataset.activeTab = selected.dataset.tab;
+  scroller.scrollTop = state.tabScroll[selected.dataset.tab] || 0;
   $("inspection-label").textContent = selected.textContent;
 }
 for (const tab of tabs) {
@@ -1490,16 +1341,9 @@ $('scope-select').addEventListener("change", () => {
   state.scope = state.scopes.find((scope) => scope.scope_ref === $("scope-select").value) || null;
   state.session = null;
   state.sessions = [];
-  state.turns = [];
   renderScope();
   state.channel = null;
   loadSessions().then(loadChannelOverview).catch(showError);
-});
-$('purpose-select').addEventListener("change", () => {
-  state.purposeFilter = $("purpose-select").value;
-  if (state.session && state.purposeFilter && (state.session.purpose || "chat") !== state.purposeFilter) {
-    selectSession(null).catch(showError);
-  } else { renderSessions(); renderTurns(); }
 });
 $("turn-order-button").addEventListener("click", () => {
   state.newestFirst = !state.newestFirst;
@@ -1508,6 +1352,7 @@ $("turn-order-button").addEventListener("click", () => {
 });
 $("back-to-turns").addEventListener("click", () => {
   $("sessions-workspace").dataset.view = "list";
+  navigationController.abort(); navigationController = new AbortController(); activity.cancel();
   $("turn-list").querySelector("[aria-current=true]")?.focus({ preventScroll: true });
   startPolling();
 });
@@ -1525,8 +1370,10 @@ document.addEventListener("keydown", (event) => {
 });
 $("session-details-button").addEventListener("click", () => {
   $("session-dialog").showModal();
+  if (state.scope) reviewArchive.open($("scope-review-history"), state.scope.scope_ref);
   loadChannelOverview().catch(showError);
 });
+$("session-dialog").addEventListener("close", () => reviewArchive.cancel());
 $("payload-reader-button").addEventListener("click", () => setPayloadMode(false));
 $("payload-source-button").addEventListener("click", () => setPayloadMode(true));
 $("refresh-button").addEventListener("click", () => loadScopes().catch(showError));
@@ -1547,7 +1394,7 @@ $("confirm-action-button").addEventListener("click", () => runAction().catch(sho
 $("confirm-dialog").addEventListener("close", () => { state.action = null; });
 $("payload-load-button").addEventListener("click", () => {
   const payload = state.payload;
-  if (payload && !payload.busy && !payload.all) openPayload(payload.ref, payload.title, $("payload-path").value.trim());
+  if (payload && !payload.busy && !payload.all) openPayload(payload.ref, payload.title, $("payload-path").value.trim(), payload.bundle);
 });
 $("payload-next-button").addEventListener("click", () => loadPayloadPage().catch(payloadError));
 $("payload-all-button").addEventListener("click", () => loadAllPayload());
@@ -1565,6 +1412,7 @@ $("payload-copy-button").addEventListener("click", async () => {
 });
 $("payload-dialog").addEventListener("close", () => { disposePayload(); $("payload-output").textContent = ""; $("payload-reader").replaceChildren(); });
 $("image-dialog").addEventListener("close", () => $("image-preview").removeAttribute("src"));
+$("native-dialog").addEventListener("close", () => { evidenceController?.abort(); $("native-body").replaceChildren(); });
 $("pin-event-button").addEventListener("click", () => {
   const scope = state.scope, payload = state.payload;
   if (!scope || !payload) return;
@@ -1575,13 +1423,23 @@ $("pin-event-button").addEventListener("click", () => {
   } });
 });
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) { stopPolling(); sessionTree.cancel(); }
-  else startPolling();
+  if (document.hidden) {
+    stopPolling();
+    navigationController.abort(); navigationController = new AbortController();
+    activity.cancel(); reviewArchive.cancel(); evidenceController?.abort();
+    disposePayload();
+    if ($("payload-dialog").open) $("payload-dialog").close();
+    if ($("native-dialog").open) $("native-dialog").close();
+  } else {
+    if ($("sessions-workspace").dataset.view === "detail") activity.resume();
+    if ($("session-dialog").open && state.scope) reviewArchive.open($("scope-review-history"), state.scope.scope_ref);
+    for (const entry of attachmentCache.values()) if (!entry.url && !entry.error) attachmentQueue.add(entry);
+    pumpAttachments(); startPolling();
+  }
 });
 window.addEventListener("pagehide", () => {
   pageActive = false;
   stopPolling();
-  sessionTree.cancel();
   pageController.abort();
   beginNavigation();
   attachmentVisibility.disconnect();
