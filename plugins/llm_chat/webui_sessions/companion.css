@@ -35,10 +35,6 @@
 .companion-decision-summary { padding: 10px 12px; border-left: 3px solid var(--ui-info); background: var(--ui-info-soft); border-radius: 6px; white-space: pre-wrap; }
 .companion-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .companion-comparison > .section { margin-bottom: 0; padding: 12px; }
-.companion-turn-context { padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--soft); }
-.companion-turn-context .disclosure { background: transparent; }
-.companion-turn-context .disclosure-summary { min-height: 0; padding: 8px 0; }
-.companion-turn-context .disclosure-content { padding: 8px 0; }
 .companion-detail-pane .back-button { display: none; }
 .companion-mobile-navigation { display: none; }
 @media (min-width: 1500px) {

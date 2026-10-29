@@ -388,50 +388,5 @@
     });
   }
 
-  function decisionPanel(view, hooks) {
-    const { node, section, disclosure, eventButton, date, number, outcomeLabel, badge } = hooks;
-    const panel = section("\u56de\u5e94\u51b3\u7b56", "\u7ed3\u6784\u5316\u6a21\u578b\u7406\u7531\u4e0d\u662f\u9690\u85cf\u601d\u7ef4\u94fe\uff1b\u5bbf\u4e3b\u51b3\u7b56\u4e0e\u5b9e\u9645\u9001\u8fbe\u5206\u5f00\u663e\u793a\u3002");
-    panel.dataset.recordKey = "response-decision";
-    const decision = view.response_decision;
-    if (decision) {
-      const actual = node("div", "response-outcome");
-      actual.append(node("h4", "", "\u5b9e\u9645\u56de\u5e94\u4e0e\u9001\u8fbe"), node("strong", "", outcomeLabel(decision, view.turn.status)));
-      actual.append(node("p", "muted", `\u786e\u8ba4\u9001\u8fbe ${number(decision.actual_delivery?.confirmed_deliveries)} \u00b7 \u6587\u5b57\u6d88\u606f ${number(decision.actual_delivery?.text_messages)} \u00b7 \u5a92\u4f53\u6d88\u606f ${number(decision.actual_delivery?.media_messages)}`));
-      panel.append(actual, node("p", "", `\u8bb0\u5f55\u51b3\u5b9a\uff1a${hooks.label(decision.outcome)} \u00b7 \u6765\u6e90 ${decision.source || missing}`));
-      const rationale = disclosure("\u7ed3\u6784\u5316\u56de\u5e94\u7406\u7531");
-      rationale.item.dataset.detailKey = "response-rationale";
-      rationale.content.append(SessionContent.markdown(decision.reason || missing), eventButton(decision.event_ref, "\u5b8c\u6574\u56de\u5e94\u51b3\u7b56"));
-      panel.append(rationale.item);
-    } else {
-      const internal = view.turn.purpose === "companion_reflection";
-      panel.append(node("p", "muted", internal ? "\u672c\u8f6e\u4e3a\u7cfb\u7edf\u89e6\u53d1\u7684\u5185\u90e8\u590d\u76d8\uff0c\u4e0d\u9002\u7528\u804a\u5929\u56de\u5e94\u51b3\u7b56\uff1b\u8054\u7cfb\u63d0\u6848\u548c\u5bbf\u4e3b\u7ed3\u679c\u89c1\u4e0b\u65b9\u3002" : "\u56de\u5e94\u51b3\u7b56\u5386\u53f2\u672a\u8bb0\u5f55\uff1b\u4e0d\u4ee5\u65e0\u56de\u590d\u63a8\u65ad\u6c89\u9ed8\u6216\u62d2\u7edd\u3002"));
-    }
-    const companion = view.companion;
-    const context = node("div", "companion-turn-context");
-    context.append(node("p", "", `\u8f6e\u6b21\u7528\u9014\uff1a${purpose(view.turn.purpose)} \u00b7 ${trigger(view.turn.trigger_kind)}`));
-    for (const [key, title] of [["mode", "\u5f53\u65f6\u6a21\u5f0f\u4e0e\u7248\u672c"], ["trigger", "\u5bbf\u4e3b\u89e6\u53d1\u4e0a\u4e0b\u6587"]]) {
-      const value = companion?.[key];
-      if (key === "trigger" && !value && view.turn.trigger_kind !== "autonomous") continue;
-      const detail = disclosure(title, value ? "\u672c\u8f6e\u6355\u83b7\u7684\u5386\u53f2\u4e8b\u4ef6" : missing);
-      detail.item.dataset.detailKey = `companion-turn-${key}`;
-      detail.content.append(SessionContent.value(value || missing), eventButton(value?.event_ref, "\u67e5\u770b\u539f\u59cb\u4e8b\u4ef6"));
-      context.append(detail.item);
-    }
-    const reflection = companion?.reflection;
-    if (reflection) {
-      const gate = reflection.decision;
-      const row = node("div", "actions"); row.append(node("strong", "", "\u8054\u7cfb\u5bbf\u4e3b\u95e8\u7981"), badge(gate?.status || "not_recorded"));
-      context.append(row, node("p", "", reason(gate?.reason)), node("p", "muted", date(gate?.checked_at)));
-      for (const [key, title] of [["state", "\u53cd\u601d\u8f93\u5165"], ["proposal", "\u7ed3\u6784\u5316\u6a21\u578b\u63d0\u8bae"], ["decision", "\u5bbf\u4e3b\u8054\u7cfb\u51b3\u7b56"]]) {
-        const detail = disclosure(title, key === "proposal" ? "\u975e\u9690\u85cf\u601d\u7ef4\u94fe" : "\u672c\u8f6e\u5386\u53f2\u8bb0\u5f55");
-        detail.item.dataset.detailKey = `companion-reflection-${key}`;
-        const ref = reflection.events?.[`${key}_event_ref`] || reflection[`${key}_event_ref`] || reflection[key]?.event_ref;
-        detail.content.append(SessionContent.value(reflection[key] ?? missing), eventButton(ref, "\u67e5\u770b\u539f\u59cb\u8bb0\u5f55"));
-        context.append(detail.item);
-      }
-    }
-    panel.append(context);
-    return panel;
-  }
-  global.SessionCompanion = Object.freeze({ create, decisionPanel, purpose, trigger });
+  global.SessionCompanion = Object.freeze({ create, purpose, trigger });
 })(window);

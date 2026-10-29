@@ -244,6 +244,32 @@
     if (cursor < text.length) parent.append(document.createTextNode(text.slice(cursor)));
   }
 
+  async function copyText(text) {
+    if (global.navigator?.clipboard?.writeText) {
+      try { await global.navigator.clipboard.writeText(text); return; }
+      catch { /* Opaque frames may deny the asynchronous clipboard API. */ }
+    }
+    const focused = document.activeElement;
+    const selection = document.getSelection();
+    const ranges = selection ? Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index).cloneRange()) : [];
+    const field = create("textarea", "content-clipboard");
+    field.value = text;
+    field.tabIndex = -1;
+    field.setAttribute("aria-hidden", "true");
+    (focused?.closest("dialog") || document.body).append(field);
+    try {
+      field.select();
+      if (!document.execCommand("copy")) throw new Error("Clipboard unavailable");
+    } finally {
+      field.remove();
+      focused?.focus({ preventScroll: true });
+      if (selection) {
+        selection.removeAllRanges();
+        for (const range of ranges) selection.addRange(range);
+      }
+    }
+  }
+
   function renderCodeBlock(code, language) {
     const block = create("div", "content-code-block");
     const head = create("div", "content-code-head");
@@ -255,11 +281,7 @@
         copy.textContent = "\u5df2\u590d\u5236";
         setTimeout(() => { copy.textContent = "\u590d\u5236"; }, 1200);
       };
-      if (global.navigator?.clipboard?.writeText) {
-        global.navigator.clipboard.writeText(code).then(done, () => { copy.textContent = "\u590d\u5236\u5931\u8d25"; });
-      } else {
-        copy.textContent = "\u6682\u4e0d\u652f\u6301";
-      }
+      copyText(code).then(done, () => { copy.textContent = "\u590d\u5236\u5931\u8d25"; });
     });
     append(head, caption, copy);
     const pre = create("pre", "content-code");
@@ -536,6 +558,112 @@
     return root;
   }
 
+  function invocationCode(value) {
+    const source = typeof value === "string" ? value : exactSerialize(value);
+    const block = renderCodeBlock(source, typeof value === "string" ? "text" : "json");
+    if (typeof value === "string") return block;
+    const code = block.querySelector("code");
+    code.replaceChildren();
+    const tokens = /"(?:\\.|[^"\\])*"(?:\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+    let cursor = 0;
+    let count = 0;
+    for (const token of source.matchAll(tokens)) {
+      if (++count > MAX_NODES) break;
+      code.append(document.createTextNode(source.slice(cursor, token.index)));
+      const kind = token[0].endsWith(":") ? "key" : token[0].startsWith('"') ? "string" : "literal";
+      code.append(create("span", `invocation-json-${kind}`, token[0]));
+      cursor = token.index + token[0].length;
+    }
+    code.append(document.createTextNode(source.slice(cursor)));
+    return block;
+  }
+
+  function invocationSource(value, title = "\u539f\u59cb\u6570\u636e") {
+    const details = create("details", "invocation-source");
+    details.dataset.detailKey = title;
+    details.append(create("summary", "", title), invocationCode(value));
+    return details;
+  }
+
+  function invocationBody(value, structuredUser = false) {
+    const body = create("div", "invocation-body");
+    const prepared = parseCompleteJson(value);
+    if (structuredUser && isPlainObject(prepared) && typeof prepared.content === "string") {
+      const quote = prepared.reply_to;
+      body.append(message({
+        speaker: typeof prepared.speaker === "string" ? prepared.speaker : null,
+        content: prepared.content,
+        mentions: Array.isArray(prepared.mentioned_participants)
+          ? prepared.mentioned_participants.map((item) => ({ name: item?.display_name })) : [],
+        quotes: isPlainObject(quote) && typeof quote.content === "string"
+          ? [{ speaker: quote.speaker, role: quote.speaker_role, content: quote.content }] : [],
+      }), invocationSource(prepared, "\u6d88\u606f\u539f\u59cb\u6570\u636e"));
+    } else if (typeof prepared === "string") {
+      body.append(markdown(prepared));
+    } else if (Array.isArray(prepared)) {
+      for (const part of prepared.slice(0, MAX_ARRAY_ITEMS)) {
+        if (isPlainObject(part) && ["text", "input_text", "output_text"].includes(part.type) && typeof part.text === "string") {
+          body.append(markdown(part.text));
+          const extra = Object.keys(part).filter((key) => key !== "type" && key !== "text");
+          if (extra.length) body.append(invocationSource(part));
+        } else body.append(invocationCode(part));
+      }
+      if (prepared.length > MAX_ARRAY_ITEMS) body.append(invocationSource(prepared.slice(MAX_ARRAY_ITEMS), "\u5269\u4f59\u5185\u5bb9"));
+    } else body.append(invocationCode(prepared));
+    return body;
+  }
+
+  function invocationMessages(messages) {
+    const list = create("div", "invocation-messages");
+    for (const [index, record] of messages.slice(0, MAX_ARRAY_ITEMS).entries()) {
+      if (!isPlainObject(record) || typeof record.role !== "string") {
+        list.append(invocationCode(record));
+        continue;
+      }
+      const system = record.role === "system" || record.role === "developer";
+      const item = create(system ? "details" : "article", "invocation-message");
+      item.dataset.recordKey = `message:${index}`;
+      if (system) item.dataset.detailKey = `system-message-${index}`;
+      const title = [roleLabel(record.role), record.name].filter(Boolean).join(" \u00b7 ");
+      item.append(create(system ? "summary" : "header", "invocation-message-role", title));
+      if (Object.hasOwn(record, "content") && record.content !== null) item.append(invocationBody(record.content, record.role === "user"));
+      if (record.tool_calls?.length) {
+        item.append(create("p", "invocation-note", "\u8bf7\u6c42\u7684\u5de5\u5177\u8c03\u7528"), invocationCode(record.tool_calls));
+      }
+      const extra = Object.keys(record).filter((key) => !["role", "name", "content", "tool_calls"].includes(key));
+      if (extra.length) item.append(invocationSource(Object.fromEntries(extra.map((key) => [key, record[key]])), "\u6d88\u606f\u5143\u6570\u636e"));
+      list.append(item);
+    }
+    if (messages.length > MAX_ARRAY_ITEMS) list.append(invocationSource(messages.slice(MAX_ARRAY_ITEMS), "\u5269\u4f59\u6d88\u606f"));
+    return list;
+  }
+
+  function invocation(value, mode = "result") {
+    const root = create("div", "content-value invocation-content");
+    const prepared = parseCompleteJson(value);
+    if (mode === "arguments") {
+      root.append(invocationCode(prepared));
+      return root;
+    }
+    const messages = mode === "model" && (Array.isArray(prepared) ? prepared
+      : Array.isArray(prepared?.messages) ? prepared.messages
+      : isPlainObject(prepared) && typeof prepared.role === "string" ? [prepared] : null);
+    if (messages) {
+      root.append(invocationMessages(messages));
+      if (!Array.isArray(prepared) && prepared.messages) root.append(invocationSource(prepared, "\u8bf7\u6c42\u539f\u59cb\u6570\u636e"));
+    } else if (typeof prepared === "string") {
+      root.append(markdown(prepared));
+    } else if (isPlainObject(prepared)) {
+      const key = ["error", "content", "text", "description", "message"].find((name) => typeof prepared[name] === "string" && prepared[name].trim());
+      if (key) {
+        const body = invocationBody(prepared[key]);
+        if (key === "error") body.classList.add("invocation-error");
+        root.append(body, invocationSource(prepared, "\u8fd4\u56de\u539f\u59cb\u6570\u636e"));
+      } else root.append(invocationCode(prepared));
+    } else root.append(invocationCode(prepared));
+    return root;
+  }
+
   function message(record) {
     const root = create("article", "content-message");
     const header = create("header", "content-message-head");
@@ -571,5 +699,5 @@
     return root;
   }
 
-  global.SessionContent = Object.freeze({ message, value, markdown });
+  global.SessionContent = Object.freeze({ message, value, markdown, invocation, copyText });
 })(window);

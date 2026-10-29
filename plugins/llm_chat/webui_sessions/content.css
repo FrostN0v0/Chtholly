@@ -451,3 +451,31 @@ h5.content-heading, h6.content-heading { font-size: 14px; }
     font-size: 11px;
   }
 }
+
+.invocation-content { gap: 8px; font-size: 14px; line-height: 1.65; }
+.invocation-messages { display: grid; gap: 16px; }
+.invocation-message { min-width: 0; }
+.invocation-message-role { color: var(--content-muted); font-size: 12px; font-weight: 500; }
+.invocation-message > * + * { margin-top: 6px; }
+.invocation-body { min-width: 0; }
+.invocation-body > * + * { margin-top: 8px; }
+.invocation-message > .invocation-body { max-height: 400px; overflow: auto; scrollbar-width: thin; }
+.invocation-content .content-message { gap: 6px; }
+.invocation-content .content-message-head { border: 0; padding: 0; }
+.invocation-content .content-message-speaker { font-size: 13px; font-weight: 500; }
+.invocation-content .content-code-block { border-color: var(--content-border); border-radius: 6px; background: var(--content-soft); }
+.invocation-content .content-code-head { padding: 3px 10px; border: 0; background: transparent; }
+.invocation-content .content-code { max-height: 320px; padding: 4px 12px 10px; font-size: 12px; line-height: 1.7; background: transparent; scrollbar-width: thin; }
+.invocation-content .content-copy-button { min-height: 22px; border: 0; background: transparent; color: var(--content-muted); }
+.invocation-content .content-copy-button:hover { color: var(--content-text); }
+.invocation-source { min-width: 0; font-size: 12px; }
+.invocation-source > summary { width: fit-content; color: var(--content-muted); }
+.invocation-source[open] > summary { margin-bottom: 6px; }
+.invocation-note { color: var(--content-muted); font-size: 12px; }
+.invocation-json-key { color: var(--content-accent); }
+.invocation-json-string { color: var(--ui-success, var(--content-text)); }
+.invocation-json-literal { color: var(--content-muted); }
+.invocation-error { color: var(--content-danger); }
+.invocation-error .content-markdown { color: inherit; }
+.payload-reader .invocation-content .content-code { max-height: none; }
+.content-clipboard { position: fixed; left: 0; top: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }

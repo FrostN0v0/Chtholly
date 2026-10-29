@@ -322,7 +322,7 @@ async function selectEvidenceTurn(evidence) {
     $("purpose-select").value = state.purposeFilter;
     await selectTurn(state.turns.find((turn) => turn.turn_ref === evidence.turn_ref) || evidence);
   }
-  if (fromCompanion) selectTab($((state.session?.purpose === "companion_reflection") ? "tab-decision" : "tab-io"));
+  if (fromCompanion) selectTab($(state.session?.purpose === "companion_reflection" ? "tab-timeline" : "tab-io"));
 }
 function evidenceLinks(ids, recordKey) {
   const row = node("div", "actions evidence-links");
@@ -635,7 +635,7 @@ function renderWorkspace() {
   $("overview-toggle").disabled = !state.inspection;
   if (!state.inspection) {
     header.append(node("p", "", state.turn ? "\u6b63\u5728\u8bfb\u53d6\u8f6e\u6b21\u2026" : "\u8bf7\u9009\u62e9\u4e00\u4e2a\u8f6e\u6b21\u3002"));
-    for (const id of ["timeline-view", "context-view", "io-view", "relationship-view", "decision-view", "turn-overview"]) empty($(id), state.turn ? "\u6b63\u5728\u8bfb\u53d6\u8f6e\u6b21\u2026" : "\u8bf7\u9009\u62e9\u4e00\u4e2a\u8f6e\u6b21\u3002");
+    for (const id of ["timeline-view", "context-view", "io-view", "relationship-view", "turn-overview"]) empty($(id), state.turn ? "\u6b63\u5728\u8bfb\u53d6\u8f6e\u6b21\u2026" : "\u8bf7\u9009\u62e9\u4e00\u4e2a\u8f6e\u6b21\u3002");
     return;
   }
   const inspection = state.inspection;
@@ -643,16 +643,16 @@ function renderWorkspace() {
   renderOverview(inspection);
   renderTimeline(); renderContext(); renderIO();
   $("relationship-view").replaceChildren(relationshipPanel());
-  $("decision-view").replaceChildren(SessionCompanion.decisionPanel(inspection, { node, section, disclosure, eventButton, date, number, outcomeLabel, badge, label }));
 }
-function callPanel(title, preview, ref, path = "") {
-  const panel = node("div", "call-panel");
-  const heading = node("div", "call-panel-heading");
-  heading.append(node("h4", "", title), eventButton(ref, "查看完整内容", path));
+function callPanel(title, preview, ref, { path = "", mode = "result", folded = false } = {}) {
+  const panel = node(folded ? "details" : "div", "call-panel");
+  if (folded) panel.dataset.detailKey = "request-messages";
+  const heading = node(folded ? "summary" : "div", "call-panel-heading");
+  heading.append(node("h4", "", title), eventButton(ref, "\u5b8c\u6574\u8bb0\u5f55", path));
   const display = preview?.kind === "messages" ? preview.items : preview?.kind === "value" ? preview.value : preview;
   const value = !ref ? "\u672c\u8f6e\u672a\u8bb0\u5f55" : display ?? "\u6458\u8981\u672a\u8bb0\u5f55";
-  const body = SessionContent.value(value);
-  body.classList.add("preview");
+  const body = SessionContent.invocation(value, mode);
+  body.dataset.detailKey = title;
   panel.append(heading, body);
   if (preview?.truncated) panel.append(node("p", "partial-notice", "\u6458\u8981\u5df2\u622a\u65ad\uff0c\u5b8c\u6574\u5185\u5bb9\u53ef\u6309\u9700\u67e5\u770b"));
   return panel;
@@ -686,10 +686,11 @@ function modelCard(call, index) {
   meta.append(node("span", "record-duration", duration(call.duration_ms)));
   if (call.usage) meta.append(node("span", "record-usage", `\u2191${compactTokens(call.usage.input_tokens)} \u2193${compactTokens(call.usage.output_tokens)}`));
   summary.append(meta);
-  content.append(node("p", "muted", call.model || "\u6a21\u578b\u672a\u8bb0\u5f55"), usageDetails(call.usage), node("p", "muted", `\u5c1d\u8bd5 ${call.attempt ?? "\u672a\u77e5"} \xb7 ${label(call.capture_status)}`));
-  const panels = node("div", "call-panels");
-  panels.append(callPanel("\u6a21\u578b\u8f93\u5165", call.input_display ?? call.input_preview, call.request_event_ref), callPanel("\u6a21\u578b\u8f93\u51fa", call.output_display ?? call.output_preview, call.response_event_ref));
-  content.append(panels, rawDetails("请求标识与统计", { request_id: call.request_id, request_event_ref: call.request_event_ref, response_event_ref: call.response_event_ref, usage: call.usage }));
+  content.append(
+    callPanel("\u6a21\u578b\u8f93\u51fa", call.output_display ?? call.output_preview, call.response_event_ref, { mode: "model" }),
+    callPanel("\u8bf7\u6c42\u6d88\u606f", call.input_display ?? call.input_preview, call.request_event_ref, { mode: "model", folded: true }),
+    rawDetails("\u8bf7\u6c42\u4fe1\u606f", { request_id: call.request_id, request_event_ref: call.request_event_ref, response_event_ref: call.response_event_ref, attempt: call.attempt, capture_status: call.capture_status, usage: call.usage }),
+  );
   return item;
 }
 function toolCard(call, index, includeDeliveries = true) {
@@ -702,20 +703,18 @@ function toolCard(call, index, includeDeliveries = true) {
   if (call.status !== "succeeded") meta.append(badge(call.status));
   meta.append(node("span", "record-duration", duration(call.duration_ms)));
   summary.append(meta);
-  content.append(node("p", "muted", `\u6267\u884c\u6548\u679c \xb7 ${label(call.effect)}`));
   if (includeDeliveries) for (const delivery of deliveries) content.append(deliveryCard(delivery, `tool-delivery:${delivery.event_ref}`));
   if (call.delivery_source === "legacy_incomplete") content.append(node("p", "muted", "旧记录没有独立送达凭据；未留存的历史输出图片无法还原，不重新渲染历史 Markdown。"));
   const panels = node("div", "call-panels");
-  const argumentsPanel = callPanel("\u8c03\u7528\u53c2\u6570", call.arguments_display ?? call.arguments_preview, call.call_event_ref, call.arguments_path || "");
-  const resultPanel = callPanel("\u8fd4\u56de\u7ed3\u679c", call.result_display ?? call.result_preview, call.result_event_ref, call.result_path || "");
+  const argumentsPanel = callPanel("\u53c2\u6570", call.arguments_display ?? call.arguments_preview, call.call_event_ref, { path: call.arguments_path || "", mode: "arguments" });
+  const resultPanel = callPanel("\u7ed3\u679c", call.result_display ?? call.result_preview, call.result_event_ref, { path: call.result_path || "" });
   if (!["complete", "captured"].includes(call.arguments_capture_status)) argumentsPanel.append(node("p", "muted", label(call.arguments_capture_status || "not_recorded")));
   if (!["complete", "captured"].includes(call.result_capture_status)) resultPanel.append(node("p", "muted", label(call.result_capture_status || "not_recorded")));
   panels.append(argumentsPanel, resultPanel);
   content.append(panels);
-  if (call.evidence != null) content.append(rawDetails("执行证据摘要", call.evidence));
   if (call.images?.length) content.append(node("p", "muted", "工具附件（可能含输入 / 参考图，不等同于已送达图片）"));
   appendImages(content, { event_ref: call.result_event_ref, images: call.images });
-  content.append(rawDetails("执行标识", { execution_ref: call.execution_ref, call_event_ref: call.call_event_ref, result_event_ref: call.result_event_ref }));
+  content.append(rawDetails("\u6267\u884c\u8bb0\u5f55", { effect: call.effect, evidence: call.evidence, execution_ref: call.execution_ref, call_event_ref: call.call_event_ref, result_event_ref: call.result_event_ref }));
   return item;
 }
 function timelineCalls(includeDeliveries = true) {
@@ -1071,6 +1070,9 @@ function refreshPanels() {
   const focusKey = focused?.dataset.focusKey ? `${detailKey(focused)}|${focused.dataset.focusKey}` : null;
   const focusedDetail = focused?.tagName === "SUMMARY" ? detailKey(focused.parentElement) : null;
   const scrollPositions = [...document.querySelectorAll(".workspace .scroll, .inspector, .context-popover, #session-dialog .modal-body")].map((item) => [item, item.scrollTop, item.scrollLeft]);
+  const contentScrollers = () => [...document.querySelectorAll(".workspace .call-panel .invocation-content")].flatMap((root) =>
+    [...root.querySelectorAll(".content-code, .invocation-message > .invocation-body")].map((item, index) => [`${detailKey(root)}|${index}`, item]));
+  const contentScroll = new Map(contentScrollers().map(([key, item]) => [key, { top: item.scrollTop, left: item.scrollLeft }]));
   const pageScroll = { top: window.scrollY, left: window.scrollX, behavior: "instant" };
   renderTurns(); renderSession(); renderWorkspace();
   for (const item of document.querySelectorAll(".workspace details, #session-detail details")) {
@@ -1080,6 +1082,10 @@ function refreshPanels() {
   if (focusKey) {
     [...document.querySelectorAll(".workspace [data-focus-key], #session-detail [data-focus-key]")]
       .find((item) => `${detailKey(item)}|${item.dataset.focusKey}` === focusKey)?.focus({ preventScroll: true });
+  }
+  for (const [key, item] of contentScrollers()) {
+    const position = contentScroll.get(key);
+    if (position) { item.scrollTop = position.top; item.scrollLeft = position.left; }
   }
   for (const [item, top, left] of scrollPositions) {
     item.scrollTop = top;
@@ -1160,7 +1166,9 @@ function renderPayloadContent() {
   const target = $("payload-reader");
   target.replaceChildren();
   if (payload.next !== null) target.append(node("p", "partial-notice", "\u4ec5\u663e\u793a\u5df2\u52a0\u8f7d\u90e8\u5206 \xb7 \u53ef\u7ee7\u7eed\u52a0\u8f7d"));
-  target.append(SessionContent.value(value));
+  const kind = eventByRef(payload.ref)?.event_type;
+  const mode = ["model_request", "model_response"].includes(kind) ? "model" : kind === "assistant_tool_call" ? "arguments" : "result";
+  target.append(SessionContent.invocation(value, mode));
 }
 function payloadError(error) {
   if (error?.name !== "AbortError" && state.payload) $("payload-error").textContent = error instanceof Error ? error.message : "读取失败，可重试。";
@@ -1393,7 +1401,7 @@ $("payload-copy-button").addEventListener("click", async () => {
   if (!payload?.hasPage) return;
   const loadedText = payload.text;
   const complete = payload.next === null;
-  try { await navigator.clipboard.writeText(loadedText); if (payload === state.payload) $("payload-copy-button").textContent = complete ? "已复制完整内容" : "已复制部分内容"; }
+  try { await SessionContent.copyText(loadedText); if (payload === state.payload) $("payload-copy-button").textContent = complete ? "\u5df2\u590d\u5236\u5b8c\u6574\u5185\u5bb9" : "\u5df2\u590d\u5236\u90e8\u5206\u5185\u5bb9"; }
   catch { $("payload-error").textContent = "剪贴板不可用，请选中已加载文本手动复制。"; }
 });
 $("payload-dialog").addEventListener("close", () => { disposePayload(); $("payload-output").textContent = ""; $("payload-reader").replaceChildren(); });
